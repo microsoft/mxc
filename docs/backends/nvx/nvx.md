@@ -84,9 +84,11 @@ numeric port, followed by `/` and the image repository. For example, use
 characters are rejected. The signed runtime validates the remaining reference
 syntax and pulls the selected image on the host. Host-side image
 acquisition does not grant the guest network access. MXC has no separate
-registry-credentials input. The runtime caches references by text within its
-state root, so a tag can retain previously pulled content; use a digest when
-immutable content identity is required.
+registry-credentials input. The runtime registers each reference once and keeps
+it by its text in the [agent state directory](#agent-state-directory), so later
+requests boot it without contacting the registry, and a moving tag such as
+`latest` keeps naming the content first pulled. Use a version tag or a digest
+(`repository@sha256:…`) to control what a sandbox boots.
 
 ## Supported operations and policy
 
@@ -173,26 +175,32 @@ contains credentials, MXC withholds native error details and startup diagnostics
 to avoid exposing them; the error code and failed operation are still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
-VM shutdown, deprovisioning, and temporary-directory cleanup before exit code
-130 is returned. A request received during startup is observed when the native
-startup call returns. Closing the console or forcibly terminating the process
-does not provide this cooperative-cleanup guarantee. Embedding the SDK does not
-install a process-wide console handler.
+VM shutdown and deprovisioning before exit code 130 is returned. A request
+received during startup is observed when the native startup call returns.
+Closing the console or forcibly terminating the process does not provide this
+cooperative-cleanup guarantee. Embedding the SDK does not install a
+process-wide console handler.
 
-### Temporary agent workspace
+### Agent state directory
 
-MXC allocates a private temporary directory for each create-and-run operation.
-The signed agent owns the sandbox records, VM control data, diagnostics, and
-image registry/cache stored there. MXC coordinates the agent's stop and
-deprovision operations, closes the client, and removes the directory after
-successful deprovisioning; it does not maintain a persistent container database.
+The signed agent keeps its sandbox records, VM control data, diagnostics, and
+registered images in a per-user state directory,
+`%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
+hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
+runtime keeps its own state. MXC creates the directory with an access list for
+only the current user and Local SYSTEM. Every create-and-run request reuses it,
+so an image is pulled once rather than for every request, and concurrent
+requests share it. MXC coordinates the agent's stop and deprovision operations
+and closes the client after each request; it does not maintain a persistent
+container database.
 
-If deprovisioning fails, MXC reports the failure and retains the directory,
-including its location in the error. This preserves the agent's resource
-records rather than deleting them while a VM might remain. Retention does not
-provide automatic recovery. Retained runtime files can contain sensitive data;
-protect them and confirm that the operation's VM has stopped before manually
-removing retained storage.
+To pull a reference again or reclaim disk space, delete the directory while no
+MicroVM request is running; the next request creates it again.
+
+If deprovisioning fails, MXC reports the failure and the directory's location.
+The agent's records for that sandbox remain there rather than being deleted
+while a VM might remain. Runtime files in the directory can contain sensitive
+data; confirm that no VM is running before you remove the directory.
 
 ## Validation
 
