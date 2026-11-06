@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct ConsentResource {
@@ -44,8 +44,7 @@ fn rust_string(value: &str) -> String {
     format!("{value:?}")
 }
 
-pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+pub(crate) fn run(manifest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let resource_path = manifest_dir.join("resources/telemetry/consent/en-US.json");
     println!("cargo:rerun-if-changed={}", resource_path.display());
 

@@ -6,8 +6,8 @@
 //! Where [`mxc_run_json`](crate::mxc_run_json) runs a sandbox to completion
 //! and captures its output, this surface hands the caller a live,
 //! opaque handle it can feed stdin, read stdout/stderr from, wait on, and kill
-//! while the child runs — mirroring [`mxc_sdk::__ffi::spawn_container_json`] /
-//! [`mxc_sdk::v1::MxcProcess`].
+//! while the child runs — mirroring [`mxc_internal::__ffi::spawn_container_json`] /
+//! [`mxc_internal::v1::MxcProcess`].
 //!
 //! ## Handles & ownership
 //!
@@ -65,10 +65,10 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::__ffi::spawn_container_json;
-use mxc_sdk::mxc_common::models::SandboxOutputMetadata;
-use mxc_sdk::mxc_common::sandbox_process::NativeStdio;
-use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
+use mxc_internal::__ffi::spawn_container_json;
+use mxc_internal::mxc_common::models::SandboxOutputMetadata;
+use mxc_internal::mxc_common::sandbox_process::NativeStdio;
+use mxc_internal::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
 
 use crate::{
     alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
@@ -80,7 +80,7 @@ use crate::{
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Opaque sandbox process handle wrapping an [`mxc_sdk::v1::MxcProcess`]. Created by
+/// Opaque sandbox process handle wrapping an [`mxc_internal::v1::MxcProcess`]. Created by
 /// [`mxc_spawn_json`] or
 /// [`mxc_exec_state_aware_json`](crate::mxc_exec_state_aware_json), destroyed by
 /// [`mxc_sandbox_free`].
@@ -465,7 +465,7 @@ pub(crate) unsafe fn finish_handle(
 
 /// Map an SDK error onto the status + detail pair the spawn chain carries, so
 /// the failing API call survives instead of being flattened to a message.
-pub(crate) fn sdk_error_detail(error: mxc_sdk::v1::Error) -> (i32, MxcErrorDetail) {
+pub(crate) fn sdk_error_detail(error: mxc_internal::v1::Error) -> (i32, MxcErrorDetail) {
     (
         status_from_error_code(error.code),
         MxcErrorDetail::from_error(&error),

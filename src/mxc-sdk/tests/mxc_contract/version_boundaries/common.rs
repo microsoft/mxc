@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::mxc_contract::{
+use mxc_internal::mxc_contract::{
     dev::OneShotRequest as V11Request,
     published::{v0_9_0_alpha::OneShotRequest as V09Request, v1_0_0::OneShotRequest as V10Request},
 };

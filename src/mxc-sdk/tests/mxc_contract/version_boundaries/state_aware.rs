@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::mxc_contract::published::v0_9_0_alpha::{parse_request, ProvisionRequest, Request};
+use mxc_internal::mxc_contract::published::v0_9_0_alpha::{parse_request, ProvisionRequest, Request};
 
 #[derive(Clone, Copy)]
 enum ExpectedRoot {

@@ -1,148 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc-sdk`: an importable library for running MXC containers in-process.
+//! MXC implementation shared with the private SDK facade.
 //!
-//! See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
-//! for terminology.
-//!
-//! Create a [`v1::ContainerRequest`] with its command and restrictions, then either:
-//!
-//! - hand it to [`v1::run`] to run the contained process **to completion** and get
-//!   its captured stdout/stderr and exit outcome in one call, or
-//! - hand it to [`v1::spawn`] for a live [`v1::MxcProcess`] handle you can
-//!   stream stdio through, feed stdin, and kill while it runs.
-//! - hand it to [`v1::spawn_with_pty`] for an [`v1::MxcPtyProcess`] with
-//!   merged terminal output and resize support.
-//!
-//! Either way the right containment backend is selected for the host and the
-//! ordinary `run` and `spawn` paths allocate no PTY.
-//!
-//! ```no_run
-//! use mxc_sdk::v1::{self, WaitResult};
-//!
-//! let request = v1::ContainerRequest::new("echo hi");
-//! let output = v1::run(request, Default::default())?;
-//! match output.outcome {
-//!     WaitResult::Exited(code) => println!("exit={code}"),
-//!     WaitResult::TimedOut => println!("timed out"),
-//! }
-//! println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-//!
-//! ## Backend support
-//!
-//! The selected backend is driven by the request's [`v1::Containment`].
-//! Requests default to the host's native process backend.
-//!
-//! | Backend | Host | Selected by |
-//! |---------|------|-------------|
-//! | Bubblewrap | Linux | [`v1::Containment::Process`] or [`v1::Containment::Bubblewrap`] |
-//! | LXC | Linux | [`v1::Containment::Lxc`] |
-//! | Seatbelt | macOS | [`v1::Containment::Process`] or [`v1::Containment::Seatbelt`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`v1::Containment::Process`] |
-//! | Explicit ProcessContainer configuration | Windows | [`v1::Containment::ProcessContainer`] |
-//! | WSLC (WSL Container) | Windows | [`v1::Containment::Wslc`] |
-//! | IsolationSession | Windows | [`v1::Containment::IsolationSession`] |
-//!
-//! LXC is reachable only by naming it: [`v1::Containment::Process`] resolves to
-//! Bubblewrap on Linux. It needs root. Ordinary streaming uses pipes, while
-//! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
-//!
-//! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. WSLC's container has no
-//! stdin (the WSLC SDK exposes no process-input API), so
-//! [`MxcProcess::take_stdin`] returns `None` for it.
-//! IsolationSession is also available through the typed lifecycle API.
-//!
-//! The `wslc` feature stages `wslcsdk.dll` into the cargo profile directory,
-//! and WSLC loads it from beside the module holding this code, so an executable
-//! copied or installed out of that directory needs the DLL brought along. The
-//! crate README covers that and the separate `wxc-wslc-daemon.exe` that the
-//! container lifecycle needs.
-//!
-//! A concrete backend selected on another host returns an [`Error`] with
-//! [`ErrorCode::UnsupportedContainment`].
-//!
-//! # Diagnosing a failure
-//!
-//! [`Error`] carries an [`ErrorCode`] and a message. When an underlying platform
-//! API fails, it also identifies the call and its status:
-//!
-//! ```no_run
-//! # fn demo(error: mxc_sdk::v1::Error) {
-//! if let Some(operation) = &error.operation {
-//!     eprintln!("{operation} failed with {:?}", error.native_code);
-//! }
-//! if let Some(hint) = &error.remediation {
-//!     eprintln!("  try: {hint}");
-//! }
-//! # }
-//! ```
-//!
-//! [`Error::operation`] and [`Error::native_code`] are absent for a failure
-//! raised before any API call was reached (a malformed policy, say) and a
-//! native code only ever appears alongside the operation it belongs to.
-//! `Display` renders both, so logging the error alone does not lose them.
-//!
-//! ```no_run
-//! use mxc_sdk::v1;
-//!
-//! // Run a command inside a WSL container (Windows, --features wslc).
-//! let wslc = v1::configs::WslcConfig { image: "python:3.12".to_string(), ..Default::default() };
-//! let request = v1::ContainerRequest {
-//!     containment: v1::Containment::Wslc(wslc),
-//!     ..v1::ContainerRequest::new("python3 -c 'print(42)'")
-//! };
-//! let output = v1::run(request, Default::default())?;
-//! # Ok::<(), mxc_sdk::v1::Error>(())
-//! ```
-//!
-//! ## Choosing an entry point
-//!
-//! |             | container request | existing container | Stdio |
-//! |-------------|-------------------|--------------------|-------|
-//! | **capture** | [`v1::run`] | [`v1::container::run_in_container`] | captured stdout and stderr |
-//! | **handle**  | [`v1::spawn`] | [`v1::container::spawn_in_container`] | separate live pipes |
-//! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
-//!
-//! [`v1::container::provision_container`], [`v1::container::start_container`],
-//! [`v1::container::stop_container`], and
-//! [`v1::container::deprovision_container`] drive the lifecycle with typed Rust
-//! requests. All SDK execution APIs take typed requests.
-//!
-//! ## Standard streams
-//!
-//! The V1 `run` and `spawn` APIs use ordinary pipes; PTY allocation is explicit
-//! through [`v1::spawn_with_pty`] and
-//! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
-//! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
-//! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
-//! stream they did not take. WSLC does not expose stdin.
-//!
-//! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
-//! execution on supported backends, including IsolationSession, Bubblewrap, LXC,
-//! and Seatbelt direct execution.
-//! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
-//! an existing IsolationSession container. Unsupported backends reject the
-//! request before creating a sandbox.
-//!
-//! Policy and operational warnings are available through [`MxcProcess::warnings`]
-//! and [`ExecutionResult::warnings`]. These include security warnings, network rules
-//! that cannot carry traffic, and operational warnings such as unavailable
-//! telemetry routing.
-//!
-//! ## Internal module boundaries
-//!
-//! This crate root is the curated public facade. Backend dispatch, host
-//! probing, execution, and backend implementations are doc-hidden compatibility
-//! exports for workspace consumers rather than supported SDK entry points.
+//! This implementation root is shared by the private SDK implementation and
+//! the non-published `mxc-internal` workspace crate. The published SDK exposes
+//! only `v1`; workspace consumers use `mxc_internal` for implementation access.
 
 #[path = "backends/mod.rs"]
-mod backend_modules;
+pub(crate) mod backend_modules;
 #[path = "core/mod.rs"]
-mod core_modules;
+pub(crate) mod core_modules;
 
 #[doc(hidden)]
 pub use backend_modules::bubblewrap::common as bwrap_common;
@@ -201,22 +69,19 @@ pub use core_modules::plm;
 #[doc(hidden)]
 pub use core_modules::process_security_environment_spec;
 
-mod configs;
-mod options;
-mod policy;
-mod sandbox;
-mod state_aware_sdk;
+pub(crate) mod configs;
+pub(crate) mod options;
+pub(crate) mod policy;
+pub(crate) mod sandbox;
+pub(crate) mod state_aware_sdk;
 
-mod telemetry;
-
-#[cfg(doctest)]
-mod api_tests;
+pub(crate) mod telemetry;
 
 #[cfg(target_os = "windows")]
-use crate::mxc_engine::ProbeOutput;
-use crate::mxc_engine::{Error, ErrorCode};
+pub(crate) use crate::mxc_engine::ProbeOutput;
+pub(crate) use crate::mxc_engine::{Error, ErrorCode};
 
-use sandbox::{ExecutionResult, MxcProcess};
+pub(crate) use sandbox::{ExecutionResult, MxcProcess};
 
 /// V1 contract-mapped request and typed lifecycle APIs.
 ///
@@ -498,7 +363,7 @@ pub mod __ffi {
     }
 }
 
-fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
+pub(crate) fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
     sandbox.wait_with_output().map_err(|e| {
         Error::new(
             ErrorCode::BackendError,

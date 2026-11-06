@@ -39,7 +39,7 @@ fn feed_url(version: &str) -> String {
     )
 }
 
-pub(crate) fn run() {
+pub(crate) fn run(manifest_dir: &Path) {
     // Skip nupkg extraction and DLL copy unless the `link-wslcsdk` feature is
     // enabled. Without this gate, workspace builds would extract the nupkg
     // even when no binary depends on wslc_common.
@@ -79,7 +79,7 @@ pub(crate) fn run() {
                 println!(
                     "cargo:warning=WSLC SDK: feed download failed ({e}); trying vendored copy"
                 );
-                match extract_vendored(&version, arch) {
+                match extract_vendored(manifest_dir, &version, arch) {
                     Ok(path) => path,
                     Err(e2) => {
                         // The `link-wslcsdk` feature is explicitly enabled, so a
@@ -116,6 +116,17 @@ pub(crate) fn run() {
         .and_then(|p| p.parent())
         .expect("WSLC SDK: cannot resolve the build profile output directory from OUT_DIR");
     let dll_dst = profile_dir.join("wslcsdk.dll");
+    // SDK and workspace implementation builds can stage the same DLL concurrently.
+    let staging_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(profile_dir.join(".wslcsdk-stage.lock"))
+        .expect("WSLC SDK: failed to open the DLL staging lock");
+    staging_lock
+        .lock()
+        .expect("WSLC SDK: failed to acquire the DLL staging lock");
     if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
         panic!(
             "WSLC SDK: failed to copy wslcsdk.dll to {}: {}",
@@ -187,8 +198,7 @@ fn download_and_extract(version: &str, arch: &str) -> Result<PathBuf, String> {
 /// `WSLC_SDK_PATH` set). This vendored copy is a transitional safety net and is
 /// expected to be removed once the feed is proven in all official build
 /// environments.
-fn extract_vendored(version: &str, arch: &str) -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+fn extract_vendored(manifest_dir: &Path, version: &str, arch: &str) -> Result<PathBuf, String> {
     let nupkg = manifest_dir
         .join("build/wslc_common")
         .join(format!("Microsoft.WSL.Containers.{version}.nupkg"));

@@ -84,8 +84,9 @@ pub enum AccessType {
 ///
 /// # Examples
 ///
-/// ```
-/// use mxc_sdk::learning_mode_core::{AccessType, DeniedResource, ResourceType};
+#[cfg_attr(mxc_internal, doc = "```")]
+#[cfg_attr(not(mxc_internal), doc = "```ignore")]
+/// use mxc_internal::learning_mode_core::{AccessType, DeniedResource, ResourceType};
 ///
 /// let denial = DeniedResource {
 ///     resource: r"C:\Users\test\secret.txt".to_string(),

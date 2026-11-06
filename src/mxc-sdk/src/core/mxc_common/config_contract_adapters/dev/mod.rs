@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn one_shot_preserves_process_container_enumerate_paths() {
         let request = contract::parse_request(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
+            env!("MXC_SDK_SOURCE_DIR"),
             "/tests/mxc_contract/v1_1_0_alpha/fixtures/one_shot/valid/complete.json"
         )))
         .unwrap();

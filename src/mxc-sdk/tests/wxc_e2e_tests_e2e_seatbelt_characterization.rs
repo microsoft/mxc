@@ -274,7 +274,7 @@ fn seatbelt_timeout_kills_before_completion() {
 }
 
 /// End-to-end guard for the macOS root-symlink resolution in
-/// `mxc_sdk::seatbelt_common::profile_builder` (`resolve_macos_root_symlinks`).
+/// `mxc_internal::seatbelt_common::profile_builder` (`resolve_macos_root_symlinks`).
 ///
 /// On macOS `/var` is a symlink to `/private/var`, and Seatbelt matches
 /// `subpath` filters against the **resolved** path, so a grant emitted as

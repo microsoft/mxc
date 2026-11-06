@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-mxc-sdk.workspace = true
+mxc-internal.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"

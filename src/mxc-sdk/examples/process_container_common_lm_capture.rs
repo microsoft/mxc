@@ -41,10 +41,10 @@ fn main() {
 mod windows_impl {
     use std::path::PathBuf;
 
-    use mxc_sdk::process_container_common::{
+    use mxc_internal::process_container_common::{
         CaptureSession, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     };
-    use mxc_sdk::process_security_environment_spec::process_security_environment_layout::{
+    use mxc_internal::process_security_environment_spec::process_security_environment_layout::{
         finish_process_security_environment_buffer, ProcessSecurityEnvironment,
         ProcessSecurityEnvironmentArgs, SchemaVersion,
     };

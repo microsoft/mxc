@@ -26,10 +26,10 @@ parameters:
       os: macos
       triplet: aarch64-apple-darwin
       component: MAC
-      # macOS-compatible crates (mxc_darwin and consolidated mxc-sdk) — the workspace
+      # macOS-compatible executor, SDK, and implementation crates — the workspace
       # has Windows-only crates that do not compile on macOS, so we can't
       # use --all-features here.
-      clippyArgs: --locked --release -p mxc_darwin -p mxc-sdk
+      clippyArgs: --locked --release -p mxc_darwin -p mxc-sdk -p mxc-internal
 
 jobs:
 - ${{ each item in parameters.matrix }}:

@@ -198,7 +198,7 @@ fn rejects_invalid_capture_denials_mode_value() {
     );
 }
 
-use mxc_sdk::mxc_contract::published::v1_0_0::OneShotRequest;
+use mxc_internal::mxc_contract::published::v1_0_0::OneShotRequest;
 
 #[test]
 fn rejects_appcontainer_containment_value_alias() {

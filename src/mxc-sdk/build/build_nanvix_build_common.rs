@@ -131,6 +131,16 @@ pub fn copy_artifacts_to_target(
 ) -> io::Result<()> {
     use std::fs;
 
+    // Multiple workspace build scripts stage into the same profile directory.
+    fs::create_dir_all(target_dir)?;
+    let staging_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target_dir.join(".nanvix-stage.lock"))?;
+    staging_lock.lock()?;
+
     for (kind, rel) in artifact_rel_paths() {
         let src = src_dir.join(&rel);
         let dst = target_dir.join(&rel);
@@ -233,7 +243,7 @@ pub fn stage_artifacts_next_to_exe(nanvix_bin_dir: &Path, trust_snapshots: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nanvix_common::{SNAPSHOT_CBOR, SNAPSHOT_VMEM};
+    use crate::nanvix_common::{SNAPSHOT_CBOR, SNAPSHOT_VMEM};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -261,6 +271,38 @@ mod tests {
 
     fn snapshot_path(root: &Path, name: &str) -> PathBuf {
         root.join(SNAPSHOTS_SUBDIR).join(name)
+    }
+
+    #[test]
+    fn concurrent_staging_preserves_a_complete_snapshot_pair() {
+        let first = scratch("concurrent_first");
+        let second = scratch("concurrent_second");
+        let target = scratch("concurrent_target");
+        write_snapshot(&first, SNAPSHOT_VMEM, b"first");
+        write_snapshot(&first, SNAPSHOT_CBOR, b"first");
+        write_snapshot(&second, SNAPSHOT_VMEM, b"second");
+        write_snapshot(&second, SNAPSHOT_CBOR, b"second");
+        let barrier = std::sync::Barrier::new(8);
+
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let source = if index % 2 == 0 { &first } else { &second };
+                let target = &target;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    copy_artifacts_to_target(source, target, true).unwrap();
+                });
+            }
+        });
+
+        let vmem = fs::read(snapshot_path(&target, SNAPSHOT_VMEM)).unwrap();
+        let cbor = fs::read(snapshot_path(&target, SNAPSHOT_CBOR)).unwrap();
+        assert!(vmem == b"first" || vmem == b"second");
+        assert_eq!(vmem, cbor);
+        fs::remove_dir_all(&first).unwrap();
+        fs::remove_dir_all(&second).unwrap();
+        fs::remove_dir_all(&target).unwrap();
     }
 
     #[test]

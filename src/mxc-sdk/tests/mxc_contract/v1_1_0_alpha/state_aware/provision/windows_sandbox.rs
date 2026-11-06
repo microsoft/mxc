@@ -4,7 +4,7 @@
 use crate::state_aware::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
-use mxc_sdk::mxc_contract::dev::WindowsSandboxProvisionRequest;
+use mxc_internal::mxc_contract::dev::WindowsSandboxProvisionRequest;
 
 fn assert_valid(json: &str) {
     assert_valid_request::<WindowsSandboxProvisionRequest>(json);

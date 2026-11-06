@@ -16,13 +16,13 @@ cargo-fuzz = true
 [features]
 # Enable runner-specific validation in the `validator` fuzz target.
 # These pull in heavier deps so they're opt-in for local dev.
-hyperlight = ["mxc-sdk/hyperlight"]
-isolation_session = ["mxc-sdk/isolation_session"]
-microvm = ["mxc-sdk/microvm"]
+hyperlight = ["mxc-internal/hyperlight"]
+isolation_session = ["mxc-internal/isolation_session"]
+microvm = ["mxc-internal/microvm"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-mxc-sdk = { path = "../../mxc-sdk" }
+mxc-internal = { path = "../../mxc-internal" }
 
 [[bin]]
 name = "config_parser"

@@ -5,7 +5,7 @@ use crate::FixtureRequest;
 use std::path::Path;
 
 fn fixtures(kind: &str) -> Vec<(String, String)> {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let directory = Path::new(env!("MXC_SDK_SOURCE_DIR"))
         .join("tests")
         .join("mxc_contract")
         .join(crate::FIXTURE_VERSION)

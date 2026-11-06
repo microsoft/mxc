@@ -305,8 +305,9 @@ impl RejectionReason {
 /// setters, then hand it to
 /// [`Logger::log_audit_event`](crate::mxc_common::logger::Logger::log_audit_event).
 ///
-/// ```
-/// use mxc_sdk::mxc_common::audit::{AuditEvent, AuditEventName};
+#[cfg_attr(mxc_internal, doc = "```")]
+#[cfg_attr(not(mxc_internal), doc = "```ignore")]
+/// use mxc_internal::mxc_common::audit::{AuditEvent, AuditEventName};
 ///
 /// let line = AuditEvent::new(AuditEventName::ProcessExited)
 ///     .str("backend", "processcontainer")

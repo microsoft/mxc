@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::learning_mode_core::{VerboseLoggingOutcomeReason, VerboseLoggingProvider};
+use mxc_internal::learning_mode_core::{VerboseLoggingOutcomeReason, VerboseLoggingProvider};
 
 fn provider_name(provider: VerboseLoggingProvider) -> &'static str {
     match provider {

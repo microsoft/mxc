@@ -9,9 +9,9 @@
 
 #![cfg(target_os = "windows")]
 
-use mxc_sdk::v1::configs::ProcessContainerConfig;
-use mxc_sdk::v1::WaitResult;
-use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
+use mxc_internal::v1::configs::ProcessContainerConfig;
+use mxc_internal::v1::WaitResult;
+use mxc_internal::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
@@ -47,7 +47,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
 #[test]
 #[ignore = "requires a ProcessContainer proxy host and MXC_TEST_PROXY_* fixture variables"]
 fn processcontainer_unpackaged_proxy_reaches_origin() {
-    use mxc_sdk::v1::policy::{
+    use mxc_internal::v1::policy::{
         NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
         NetworkRuntimeConfig, UiPolicy,
     };
@@ -89,7 +89,7 @@ fn processcontainer_unpackaged_proxy_reaches_origin() {
         ..ContainerRequest::new(command)
     };
 
-    let result = mxc_sdk::v1::run(request, Default::default()).expect("proxy container run");
+    let result = mxc_internal::v1::run(request, Default::default()).expect("proxy container run");
     assert_eq!(
         result.outcome,
         WaitResult::Exited(0),

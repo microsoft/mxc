@@ -21,9 +21,9 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::v1::WaitResult;
-use mxc_sdk::v1::{spawn, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
-use mxc_sdk::v1::{ContainerRequest, Containment, FilesystemPolicy, NetworkPolicy};
+use mxc_internal::v1::WaitResult;
+use mxc_internal::v1::{spawn, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
+use mxc_internal::v1::{ContainerRequest, Containment, FilesystemPolicy, NetworkPolicy};
 
 /// The bound on a read or wait that should already have finished. Long enough
 /// to create a container, start it, and destroy it again on a loaded CI runner.
@@ -58,7 +58,7 @@ fn not_ready(reason: &str) -> bool {
 /// Whether this host can run a live LXC sandbox. Reuses the backend's own
 /// availability probe so this gate cannot drift from what discovery reports.
 fn lxc_ready() -> bool {
-    if !mxc_sdk::lxc_common::availability::is_lxc_available() {
+    if !mxc_internal::lxc_common::availability::is_lxc_available() {
         return not_ready("lxc-ls is not installed — this host cannot run a system container");
     }
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
@@ -77,7 +77,7 @@ fn container_name(case: &str) -> String {
 /// Whether `lxc-ls` still lists `name`. Reads the same `lxcpath` the backend
 /// writes to, which differs between a root and an unprivileged caller.
 fn container_is_defined(name: &str) -> bool {
-    let lxcpath = mxc_sdk::lxc_common::lxc_bindings::resolve_default_lxcpath();
+    let lxcpath = mxc_internal::lxc_common::lxc_bindings::resolve_default_lxcpath();
     let output = Command::new("lxc-ls")
         .arg("-P")
         .arg(&lxcpath)
@@ -172,7 +172,7 @@ fn lxc_pty_closing_input_sends_canonical_eof() {
     }
     let _guard = exclusive();
     let name = container_name("pty-eof");
-    let terminal = mxc_sdk::v1::spawn_with_pty(
+    let terminal = mxc_internal::v1::spawn_with_pty(
         lxc_request(
             "cat >/dev/null; printf 'eof-observed\\n'",
             &name,
@@ -203,7 +203,7 @@ fn lxc_pty_closing_input_sends_canonical_eof() {
 /// `LxcContainer::is_running`, so the test cannot disagree with it about what
 /// running means.
 fn container_is_running(name: &str) -> bool {
-    let lxcpath = mxc_sdk::lxc_common::lxc_bindings::resolve_default_lxcpath();
+    let lxcpath = mxc_internal::lxc_common::lxc_bindings::resolve_default_lxcpath();
     let output = Command::new("lxc-info")
         .arg("-P")
         .arg(&lxcpath)
@@ -224,7 +224,7 @@ fn container_is_running(name: &str) -> bool {
 /// would hold this file's mutex until the CI job's own cap. A healthy workload
 /// here finishes in well under a second, so the bound only ever fires on a
 /// failure, and it fires as a reported timeout with teardown rather than a hang.
-fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::ContainerRequest {
+fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_internal::v1::ContainerRequest {
     lxc_request_with_network(command, name, timeout_ms, isolated_network())
 }
 
@@ -254,7 +254,7 @@ fn lxc_request_with_network(
     name: &str,
     timeout_ms: u32,
     network: NetworkPolicy,
-) -> mxc_sdk::v1::ContainerRequest {
+) -> mxc_internal::v1::ContainerRequest {
     ContainerRequest {
         filesystem: Some(FilesystemPolicy {
             readwrite_paths: vec!["/tmp".to_string()],
@@ -263,7 +263,7 @@ fn lxc_request_with_network(
             clear_policy_on_exit: None,
         }),
         network: Some(network),
-        containment: Containment::Lxc(mxc_sdk::v1::configs::LxcConfig::default()),
+        containment: Containment::Lxc(mxc_internal::v1::configs::LxcConfig::default()),
         container_name: Some(name.to_string()),
         timeout_ms: (timeout_ms != 0).then_some(timeout_ms),
         ..ContainerRequest::new(command)

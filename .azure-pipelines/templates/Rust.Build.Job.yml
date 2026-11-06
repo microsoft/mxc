@@ -162,11 +162,11 @@ jobs:
 
       - script: |
           set -euo pipefail
-          cargo test --locked --release --target $(triplet) -p mxc-sdk --lib mxc_common::
+          cargo test --locked --release --target $(triplet) -p mxc-internal --lib mxc_common::
           cargo test --locked --release --target $(triplet) -p mxc-sdk --doc
-          cargo test --locked --release --target $(triplet) -p mxc-sdk --features schema-gen --test mxc_contract_v0_9_0_alpha --test mxc_contract_v1_0_0 --test mxc_contract_v1_1_0_alpha --test mxc_contract_version_boundaries
-          cargo test --locked --release --target $(triplet) -p mxc-sdk -p mxc_ffi --lib state_aware
-          cargo test --locked --release --target $(triplet) -p mxc-sdk --test state_aware
+          cargo test --locked --release --target $(triplet) -p mxc-internal --features schema-gen --test mxc_contract_v0_9_0_alpha --test mxc_contract_v1_0_0 --test mxc_contract_v1_1_0_alpha --test mxc_contract_version_boundaries
+          cargo test --locked --release --target $(triplet) -p mxc-internal -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target $(triplet) -p mxc-internal --test state_aware
         displayName: Test common contracts and state-aware SDK boundaries
         workingDirectory: $(Build.SourcesDirectory)/src
         condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))

@@ -25,8 +25,8 @@
 //!
 //! Must run at a real interactive console.
 
-use mxc_sdk::mxc_common::state_aware_backend::ExecOutcome as WaitResult;
-use mxc_sdk::v1::{container, ContainerId, ProvisionRequest};
+use mxc_internal::mxc_common::state_aware_backend::ExecOutcome as WaitResult;
+use mxc_internal::v1::{container, ContainerId, ProvisionRequest};
 
 /// Provision mints a real OS account, so an early return or a panic would
 /// otherwise leave one behind on the host.
@@ -108,7 +108,7 @@ fn run() -> i32 {
         None => ("custom", arg, None),
     };
 
-    if !mxc_sdk::v1::available_backends()
+    if !mxc_internal::v1::available_backends()
         .iter()
         .any(|b| b.backend == "isolation_session")
     {
@@ -140,7 +140,7 @@ fn run() -> i32 {
     })
     .to_string();
 
-    match mxc_sdk::mxc_engine::exec_state_aware_attached(&exec, true) {
+    match mxc_internal::mxc_engine::exec_state_aware_attached(&exec, true) {
         Ok(outcome) => {
             println!("\n[driver] outcome: {outcome:?}");
             match outcome {

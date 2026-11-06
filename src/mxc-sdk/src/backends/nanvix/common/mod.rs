@@ -144,11 +144,12 @@ pub struct RepoConfig {
 }
 
 /// Load and deserialize a JSON file.
-pub fn load_json<T: serde::de::DeserializeOwned>(path: &str) -> T {
-    let content = std::fs::read_to_string(Path::new(path))
-        .unwrap_or_else(|e| panic!("nanvix_common: failed to read {}: {}", path, e));
+pub fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> T {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("nanvix_common: failed to read {}: {}", path.display(), e));
     serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("nanvix_common: failed to parse {}: {}", path, e))
+        .unwrap_or_else(|e| panic!("nanvix_common: failed to parse {}: {}", path.display(), e))
 }
 
 /// Load checksums from `checksums.json`.
@@ -156,12 +157,14 @@ pub fn load_json<T: serde::de::DeserializeOwned>(path: &str) -> T {
 /// The file is a platform-keyed map of the form
 /// `{ "windows": { "name": "hash", ... }, "linux": { ... } }`; `platform`
 /// selects which sub-map to return.
-pub fn load_checksums(path: &str, platform: &str) -> HashMap<String, String> {
+pub fn load_checksums(path: impl AsRef<Path>, platform: &str) -> HashMap<String, String> {
+    let path = path.as_ref();
     let mut value: HashMap<String, HashMap<String, String>> = load_json(path);
     value.remove(platform).unwrap_or_else(|| {
         panic!(
             "nanvix_common: {} does not contain a '{}' section",
-            path, platform
+            path.display(),
+            platform
         )
     })
 }

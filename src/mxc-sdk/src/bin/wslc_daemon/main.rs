@@ -38,9 +38,9 @@ use anyhow::{Context, Result};
 use tokio::sync::Notify;
 
 #[cfg(windows)]
-use mxc_sdk::wslc_common::daemon_protocol::PROTOCOL_VERSION;
+use mxc_internal::wslc_common::daemon_protocol::PROTOCOL_VERSION;
 #[cfg(windows)]
-use mxc_sdk::wslc_common::daemon_record::{
+use mxc_internal::wslc_common::daemon_record::{
     mint_pipe_name, process_creation_time, remove_daemon_record, secure_record_root,
     write_daemon_record, DaemonRecord, TransitionLock, RECORD_SCHEMA_VERSION,
 };

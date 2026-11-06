@@ -23,24 +23,25 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn run_probe() -> i32 {
-    let learning_mode_available = mxc_sdk::learning_mode_windows::is_learning_mode_api_available();
+    let learning_mode_available =
+        mxc_internal::learning_mode_windows::is_learning_mode_api_available();
     println!("is_learning_mode_api_available = {learning_mode_available}");
 
-    match mxc_sdk::learning_mode_windows::LearningModeApi::load() {
+    match mxc_internal::learning_mode_windows::LearningModeApi::load() {
         Ok(api) => println!("LearningModeApi::load = OK  ({api:?})"),
         Err(e) => println!("LearningModeApi::load = ERR ({e})"),
     }
 
     let secenv_available =
-        mxc_sdk::process_container_common::is_security_environment_api_available();
+        mxc_internal::process_container_common::is_security_environment_api_available();
     println!("is_security_environment_api_available = {secenv_available}");
 
-    let report = mxc_sdk::process_container_common::probe_security_environment_exports();
+    let report = mxc_internal::process_container_common::probe_security_environment_exports();
     println!("  create export = {:?}", report.create);
     println!("  query support = {:?}", report.query_support);
     println!("  close  export = {:?}", report.close);
 
-    match mxc_sdk::process_container_common::ProcessSecurityEnvironmentApi::load() {
+    match mxc_internal::process_container_common::ProcessSecurityEnvironmentApi::load() {
         Ok(api) => println!("ProcessSecurityEnvironmentApi::load = OK  ({api:?})"),
         Err(e) => println!("ProcessSecurityEnvironmentApi::load = ERR ({e})"),
     }

@@ -24,7 +24,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 /// Locate the repository root.
 /// `CARGO_MANIFEST_DIR` points to `src/mxc-sdk/` during `cargo test`.
 pub fn repo_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env!("MXC_SDK_SOURCE_DIR"));
     manifest_dir
         .parent() // src
         .and_then(|p| p.parent()) // repo root
@@ -43,7 +43,7 @@ pub fn examples_dir() -> PathBuf {
 }
 
 fn src_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("MXC_SDK_SOURCE_DIR"))
         .parent() // src
         .expect("could not find src/")
         .to_path_buf()
@@ -678,12 +678,12 @@ pub fn has_platform_exec() -> bool {
 /// Whether `bwrap` (Bubblewrap) is installed, runnable, and new enough on this
 /// Linux host. Bubblewrap characterization tests skip cleanly otherwise (e.g. a
 /// CI runner without `bubblewrap` installed, or one shipping a release older
-/// than [`mxc_sdk::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`]) — the backend
+/// than [`mxc_internal::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`]) — the backend
 /// rejects such hosts up front, so the tests would have nothing to exercise.
 pub fn has_bwrap() -> bool {
     #[cfg(target_os = "linux")]
     {
-        match mxc_sdk::bwrap_common::bwrap_version::probe_bwrap() {
+        match mxc_internal::bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => true,
             Err(err) => {
                 println!("SKIPPED: {err}");

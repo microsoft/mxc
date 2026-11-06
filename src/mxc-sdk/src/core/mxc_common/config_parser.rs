@@ -624,7 +624,7 @@ pub fn load_mxc_request_with_options(
 /// raw-JSON loader is available:
 ///
 /// ```compile_fail,E0432
-/// use mxc_sdk::mxc_common::config_parser::load_request_from_json;
+/// use mxc_internal::mxc_common::config_parser::load_request_from_json;
 /// ```
 pub fn load_mxc_request_from_json(
     json_str: &str,
@@ -1712,7 +1712,7 @@ mod tests {
     }
 
     fn repository_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+        Path::new(env!("MXC_SDK_SOURCE_DIR"))
             .ancestors()
             .nth(2)
             .unwrap()

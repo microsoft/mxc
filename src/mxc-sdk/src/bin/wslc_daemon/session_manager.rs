@@ -19,7 +19,7 @@
 //! elapses.
 //!
 //! Each phase drives the real WSLc SDK via the reusable steps in
-//! [`mxc_sdk::wslc_common::container_steps`] and [`mxc_sdk::wslc_common::image`]: `provision`
+//! [`mxc_internal::wslc_common::container_steps`] and [`mxc_internal::wslc_common::image`]: `provision`
 //! ensures the session + resolves the image + creates a container with a
 //! keepalive init process; `start` boots
 //! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion on a
@@ -37,17 +37,17 @@ use anyhow::Result;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
-use mxc_sdk::mxc_common::logger::{Logger, Mode};
-use mxc_sdk::mxc_common::models::{FailurePhase, ScriptResponse};
-use mxc_sdk::wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
-use mxc_sdk::wslc_common::daemon_protocol::{
+use mxc_internal::mxc_common::logger::{Logger, Mode};
+use mxc_internal::mxc_common::models::{FailurePhase, ScriptResponse};
+use mxc_internal::wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
+use mxc_internal::wslc_common::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, PortMapping,
     ProvisionConfig, StartConfig, StopConfig,
 };
-use mxc_sdk::wslc_common::image;
-use mxc_sdk::wslc_common::policy_mapping;
-use mxc_sdk::wslc_common::process_env::EnvScope;
-use mxc_sdk::wslc_common::wslc_bindings::{
+use mxc_internal::wslc_common::image;
+use mxc_internal::wslc_common::policy_mapping;
+use mxc_internal::wslc_common::process_env::EnvScope;
+use mxc_internal::wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 
@@ -1634,10 +1634,10 @@ impl Drop for ComApartment {
 /// The daemon IPC frame carries no protocol, so every mapping is rebuilt as TCP.
 fn to_model_port_mappings(
     mappings: &[PortMapping],
-) -> Vec<mxc_sdk::mxc_common::models::PortMapping> {
+) -> Vec<mxc_internal::mxc_common::models::PortMapping> {
     mappings
         .iter()
-        .map(|mapping| mxc_sdk::mxc_common::models::PortMapping {
+        .map(|mapping| mxc_internal::mxc_common::models::PortMapping {
             windows_port: mapping.windows_port,
             container_port: mapping.container_port,
             protocol: "tcp".to_string(),
@@ -1671,12 +1671,12 @@ mod tests {
         assert_eq!(
             converted,
             vec![
-                mxc_sdk::mxc_common::models::PortMapping {
+                mxc_internal::mxc_common::models::PortMapping {
                     windows_port: 8080,
                     container_port: 80,
                     protocol: "tcp".to_string(),
                 },
-                mxc_sdk::mxc_common::models::PortMapping {
+                mxc_internal::mxc_common::models::PortMapping {
                     windows_port: 8443,
                     container_port: 443,
                     protocol: "tcp".to_string(),
@@ -1693,7 +1693,7 @@ mod tests {
     /// Build a worker entry around a handle that is never dereferenced.
     fn test_entry(retired: bool) -> ContainerEntry {
         unsafe extern "C" fn release_noop(
-            _: mxc_sdk::wslc_common::wslc_bindings::WslcContainer,
+            _: mxc_internal::wslc_common::wslc_bindings::WslcContainer,
         ) -> i32 {
             0
         }
@@ -2095,7 +2095,9 @@ mod tests {
 
     #[tokio::test]
     async fn large_callback_split_into_frame_safe_chunks() {
-        use mxc_sdk::wslc_common::daemon_protocol::{encode_frame, StreamFrame, MAX_FRAME_SIZE};
+        use mxc_internal::wslc_common::daemon_protocol::{
+            encode_frame, StreamFrame, MAX_FRAME_SIZE,
+        };
 
         let (tx, mut rx) = mpsc::channel::<OutputChunk>(LIVE_OUTPUT_CHANNEL_CAPACITY);
         // A single callback far larger than one chunk (and, unsplit, larger than
@@ -2138,7 +2140,9 @@ mod tests {
     /// A container whose handle release is observable, so a test can tell a
     /// deliberate leak from a normal drop.
     fn flagged_entry(
-        release: unsafe extern "C" fn(mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32,
+        release: unsafe extern "C" fn(
+            mxc_internal::wslc_common::wslc_bindings::WslcContainer,
+        ) -> i32,
     ) -> ContainerEntry {
         let sentinel = std::ptr::dangling_mut();
         ContainerEntry {
@@ -2693,7 +2697,9 @@ mod tests {
     fn a_timed_out_shutdown_answers_clients_without_releasing_live_handles() {
         static RELEASED: AtomicBool = AtomicBool::new(false);
 
-        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+        unsafe extern "C" fn release(
+            _: mxc_internal::wslc_common::wslc_bindings::WslcContainer,
+        ) -> i32 {
             RELEASED.store(true, Ordering::SeqCst);
             0
         }
@@ -2895,7 +2901,9 @@ mod tests {
     fn an_unwind_with_a_run_still_counted_keeps_container_handles() {
         static RELEASED: AtomicBool = AtomicBool::new(false);
 
-        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+        unsafe extern "C" fn release(
+            _: mxc_internal::wslc_common::wslc_bindings::WslcContainer,
+        ) -> i32 {
             RELEASED.store(true, Ordering::SeqCst);
             0
         }
@@ -2917,7 +2925,9 @@ mod tests {
     fn an_unwind_with_a_pull_outstanding_keeps_container_handles() {
         static RELEASED: AtomicBool = AtomicBool::new(false);
 
-        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+        unsafe extern "C" fn release(
+            _: mxc_internal::wslc_common::wslc_bindings::WslcContainer,
+        ) -> i32 {
             RELEASED.store(true, Ordering::SeqCst);
             0
         }
@@ -2939,7 +2949,9 @@ mod tests {
     fn an_unwind_with_no_run_counted_releases_container_handles() {
         static RELEASED: AtomicBool = AtomicBool::new(false);
 
-        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+        unsafe extern "C" fn release(
+            _: mxc_internal::wslc_common::wslc_bindings::WslcContainer,
+        ) -> i32 {
             RELEASED.store(true, Ordering::SeqCst);
             0
         }

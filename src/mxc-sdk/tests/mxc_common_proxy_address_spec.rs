@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Black-box contract tests for `mxc_sdk::mxc_common::models::ProxyAddress` and
+//! Black-box contract tests for `mxc_internal::mxc_common::models::ProxyAddress` and
 //! `ProxyHostPin`.
 //!
 //! These live in the integration-test directory on purpose: from here only the
@@ -68,7 +68,7 @@
 
 use std::net::IpAddr;
 
-use mxc_sdk::mxc_common::models::{ProxyAddress, ProxyHostPin};
+use mxc_internal::mxc_common::models::{ProxyAddress, ProxyHostPin};
 
 // `ProxyHostPin` has no public constructor: the only way to obtain one is
 // `ProxyAddress::host_pin` on a hostname address, which must return

@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn rootfs_tag_follows_the_pinned_crate_release() {
         let manifest =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+            std::fs::read_to_string(concat!(env!("MXC_SDK_SOURCE_DIR"), "/Cargo.toml")).unwrap();
         let line = manifest
             .lines()
             .find(|l| l.starts_with("hyperlight-unikraft = "))

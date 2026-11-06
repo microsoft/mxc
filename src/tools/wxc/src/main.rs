@@ -10,19 +10,19 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use mxc_sdk::mxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
-use mxc_sdk::mxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
+use mxc_internal::mxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
+use mxc_internal::mxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
 #[cfg(target_os = "windows")]
-use mxc_sdk::mxc_common::diagnostic::DiagnosticConfig;
-use mxc_sdk::mxc_common::error::WxcError;
-use mxc_sdk::mxc_common::logger::{Logger, Mode};
-use mxc_sdk::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
-use mxc_sdk::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-use mxc_sdk::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
-use mxc_sdk::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use mxc_sdk::mxc_common::telemetry;
-use mxc_sdk::process_container_common::appcontainer_runner::delete_app_container_profile;
+use mxc_internal::mxc_common::diagnostic::DiagnosticConfig;
+use mxc_internal::mxc_common::error::WxcError;
+use mxc_internal::mxc_common::logger::{Logger, Mode};
+use mxc_internal::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use mxc_internal::mxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
+use mxc_internal::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use mxc_internal::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
+use mxc_internal::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use mxc_internal::mxc_common::telemetry;
+use mxc_internal::process_container_common::appcontainer_runner::delete_app_container_profile;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -222,7 +222,7 @@ enum CliOperation {
     Deprovision,
 }
 
-impl From<CliOperation> for mxc_sdk::mxc_common::state_aware_request::Phase {
+impl From<CliOperation> for mxc_internal::mxc_common::state_aware_request::Phase {
     fn from(operation: CliOperation) -> Self {
         match operation {
             CliOperation::Provision => Self::Provision,
@@ -316,7 +316,9 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
 /// source is only read once per invocation.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, RequestInputError>> {
     let (input, is_base64) = config_input(cli)?;
-    Some(mxc_sdk::mxc_common::config_parser::decode_request_input_classified(&input, is_base64))
+    Some(
+        mxc_internal::mxc_common::config_parser::decode_request_input_classified(&input, is_base64),
+    )
 }
 
 fn lifecycle_input_error(
@@ -377,8 +379,8 @@ fn log_config_rejected(
     offending_field: &str,
     phase: &str,
 ) {
-    let correlation_id = mxc_sdk::mxc_common::audit::process_correlation_id();
-    mxc_sdk::mxc_common::telemetry::log_config_rejected(
+    let correlation_id = mxc_internal::mxc_common::audit::process_correlation_id();
+    mxc_internal::mxc_common::telemetry::log_config_rejected(
         correlation_id,
         backend,
         reason.as_str(),
@@ -453,7 +455,7 @@ const UNVERIFIED_SANDBOX_ID_MARKER: &str = "unverified";
 
 fn state_aware_policy_identity(sandbox_id: Option<&str>) -> String {
     match sandbox_id.filter(|id| !id.is_empty()) {
-        None => mxc_sdk::mxc_common::policy_identity::redact_identity("CLI"),
+        None => mxc_internal::mxc_common::policy_identity::redact_identity("CLI"),
         Some(_) => UNVERIFIED_SANDBOX_ID_MARKER.to_string(),
     }
 }
@@ -550,13 +552,13 @@ fn run_state_aware_main(
     let diagnostics_active = logger.has_diagnostic_sink();
     let mut diagnostic_logger = logger.clone_diagnostic_sink();
     if telemetry_active || diagnostics_active {
-        let policy_hash = mxc_sdk::mxc_common::policy_identity::state_aware_policy_hash(
+        let policy_hash = mxc_internal::mxc_common::policy_identity::state_aware_policy_hash(
             parsed.request(),
             backend,
             parsed.operation(),
         );
         let identity = state_aware_policy_identity(parsed.sandbox_id());
-        mxc_sdk::mxc_common::telemetry::log_policy_hash(
+        mxc_internal::mxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
             parsed.request().source_contract_version(),
@@ -589,7 +591,7 @@ fn run_state_aware_main(
     // panics -- so we never leak duplicated handles across independent
     // invocations even on an unwind.
     let _diag_sink_guard = diagnostic_logger.install_thread_diagnostic_sink();
-    let outcome = mxc_sdk::mxc_engine::run_state_aware(parsed, dry_run);
+    let outcome = mxc_internal::mxc_engine::run_state_aware(parsed, dry_run);
     drop(_diag_sink_guard);
     let elapsed = started.elapsed();
 
@@ -864,19 +866,19 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "windows")]
 static DACL_CLEANUP_SLOT: OnceLock<
-    Mutex<Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager>>,
+    Mutex<Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager>>,
 > = OnceLock::new();
 
 #[cfg(target_os = "windows")]
-fn dacl_cleanup_slot() -> &'static Mutex<Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager>>
-{
+fn dacl_cleanup_slot(
+) -> &'static Mutex<Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager>> {
     DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
 }
 
 /// Park the DACL manager in the global slot so the Ctrl-C handler can
 /// drop it if a signal arrives before the normal-exit path runs.
 #[cfg(target_os = "windows")]
-fn park_dacl_for_cleanup(mgr: mxc_sdk::mxc_common::filesystem_dacl::DaclManager) {
+fn park_dacl_for_cleanup(mgr: mxc_internal::mxc_common::filesystem_dacl::DaclManager) {
     let slot = dacl_cleanup_slot();
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     *guard = Some(mgr);
@@ -891,7 +893,7 @@ fn park_dacl_for_cleanup(mgr: mxc_sdk::mxc_common::filesystem_dacl::DaclManager)
 /// parked manager — that would leak ACEs until the next-startup
 /// recovery scan reaps them.
 #[cfg(target_os = "windows")]
-fn take_parked_dacl() -> Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager> {
+fn take_parked_dacl() -> Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager> {
     DACL_CLEANUP_SLOT.get().and_then(|slot| {
         let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
         guard.take()
@@ -954,7 +956,7 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
                 // ~5s OS-imposed kill budget. The persistent elevated PLM
                 // child handles trace cleanup after this owner terminates.
                 let deadline =
-                    Instant::now() + mxc_sdk::plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
+                    Instant::now() + mxc_internal::plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
                 loop {
                     if let Ok(mut guard) = slot.try_lock() {
                         // Either main already took the manager (guard is None)
@@ -1037,7 +1039,7 @@ fn main() {
     // (run_processcontainer_crash_recovery_test.ps1, SDK warm-start) rely on. Errors
     // here are non-fatal and only surface via stderr. On a healthy host
     // with zero state files this is sub-millisecond.
-    match mxc_sdk::mxc_common::filesystem_dacl::recover_orphaned_state() {
+    match mxc_internal::mxc_common::filesystem_dacl::recover_orphaned_state() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
                 eprintln!(
@@ -1070,17 +1072,19 @@ fn main() {
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
             match decoded {
-                Ok(json) => match mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json(
-                    json,
-                    &mut probe_logger,
-                ) {
-                    Ok(MxcRequest::OneShot(request)) => request,
-                    Ok(MxcRequest::StateAware(_)) | Err(_) => {
-                        eprintln!("Error: failed to load probe config");
-                        eprint!("{}", probe_logger.get_buffer());
-                        process::exit(1);
+                Ok(json) => {
+                    match mxc_internal::mxc_common::config_parser::load_mxc_request_from_json(
+                        json,
+                        &mut probe_logger,
+                    ) {
+                        Ok(MxcRequest::OneShot(request)) => request,
+                        Ok(MxcRequest::StateAware(_)) | Err(_) => {
+                            eprintln!("Error: failed to load probe config");
+                            eprint!("{}", probe_logger.get_buffer());
+                            process::exit(1);
+                        }
                     }
-                },
+                }
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
                     eprint!("{}", probe_logger.get_buffer());
@@ -1088,16 +1092,16 @@ fn main() {
                 }
             }
         } else {
-            mxc_sdk::mxc_common::models::ExecutionRequest::default()
+            mxc_internal::mxc_common::models::ExecutionRequest::default()
         };
-        let output = match mxc_sdk::mxc_engine::probe_execution_request(Some(&request)) {
+        let output = match mxc_internal::mxc_engine::probe_execution_request(Some(&request)) {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("Error: {}", error.message);
                 process::exit(1);
             }
         };
-        match mxc_sdk::process_container_common::probe::to_json_pretty(&output) {
+        match mxc_internal::process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -1152,7 +1156,7 @@ fn main() {
         {
             // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
-            if !mxc_sdk::hyperlight_common::is_whp_available() {
+            if !mxc_internal::hyperlight_common::is_whp_available() {
                 eprintln!(
                     "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
                      Enable the HypervisorPlatform optional feature and reboot."
@@ -1163,14 +1167,14 @@ fn main() {
             // Setup is an interactive install: the pull and the warm-up
             // report progress as they go.
             let mut logger = Logger::new(Mode::Console);
-            let runtimes = match mxc_sdk::hyperlight_common::parse_runtimes(runtime_names) {
+            let runtimes = match mxc_internal::hyperlight_common::parse_runtimes(runtime_names) {
                 Ok(runtimes) => runtimes,
                 Err(msg) => {
                     eprintln!("Error: {msg}");
                     process::exit(1);
                 }
             };
-            match mxc_sdk::hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
+            match mxc_internal::hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
                 Ok(home) => {
                     eprintln!("hyperlight setup: image home ready at {:?}", home);
                     process::exit(0);
@@ -1212,7 +1216,7 @@ fn main() {
             // process exit. It owns the COM init contract documented on
             // `init_and_load_sdk`.
             let result = unsafe {
-                mxc_sdk::wslc_common::image::setup_pull_image(
+                mxc_internal::wslc_common::image::setup_pull_image(
                     image,
                     cli.storage_path.as_deref(),
                     &mut logger,
@@ -1313,7 +1317,7 @@ fn main() {
     if let Some(operation) = cli.operation {
         let phase = operation.into();
         let parsed =
-            match mxc_sdk::mxc_common::config_parser::load_state_aware_request_from_json_with_options(
+            match mxc_internal::mxc_common::config_parser::load_state_aware_request_from_json_with_options(
                 &config_json,
                 &mut logger,
                 phase,
@@ -1356,7 +1360,7 @@ fn main() {
         cli_command: &cli.command,
     };
     let parsed_request =
-        mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json_with_options(
+        mxc_internal::mxc_common::config_parser::load_mxc_request_from_json_with_options(
             &config_json,
             &mut logger,
             load_opts,
@@ -1516,7 +1520,7 @@ fn main() {
             let exe_path = std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "unknown".to_string());
-            let parent_info = mxc_sdk::mxc_common::diagnostic::get_parent_process_info();
+            let parent_info = mxc_internal::mxc_common::diagnostic::get_parent_process_info();
             let _ = writeln!(
                 logger,
                 "wxc-exec v{} (PID {})",
@@ -1543,7 +1547,7 @@ fn main() {
             let _ = writeln!(
                 logger,
                 "{}",
-                mxc_sdk::mxc_common::diagnostic::redact_raw_config_json(config_json.trim())
+                mxc_internal::mxc_common::diagnostic::redact_raw_config_json(config_json.trim())
             );
         }
     }
@@ -1565,7 +1569,7 @@ fn main() {
             let _ = writeln!(
                 logger,
                 "{}",
-                mxc_sdk::mxc_common::diagnostic::redacted_request_json(&request)
+                mxc_internal::mxc_common::diagnostic::redacted_request_json(&request)
             );
         }
     }
@@ -1573,13 +1577,13 @@ fn main() {
     // Run script in the selected containment backend. Backend selection and
     // runner construction — including the ProcessContainer BaseContainer /
     // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
-    // live in `mxc_sdk::mxc_engine::resolve_runner`, the single home for one-shot backend
+    // live in `mxc_internal::mxc_engine::resolve_runner`, the single home for one-shot backend
     // dispatch. The DACL guard it returns for the fallback tiers is parked into
     // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
     // it on signal as well as the normal-exit path below; it is `None` when no
     // DACL augmentation was required. Tier-selection warnings and the selected
     // tier are logged to `logger` by the engine.
-    let resolved_runner = mxc_sdk::mxc_engine::resolve_runner(&request, &mut logger);
+    let resolved_runner = mxc_internal::mxc_engine::resolve_runner(&request, &mut logger);
     let mut runner: Box<dyn ScriptRunner> = match resolved_runner {
         Ok(resolved) => {
             #[cfg(target_os = "windows")]
@@ -1654,7 +1658,7 @@ fn main() {
     // next startup covers everything else.)
     //
     // The parked-DACL machinery is Windows-only: `DaclManager` lives behind
-    // `#[cfg(target_os = "windows")]` in `mxc_sdk::mxc_common::filesystem_dacl`, so the
+    // `#[cfg(target_os = "windows")]` in `mxc_internal::mxc_common::filesystem_dacl`, so the
     // whole extract/park/take/cleanup lifecycle is gated to match.
     drop(runner);
     #[cfg(target_os = "windows")]
@@ -1671,7 +1675,7 @@ fn main() {
     }
 
     #[cfg(target_os = "windows")]
-    if let Err(error) = mxc_sdk::mxc_engine::emit_verbose_telemetry(
+    if let Err(error) = mxc_internal::mxc_engine::emit_verbose_telemetry(
         telemetry_active,
         &request.containment,
         requested_sandbox_kind,
@@ -1722,7 +1726,7 @@ fn main() {
     // when the runner produced an error message (one-shot flows only).
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
     // appears inline -- callers (e.g. copilot) can parse it from the output.
-    mxc_sdk::mxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_internal::mxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }
@@ -1732,13 +1736,13 @@ mod tests {
     use super::*;
 
     use clap::{CommandFactory, Parser};
-    use mxc_sdk::mxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
-    use mxc_sdk::mxc_common::config_parser::load_mxc_request_with_options;
-    use mxc_sdk::mxc_common::encoding::base64_encode;
-    use mxc_sdk::mxc_common::error::WxcError;
-    use mxc_sdk::mxc_common::logger::Mode;
-    use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
-    use mxc_sdk::mxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+    use mxc_internal::mxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
+    use mxc_internal::mxc_common::config_parser::load_mxc_request_with_options;
+    use mxc_internal::mxc_common::encoding::base64_encode;
+    use mxc_internal::mxc_common::error::WxcError;
+    use mxc_internal::mxc_common::logger::Mode;
+    use mxc_internal::mxc_common::state_aware_request::MxcRequest;
+    use mxc_internal::mxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
 
     const CLI_OVERRIDE_PROGRAM: &str = "cli-app.exe";
     const CLI_OVERRIDE_FLAG: &str = "--from-cli";
@@ -2089,7 +2093,7 @@ mod tests {
             );
             assert_eq!(
                 error.code,
-                mxc_sdk::mxc_common::mxc_error::MxcErrorCode::MalformedRequest
+                mxc_internal::mxc_common::mxc_error::MxcErrorCode::MalformedRequest
             );
             assert!(error.message.contains("decode failed"), "{}", error.message);
             let envelope: serde_json::Value =
@@ -2148,7 +2152,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("invalid-utf8.json");
         std::fs::write(&config_path, [0xff, 0xfe]).unwrap();
-        let input_error = mxc_sdk::mxc_common::config_parser::decode_request_input_classified(
+        let input_error = mxc_internal::mxc_common::config_parser::decode_request_input_classified(
             config_path.to_str().unwrap(),
             false,
         )
@@ -2283,7 +2287,7 @@ mod tests {
                 RejectionReason::MalformedJson,
             ),
         ] {
-            let error = mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json(
+            let error = mxc_internal::mxc_common::config_parser::load_mxc_request_from_json(
                 json,
                 &mut test_logger(),
             )
@@ -2323,7 +2327,7 @@ mod tests {
             "telemetry":{}
         }"#;
         let mut logger = test_logger();
-        let error = mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json(
+        let error = mxc_internal::mxc_common::config_parser::load_mxc_request_from_json(
             state_aware,
             &mut logger,
         )
@@ -2344,9 +2348,11 @@ mod tests {
             "telemetry":{}
         }"#;
         let mut logger = test_logger();
-        let error =
-            mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json(one_shot, &mut logger)
-                .unwrap_err();
+        let error = mxc_internal::mxc_common::config_parser::load_mxc_request_from_json(
+            one_shot,
+            &mut logger,
+        )
+        .unwrap_err();
         assert!(matches!(
             request_error_route(&error),
             RequestErrorRoute::Diagnostic
@@ -2418,7 +2424,7 @@ mod tests {
 
     #[test]
     fn audit_mode_rejects_both_capture_denials_modes() {
-        use mxc_sdk::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+        use mxc_internal::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
 
         for mode in [CaptureDenialsMode::Block, CaptureDenialsMode::Allow] {
             let mut request = ExecutionRequest {

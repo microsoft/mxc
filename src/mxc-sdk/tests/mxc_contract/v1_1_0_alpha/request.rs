@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::mxc_contract::dev::{
+use mxc_internal::mxc_contract::dev::{
     parse_request, ContainmentProbeError, PhaseProbeError, ProvisionRequest, Request,
     RequestParseError,
 };

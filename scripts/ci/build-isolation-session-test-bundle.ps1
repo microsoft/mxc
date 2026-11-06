@@ -100,10 +100,11 @@ if (Test-Path -LiteralPath $OutputDirectory) {
 $OutputDirectory = New-Directory $OutputDirectory
 
 $sdkPackage = @('-p', 'mxc-sdk', '--features', 'isolation_session')
+$internalPackage = @('-p', 'mxc-internal', '--features', 'isolation_session')
 if (-not $WxcExecPath) {
     $WxcExecPath = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'wxc', '--features', 'isolation_session')) 'wxc-exec'
 }
-$testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @('--test', 'isolation_session', '--test', 'sdk_helpers', '--no-run'))
+$testArtifacts = Invoke-CargoBuild (@('test') + $internalPackage + @('--test', 'isolation_session', '--test', 'sdk_helpers', '--no-run'))
 $probeArtifacts = Invoke-CargoBuild (@('build') + $sdkPackage + @('--example', 'sta_probe'))
 $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session') |
     Where-Object { $_.target.name -eq 'mxc_ffi' } |

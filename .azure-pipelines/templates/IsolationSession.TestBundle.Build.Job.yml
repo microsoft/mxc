@@ -105,7 +105,7 @@ jobs:
       Push-Location "$(workingDirectory)"
       try {
           & cargo test --locked --release --target "$(triplet)" `
-              -p mxc-sdk --features isolation_session `
+              -p mxc-internal --features isolation_session `
               --test isolation_session --no-run --message-format=json `
               > $messagesPath
           if ($LASTEXITCODE -ne 0) {

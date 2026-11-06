@@ -5,7 +5,7 @@ use crate::common::{assert_invalid, assert_valid};
 
 #[test]
 fn every_removed_property_is_rejected_from_every_request_root() {
-    use mxc_sdk::mxc_contract::dev::parse_request;
+    use mxc_internal::mxc_contract::dev::parse_request;
     use serde_json::{json, Map, Value};
 
     let roots = [
@@ -62,7 +62,7 @@ fn every_removed_property_is_rejected_from_every_request_root() {
 
 #[test]
 fn exec_runtime_proxy_is_a_closed_optional_string_surface() {
-    use mxc_sdk::mxc_contract::dev::parse_request;
+    use mxc_internal::mxc_contract::dev::parse_request;
     for runtime in [
         r#"{"networkProxy":null}"#,
         r#"{"networkProxy":true}"#,

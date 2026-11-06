@@ -1,20 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::v1::{
+use mxc_internal::v1::{
     self, ContainerId, ContainerRequest, ExecutionRequest, MxcPtyProcess, MxcPtySize,
     SpawnInContainerWithPtyOptions, SpawnWithPtyOptions,
 };
 
 #[test]
 fn pty_entry_points_take_dimensions_from_operation_options() {
-    let _: fn(ContainerRequest, SpawnWithPtyOptions) -> Result<MxcPtyProcess, mxc_sdk::v1::Error> =
-        v1::spawn_with_pty;
+    let _: fn(
+        ContainerRequest,
+        SpawnWithPtyOptions,
+    ) -> Result<MxcPtyProcess, mxc_internal::v1::Error> = v1::spawn_with_pty;
     let _: fn(
         &ContainerId,
         ExecutionRequest,
         SpawnInContainerWithPtyOptions,
-    ) -> Result<MxcPtyProcess, mxc_sdk::v1::Error> = v1::container::spawn_in_container_with_pty;
+    ) -> Result<MxcPtyProcess, mxc_internal::v1::Error> =
+        v1::container::spawn_in_container_with_pty;
 
     let default_size = SpawnWithPtyOptions::default().size;
     assert_eq!(default_size, MxcPtySize::default());
@@ -33,6 +36,6 @@ fn pty_entry_points_take_dimensions_from_operation_options() {
         },
         ..Default::default()
     };
-    let native_size: mxc_sdk::mxc_common::sandbox_process::PtySize = options.size.into();
+    let native_size: mxc_internal::mxc_common::sandbox_process::PtySize = options.size.into();
     assert_eq!((native_size.rows, native_size.cols), (40, 120));
 }

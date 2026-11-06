@@ -821,21 +821,21 @@ mod tests {
         let fixtures = [
             (
                 include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
+                    env!("MXC_SDK_SOURCE_DIR"),
                     "/../../tests/fixtures/telemetry-consent/presenter-decision-yes.json"
                 )),
                 consent::ConsentDecision::Yes,
             ),
             (
                 include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
+                    env!("MXC_SDK_SOURCE_DIR"),
                     "/../../tests/fixtures/telemetry-consent/presenter-decision-no.json"
                 )),
                 consent::ConsentDecision::No,
             ),
             (
                 include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
+                    env!("MXC_SDK_SOURCE_DIR"),
                     "/../../tests/fixtures/telemetry-consent/presenter-decision-dismissed.json"
                 )),
                 consent::ConsentDecision::Dismissed,
@@ -849,7 +849,7 @@ mod tests {
             );
         }
         let invalid = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
+            env!("MXC_SDK_SOURCE_DIR"),
             "/../../tests/fixtures/telemetry-consent/presenter-decision-unknown-field.json"
         ));
         assert_eq!(

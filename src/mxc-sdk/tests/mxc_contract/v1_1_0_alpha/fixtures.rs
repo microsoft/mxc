@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::mxc_contract::dev::{
+use mxc_internal::mxc_contract::dev::{
     parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
     StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
 };
@@ -9,11 +9,11 @@ use mxc_sdk::mxc_contract::dev::{
 const VERSION: &str = "v1_1_0_alpha";
 
 fn read_fixtures(root: &str, kind: &str) -> Vec<(String, String)> {
-    crate::exact_test_support::read_fixtures(env!("CARGO_MANIFEST_DIR"), VERSION, root, kind)
+    crate::exact_test_support::read_fixtures(env!("MXC_SDK_SOURCE_DIR"), VERSION, root, kind)
 }
 
 fn assert_root_fixtures<T: serde::de::DeserializeOwned>(root: &str) {
-    crate::exact_test_support::assert_root_fixtures::<T>(env!("CARGO_MANIFEST_DIR"), VERSION, root);
+    crate::exact_test_support::assert_root_fixtures::<T>(env!("MXC_SDK_SOURCE_DIR"), VERSION, root);
 }
 
 fn assert_one_shot_fixtures() {

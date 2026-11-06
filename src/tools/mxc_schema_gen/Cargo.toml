@@ -7,7 +7,7 @@ edition.workspace = true
 # Emits exact versioned MXC config schemas and TypeScript wire oracles.
 [dependencies]
 clap.workspace = true
-mxc-sdk = { workspace = true, features = ["schema-gen"] }
+mxc-internal = { workspace = true, features = ["schema-gen"] }
 serde_json.workspace = true
 
 [dev-dependencies]

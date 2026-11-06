@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mxc_sdk::mxc_common::models::{
+use mxc_internal::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest, ScriptResponse,
 };
 
@@ -19,7 +19,11 @@ pub fn prepare_request(
     request: &mut ExecutionRequest,
     config_path: Option<PathBuf>,
 ) -> Result<AuditContext, String> {
-    prepare_request_in(request, config_path, mxc_sdk::plm::stop::default_log_dir())
+    prepare_request_in(
+        request,
+        config_path,
+        mxc_internal::plm::stop::default_log_dir(),
+    )
 }
 
 fn prepare_request_in(
@@ -61,7 +65,7 @@ pub fn finalize(
         .as_mut()
         .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
     let source_denials = PathBuf::from(&capture.output_path);
-    let source_verbose_logging = mxc_sdk::learning_mode_core::verbose_logging_sibling_path(
+    let source_verbose_logging = mxc_internal::learning_mode_core::verbose_logging_sibling_path(
         &source_denials,
     )
     .map_err(|error| {
@@ -94,7 +98,7 @@ pub fn finalize(
         ));
     }
 
-    let document: mxc_sdk::learning_mode_core::DenialsDocument =
+    let document: mxc_internal::learning_mode_core::DenialsDocument =
         serde_json::from_slice(&std::fs::read(&source_denials).map_err(|error| {
             format!(
                 "failed to read captureDenials output {}: {error}",
@@ -114,7 +118,7 @@ pub fn finalize(
             source_verbose_logging.display()
         )
     })?;
-    mxc_sdk::learning_mode_core::verbose_logging::validate_verbose_logging_document(
+    mxc_internal::learning_mode_core::verbose_logging::validate_verbose_logging_document(
         &verbose_logging_bytes,
     )
     .map_err(|error| {
@@ -125,7 +129,7 @@ pub fn finalize(
     })?;
 
     let final_denials = context.log_dir.join("denials.json");
-    let final_verbose_logging = mxc_sdk::learning_mode_core::verbose_logging_sibling_path(
+    let final_verbose_logging = mxc_internal::learning_mode_core::verbose_logging_sibling_path(
         &final_denials,
     )
     .map_err(|error| format!("failed to derive audit verbose logging output path: {error}"))?;
@@ -140,14 +144,14 @@ pub fn finalize(
             source_etl: &source_etl,
             final_etl: &final_etl,
         },
-        mxc_sdk::learning_mode_core::relocate_paired_output_files,
+        mxc_internal::learning_mode_core::relocate_paired_output_files,
         move_new_file,
     )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
 
-    mxc_sdk::plm::stop::postprocess_denials(
+    mxc_internal::plm::stop::postprocess_denials(
         &document,
-        &mxc_sdk::plm::stop::PostProcessOptions {
+        &mxc_internal::plm::stop::PostProcessOptions {
             log_dir: context.log_dir.clone(),
             bin_path: None,
             config_path: context.config_path.clone(),
@@ -163,10 +167,10 @@ pub fn finalize(
 }
 
 fn validate_metadata(
-    capture: &mxc_sdk::mxc_common::models::CaptureDenialsOutput,
-    document: &mxc_sdk::learning_mode_core::DenialsDocument,
+    capture: &mxc_internal::mxc_common::models::CaptureDenialsOutput,
+    document: &mxc_internal::learning_mode_core::DenialsDocument,
 ) -> Result<(), String> {
-    if capture.kind != mxc_sdk::mxc_common::models::CaptureDenialsOutput::KIND
+    if capture.kind != mxc_internal::mxc_common::models::CaptureDenialsOutput::KIND
         || capture.exit_code != document.summary.exit_code
         || capture.total_denials != document.summary.total_denials
         || capture.denied_resources_truncated != document.summary.denied_resources_truncated
@@ -199,7 +203,7 @@ struct ArtifactRelocation<'a> {
 }
 
 fn relocate_artifacts(
-    capture: &mut mxc_sdk::mxc_common::models::CaptureDenialsOutput,
+    capture: &mut mxc_internal::mxc_common::models::CaptureDenialsOutput,
     paths: &ArtifactRelocation<'_>,
     relocate_pair: impl FnOnce(
         &str,
@@ -207,11 +211,13 @@ fn relocate_artifacts(
         &Path,
         &Path,
         &Path,
-    ) -> std::io::Result<mxc_sdk::learning_mode_core::RelocationOutcome>,
+    )
+        -> std::io::Result<mxc_internal::learning_mode_core::RelocationOutcome>,
     mut move_file: impl FnMut(
         &Path,
         &Path,
-    ) -> Result<mxc_sdk::learning_mode_core::RelocationOutcome, String>,
+    )
+        -> Result<mxc_internal::learning_mode_core::RelocationOutcome, String>,
 ) -> Result<Vec<String>, String> {
     ensure_destination_available(paths.source_etl, paths.final_etl)?;
 
@@ -238,8 +244,8 @@ fn relocate_artifacts(
 fn move_new_file(
     source: &Path,
     destination: &Path,
-) -> Result<mxc_sdk::learning_mode_core::RelocationOutcome, String> {
-    mxc_sdk::learning_mode_core::relocate_output_file(
+) -> Result<mxc_internal::learning_mode_core::RelocationOutcome, String> {
+    mxc_internal::learning_mode_core::relocate_output_file(
         "audit artifact relocation",
         "retained ETL",
         source,
@@ -275,7 +281,9 @@ fn remove_empty_managed_directory(
     // store; the predicate is owned by `process_container_common` so this does not
     // duplicate the store's private directory name.
     let is_retained_capture_dir =
-        mxc_sdk::process_container_common::capture_output::is_retained_capture_run_dir(directory);
+        mxc_internal::process_container_common::capture_output::is_retained_capture_run_dir(
+            directory,
+        );
     if directory == audit_dir || !is_retained_capture_dir {
         return Ok(());
     }
@@ -299,10 +307,10 @@ fn remove_empty_managed_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxc_sdk::learning_mode_core::{
+    use mxc_internal::learning_mode_core::{
         DenialSummary, DenialsDocument, VerboseLoggingDocument, VerboseLoggingSummary,
     };
-    use mxc_sdk::mxc_common::models::{
+    use mxc_internal::mxc_common::models::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
 
@@ -349,7 +357,7 @@ mod tests {
 
         assert!(!source_denials.exists());
         assert!(
-            !mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+            !mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
                 .unwrap()
                 .exists()
         );
@@ -386,7 +394,8 @@ mod tests {
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut response = response_with_capture(&source_denials, &source_etl, 0);
         let source_verbose_logging =
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap();
         std::fs::write(
             &source_verbose_logging,
             br#"{
@@ -501,7 +510,7 @@ mod tests {
         assert!(error.contains("actionable denials JSON"));
         assert!(source_denials.exists());
         assert!(
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
                 .unwrap()
                 .exists()
         );
@@ -515,7 +524,8 @@ mod tests {
         std::fs::create_dir_all(&log_dir).unwrap();
         let source_denials = log_dir.join("denials.unique.json");
         let source_verbose_logging =
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap();
         let source_etl = log_dir.join("denials.unique.etl");
         let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
         std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
@@ -561,7 +571,7 @@ mod tests {
         assert!(error.contains("actionable output file already exists"));
         assert!(source_denials.exists());
         assert!(
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
                 .unwrap()
                 .exists()
         );
@@ -596,7 +606,8 @@ mod tests {
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut response = response_with_capture(&source_denials, &source_etl, 0);
         std::fs::remove_file(
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap(),
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap(),
         )
         .unwrap();
         let context = AuditContext {
@@ -645,14 +656,14 @@ mod tests {
                 source_etl: &source_etl,
                 final_etl: &final_etl,
             },
-            mxc_sdk::learning_mode_core::relocate_paired_output_files,
+            mxc_internal::learning_mode_core::relocate_paired_output_files,
             |source, destination| {
                 calls += 1;
                 if calls == 1 {
                     Err("injected ETL move failure".to_string())
                 } else {
                     std::fs::rename(source, destination)
-                        .map(|_| mxc_sdk::learning_mode_core::RelocationOutcome::default())
+                        .map(|_| mxc_internal::learning_mode_core::RelocationOutcome::default())
                         .map_err(|error| error.to_string())
                 }
             },
@@ -705,7 +716,7 @@ mod tests {
                 source_etl: &source_etl,
                 final_etl: &final_etl,
             },
-            mxc_sdk::learning_mode_core::relocate_paired_output_files,
+            mxc_internal::learning_mode_core::relocate_paired_output_files,
             |_, _| panic!("ETL relocation must not run after JSON-pair failure"),
         )
         .unwrap_err();
@@ -725,7 +736,7 @@ mod tests {
         exit_code: i32,
     ) -> ScriptResponse {
         let verbose_logging_path =
-            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(denials_path).unwrap();
+            mxc_internal::learning_mode_core::verbose_logging_sibling_path(denials_path).unwrap();
         let verbose_logging = VerboseLoggingDocument::new(&VerboseLoggingSummary::default());
         std::fs::write(
             verbose_logging_path,

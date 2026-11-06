@@ -40,8 +40,8 @@ mod windows_impl {
     use std::io::Write;
     use std::path::Path;
 
-    use mxc_sdk::learning_mode_core::{emit, DenialAnalyzer, DenialSummary};
-    use mxc_sdk::learning_mode_windows::{visit_raw_events, EtlDenialAnalyzer};
+    use mxc_internal::learning_mode_core::{emit, DenialAnalyzer, DenialSummary};
+    use mxc_internal::learning_mode_windows::{visit_raw_events, EtlDenialAnalyzer};
 
     pub fn run() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -108,7 +108,7 @@ mod windows_impl {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let event_count = {
-            let mut visitor = |ev: &mxc_sdk::learning_mode_windows::DecodedEventParts| {
+            let mut visitor = |ev: &mxc_internal::learning_mode_windows::DecodedEventParts| {
                 let provider = format!("{:?}", ev.provider);
                 *histogram
                     .entry((provider.clone(), ev.event_id))

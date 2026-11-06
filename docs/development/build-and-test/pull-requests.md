@@ -65,7 +65,7 @@ package's `wxc-test-proxy.exe`; .NET and Rust require an already-running proxy a
 | --- | --- |
 | `sdk/node/tests/integration` (after build) | `node --test --test-name-pattern="unpackaged proxy" dist/windows-process-container.test.js` |
 | `sdk/dotnet` | `dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --filter FullyQualifiedName~MxcContainerProxyE2ETests` |
-| `src` | `cargo test -p mxc-sdk --test streaming_processcontainer processcontainer_unpackaged_proxy_reaches_origin -- --ignored --test-threads=1` |
+| `src` | `cargo test -p mxc-internal --test streaming_processcontainer processcontainer_unpackaged_proxy_reaches_origin -- --ignored --test-threads=1` |
 
 Select the current native build using `MXC_FFI_DIR` for Node and the managed
 prebuilt-native MSBuild properties for .NET. These are opt-in host tests, not
@@ -76,7 +76,7 @@ substitutes for the PR build matrix.
 From `src`, run:
 
 ```text
-cargo test --release -p mxc-sdk --lib benchmark_high_cardinality_network_capture -- --ignored --nocapture
+cargo test --release -p mxc-internal --lib benchmark_high_cardinality_network_capture -- --ignored --nocapture
 ```
 
 This opt-in benchmark exercises the production network extractor, bounded

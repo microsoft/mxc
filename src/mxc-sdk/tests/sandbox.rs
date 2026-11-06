@@ -5,14 +5,14 @@
 //!
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
-//! [`mxc_sdk::v1::ContainerRequest`], `mxc_sdk::v1::spawn`, read the (untaken)
-//! stdout/stderr, then [`wait`](mxc_sdk::v1::MxcProcess::wait) for the exit code —
+//! [`mxc_internal::v1::ContainerRequest`], `mxc_internal::v1::spawn`, read the (untaken)
+//! stdout/stderr, then [`wait`](mxc_internal::v1::MxcProcess::wait) for the exit code —
 //! the same path the consumer drives.
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::v1::WaitResult;
+use mxc_internal::v1::WaitResult;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemPolicy};
+use mxc_internal::v1::{spawn, ContainerRequest, FilesystemPolicy};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
@@ -58,7 +58,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: ContainerRequest) -> Result<RunOutcome, mxc_sdk::v1::Error> {
+fn spawn_and_wait(request: ContainerRequest) -> Result<RunOutcome, mxc_internal::v1::Error> {
     use std::io::Read;
 
     fn read_thread(
@@ -265,7 +265,7 @@ fn process_container_finite_timeout_fires() {
 #[test]
 fn run_captures_stdout_seatbelt() {
     // `run` spawns, waits, and returns captured stdout/stderr in one call.
-    let output = mxc_sdk::v1::run(
+    let output = mxc_internal::v1::run(
         seatbelt_request("echo hello-run", 10000),
         Default::default(),
     )
@@ -283,7 +283,7 @@ fn run_captures_stdout_seatbelt() {
 fn run_reports_timeout_seatbelt() {
     // A finite scriptTimeout shorter than the command must surface as
     // `WaitResult::TimedOut` rather than an error.
-    let output = mxc_sdk::v1::run(seatbelt_request("sleep 30", 1000), Default::default())
+    let output = mxc_internal::v1::run(seatbelt_request("sleep 30", 1000), Default::default())
         .expect("run should return an outcome");
     assert_eq!(output.outcome, WaitResult::TimedOut);
 }
@@ -293,7 +293,7 @@ fn run_reports_timeout_seatbelt() {
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
 fn run_captures_stdout_process_container() {
     // `run` spawns, waits, and returns captured stdout/stderr in one call.
-    let output = mxc_sdk::v1::run(
+    let output = mxc_internal::v1::run(
         process_container_request("cmd /c echo hello-run", 30000),
         Default::default(),
     )

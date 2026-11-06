@@ -4,7 +4,7 @@
 use crate::state_aware::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
-use mxc_sdk::mxc_contract::published::v1_0_0::WslcProvisionRequest;
+use mxc_internal::mxc_contract::published::v1_0_0::WslcProvisionRequest;
 
 fn assert_valid(json: &str) {
     assert_valid_request::<WslcProvisionRequest>(json);

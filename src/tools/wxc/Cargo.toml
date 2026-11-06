@@ -10,7 +10,7 @@ name = "wxc-exec"
 path = "src/main.rs"
 
 [dependencies]
-mxc-sdk.workspace = true
+mxc-internal.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -29,10 +29,10 @@ serde_json.workspace = true
 
 [features]
 default = []
-test-support = ["mxc-sdk/test-support"]
-microvm = ["mxc-sdk/microvm"]
-wslc = ["mxc-sdk/wslc"]
-hyperlight = ["mxc-sdk/hyperlight"]
-isolation_session = ["mxc-sdk/isolation_session"]
-force-tier-testing = ["mxc-sdk/force-tier-testing"]
-tier2_bfs = ["mxc-sdk/tier2_bfs"]
+test-support = ["mxc-internal/test-support"]
+microvm = ["mxc-internal/microvm"]
+wslc = ["mxc-internal/wslc"]
+hyperlight = ["mxc-internal/hyperlight"]
+isolation_session = ["mxc-internal/isolation_session"]
+force-tier-testing = ["mxc-internal/force-tier-testing"]
+tier2_bfs = ["mxc-internal/tier2_bfs"]

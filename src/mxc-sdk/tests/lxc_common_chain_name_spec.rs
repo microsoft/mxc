@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::lxc_common::network_iptables::{
+use mxc_internal::lxc_common::network_iptables::{
     chain_name_for, EgressHookPoint, NetworkIptablesManager, CHAIN_NAME_MAX_LEN,
 };
 use std::collections::{HashMap, HashSet};

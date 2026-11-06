@@ -5,13 +5,13 @@
 //! Seatbelt-specific cases run only on macOS.
 //!
 //! These drive the real consumer path by constructing a [`ContainerRequest`]
-//! and passing it to `mxc_sdk::v1::spawn`.
+//! and passing it to `mxc_internal::v1::spawn`.
 
 #![cfg(target_os = "macos")]
 
 mod unix_pty_contract;
 
-use mxc_sdk::v1::{
+use mxc_internal::v1::{
     spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
 };
 

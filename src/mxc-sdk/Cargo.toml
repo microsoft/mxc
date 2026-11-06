@@ -8,23 +8,14 @@ repository = "https://github.com/microsoft/mxc"
 readme = "README.md"
 build = "build.rs"
 autobins = false
+autotests = false
+autoexamples = false
+exclude = ["tests", "src/bin", "examples/isolation_session_console.rs", "examples/learning_mode_windows_lm_analyze.rs", "examples/process_container_common_lm_capture.rs", "examples/process_container_common_lm_probe.rs"]
 
 [lib]
 name = "mxc_sdk"
-path = "src/lib.rs"
-
-[[bin]]
-name = "wxc-windows-sandbox-daemon"
-path = "src/bin/windows_sandbox_daemon/portable_main.rs"
-
-[[bin]]
-name = "wxc-windows-sandbox-guest"
-path = "src/bin/windows_sandbox_guest/portable_main.rs"
-
-[[bin]]
-name = "wxc-wslc-daemon"
-path = "src/bin/wslc_daemon/main.rs"
-required-features = ["wslc"]
+path = "src/public.rs"
+test = false
 
 [features]
 default = []
@@ -106,10 +97,6 @@ winreg.workspace = true
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
 winresource = { version = "0.1.31", default-features = false }
-
-[[example]]
-name = "isolation_session_console"
-required-features = ["isolation_session"]
 
 [[example]]
 name = "sta_probe"

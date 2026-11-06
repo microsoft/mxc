@@ -3,7 +3,7 @@
 
 pub(crate) const CONTRACT_VERSION: &str = "0.9.0-alpha";
 pub(crate) const COMPATIBILITY_ALIASES: bool = true;
-pub(crate) use mxc_sdk::mxc_contract::published::v0_9_0_alpha::{
+pub(crate) use mxc_internal::mxc_contract::published::v0_9_0_alpha::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
     StartRequest, StopRequest,
 };

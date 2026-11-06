@@ -1,4 +1,4 @@
-//! Black-box contract tests for `mxc_sdk::mxc_common::proxy_env`.
+//! Black-box contract tests for `mxc_internal::mxc_common::proxy_env`.
 //!
 //! These tests are derived from the documented contract of the public API, not
 //! from its implementation. Each test names the client whose observable
@@ -22,8 +22,8 @@
 //! (d) Security review -- a sandboxed workload must not disable or redirect the
 //!     proxy via its own env, and logs must not leak proxy credentials.
 
-use mxc_sdk::mxc_common::models::{ProxyAddress, ProxyConfig};
-use mxc_sdk::mxc_common::proxy_env::{
+use mxc_internal::mxc_common::models::{ProxyAddress, ProxyConfig};
+use mxc_internal::mxc_common::proxy_env::{
     apply_cooperative_proxy_env, apply_proxy_env, is_managed_proxy_key, proxy_url_has_credentials,
     redact_proxy_url, PROXY_ENV_KEYS, PROXY_NEUTRALIZE_KEYS, PROXY_SET_KEYS,
 };

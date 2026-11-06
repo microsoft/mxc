@@ -366,7 +366,7 @@ struct InvalidDocument {
 }
 
 fn fixture_dir(kind: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    Path::new(env!("MXC_SDK_SOURCE_DIR"))
         .join("../../tests/policy/sdk-v1")
         .join(kind)
 }

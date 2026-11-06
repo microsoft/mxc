@@ -6,13 +6,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
-use mxc_sdk::mxc_common::logger::{Logger, Mode};
-use mxc_sdk::mxc_common::models::{ExecutionRequest, ScriptResponse};
-use mxc_sdk::mxc_common::script_runner::handle_dry_run_exit;
-use mxc_sdk::mxc_common::telemetry;
+use mxc_internal::mxc_common::config_parser::load_one_shot_request;
+use mxc_internal::mxc_common::logger::{Logger, Mode};
+use mxc_internal::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use mxc_internal::mxc_common::script_runner::handle_dry_run_exit;
+use mxc_internal::mxc_common::telemetry;
 
-use mxc_sdk::lxc_common::signal_cleanup;
+use mxc_internal::lxc_common::signal_cleanup;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -112,7 +112,7 @@ fn emit_warnings(logger: &Logger) {
 }
 
 fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
-    use mxc_sdk::lxc_common::lxc_bindings::LxcContainer;
+    use mxc_internal::lxc_common::lxc_bindings::LxcContainer;
 
     let container = LxcContainer::new(name, None);
 
@@ -150,7 +150,9 @@ fn main() {
     // config handling so no JSON file is needed just to ask what the host can
     // do, and mutates no host state.
     if cli.available_backends {
-        match mxc_sdk::mxc_engine::to_json_pretty(&mxc_sdk::mxc_engine::available_backends()) {
+        match mxc_internal::mxc_engine::to_json_pretty(
+            &mxc_internal::mxc_engine::available_backends(),
+        ) {
             Ok(json) => println!("{json}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -177,7 +179,7 @@ fn main() {
         {
             // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
-            if !mxc_sdk::hyperlight_common::is_whp_available() {
+            if !mxc_internal::hyperlight_common::is_whp_available() {
                 eprintln!(
                     "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
                      Enable the HypervisorPlatform optional feature and reboot."
@@ -186,7 +188,7 @@ fn main() {
             }
             // KVM is checked before anything is pulled.
             #[cfg(target_os = "linux")]
-            if !mxc_sdk::hyperlight_common::is_kvm_available() {
+            if !mxc_internal::hyperlight_common::is_kvm_available() {
                 eprintln!(
                     "Error: --setup-hyperlight requires KVM: /dev/kvm must be readable and \
                      writable by this user."
@@ -197,14 +199,14 @@ fn main() {
             // Setup is an interactive install: the pull and the warm-up
             // report progress as they go.
             let mut logger = Logger::new(Mode::Console);
-            let runtimes = match mxc_sdk::hyperlight_common::parse_runtimes(runtime_names) {
+            let runtimes = match mxc_internal::hyperlight_common::parse_runtimes(runtime_names) {
                 Ok(runtimes) => runtimes,
                 Err(msg) => {
                     eprintln!("Error: {msg}");
                     process::exit(1);
                 }
             };
-            match mxc_sdk::hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
+            match mxc_internal::hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
                 Ok(home) => {
                     eprintln!("hyperlight setup: image home ready at {:?}", home);
                     process::exit(0);
@@ -300,12 +302,12 @@ fn main() {
     // construction — Bubblewrap (the Linux default for abstract intents), LXC
     // (explicit `containment: "lxc"`, plus the catch-all for anything else such
     // as `processcontainer`), and the experimental Hyperlight / MicroVM
-    // backends — live in `mxc_sdk::mxc_engine::run`, the single home for one-shot backend
+    // backends — live in `mxc_internal::mxc_engine::run`, the single home for one-shot backend
     // dispatch. It runs the selected backend to completion and returns the
     // response; experimental backends that require `--experimental` (or that
     // aren't compiled in) surface an error here.
     let run_start = Instant::now();
-    let response = match mxc_sdk::mxc_engine::run(&request, &mut logger) {
+    let response = match mxc_internal::mxc_engine::run(&request, &mut logger) {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e.message);
@@ -348,7 +350,7 @@ fn main() {
     // `display_script_results` only writes the error into the (buffered,
     // non-debug-suppressed) logger, so surface it on stderr here for parity
     // with wxc-exec (issue #564).
-    mxc_sdk::mxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_internal::mxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }

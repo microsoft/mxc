@@ -1,0 +1,247 @@
+[package]
+name = "mxc-internal"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workspace-only MXC implementation for executors, native bindings, and internal tests."
+build = "build.rs"
+autobins = false
+autotests = false
+autoexamples = false
+
+[lib]
+name = "mxc_internal"
+path = "../mxc-sdk/src/lib.rs"
+
+[[bin]]
+name = "wxc-windows-sandbox-daemon"
+path = "../mxc-sdk/src/bin/windows_sandbox_daemon/portable_main.rs"
+
+[[bin]]
+name = "wxc-windows-sandbox-guest"
+path = "../mxc-sdk/src/bin/windows_sandbox_guest/portable_main.rs"
+
+[[bin]]
+name = "wxc-wslc-daemon"
+path = "../mxc-sdk/src/bin/wslc_daemon/main.rs"
+required-features = ["wslc"]
+
+[features]
+default = []
+wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
+link-wslcsdk = ["dep:zip"]
+isolation_session = ["dep:windows-collections", "dep:windows-future"]
+test-support = []
+microvm = []
+hyperlight = [
+    "dep:hyperlight-unikraft",
+    "dep:ureq",
+    "dep:flate2",
+    "dep:tar",
+]
+force-tier-testing = []
+tier2_bfs = []
+schema-gen = ["dep:schemars"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+cidr.workspace = true
+flatbuffers.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+libloading = { version = "0.8", optional = true }
+nix.workspace = true
+same-file.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tar = { version = "0.4", optional = true }
+unicode-general-category.workspace = true
+url.workspace = true
+uuid.workspace = true
+widestring.workspace = true
+
+[build-dependencies]
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+
+[dev-dependencies]
+mxc-sdk.workspace = true
+filetime = "0.2"
+quick-xml.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+flate2 = { version = "1", optional = true }
+hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }
+ureq = { version = "3", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tracelogging.workspace = true
+windows = { workspace = true, features = [
+    "Foundation",
+    "UI",
+    "Win32_Globalization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_System_EventLog",
+] }
+windows-collections = { version = "0.3", optional = true }
+windows-core.workspace = true
+windows-future = { version = "0.3", optional = true }
+winreg.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource = { version = "0.1.31", default-features = false }
+
+[[example]]
+name = "isolation_session_console"
+path = "../mxc-sdk/examples/isolation_session_console.rs"
+required-features = ["isolation_session"]
+
+[[example]]
+name = "learning_mode_windows_lm_analyze"
+path = "../mxc-sdk/examples/learning_mode_windows_lm_analyze.rs"
+
+[[example]]
+name = "process_container_common_lm_capture"
+path = "../mxc-sdk/examples/process_container_common_lm_capture.rs"
+
+[[example]]
+name = "process_container_common_lm_probe"
+path = "../mxc-sdk/examples/process_container_common_lm_probe.rs"
+
+[[test]]
+name = "build_artifact_staging"
+path = "tests/build_artifact_staging.rs"
+
+[[test]]
+name = "isolation_session"
+path = "../mxc-sdk/tests/isolation_session.rs"
+
+[[test]]
+name = "learning_mode_public_api_compat"
+path = "../mxc-sdk/tests/learning_mode_public_api_compat.rs"
+
+[[test]]
+name = "lxc_common_chain_name_script_drift_spec"
+path = "../mxc-sdk/tests/lxc_common_chain_name_script_drift_spec.rs"
+
+[[test]]
+name = "lxc_common_chain_name_spec"
+path = "../mxc-sdk/tests/lxc_common_chain_name_spec.rs"
+
+[[test]]
+name = "mxc_common_proxy_address_spec"
+path = "../mxc-sdk/tests/mxc_common_proxy_address_spec.rs"
+
+[[test]]
+name = "mxc_common_proxy_env_spec"
+path = "../mxc-sdk/tests/mxc_common_proxy_env_spec.rs"
+
+[[test]]
+name = "mxc_contract_v0_9_0_alpha"
+path = "../mxc-sdk/tests/mxc_contract_v0_9_0_alpha.rs"
+
+[[test]]
+name = "mxc_contract_v1_0_0"
+path = "../mxc-sdk/tests/mxc_contract_v1_0_0.rs"
+
+[[test]]
+name = "mxc_contract_v1_1_0_alpha"
+path = "../mxc-sdk/tests/mxc_contract_v1_1_0_alpha.rs"
+
+[[test]]
+name = "mxc_contract_version_boundaries"
+path = "../mxc-sdk/tests/mxc_contract_version_boundaries.rs"
+
+[[test]]
+name = "portable_windows_sandbox_bins"
+path = "../mxc-sdk/tests/portable_windows_sandbox_bins.rs"
+
+[[test]]
+name = "pty_options_api"
+path = "../mxc-sdk/tests/pty_options_api.rs"
+
+[[test]]
+name = "sandbox"
+path = "../mxc-sdk/tests/sandbox.rs"
+
+[[test]]
+name = "sdk_helpers"
+path = "../mxc-sdk/tests/sdk_helpers.rs"
+
+[[test]]
+name = "state_aware"
+path = "../mxc-sdk/tests/state_aware.rs"
+
+[[test]]
+name = "streaming"
+path = "../mxc-sdk/tests/streaming.rs"
+
+[[test]]
+name = "streaming_bubblewrap"
+path = "../mxc-sdk/tests/streaming_bubblewrap.rs"
+
+[[test]]
+name = "streaming_lxc"
+path = "../mxc-sdk/tests/streaming_lxc.rs"
+
+[[test]]
+name = "streaming_processcontainer"
+path = "../mxc-sdk/tests/streaming_processcontainer.rs"
+
+[[test]]
+name = "wslc_daemon_ipc"
+path = "../mxc-sdk/tests/wslc_daemon_ipc.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_bubblewrap_characterization"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_bubblewrap_characterization.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_isolation_session_policy"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_isolation_session_policy.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_linux_microvm"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_linux_microvm.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_lxc_network_capability"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_lxc_network_capability.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_processcontainer_characterization"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_processcontainer_characterization.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_seatbelt_characterization"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_seatbelt_characterization.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_state_aware"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_state_aware.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_telemetry_etw"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_telemetry_etw.rs"
+
+[[test]]
+name = "wxc_e2e_tests_e2e_windows"
+path = "../mxc-sdk/tests/wxc_e2e_tests_e2e_windows.rs"

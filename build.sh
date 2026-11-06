@@ -71,8 +71,8 @@ cd "$SRC_DIR"
 
 # Packages to build and lint — kept in one place so build and clippy stay in
 # sync. The former lxc_common, mxc_common, and bwrap_common crates are modules
-# inside mxc-sdk.
-LXC_PACKAGES=(-p mxc-sdk -p lxc -p unix_test_proxy -p mxc_ffi)
+# compiled by mxc-internal.
+LXC_PACKAGES=(-p mxc-sdk -p mxc-internal -p lxc -p unix_test_proxy -p mxc_ffi)
 
 CARGO_FEATURES=()
 FEATURES_LIST=()

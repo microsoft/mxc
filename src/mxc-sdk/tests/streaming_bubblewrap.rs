@@ -14,13 +14,13 @@
 
 mod unix_pty_contract;
 
-use mxc_sdk::v1::WaitResult;
-use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemPolicy};
+use mxc_internal::v1::WaitResult;
+use mxc_internal::v1::{spawn, ContainerRequest, FilesystemPolicy};
 
 /// Whether `bwrap` is usable. Reuses the backend's own probe so this gate
 /// cannot drift from the real version check.
 fn bwrap_available() -> bool {
-    match mxc_sdk::bwrap_common::bwrap_version::probe_bwrap() {
+    match mxc_internal::bwrap_common::bwrap_version::probe_bwrap() {
         Ok(_) => true,
         Err(err) => {
             if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {

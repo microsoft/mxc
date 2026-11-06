@@ -4,7 +4,9 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::v1::{spawn_with_pty, ContainerRequest, MxcPtySize, SpawnWithPtyOptions, WaitResult};
+use mxc_internal::v1::{
+    spawn_with_pty, ContainerRequest, MxcPtySize, SpawnWithPtyOptions, WaitResult,
+};
 
 pub const ROUND_TRIP_COMMAND: &str =
     "read value; stty size; printf 'stdout:%s\\n' \"$value\"; printf 'stderr:merged\\n' >&2";

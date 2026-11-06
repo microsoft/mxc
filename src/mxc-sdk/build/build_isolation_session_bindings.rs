@@ -4,11 +4,10 @@
 //! Build script that verifies the workspace's `windows` crate version matches
 //! the version the generated bindings were produced for.
 
-pub(crate) fn run() {
+pub(crate) fn run(manifest_dir: &std::path::Path) {
     // Keep provenance inside the package so crates.io builds enforce the same
     // generated-binding version coupling as repository builds.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let info_path = std::path::Path::new(&manifest_dir)
+    let info_path = manifest_dir
         .join("build")
         .join("isolation_session_bindings")
         .join("GENERATION_INFO.toml");
@@ -40,7 +39,6 @@ pub(crate) fn run() {
 
     // Cargo packages include Cargo.lock at the crate root, while repository
     // builds use the workspace lockfile one directory above mxc-sdk.
-    let manifest_dir = std::path::Path::new(&manifest_dir);
     let lock_path = [
         manifest_dir.join("Cargo.lock"),
         manifest_dir.join("../Cargo.lock"),

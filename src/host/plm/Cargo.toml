@@ -19,7 +19,7 @@ serde.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
 getrandom.workspace = true
-mxc-sdk.workspace = true
+mxc-internal.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

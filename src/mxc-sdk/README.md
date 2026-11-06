@@ -8,6 +8,11 @@ them in-process through the native engine. The versioned public API is under
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
+`v1` is the only public SDK namespace. Implementation modules, including
+`mxc_common`, backend helpers, and native binding hooks, are private.
+Repository tools and tests use the non-published `mxc-internal` workspace crate;
+it is not an SDK dependency or supported consumer API.
+
 See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
 ## Run to completion and spawn
@@ -179,25 +184,24 @@ temporary storage without creating directories.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes
-only the versioned public SDK and explicitly hidden compatibility surfaces used
-by the retained MXC binaries and FFI boundary.
+only `v1`.
 
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` packages remain thin process
-entry points that depend on `mxc-sdk`. The Windows Sandbox guest and daemon,
-plus the WSLC daemon when the `wslc` feature is enabled, are published as
-`mxc-sdk` binary targets so their implementation and packaged assets remain
-part of the same release unit.
+entry points that depend on the non-published `mxc-internal` workspace crate.
+It compiles the same implementation sources as the SDK and owns the internal
+integration tests, debug examples, Windows Sandbox guest and daemon, and
+WSLC daemon.
 
-Cargo builds the `[[bin]]` targets declared in `Cargo.toml` as part of the
-package. They can also be selected directly:
+Cargo workspace builds include the sidecar targets declared in
+`src/mxc-internal/Cargo.toml`. They can also be selected directly:
 
 ```text
-cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-daemon
-cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-guest
-cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --features wslc --bin wxc-wslc-daemon
+cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --bin wxc-windows-sandbox-daemon
+cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --bin wxc-windows-sandbox-guest
+cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --features wslc --bin wxc-wslc-daemon
 ```
 
 `required-features = ["wslc"]` prevents Cargo from building the WSLC daemon
-unless WSLC support is enabled. The crate build script prepares package assets
+unless WSLC support is enabled. The shared build script prepares package assets
 and Windows version resources; repository build scripts and CI copy, sign, and
 publish the resulting executables from the Cargo target directory.

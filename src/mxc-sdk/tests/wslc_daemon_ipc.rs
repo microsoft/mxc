@@ -21,11 +21,11 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::wslc_common::container_steps::OutStream;
-use mxc_sdk::wslc_common::daemon_client::{DaemonClient, DaemonError};
-use mxc_sdk::wslc_common::daemon_protocol::{ErrKind, ExecConfig, ExecTerminal};
-use mxc_sdk::wslc_common::daemon_record::{read_daemon_record, STATE_ROOT_ENV_VAR};
-use mxc_sdk::wslc_common::process_env::EnvScope;
+use mxc_internal::wslc_common::container_steps::OutStream;
+use mxc_internal::wslc_common::daemon_client::{DaemonClient, DaemonError};
+use mxc_internal::wslc_common::daemon_protocol::{ErrKind, ExecConfig, ExecTerminal};
+use mxc_internal::wslc_common::daemon_record::{read_daemon_record, STATE_ROOT_ENV_VAR};
+use mxc_internal::wslc_common::process_env::EnvScope;
 
 /// Owns a spawned daemon process and guarantees teardown (kill + isolated
 /// record cleanup) even if a test assertion panics.
@@ -85,7 +85,7 @@ impl Drop for DaemonProcess {
 
 /// Provision and start a sandbox over the pipe, returning its id.
 fn provisioned_and_started(client: &DaemonClient) -> String {
-    use mxc_sdk::wslc_common::daemon_protocol::{ProvisionConfig, StartConfig};
+    use mxc_internal::wslc_common::daemon_protocol::{ProvisionConfig, StartConfig};
 
     let sandbox_id = client
         .provision(ProvisionConfig {
@@ -132,7 +132,7 @@ fn stamped_interval(stdout: &str) -> (i64, i64) {
 }
 
 fn deprovision_all(client: &DaemonClient, sandbox_ids: Vec<String>) {
-    use mxc_sdk::wslc_common::daemon_protocol::DeprovisionConfig;
+    use mxc_internal::wslc_common::daemon_protocol::DeprovisionConfig;
 
     for sandbox_id in sandbox_ids {
         let _ = client.deprovision(DeprovisionConfig { sandbox_id });
@@ -282,7 +282,7 @@ fn ping_round_trip_over_pipe() {
 #[test]
 #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
 fn full_lifecycle_over_pipe() {
-    use mxc_sdk::wslc_common::daemon_protocol::{
+    use mxc_internal::wslc_common::daemon_protocol::{
         DeprovisionConfig, ExecConfig, ProvisionConfig, StartConfig, StopConfig,
     };
 

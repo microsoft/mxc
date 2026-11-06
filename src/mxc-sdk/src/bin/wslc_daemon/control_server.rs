@@ -40,8 +40,8 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use mxc_sdk::wslc_common::container_steps::OutStream;
-use mxc_sdk::wslc_common::daemon_protocol::{
+use mxc_internal::wslc_common::container_steps::OutStream;
+use mxc_internal::wslc_common::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, ExecTerminal, StreamFrame,
     MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE,
 };
@@ -514,7 +514,7 @@ where
         write_frame(
             &mut pipe,
             &DaemonResponse::Err {
-                kind: mxc_sdk::wslc_common::daemon_protocol::ErrKind::Busy,
+                kind: mxc_internal::wslc_common::daemon_protocol::ErrKind::Busy,
                 message: "WSLc daemon client capacity is exhausted".to_string(),
             },
         )
@@ -553,7 +553,7 @@ where
                 write_frame(
                     &mut pipe,
                     &DaemonResponse::Err {
-                        kind: mxc_sdk::wslc_common::daemon_protocol::ErrKind::Busy,
+                        kind: mxc_internal::wslc_common::daemon_protocol::ErrKind::Busy,
                         message: "WSLc daemon exec capacity is exhausted".to_string(),
                     },
                 )
@@ -596,7 +596,7 @@ where
 async fn handle_exec<S>(
     mut pipe: S,
     session: SessionHandle,
-    config: mxc_sdk::wslc_common::daemon_protocol::ExecConfig,
+    config: mxc_internal::wslc_common::daemon_protocol::ExecConfig,
     exec_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()>
 where
@@ -785,7 +785,7 @@ mod tests {
     use crate::session_manager::{
         register_exec, spawn, LIVE_OUTPUT_CHANNEL_CAPACITY, LIVE_OUTPUT_MAX_CHUNK_BYTES,
     };
-    use mxc_sdk::wslc_common::daemon_protocol::{
+    use mxc_internal::wslc_common::daemon_protocol::{
         CancelExecConfig, ErrKind, ExecConfig, ProvisionConfig,
     };
     use tokio::io::duplex;
@@ -869,7 +869,7 @@ mod tests {
         let (mut client, server) = duplex(64 * 1024);
         write_frame(
             &mut client,
-            &DaemonRequest::Stop(mxc_sdk::wslc_common::daemon_protocol::StopConfig {
+            &DaemonRequest::Stop(mxc_internal::wslc_common::daemon_protocol::StopConfig {
                 sandbox_id: "wslc:test".to_string(),
             }),
         )
@@ -906,7 +906,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
-                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                env_scope: mxc_internal::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
             }),
         )
@@ -947,14 +947,14 @@ mod tests {
         let delivered = handle_exec(
             BrokenPipe,
             session.clone(),
-            mxc_sdk::wslc_common::daemon_protocol::ExecConfig {
+            mxc_internal::wslc_common::daemon_protocol::ExecConfig {
                 exec_id: "orphan-1".to_string(),
                 run_token: "orphan-run-1".to_string(),
                 sandbox_id: "wslc:does-not-exist".to_string(),
                 script_code: "sleep 600".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
-                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                env_scope: mxc_internal::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
             },
             permit,
@@ -989,7 +989,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
-                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                env_scope: mxc_internal::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
             },
             permit,
@@ -1170,7 +1170,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
-                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                env_scope: mxc_internal::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
             }),
         )

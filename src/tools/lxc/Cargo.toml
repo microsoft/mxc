@@ -10,11 +10,11 @@ name = "lxc-exec"
 path = "src/main.rs"
 
 [features]
-hyperlight = ["mxc-sdk/hyperlight"]
-microvm = ["mxc-sdk/microvm"]
+hyperlight = ["mxc-internal/hyperlight"]
+microvm = ["mxc-internal/microvm"]
 
 [dependencies]
-mxc-sdk.workspace = true
+mxc-internal.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 

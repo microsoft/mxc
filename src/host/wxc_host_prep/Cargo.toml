@@ -20,7 +20,7 @@ windows-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-mxc-sdk.workspace = true
+mxc-internal.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"

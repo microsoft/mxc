@@ -3,8 +3,8 @@
 
 //! State-aware lifecycle C ABI over the native engine and binding adapters.
 //!
-//! Entry points mirror the SDK's [`mxc_sdk::__ffi::run_lifecycle_json`],
-//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::__ffi::execute_lifecycle_json`]:
+//! Entry points mirror the SDK's [`mxc_internal::__ffi::run_lifecycle_json`],
+//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_internal::__ffi::execute_lifecycle_json`]:
 //!
 //! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision` /
 //!   `start` / `stop` / `deprovision`, and a dry run of any phase): JSON
@@ -34,14 +34,14 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::__ffi::{
+use mxc_internal::__ffi::{
     execute_lifecycle_json, run_lifecycle_json as run_state_aware_json,
     spawn_in_container_with_pty_json,
 };
-use mxc_sdk::v1::MxcPtySize;
+use mxc_internal::v1::MxcPtySize;
 
-use mxc_sdk::mxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
-use mxc_sdk::mxc_engine::exec_state_aware_attached as exec_attached;
+use mxc_internal::mxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
+use mxc_internal::mxc_engine::exec_state_aware_attached as exec_attached;
 
 use crate::streaming::{finish_handle, MxcSandbox};
 use crate::{
@@ -86,7 +86,7 @@ impl MxcStateAwareResult {
     }
 
     /// A failure from the SDK, carrying its API detail across.
-    fn from_sdk_error(error: &mxc_sdk::v1::Error) -> Self {
+    fn from_sdk_error(error: &mxc_internal::v1::Error) -> Self {
         Self {
             status: status_from_error_code(error.code),
             response_json_utf8: ptr::null_mut(),
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
         crate::execute_output(
             execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
                 process.wait_with_output().map_err(|error| {
-                    mxc_sdk::v1::Error::new(
+                    mxc_internal::v1::Error::new(
                         crate::ErrorCode::BackendError,
                         format!("waiting for the sandbox to complete failed: {error}"),
                     )
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn from_sdk_error_carries_the_api_detail() {
         let mut error =
-            mxc_sdk::v1::Error::new(crate::ErrorCode::StaleId, "The provision was not found.");
+            mxc_internal::v1::Error::new(crate::ErrorCode::StaleId, "The provision was not found.");
         error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
         error.native_code = Some("0x80070490".to_string());
         error.remediation = Some("Re-provision the sandbox.".to_string());
@@ -971,7 +971,7 @@ mod tests {
             if let Err(error) = run_state_aware_json(fixture, true, true) {
                 assert_eq!(
                     error.code,
-                    mxc_sdk::v1::ErrorCode::BackendUnavailable,
+                    mxc_internal::v1::ErrorCode::BackendUnavailable,
                     "golden must parse and validate; feature-off is the only accepted failure: {error}"
                 );
             }

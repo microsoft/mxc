@@ -18,13 +18,13 @@
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
-use mxc_sdk::__ffi::{execute_lifecycle_json, run_lifecycle_json};
-use mxc_sdk::v1::{
+use mxc_internal::__ffi::{execute_lifecycle_json, run_lifecycle_json};
+use mxc_internal::v1::{
     container, ContainerId, DeprovisionOptions, ExecutionRequest, ExecutionResult, LifecycleResult,
     MxcProcess, ProvisionOptions, ProvisionRequest, ProvisionResult, RunInContainerOptions,
     SpawnInContainerOptions, StartOptions, StopOptions, ValidationResult,
 };
-use mxc_sdk::v1::{Error, ErrorCode};
+use mxc_internal::v1::{Error, ErrorCode};
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {

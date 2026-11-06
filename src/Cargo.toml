@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "mxc-internal",
     "mxc-sdk",
     "ffi/mxc_ffi",
     "host/plm",
@@ -43,6 +44,7 @@ flatbuffers = "25"
 getrandom = "0.2"
 libc = "0.2"
 mxc-sdk = { path = "mxc-sdk" }
+mxc-internal = { path = "mxc-internal" }
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
 quick-xml = "0.41"
 same-file = "1"

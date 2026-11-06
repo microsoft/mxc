@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::lxc_common::network_iptables::chain_name_for;
+use mxc_internal::lxc_common::network_iptables::chain_name_for;
 use std::fs;
 use std::path::PathBuf;
 
 fn scripts_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("MXC_SDK_SOURCE_DIR"))
         .parent()
         .and_then(|p| p.parent())
         .expect("could not determine repo root")
