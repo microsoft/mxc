@@ -8,6 +8,7 @@
 //
 // Runner-specific validation coverage:
 //   - NVX (MicroVm): requires `--features microvm` on Windows x64
+//   - ACI: requires `--features aci` on Windows; validation makes no Azure calls
 //   - Hyperlight: requires `--features hyperlight`
 //   - IsolationSession: requires `--features isolation_session`
 //   - Seatbelt: macOS-only, not available in Windows fuzz builds
@@ -37,6 +38,11 @@ fuzz_target!(|data: &[u8]| {
             #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
             ContainmentBackend::MicroVm => {
                 let runner = mxc_sdk::nvx_runner::NvxRunner::new();
+                let _ = runner.validate_runner(&req);
+            }
+            #[cfg(feature = "aci")]
+            ContainmentBackend::Aci => {
+                let runner = mxc_sdk::aci_runner::AciRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "hyperlight")]

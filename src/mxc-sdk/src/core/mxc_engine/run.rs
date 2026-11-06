@@ -243,6 +243,20 @@ fn resolve_runner_inner_windows(
             }
         }
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
+        ContainmentBackend::Aci => {
+            #[cfg(feature = "aci")]
+            {
+                Ok(ResolvedRunner::without_guard(Box::new(
+                    crate::aci_runner::AciRunner::new(),
+                )))
+            }
+            #[cfg(not(feature = "aci"))]
+            {
+                Err(MxcError::backend_unavailable(
+                    "ACI requires a build with --features aci",
+                ))
+            }
+        }
         ContainmentBackend::WindowsSandbox => {
             if let Some(ws) = &request.windows_sandbox {
                 let default = crate::mxc_common::models::WindowsSandboxConfig::default();
@@ -473,6 +487,7 @@ mod tests {
             ContainmentBackend::WindowsSandbox,
             ContainmentBackend::MicroVm,
             ContainmentBackend::Hyperlight,
+            ContainmentBackend::Aci,
         ] {
             let request = ExecutionRequest {
                 containment,

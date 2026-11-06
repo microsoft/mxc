@@ -270,6 +270,7 @@ get fixed or wired.
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, isolated lifecycle ETW capture, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | Experimental | Windows 25H2 x64 nightly; see [MicroVM validation](#microvm-validation). |
+| ACI | Experimental, not scheduled | Needs Azure credentials that validation hosts do not have; see [ACI validation](#aci-validation). |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
 ### MicroVM validation
@@ -297,6 +298,33 @@ network, `10.0.0.0/24`.
 
 Regular Windows x64 PR builds run checks that do not need a VM. They also
 unpack the Rust crate package and check that its tests compile.
+
+### ACI validation
+
+The ACI backend creates sandboxes in Azure, so its end-to-end tests need an
+Azure sandbox group and credentials for it. Validation hosts have neither, and
+the matrix does not include ACI.
+
+Windows PR builds, x64 and arm64, run the backend's unit tests and the request
+checks in `src/mxc-sdk/tests/aci_e2e.rs` that need no Azure access. The tests
+that create sandboxes are ignored by default and run manually, as described in
+the [ACI backend guide](../../backends/aci/aci.md#validation).
+
+Scheduling them requires:
+
+- a sandbox group reserved for CI, in a subscription with sandbox groups
+  enabled;
+- an Azure identity that the validation job can sign in as without a stored
+  secret, such as a federated workload identity, with access to that group;
+- a step that signs in and passes an access token for
+  `https://management.azure.com/` to the tests in `MXC_ACI_ARM_TOKEN`, and the
+  group ID in `MXC_ACI_E2E_SANDBOX_GROUP`;
+- the usual catalog entry, dispatcher case, and host preparation for a new
+  backend; see [Add a new backend](#add-a-new-backend).
+
+The tests delete every sandbox they create. A job that is cancelled or killed
+mid-run can leave sandboxes named `mxc-*` with the tag `createdBy: mxc`, so a
+scheduled job should delete such sandboxes older than its longest run.
 
 ### ProcessContainer SDK streaming
 

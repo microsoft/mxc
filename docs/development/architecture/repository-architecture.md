@@ -50,6 +50,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
 | NVX MicroVM | SDK backend modules under `backends/nvx/`; bundle staging owned by `aci_edge_sandboxes`; independent file-hash and signature checks shared by the runtime and `build/verify_nvx_runtime_signatures.rs` |
+| ACI | SDK backend modules under `backends/aci/`: Azure REST and gateway gRPC clients with no native dependencies |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
 Shared parsing and normalization live in the `mxc_common` module; backend-specific policy

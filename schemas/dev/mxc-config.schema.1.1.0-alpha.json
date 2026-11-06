@@ -36,6 +36,30 @@
             }
           },
           {
+            "else": {
+              "not": {
+                "required": [
+                  "aci"
+                ]
+              }
+            },
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "aci"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "required": [
+                "aci"
+              ]
+            }
+          },
+          {
             "else": true,
             "if": {
               "properties": {
@@ -315,6 +339,30 @@
     }
   ],
   "definitions": {
+    "AciProvision": {
+      "additionalProperties": false,
+      "description": "ACI sandbox sizing. An omitted value uses the service default.",
+      "properties": {
+        "cpu": {
+          "description": "Whole CPU cores. Zero is rejected by semantic validation.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "memoryGb": {
+          "description": "Whole GiB of memory. Zero is rejected by semantic validation.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "AciSandboxGroupId": {
+      "minLength": 1,
+      "pattern": "^/[sS][uU][bB][sS][cC][rR][iI][pP][tT][iI][oO][nN][sS]/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[rR][eE][sS][oO][uU][rR][cC][eE][gG][rR][oO][uU][pP][sS]/[A-Za-z0-9._()-]{0,89}[A-Za-z0-9_()-]/[pP][rR][oO][vV][iI][dD][eE][rR][sS]/[mM][iI][cC][rR][oO][sS][oO][fF][tT]\\.[cC][oO][nN][tT][aA][iI][nN][eE][rR][iI][nN][sS][tT][aA][nN][cC][eE]/[sS][aA][nN][dD][bB][oO][xX][gG][rR][oO][uU][pP][sS]/[A-Za-z0-9][A-Za-z0-9._-]{0,259}(?![\\s\\S])",
+      "type": "string"
+    },
     "CaptureDenials": {
       "additionalProperties": false,
       "description": "Windows denial-capture settings.",
@@ -932,6 +980,29 @@
       "minLength": 1,
       "type": "string"
     },
+    "OneShotAci": {
+      "additionalProperties": false,
+      "description": "Settings for running a create-and-run request in an Azure Container Instances (ACI) sandbox.",
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/ImageReference",
+          "description": "Image reference including its registry, pulled by the ACI service."
+        },
+        "provision": {
+          "$ref": "#/definitions/AciProvision",
+          "description": "Optional sizing applied when creating the sandbox."
+        },
+        "sandboxGroup": {
+          "$ref": "#/definitions/AciSandboxGroupId",
+          "description": "ARM resource ID of the sandbox group that creates the sandbox."
+        }
+      },
+      "required": [
+        "image",
+        "sandboxGroup"
+      ],
+      "type": "object"
+    },
     "OneShotContainment": {
       "oneOf": [
         {
@@ -998,6 +1069,13 @@
           "type": "string"
         },
         {
+          "description": "Aci",
+          "enum": [
+            "aci"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Wslc",
           "enum": [
             "wslc"
@@ -1052,6 +1130,10 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
+        },
+        "aci": {
+          "$ref": "#/definitions/OneShotAci",
+          "description": "Required sandbox group and image when containment is ACI."
         },
         "containerId": {
           "description": "Optional externally assigned container identifier.",

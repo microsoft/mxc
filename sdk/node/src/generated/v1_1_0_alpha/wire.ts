@@ -13,6 +13,22 @@
  *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 1.1.0-alpha --out sdk/node/src/generated/v1_1_0_alpha/wire.ts
  */
 /**
+ * ACI sandbox sizing. An omitted value uses the service default.
+ */
+export interface AciProvision {
+  /**
+   * Whole CPU cores. Zero is rejected by semantic validation.
+   */
+  cpu?: number;
+  /**
+   * Whole GiB of memory. Zero is rejected by semantic validation.
+   */
+  memoryGb?: number;
+}
+
+export type AciSandboxGroupId = string;
+
+/**
  * Windows denial-capture settings.
  */
 export interface CaptureDenials {
@@ -388,7 +404,25 @@ export interface NetworkRule {
 
 export type NonEmptyString = string;
 
-export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
+/**
+ * Settings for running a create-and-run request in an Azure Container Instances (ACI) sandbox.
+ */
+export interface OneShotAci {
+  /**
+   * Image reference including its registry, pulled by the ACI service.
+   */
+  image: ImageReference;
+  /**
+   * Optional sizing applied when creating the sandbox.
+   */
+  provision?: AciProvision;
+  /**
+   * ARM resource ID of the sandbox group that creates the sandbox.
+   */
+  sandboxGroup: AciSandboxGroupId;
+}
+
+export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "aci" | "wslc" | "isolation_session";
 
 /**
  * One-shot Hyperlight backend settings.
@@ -426,6 +460,10 @@ export interface OneShotRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
+  /**
+   * Required sandbox group and image when containment is ACI.
+   */
+  aci?: OneShotAci;
   /**
    * Optional externally assigned container identifier.
    */

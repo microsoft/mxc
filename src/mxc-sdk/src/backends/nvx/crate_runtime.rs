@@ -165,7 +165,7 @@ pub(super) fn map_error(error: Error) -> MxcError {
 }
 
 pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
-    crate::mxc_contract::dev::ImageReference::validate(image)
+    crate::mxc_contract::dev::ImageReference::validate(image, "microvm.image")
         .map_err(MxcError::malformed_request)?;
     Ok(SandboxSpec::new().with_image(ImageSource::Reference(image.to_owned())))
 }

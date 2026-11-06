@@ -6,6 +6,7 @@ set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
 set "WITH_MICROVM=0"
+set "WITH_ACI=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
@@ -19,6 +20,7 @@ if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & g
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
 if /i "%~1"=="--with-microvm" ( set "WITH_MICROVM=1"    & shift & goto :parse_args )
+if /i "%~1"=="--with-aci"     ( set "WITH_ACI=1"        & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
@@ -41,6 +43,7 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 if "%WITH_MICROVM%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
+if "%WITH_ACI%"=="1" set "CARGO_FLAGS=--features aci %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
@@ -279,6 +282,7 @@ echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
 echo   --all             Build both Windows architectures and create the .NET NuGet package
 echo   --with-microvm    Enable signed bundled NVX MicroVM support (x64)
+echo   --with-aci        Enable the experimental ACI sandbox backend
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)

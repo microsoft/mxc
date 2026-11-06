@@ -13,7 +13,7 @@ behind a unified containment model and typed SDKs.
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
   Bubblewrap, Seatbelt, MicroVM (NVX on Windows x64), Hyperlight,
-  IsolationSession, and WSLC
+  IsolationSession, WSLC, and Azure Container Instances (ACI) sandboxes
 - **Policy-driven sandboxing**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
@@ -52,11 +52,12 @@ Linux, and macOS.
 
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
-| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | [Windows OS-version support](docs/backends/process-container/os-version-support.md)|
+| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `aci`\*, `isolation_session` | [Windows OS-version support](docs/backends/process-container/os-version-support.md)|
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight` | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
 \* These backends are **experimental**. MicroVM is currently available on Windows x64 only.
+`aci` runs the workload in an [Azure Container Instances sandbox](docs/backends/aci/aci.md) rather than on the host.
 
 ## How do I use MXC?
 

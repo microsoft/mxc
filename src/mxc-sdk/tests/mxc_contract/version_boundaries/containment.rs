@@ -21,4 +21,7 @@ fn development_containment_values_are_introduced_in_v11() {
     assert_v11_introduces(
         r#""containment": "microvm", "microvm": {"image": "docker.io/library/python:3.12-alpine"}"#,
     );
+    assert_v11_introduces(
+        r#""containment": "aci", "aci": {"sandboxGroup": "/subscriptions/51aca303-03da-4510-849d-d4f32d3f39ac/resourceGroups/rg/providers/Microsoft.ContainerInstance/sandboxGroups/sbg", "image": "mcr.microsoft.com/azurelinux/base/core:3.0"}"#,
+    );
 }

@@ -37,6 +37,8 @@ pub enum Containment {
     Microvm,
     /// Hyperlight micro-VM (experimental).
     Hyperlight,
+    /// Azure Container Instances sandbox (experimental).
+    Aci,
     /// WSL container.
     Wslc,
     /// macOS Seatbelt.
@@ -58,6 +60,7 @@ impl Containment {
             "lxc" => Self::Lxc,
             "microvm" => Self::Microvm,
             "hyperlight" => Self::Hyperlight,
+            "aci" => Self::Aci,
             "wslc" => Self::Wslc,
             "seatbelt" | "macos_sandbox" => Self::Seatbelt,
             "isolation_session" => Self::IsolationSession,
@@ -480,6 +483,15 @@ pub struct Hyperlight {
 pub(crate) struct MicroVm {
     pub(crate) image: String,
     pub(crate) memory_mib: Option<u32>,
+}
+
+/// ACI sandbox settings retained by contract adapters before normalization.
+#[derive(Debug, Clone)]
+pub(crate) struct Aci {
+    pub(crate) sandbox_group: String,
+    pub(crate) image: String,
+    pub(crate) cpu: Option<u32>,
+    pub(crate) memory_gb: Option<u32>,
 }
 
 /// WSL container backend config.

@@ -1334,6 +1334,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Lxc) => "lxc",
         Some(wire::Containment::Microvm) => "microvm",
         Some(wire::Containment::Hyperlight) => "hyperlight",
+        Some(wire::Containment::Aci) => "aci",
         Some(wire::Containment::Wslc) => "wslc",
         Some(wire::Containment::Seatbelt) => "seatbelt",
         Some(wire::Containment::IsolationSession) => "isolation_session",
@@ -1365,6 +1366,18 @@ fn normalize_common_request_ir(
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
     let microvm_memory_mib = cfg.microvm.as_ref().and_then(|config| config.memory_mib);
     crate::mxc_common::models::MicroVmProvisionConfig::validate_memory_mib(microvm_memory_mib)?;
+    let aci = cfg
+        .aci
+        .clone()
+        .map(|config| crate::mxc_common::models::AciConfig {
+            sandbox_group: config.sandbox_group,
+            image: config.image,
+            cpu: config.cpu,
+            memory_gb: config.memory_gb,
+        });
+    if let Some(aci) = &aci {
+        aci.validate_sizing()?;
+    }
 
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1711,6 +1724,7 @@ fn normalize_common_request_ir(
         hyperlight,
         microvm_image: cfg.microvm.map(|config| config.image),
         microvm_memory_mib,
+        aci,
         experimental_enabled: false,
         dry_run: false,
     })

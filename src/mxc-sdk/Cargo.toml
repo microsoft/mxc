@@ -37,6 +37,16 @@ link-wslcsdk = ["dep:zip"]
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
 test-support = []
 microvm = ["dep:aci_edge_sandboxes", "dep:libloading"]
+# Azure Container Instances sandboxes (Windows hosts): REST over ureq and
+# gRPC over HTTP/2 with the OS TLS stack.
+aci = [
+    "dep:bytes",
+    "dep:h2",
+    "dep:http",
+    "dep:native-tls",
+    "dep:tokio-native-tls",
+    "dep:ureq",
+]
 hyperlight = [
     "dep:hyperlight-unikraft",
     "dep:ureq",
@@ -99,7 +109,13 @@ ureq = { version = "3", default-features = false, features = ["native-tls", "gzi
 aci_edge_sandboxes = { version = "=0.1.1", default-features = false, features = ["agent-bundled"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+bytes = { version = "1", optional = true }
+h2 = { version = "0.4", optional = true }
+http = { version = "1", optional = true }
+native-tls = { version = "0.2", optional = true, features = ["alpn"] }
+tokio-native-tls = { version = "0.3", optional = true }
 tracelogging.workspace = true
+ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
 windows = { workspace = true, features = [
     "Foundation",
     "UI",

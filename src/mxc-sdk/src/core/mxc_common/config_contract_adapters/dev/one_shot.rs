@@ -18,6 +18,7 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
         contract::OneShotContainment::WindowsSandbox => wire::Containment::WindowsSandbox,
         contract::OneShotContainment::Microvm => wire::Containment::Microvm,
         contract::OneShotContainment::Hyperlight => wire::Containment::Hyperlight,
+        contract::OneShotContainment::Aci => wire::Containment::Aci,
         contract::OneShotContainment::Wslc => wire::Containment::Wslc,
         contract::OneShotContainment::IsolationSession => wire::Containment::IsolationSession,
     }
@@ -305,6 +306,7 @@ pub(super) fn into_common_request_ir(
         wslc,
         hyperlight,
         microvm,
+        aci,
     } = request;
     crate::mxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
@@ -337,6 +339,25 @@ pub(super) fn into_common_request_ir(
                 .into_option()
                 .and_then(|provision| provision.memory_mib.into_option()),
         }),
+        aci: aci.into_option().map(convert_aci),
+    }
+}
+
+fn convert_aci(value: contract::OneShotAci) -> wire::Aci {
+    let contract::OneShotAci {
+        sandbox_group,
+        image,
+        provision,
+    } = value;
+    let (cpu, memory_gb) = provision.into_option().map_or((None, None), |provision| {
+        let contract::AciProvision { cpu, memory_gb } = provision;
+        (cpu.into_option(), memory_gb.into_option())
+    });
+    wire::Aci {
+        sandbox_group: sandbox_group.into_inner(),
+        image: image.into_inner(),
+        cpu,
+        memory_gb,
     }
 }
 
