@@ -1304,6 +1304,23 @@ fn natural_exit_confirmed(exit_wait: ExitWait, callback_confirmed: bool) -> bool
         || (matches!(exit_wait, ExitWait::NoEvent) && callback_confirmed)
 }
 
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_EXIT_CODE_FAILURE_SCRIPT: &str = "true # mxc-test-force-wslc-get-exit-code-failure";
+
+pub(crate) fn test_exit_code_result(
+    script_code: &str,
+    natural_exit_confirmed: bool,
+    result: HRESULT,
+) -> HRESULT {
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    if result == S_OK && natural_exit_confirmed && script_code == TEST_EXIT_CODE_FAILURE_SCRIPT {
+        return 0x8000_4005_u32 as HRESULT;
+    }
+
+    let _ = (script_code, natural_exit_confirmed);
+    result
+}
+
 fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> ProcessCompletion {
     if natural_exit_confirmed(exit_wait, confirmed) {
         return ProcessCompletion::Confirmed(ExecTerminal::Exited(exit_code));
@@ -1505,9 +1522,14 @@ pub unsafe fn exec_in_container(
     }
 
     let mut exit_code: i32 = -1;
-    let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+    let natural_exit_confirmed = natural_exit_confirmed(exit_wait, confirmed);
+    let hr = test_exit_code_result(
+        script_code,
+        natural_exit_confirmed,
+        sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code),
+    );
     if hr != S_OK {
-        if natural_exit_confirmed(exit_wait, confirmed) {
+        if natural_exit_confirmed {
             return Err(sdk_step_error("WslcGetProcessExitCode", hr, ""));
         }
         let _ = writeln!(
@@ -1710,6 +1732,36 @@ pub unsafe fn delete_daemon_container(
 mod tests {
     use super::*;
     use crate::mxc_common::models::FailurePhase;
+
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[test]
+    fn test_exit_code_failure_requires_the_exact_successful_natural_exit() {
+        let forced = 0x8000_4005_u32 as HRESULT;
+        assert_eq!(
+            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, S_OK),
+            forced
+        );
+        assert_eq!(
+            test_exit_code_result(
+                TEST_EXIT_CODE_FAILURE_SCRIPT,
+                true,
+                0x8007_0005_u32 as HRESULT
+            ),
+            0x8007_0005_u32 as HRESULT
+        );
+        assert_eq!(
+            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, false, S_OK),
+            S_OK
+        );
+        assert_eq!(
+            test_exit_code_result(
+                "true # mxc-test-force-wslc-get-exit-code-failure ",
+                true,
+                S_OK
+            ),
+            S_OK
+        );
+    }
 
     /// A modest machine: 16 GB and 8 logical processors.
     const TEST_HOST: HostCapacity = HostCapacity {

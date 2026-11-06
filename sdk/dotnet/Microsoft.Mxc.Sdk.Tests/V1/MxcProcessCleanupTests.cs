@@ -94,6 +94,39 @@ public sealed class MxcProcessCleanupTests
         Assert.True((await wait).TimedOut);
     }
 
+    [Fact]
+    public void TryGetExitCodePreservesStructuredWaitFailure()
+    {
+        using var fake = FakeSandbox.CreateTryWaitFailure();
+
+        var error = Assert.Throws<MxcException>(() => fake.Process.TryGetExitCode(out _));
+
+        AssertWaitError(error);
+    }
+
+    [Fact]
+    public async Task WaitAsyncPreservesStructuredWaitFailureAfterRunningPoll()
+    {
+        using var fake = FakeSandbox.CreateWaitFailure();
+
+        var first = await Assert.ThrowsAsync<MxcException>(
+            () => fake.Process.WaitAsync(TestContext.Current.CancellationToken));
+        var second = await Assert.ThrowsAsync<MxcException>(
+            () => fake.Process.WaitAsync(TestContext.Current.CancellationToken));
+
+        AssertWaitError(first);
+        AssertWaitError(second);
+    }
+
+    private static void AssertWaitError(MxcException error)
+    {
+        Assert.Equal(ErrorCode.BackendUnavailable, error.Code);
+        Assert.Equal("test process wait failed", error.Message);
+        Assert.Equal("TestSandbox.Wait", error.Operation);
+        Assert.Equal("0x80004005", error.NativeCode);
+        Assert.Equal("Retry the test process wait.", error.Remediation);
+    }
+
     private static async Task<T> CompletesWithinAsync<T>(Func<T> read, string message)
     {
         var task = Task.Run(read, TestContext.Current.CancellationToken);
@@ -114,6 +147,12 @@ public sealed class MxcProcessCleanupTests
 
         private static readonly delegate* unmanaged<int, int, int, NativeSandbox**, IntPtr*, int> New =
             (delegate* unmanaged<int, int, int, NativeSandbox**, IntPtr*, int>)Export("mxc_test_fake_sandbox_new");
+
+        private static readonly delegate* unmanaged<NativeSandbox**, int> NewTryWaitFailure =
+            (delegate* unmanaged<NativeSandbox**, int>)Export("mxc_test_fake_sandbox_new_try_wait_failure");
+
+        private static readonly delegate* unmanaged<NativeSandbox**, int> NewWaitFailure =
+            (delegate* unmanaged<NativeSandbox**, int>)Export("mxc_test_fake_sandbox_new_wait_failure");
 
         private static readonly delegate* unmanaged<IntPtr, uint, int> AwaitWait =
             (delegate* unmanaged<IntPtr, uint, int>)Export("mxc_test_fake_control_await_wait");
@@ -145,6 +184,20 @@ public sealed class MxcProcessCleanupTests
             return new FakeSandbox(new MxcProcess(MxcSandboxHandle.FromRaw(sandbox), timeoutMs), control);
         }
 
+        public static FakeSandbox CreateTryWaitFailure()
+        {
+            NativeSandbox* sandbox = null;
+            Assert.Equal(0, NewTryWaitFailure(&sandbox));
+            return new FakeSandbox(new MxcProcess(MxcSandboxHandle.FromRaw(sandbox)), IntPtr.Zero);
+        }
+
+        public static FakeSandbox CreateWaitFailure()
+        {
+            NativeSandbox* sandbox = null;
+            Assert.Equal(0, NewWaitFailure(&sandbox));
+            return new FakeSandbox(new MxcProcess(MxcSandboxHandle.FromRaw(sandbox)), IntPtr.Zero);
+        }
+
         public void AssertCleanupStarted() =>
             Assert.True(AwaitWait(_control, 10_000) != 0, "the wait never started the native cleanup");
 
@@ -152,10 +205,16 @@ public sealed class MxcProcessCleanupTests
 
         public void Dispose()
         {
-            ReleaseWaitExport(_control);
-            ReleaseOutputExport(_control);
+            if (_control != IntPtr.Zero)
+            {
+                ReleaseWaitExport(_control);
+                ReleaseOutputExport(_control);
+            }
             Process.Dispose();
-            FreeControl(_control);
+            if (_control != IntPtr.Zero)
+            {
+                FreeControl(_control);
+            }
         }
 
         // Loaded through the SDK's resolver, so the fake and the SDK share one native module.

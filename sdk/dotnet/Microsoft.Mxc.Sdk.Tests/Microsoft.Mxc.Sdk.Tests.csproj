@@ -14,6 +14,11 @@
     <DefineConstants Condition="'$(MxcWithIsolationSession)' == 'true'">$(DefineConstants);MXC_WITH_ISOLATION_SESSION</DefineConstants>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcTestCargoTargetDir>$(MxcSrcDir)/target/dotnet-test-support</MxcTestCargoTargetDir>
+    <MxcTestWslcCargoTargetDir Condition="'$(CARGO_TARGET_DIR)' != ''">$(CARGO_TARGET_DIR)/dotnet-wslc-test-support</MxcTestWslcCargoTargetDir>
+    <MxcTestRepositoryName>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../..'))))</MxcTestRepositoryName>
+    <MxcTestWslcCargoRoot Condition="'$(LOCALAPPDATA)' != ''">$(LOCALAPPDATA)</MxcTestWslcCargoRoot>
+    <MxcTestWslcCargoRoot Condition="'$(MxcTestWslcCargoRoot)' == ''">$(TEMP)</MxcTestWslcCargoRoot>
+    <MxcTestWslcCargoTargetDir Condition="'$(MxcTestWslcCargoTargetDir)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestWslcCargoRoot)/mxct/dotnet-wslc-test-support/$(MxcTestRepositoryName)</MxcTestWslcCargoTargetDir>
     <!-- Test isolation overrides are compiled only with Rust debug assertions,
          including when the managed tests themselves run in Release. -->
     <MxcTestCargoProfileDir>debug</MxcTestCargoProfileDir>
@@ -33,7 +38,7 @@
 
   <Target Name="BuildMxcTestSupportNativeLibrary"
           AfterTargets="Build"
-          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' != 'true'">
+          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true'">
     <Exec Command="rustc -vV"
           WorkingDirectory="$(MxcSrcDir)"
           ConsoleToMSBuild="true"
@@ -52,13 +57,30 @@
     <PropertyGroup>
       <MxcTestRustHostTriple>$(MxcTestRustcHostLine.Replace('host: ', '').Trim())</MxcTestRustHostTriple>
       <MxcTestNativeOutput>$(MxcTestCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/$(MxcTestNativeFileName)</MxcTestNativeOutput>
+      <MxcTestWslcDaemonOutput>$(MxcTestWslcCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/wxc-wslc-daemon.exe</MxcTestWslcDaemonOutput>
     </PropertyGroup>
-    <Message Importance="high" Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
-    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
-    <Error Condition="!Exists('$(MxcTestNativeOutput)')"
+    <Message Importance="high"
+             Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'"
+             Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
+    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;"
+          WorkingDirectory="$(MxcSrcDir)"
+          Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'" />
+    <Error Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true' and !Exists('$(MxcTestNativeOutput)')"
            Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
     <Copy SourceFiles="$(MxcTestNativeOutput)"
-          DestinationFolder="$(TargetDir)" />
+          DestinationFolder="$(TargetDir)"
+          Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'" />
+    <Message Importance="high"
+             Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))"
+             Text="mxc: building isolated test-support WSLC daemon for $(MxcTestRustHostTriple)" />
+    <Exec Command="cargo build -p mxc-sdk --bin wxc-wslc-daemon --features &quot;wslc test-support&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestWslcCargoTargetDir)&quot;"
+          WorkingDirectory="$(MxcSrcDir)"
+          Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))" />
+    <Error Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows')) and !Exists('$(MxcTestWslcDaemonOutput)')"
+           Text="The test-support WSLC daemon build did not produce $(MxcTestWslcDaemonOutput)." />
+    <Copy SourceFiles="$(MxcTestWslcDaemonOutput)"
+          DestinationFolder="$(TargetDir)"
+          Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))" />
   </Target>
 
   <Target Name="StageMxcTestSupportNativeLibrary"

@@ -176,6 +176,28 @@ impl fmt::Display for MxcError {
 
 impl std::error::Error for MxcError {}
 
+#[derive(Debug)]
+struct MxcIoError(MxcError);
+
+impl fmt::Display for MxcIoError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0.message)
+    }
+}
+
+impl std::error::Error for MxcIoError {}
+
+pub(crate) fn into_io_error(error: MxcError) -> std::io::Error {
+    std::io::Error::other(MxcIoError(error))
+}
+
+pub(crate) fn from_io_error(error: &std::io::Error) -> Option<MxcError> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<MxcIoError>())
+        .map(|inner| inner.0.clone())
+}
+
 impl MxcError {
     pub fn new(code: MxcErrorCode, message: impl Into<String>) -> Self {
         Self {

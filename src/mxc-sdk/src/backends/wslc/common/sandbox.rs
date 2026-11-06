@@ -35,6 +35,7 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_common::module_lifetime::pin_current_module;
+use crate::mxc_common::mxc_error::{into_io_error, MxcError};
 use crate::mxc_common::process_util::{
     create_local_pipe, InterruptiblePipeReader, InterruptiblePipeWriter, PipeWriteCanceller,
     PipeWriter,
@@ -50,7 +51,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::error::{WslcError, WslcStepError};
 use crate::wslc_common::stream_buffer::{StreamCanceller, StreamReader};
 use crate::wslc_common::wsl_container_runner::{
     InitStdin, OutputMode, StartedContainer, WSLContainerRunner,
@@ -197,6 +198,7 @@ struct WslcSandboxProcess {
     /// Exit code cached by the first successful wait, so repeat waits are
     /// idempotent (and don't re-run teardown).
     exit: Option<i32>,
+    wait_failure: Option<MxcError>,
     /// Set once the wait deadline elapsed *and* the kill was confirmed, so
     /// `TimedOut` is reported stickily rather than a later-observed exit code.
     /// Deliberately narrower than [`deadline_elapsed`](Self::deadline_elapsed):
@@ -301,6 +303,7 @@ impl WslcSandboxProcess {
             stdin_failure: None,
             started,
             exit: None,
+            wait_failure: None,
             timed_out: false,
             deadline_elapsed: false,
             torn_down: false,
@@ -311,6 +314,16 @@ impl WslcSandboxProcess {
     /// This handle's [`Settled`] outcome so far.
     fn settled(&self) -> Settled {
         settled_outcome(self.timed_out, self.deadline_elapsed, self.exit)
+    }
+
+    fn replay_wait_failure(&self) -> Option<std::io::Error> {
+        self.wait_failure.clone().map(into_io_error)
+    }
+
+    fn cache_wait_failure(&mut self, error: WslcStepError) -> std::io::Error {
+        let error = error.into_mxc_error();
+        self.wait_failure = Some(error.clone());
+        into_io_error(error)
     }
 
     /// Start closing stdin when the process exits, if it has a stdin to close.
@@ -549,6 +562,10 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        if let Some(error) = self.replay_wait_failure() {
+            return Err(error);
+        }
+
         // The settled outcome is checked exactly as in `wait`. Without this,
         // the timeout path — which kills the container — leaves `has_exited()`
         // true below, so a caller that saw `wait` fail with `TimedOut` would
@@ -581,9 +598,10 @@ impl SandboxProcess for WslcSandboxProcess {
         // turning a `TimedOut` into a normal exit. Re-querying is a cheap
         // SDK call.
         // SAFETY: `started` owns live process and SDK handles.
-        unsafe { self.started.exit_code() }
-            .map_err(std::io::Error::other)
-            .map(Some)
+        match unsafe { self.started.confirmed_exit_code() } {
+            Ok(code) => Ok(Some(code)),
+            Err(error) => Err(self.cache_wait_failure(error)),
+        }
     }
 
     /// Always `0` — the sandboxed process runs inside the WSL VM and has no
@@ -605,6 +623,10 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
+        if let Some(error) = self.replay_wait_failure() {
+            return Err(error);
+        }
+
         match self.settled() {
             // Sticky: a confirmed timeout must keep being reported as one,
             // never as a later-observed exit code.
@@ -646,13 +668,10 @@ impl SandboxProcess for WslcSandboxProcess {
         // `WslcGetProcessExitEvent`), and closing the SDK-side writers then
         // would EOF a caller-taken reader and discard every later callback for
         // a process that is still producing output.
-        let (exit_code, outcome) = waited.map_err(|response| {
-            std::io::Error::other(if response.error_message.is_empty() {
-                "waiting for the WSL container process failed".to_string()
-            } else {
-                response.error_message
-            })
-        })?;
+        let (exit_code, outcome) = match waited {
+            Ok(result) => result,
+            Err(error) => return Err(self.cache_wait_failure(error)),
+        };
 
         // The process is gone (or was killed): close the SDK-side write ends so
         // every reader — ours and the caller's — sees EOF once it has consumed

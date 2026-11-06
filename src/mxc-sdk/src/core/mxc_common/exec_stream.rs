@@ -318,10 +318,7 @@ impl ExecSandboxProcess {
         })
     }
 
-    /// Join the waiter thread, caching and returning its outcome.
-    ///
-    /// The outcome is cached rather than the exit code, because a timeout has
-    /// no code to cache and repeat calls must still be idempotent.
+    /// Join the waiter thread, caching and returning its terminal result.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
         if let Some(result) = &self.terminal {
             return terminal_to_io(result);
@@ -677,7 +674,7 @@ fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
 fn terminal_to_io(result: &Result<ExecOutcome, MxcError>) -> std::io::Result<i32> {
     match result {
         Ok(outcome) => outcome_to_io(*outcome),
-        Err(error) => Err(std::io::Error::other(error.message.clone())),
+        Err(error) => Err(super::mxc_error::into_io_error(error.clone())),
     }
 }
 
@@ -1619,6 +1616,101 @@ mod tests {
         drop(stdout_r);
     }
 
+    #[test]
+    fn waiter_errors_are_cached_with_all_structured_fields() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let expected = MxcError::backend_unavailable("could not query the process")
+            .with_details(serde_json::json!({"phase": "wait"}))
+            .with_api_failure(
+                crate::mxc_common::mxc_error::ApiFailure::new("WslcGetProcessExitCode")
+                    .with_native_code("0x80004005"),
+            )
+            .with_remediation("Retry the process wait.");
+        let waiter_error = expected.clone();
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(move || Err(waiter_error)),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        for error in [
+            process.wait().expect_err("the waiter fails"),
+            process.wait().expect_err("the cached waiter result fails"),
+            process
+                .try_wait()
+                .expect_err("polling replays the cached waiter result"),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(error.to_string(), expected.message);
+            assert_eq!(
+                crate::mxc_common::mxc_error::from_io_error(&error),
+                Some(expected.clone())
+            );
+        }
+
+        drop(stdout_r);
+    }
+
+    #[test]
+    fn a_cached_waiter_error_does_not_retire_the_terminator() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminated_by_kill = Arc::clone(&terminated);
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Err(MxcError::backend_error("wait failed"))),
+            terminator: Box::new(move || {
+                terminated_by_kill.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        process.wait().expect_err("the waiter fails");
+        process
+            .kill()
+            .expect("an unknown process outcome must remain killable");
+
+        assert!(terminated.load(std::sync::atomic::Ordering::SeqCst));
+        drop(stdout_r);
+    }
+
+    #[test]
+    fn a_waiter_panic_is_cached_as_a_structured_backend_error() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| panic!("forced waiter panic")),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        for error in [
+            process.wait().expect_err("the waiter panics"),
+            process.wait().expect_err("the cached panic fails"),
+        ] {
+            let structured = crate::mxc_common::mxc_error::from_io_error(&error)
+                .expect("structured waiter error");
+            assert_eq!(structured.code, MxcErrorCode::BackendError);
+            assert_eq!(structured.message, "exec waiter thread panicked");
+        }
+
+        drop(stdout_r);
+    }
+
     /// `wait` must **tear its discard down**, not walk away from it.
     ///
     /// This is the regression the cancellable drain exists for, and the other
@@ -1720,7 +1812,7 @@ mod tests {
 
     /// A prior `try_wait()` must not let `wait()` skip the drain.
     ///
-    /// `self.exit` records that the child finished; it says nothing about
+    /// A cached success records that the child finished; it says nothing about
     /// whether anything was drained. Returning early on it would silently
     /// break the contract for exactly the caller who polls before waiting.
     ///

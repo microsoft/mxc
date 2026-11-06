@@ -469,6 +469,12 @@ export class MxcProcess {
 ```
 
 
+`wait()` rejects with `MxcError` when MXC cannot obtain a terminal process
+result after admission. The rejection preserves `code`, `message`,
+`operation`, `nativeCode`, `remediation`, and `details`; it is not converted
+into an exit result.
+
+
 ## `@microsoft/mxc-sdk/v1::MxcPtyProcess`
 
 A container process attached to an MXC-owned pseudo-terminal.

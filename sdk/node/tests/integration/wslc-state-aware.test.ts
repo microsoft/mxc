@@ -33,6 +33,8 @@ import { safeDeprovision } from './test-helpers.js';
 import * as dev from '@microsoft/mxc-sdk/v1/dev';
 
 const wslcImage = process.env.MXC_WSLC_TEST_IMAGE ?? 'alpine:latest';
+const forcedWaitFailureCommand =
+  'true # mxc-test-force-wslc-get-exit-code-failure';
 
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
 // Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
@@ -72,6 +74,43 @@ function collectBytes(stream: NodeJS.ReadableStream | null): Promise<Buffer> {
     stream.once('end', () => resolve(Buffer.concat(chunks)));
     stream.once('error', reject);
   });
+}
+
+function assertForcedWaitFailure(error: unknown): boolean {
+  assert.ok(error instanceof MxcError);
+  assert.equal(error.code, 'backend_error');
+  assert.equal(
+    error.message,
+    'WslcGetProcessExitCode failed: HRESULT 0x80004005',
+  );
+  assert.equal(error.operation, 'WslcGetProcessExitCode');
+  assert.equal(error.nativeCode, '0x80004005');
+  assert.equal(error.remediation, undefined);
+  return true;
+}
+
+async function withStartedContainer(
+  action: (containerId: ContainerId) => Promise<void>,
+): Promise<void> {
+  const { containerId } = await provisionContainer({
+    containment: 'wslc',
+    image: wslcImage,
+  });
+  let started = false;
+  try {
+    await startContainer(containerId);
+    started = true;
+    await action(containerId);
+  } finally {
+    if (started) {
+      try {
+        await stopContainer(containerId);
+      } catch (error) {
+        console.error(`Cleanup stop failed for ${containerId}: ${error}`);
+      }
+    }
+    await safeDeprovision(containerId);
+  }
 }
 
 describe('WSLC state-aware lifecycle E2E', {
@@ -267,6 +306,52 @@ timeoutMs: 750 });
           await safeDeprovision(containerId);
         }
       }
+    },
+  );
+
+  it(
+    'captured exec preserves structured post-admission wait failures',
+    { timeout: 180_000 },
+    async () => {
+      await withStartedContainer(async (containerId) => {
+        await assert.rejects(
+          runInContainer(containerId, {
+            command: forcedWaitFailureCommand,
+            timeoutMs: 60_000,
+          }),
+          assertForcedWaitFailure,
+        );
+
+        const recovered = await runInContainer(containerId, {
+          command: 'echo CAPTURED-RECOVERED',
+          timeoutMs: 60_000,
+        });
+        assert.equal(recovered.stdout.trim(), 'CAPTURED-RECOVERED');
+      });
+    },
+  );
+
+  it(
+    'process wait preserves structured post-admission wait failures',
+    { timeout: 180_000 },
+    async () => {
+      await withStartedContainer(async (containerId) => {
+        const process = await spawnInContainer(containerId, {
+          command: forcedWaitFailureCommand,
+          timeoutMs: 60_000,
+        });
+        try {
+          await assert.rejects(process.wait(), assertForcedWaitFailure);
+        } finally {
+          process.dispose();
+        }
+
+        const recovered = await runInContainer(containerId, {
+          command: 'echo PROCESS-RECOVERED',
+          timeoutMs: 60_000,
+        });
+        assert.equal(recovered.stdout.trim(), 'PROCESS-RECOVERED');
+      });
     },
   );
 });

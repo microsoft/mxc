@@ -251,6 +251,11 @@ for complete signatures and types.
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
 `NativeCode`, and `Remediation` when available. Security and operational
 warnings are available on `ExecutionResult.Warnings` and `MxcProcess.Warnings`.
+Failures that occur after a process starts but before MXC can confirm its
+terminal result retain those fields from `MxcContainer.Run`,
+`MxcLifecycle.RunInContainer`, `MxcProcess.TryGetExitCode`, `Wait`, and
+`WaitAsync`; they are not converted into an exit code. Repeated waits report
+the same failure, while disposal still performs process cleanup.
 Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
 warnings become an empty array; malformed warnings fail explicitly. When

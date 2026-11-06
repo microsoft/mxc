@@ -500,6 +500,12 @@ pipe from the `WithStdin` variants. Rust and
 CLI attached relay surfaces as a backend error because that path cannot return a typed timeout;
 the streaming path reports it through its wait result.
 
+An exec can be admitted and produce output before a WSLc SDK call needed to
+obtain its terminal status fails. Captured SDK execution then fails, and a live
+process's wait rejects, with the original structured WSLc error rather than an
+exit code. The error identifies the failed SDK function in `operation` and
+includes its HRESULT in `nativeCode` when available.
+
 ### exec stdin
 
 An exec reads the stdin its caller supplies:
@@ -624,6 +630,12 @@ daemon attempts immediate deletion. If deletion fails, the quarantined entry is
 retained so `deprovision` can retry cleanup; it is not removed from tracking
 while a potentially running workload remains.
 
+A terminal-status failure is cached by the live SDK process handle, so another
+wait reports the same failure instead of claiming a different outcome. Because
+that failure does not confirm the process is gone, explicit termination and
+handle disposal still attempt cleanup. The daemon's quarantine behavior above
+continues to protect the container when it cannot prove termination.
+
 ## Supported and rejected policy fields
 
 WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
@@ -705,7 +717,8 @@ without matching the message.
 
 When a WSLc SDK call fails, including in an exec that has already started, the
 error envelope also carries the SDK function name in `operation`, and its HRESULT
-in `nativeCode` when the call returned one.
+in `nativeCode` when the call returned one. Captured execution and live-process
+waits in the Rust detailed API, .NET, and Node preserve those fields.
 
 `ErrKind` is additive: a kind a client does not recognize decodes to
 `ErrKind::Unknown` and maps to `backend_error`, so a daemon from a newer

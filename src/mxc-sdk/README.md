@@ -54,6 +54,15 @@ Captured execution drains both streams concurrently. Output-read failures are
 returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
+`run` and the container lifecycle captured-run helpers preserve structured
+backend failures that occur while obtaining the terminal process result.
+For live processes, use `try_wait_detailed`, `wait_detailed`, or
+`wait_with_output_detailed` when the caller needs `ErrorCode`, `operation`,
+`native_code`, `remediation`, and backend `details`. The existing `try_wait`,
+`wait`, and `wait_with_output` methods keep their `std::io::Error` signatures
+and message-only rendering for compatibility. A terminal wait failure is
+replayed by later waits and does not disable kill or drop cleanup.
+
 Creation takes `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions` after
 the request. `SpawnWithPtyOptions.size` carries initial dimensions and defaults
 to 24 rows by 80 columns.

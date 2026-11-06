@@ -15,6 +15,9 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcContainerWslcE2ETests
 {
+    private const string ForcedWaitFailureCommand =
+        "true # mxc-test-force-wslc-get-exit-code-failure";
+
     private static void RequireWslc()
     {
 #if MXC_WITH_WSLC
@@ -329,5 +332,46 @@ public class MxcContainerWslcE2ETests
         Assert.False(run.TimedOut, "a captured run has no input to wait for");
         Assert.Equal(0, run.ExitCode);
         Assert.Equal("RUN-SAW-EOF", run.Stdout.Trim());
+    }
+
+    [Fact]
+    public void Run_PreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+
+        var error = Assert.Throws<MxcException>(() =>
+            MxcContainer.Run(Request(ForcedWaitFailureCommand)));
+
+        AssertForcedWaitFailure(error);
+        Assert.Equal(
+            "RUN-RECOVERED",
+            MxcContainer.Run(Request("echo RUN-RECOVERED")).Stdout.Trim());
+    }
+
+    [Fact]
+    public void Spawn_WaitPreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+
+        using (var process = MxcContainer.Spawn(Request(ForcedWaitFailureCommand)))
+        {
+            AssertForcedWaitFailure(Assert.Throws<MxcException>(() => process.Wait()));
+            AssertForcedWaitFailure(Assert.Throws<MxcException>(() => process.Wait()));
+        }
+
+        Assert.Equal(
+            "PROCESS-RECOVERED",
+            MxcContainer.Run(Request("echo PROCESS-RECOVERED")).Stdout.Trim());
+    }
+
+    private static void AssertForcedWaitFailure(MxcException error)
+    {
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Equal(
+            "WslcGetProcessExitCode failed: HRESULT 0x80004005",
+            error.Message);
+        Assert.Equal("WslcGetProcessExitCode", error.Operation);
+        Assert.Equal("0x80004005", error.NativeCode);
+        Assert.Null(error.Remediation);
     }
 }
