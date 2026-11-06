@@ -129,7 +129,7 @@ fn relative_path(from: &std::path::Path, to: &std::path::Path) -> Option<String>
 
 /// A symlink the sandbox needs so that a grant's written path reaches its real path.
 #[cfg(any(target_os = "linux", test))]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GrantLink {
     pub path: String,
 
@@ -137,27 +137,34 @@ pub(crate) struct GrantLink {
     pub target: String,
 
     pub passes_through: Vec<GrantLink>,
+    pub climbs_out_of: Vec<String>,
 }
 
-/// The symlinks that a `readwritePaths` or `readonlyPaths` entry is named through.
+/// A `readwritePaths` or `readonlyPaths` entry whose spelling differs from its real path.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AliasedGrant {
+    pub real_path: String,
+
     /// Each host symlink on the entry's path, at a location below real directories.
     pub links: Vec<GrantLink>,
 
-    /// The link one level below the first of `links`, for when the sandbox has its own directory there.
+    /// The link one level below the first of `links`, for when the sandbox has its own directory or symlink there.
     pub inner: Option<GrantLink>,
+
+    pub climbs_out_of: Vec<String>,
 }
 
 /// What a mount argument leaves at its destination.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SandboxEntry {
+enum SandboxEntry<'a> {
     /// A bind of the same host path, which shows the host's own links.
     HostBind,
 
-    Symlink,
+    Symlink {
+        target: &'a str,
+    },
 
     /// Content that links must not be added to: `/dev`, `/proc`, a file, a
     /// read-only directory, or a bind of a different host path.
@@ -178,13 +185,17 @@ pub(crate) struct GrantLinkPlan {
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LinkPlacement {
+enum LinkPlacement<'a> {
     Create,
     Present,
     HostLink,
 
     /// The sandbox creates a directory at the location, so only links inside it can be added.
     CreateInside,
+
+    SandboxLink {
+        target: &'a str,
+    },
 
     Blocked,
 }
@@ -196,26 +207,50 @@ pub(crate) fn plan_grant_links(mount_args: &[String], grants: &[AliasedGrant]) -
         return plan;
     }
     let layout = sandbox_layout(mount_args);
-    let place = |link: &GrantLink| match &layout {
-        Some(layout) => link_placement(std::path::Path::new(&link.path), layout),
+    let place = |path: &str| match &layout {
+        Some(layout) => link_placement(std::path::Path::new(path), layout),
         None => LinkPlacement::Blocked,
     };
     let mut reachable = std::collections::HashMap::new();
     for grant in grants {
+        for directory in &grant.climbs_out_of {
+            if !ensure_directory(directory, &place, &mut reachable, &mut plan.args) {
+                plan.unavailable.push(GrantLink {
+                    path: directory.clone(),
+                    target: grant.real_path.clone(),
+                    ..Default::default()
+                });
+            }
+        }
         for link in &grant.links {
-            let (link, placement) = match place(link) {
-                LinkPlacement::CreateInside => match grant.inner.as_ref().filter(|inner| {
-                    std::path::Path::new(&inner.path).parent()
-                        == Some(std::path::Path::new(&link.path))
-                }) {
-                    Some(inner) => match place(inner) {
-                        placement @ (LinkPlacement::Create
-                        | LinkPlacement::Present
-                        | LinkPlacement::HostLink) => (inner, placement),
+            let next_level;
+            let (link, placement) = match place(&link.path) {
+                LinkPlacement::CreateInside => {
+                    next_level = inner_link_under(grant, link, &link.path);
+                    match next_level.as_ref().map(|next| (next, place(&next.path))) {
+                        Some((
+                            next,
+                            placement @ (LinkPlacement::Create
+                            | LinkPlacement::Present
+                            | LinkPlacement::HostLink),
+                        )) => (next, placement),
                         _ => (link, LinkPlacement::Blocked),
-                    },
-                    None => (link, LinkPlacement::Blocked),
-                },
+                    }
+                }
+                LinkPlacement::SandboxLink { target } => {
+                    let leads_to = sandbox_link_target(&link.path, target);
+                    if leads_to == link.target {
+                        (link, LinkPlacement::Present)
+                    } else {
+                        next_level = inner_link_under(grant, link, &leads_to);
+
+                        // Whatever the host has under the sandbox link's target is not the grant.
+                        match next_level.as_ref().map(|next| (next, place(&next.path))) {
+                            Some((next, LinkPlacement::Create)) => (next, LinkPlacement::Create),
+                            _ => (link, LinkPlacement::Blocked),
+                        }
+                    }
+                }
                 placement => (link, placement),
             };
             if reachable.contains_key(link.path.as_str()) {
@@ -231,10 +266,10 @@ pub(crate) fn plan_grant_links(mount_args: &[String], grants: &[AliasedGrant]) -
 
 #[cfg(any(target_os = "linux", test))]
 fn make_reachable<'a>(
-    link: &'a GrantLink,
-    placement: LinkPlacement,
-    place: &dyn Fn(&GrantLink) -> LinkPlacement,
-    reachable: &mut std::collections::HashMap<&'a str, bool>,
+    link: &GrantLink,
+    placement: LinkPlacement<'a>,
+    place: &dyn Fn(&str) -> LinkPlacement<'a>,
+    reachable: &mut std::collections::HashMap<String, bool>,
     args: &mut Vec<String>,
 ) -> bool {
     let reaches = match placement {
@@ -246,24 +281,88 @@ fn make_reachable<'a>(
             }
             None => false,
         },
-        LinkPlacement::HostLink => link.passes_through.iter().all(|hop| {
-            // Only the link's target and its parents exist in the sandbox for a hop to lead to.
-            std::path::Path::new(&link.target).starts_with(&hop.target)
-                && match reachable.get(hop.path.as_str()).copied() {
-                    Some(reaches) => reaches,
-                    None => make_reachable(hop, place(hop), place, reachable, args),
-                }
-        }),
+        LinkPlacement::HostLink => {
+            link.climbs_out_of
+                .iter()
+                .all(|directory| ensure_directory(directory, place, reachable, args))
+                && link.passes_through.iter().all(|hop| {
+                    // Only the link's target and its parents exist in the sandbox for a hop to lead to.
+                    std::path::Path::new(&link.target).starts_with(&hop.target)
+                        && match reachable.get(hop.path.as_str()).copied() {
+                            Some(reaches) => reaches,
+                            None => make_reachable(hop, place(&hop.path), place, reachable, args),
+                        }
+                })
+        }
+        LinkPlacement::SandboxLink { target } => {
+            sandbox_link_target(&link.path, target) == link.target
+        }
         LinkPlacement::CreateInside | LinkPlacement::Blocked => false,
     };
-    reachable.insert(&link.path, reaches);
+    reachable.insert(link.path.clone(), reaches);
     reaches
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn ensure_directory<'a>(
+    directory: &str,
+    place: &dyn Fn(&str) -> LinkPlacement<'a>,
+    reachable: &mut std::collections::HashMap<String, bool>,
+    args: &mut Vec<String>,
+) -> bool {
+    if let Some(&exists) = reachable.get(directory) {
+        return exists;
+    }
+    let exists = match place(directory) {
+        LinkPlacement::Present | LinkPlacement::HostLink | LinkPlacement::CreateInside => true,
+        LinkPlacement::Create => {
+            args.extend(["--dir".into(), directory.into()]);
+            true
+        }
+        LinkPlacement::SandboxLink { .. } | LinkPlacement::Blocked => false,
+    };
+    reachable.insert(directory.into(), exists);
+    exists
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn inner_link_under(grant: &AliasedGrant, link: &GrantLink, directory: &str) -> Option<GrantLink> {
+    let inner = grant.inner.as_ref()?;
+    let name = inner.path.strip_prefix(&link.path)?.strip_prefix('/')?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(GrantLink {
+        path: format!("{}/{name}", directory.trim_end_matches('/')),
+        target: inner.target.clone(),
+        ..Default::default()
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sandbox_link_target(location: &str, target: &str) -> String {
+    let parent = if target.starts_with('/') {
+        ""
+    } else {
+        location.rsplit_once('/').map_or("", |(parent, _)| parent)
+    };
+    let mut parts = Vec::new();
+    for part in parent.split('/').chain(target.split('/')) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 /// The entry each of `mount_args` leaves at its destination, or `None` for an
 /// option this does not know.
 #[cfg(any(target_os = "linux", test))]
-fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry)>> {
+fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>> {
     let mut layout = Vec::new();
     let mut args = mount_args.iter().map(String::as_str);
     while let Some(option) = args.next() {
@@ -273,10 +372,9 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry)>> {
             "--dev" | "--proc" | "--remount-ro" => SandboxEntry::Closed,
             "--tmpfs" => SandboxEntry::Tmpfs,
             "--dir" => SandboxEntry::Directory,
-            "--symlink" => {
-                args.next()?;
-                SandboxEntry::Symlink
-            }
+            "--symlink" => SandboxEntry::Symlink {
+                target: args.next()?,
+            },
             "--file" => {
                 args.next()?;
                 SandboxEntry::Closed
@@ -300,14 +398,18 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry)>> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn link_placement(link: &std::path::Path, layout: &[(&str, SandboxEntry)]) -> LinkPlacement {
+fn link_placement<'a>(
+    link: &std::path::Path,
+    layout: &[(&str, SandboxEntry<'a>)],
+) -> LinkPlacement<'a> {
     // The sandbox root is a tmpfs.
     let mut placement = LinkPlacement::Create;
     for &(path, entry) in layout {
         let path = std::path::Path::new(path);
         placement = if link == path {
             match entry {
-                SandboxEntry::HostBind | SandboxEntry::Symlink => LinkPlacement::Present,
+                SandboxEntry::HostBind => LinkPlacement::Present,
+                SandboxEntry::Symlink { target } => LinkPlacement::SandboxLink { target },
                 SandboxEntry::Tmpfs => LinkPlacement::CreateInside,
                 SandboxEntry::Directory if placement == LinkPlacement::Create => {
                     LinkPlacement::CreateInside
@@ -321,7 +423,7 @@ fn link_placement(link: &std::path::Path, layout: &[(&str, SandboxEntry)]) -> Li
                 SandboxEntry::HostBind => LinkPlacement::HostLink,
                 SandboxEntry::Tmpfs => LinkPlacement::Create,
                 SandboxEntry::Directory => placement,
-                SandboxEntry::Symlink | SandboxEntry::Closed => LinkPlacement::Blocked,
+                SandboxEntry::Symlink { .. } | SandboxEntry::Closed => LinkPlacement::Blocked,
             }
         } else if path.starts_with(link) && placement == LinkPlacement::Create {
             // bwrap creates the link's location as a directory to hold this entry.
@@ -2317,14 +2419,14 @@ mod tests {
         GrantLink {
             path: path.into(),
             target: target.into(),
-            passes_through: Vec::new(),
+            ..Default::default()
         }
     }
 
     fn aliased(path: &str, target: &str) -> AliasedGrant {
         AliasedGrant {
             links: vec![grant_link(path, target)],
-            inner: None,
+            ..Default::default()
         }
     }
 
@@ -2395,7 +2497,7 @@ mod tests {
             .cloned()
             .chain(unavailable.iter().map(|link| AliasedGrant {
                 links: vec![link.clone()],
-                inner: None,
+                ..Default::default()
             }))
             .chain(created.iter().cloned())
             .collect();
@@ -2426,6 +2528,7 @@ mod tests {
         let project = AliasedGrant {
             links: vec![grant_link("/tmp", "/var/tmp")],
             inner: Some(grant_link("/tmp/project", "/var/tmp/project")),
+            ..Default::default()
         };
         let mounts = policy_mounts(&ContainerPolicy {
             readwrite_paths: vec!["/var/tmp/project".into()],
@@ -2501,7 +2604,7 @@ mod tests {
             .chain(&unavailable)
             .map(|link| AliasedGrant {
                 links: vec![link.clone()],
-                inner: None,
+                ..Default::default()
             })
             .collect();
 
@@ -2511,10 +2614,109 @@ mod tests {
     }
 
     #[test]
+    fn directories_that_a_path_climbs_out_of_are_created_where_the_sandbox_has_none() {
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec![
+                "/home/alice".into(),
+                "/data/app".into(),
+                "/srv/shared".into(),
+            ],
+            ..Default::default()
+        });
+        let through_staging = AliasedGrant {
+            real_path: "/data/app".into(),
+            links: vec![GrantLink {
+                climbs_out_of: vec!["/data/staging".into(), "/home/alice".into()],
+                ..grant_link("/home/alice/app", "/data/app")
+            }],
+            ..Default::default()
+        };
+        let spelled_with_dots = AliasedGrant {
+            real_path: "/srv/shared".into(),
+            links: vec![grant_link("/opt/app", "/srv/app")],
+            climbs_out_of: vec!["/srv/app".into(), "/data/staging".into(), "/proc/1".into()],
+            ..Default::default()
+        };
+        let through_dev = GrantLink {
+            climbs_out_of: vec!["/dev/shm/staging".into()],
+            ..grant_link("/home/alice/shm", "/data/app")
+        };
+        let grants = [
+            through_staging,
+            spelled_with_dots,
+            AliasedGrant {
+                links: vec![through_dev.clone()],
+                ..Default::default()
+            },
+        ];
+
+        let plan = plan_for(&mounts, &[], &grants);
+        assert_eq!(
+            plan.args,
+            [
+                "--dir",
+                "/data/staging",
+                "--dir",
+                "/srv/app",
+                "--symlink",
+                "../srv/app",
+                "/opt/app",
+            ]
+        );
+        assert_eq!(
+            plan.unavailable,
+            [
+                GrantLink {
+                    target: "/srv/shared".into(),
+                    ..grant_link("/proc/1", "")
+                },
+                through_dev,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sandbox_link_that_leads_elsewhere_gets_the_next_level_where_it_leads() {
+        let through_var_run = |real_path: &str| AliasedGrant {
+            real_path: real_path.into(),
+            links: vec![grant_link("/var/run", "/data/run")],
+            inner: Some(grant_link("/var/run/project", "/data/run/project")),
+            ..Default::default()
+        };
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/data/run".into(), "/run/app".into()],
+            ..Default::default()
+        });
+
+        let plan = plan_for(
+            &mounts,
+            &[],
+            &[
+                through_var_run("/data/run/project"),
+                aliased("/var/run", "/run"),
+            ],
+        );
+        assert_eq!(
+            plan.args,
+            ["--symlink", "../data/run/project", "/run/project"]
+        );
+        assert_eq!(plan.unavailable, Vec::<GrantLink>::new());
+
+        let whole = AliasedGrant {
+            inner: None,
+            ..through_var_run("/data/run")
+        };
+        let plan = plan_for(&mounts, &[], &[whole]);
+        assert_eq!(plan.args, Vec::<String>::new());
+        assert_eq!(plan.unavailable, [grant_link("/var/run", "/data/run")]);
+    }
+
+    #[test]
     fn a_link_above_a_sandbox_entry_is_recreated_one_level_down() {
         let lib = AliasedGrant {
             links: vec![grant_link("/var", "/data/var")],
             inner: Some(grant_link("/var/lib", "/data/var/lib")),
+            ..Default::default()
         };
         let mounts = policy_mounts(&ContainerPolicy {
             readwrite_paths: vec!["/data/var/lib/x".into()],

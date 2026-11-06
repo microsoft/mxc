@@ -406,12 +406,19 @@ symlink's path, such as its private `/tmp` on a host whose `/tmp` is a symlink
 to `/var/tmp`, the sandbox keeps that directory and recreates the next part of
 the path inside it, so a grant of `/tmp/project` is still reachable as
 `/tmp/project`. A grant of that whole `/tmp` replaces the private `/tmp` with
-the symlink, so `/tmp` in the sandbox is the host's `/var/tmp`. A symlink that
-cannot be recreated at all, such as one under `/dev` or `/proc`, leaves paths
-through it unavailable inside the sandbox. Whenever a spelling is unavailable,
-Bubblewrap reports a warning naming the real path to use. A grant that cannot
-be resolved, such as a dangling symlink or a symlink loop, stops the sandbox
-from starting.
+the symlink, so `/tmp` in the sandbox is the host's `/var/tmp`. Where the
+sandbox has its own symlink at that path pointing somewhere else, such as its
+`/var/run -> /run` on a host whose `/var/run` points elsewhere, the next part of
+the path is recreated where the sandbox's symlink leads.
+
+A directory that a path or symlink climbs out of with `..`, such as `staging` in
+`/data/staging/../app`, is created empty inside the sandbox if it is not already
+there, so the path still works without showing that directory's contents. A
+symlink that cannot be recreated at all, such as one under `/dev` or `/proc`,
+leaves paths through it unavailable inside the sandbox. Whenever a spelling is
+unavailable, Bubblewrap reports a warning naming the real path to use. A grant
+that cannot be resolved, such as a dangling symlink or a symlink loop, stops
+the sandbox from starting.
 
 Only symlinks are followed. A hard link, or a host bind mount that shows the
 same files under a second path, stays a separate path inside the sandbox: a

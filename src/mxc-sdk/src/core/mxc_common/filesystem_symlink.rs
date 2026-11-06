@@ -25,6 +25,9 @@ pub(crate) struct SymlinkResolution {
     /// Each symlink the path passes through, below real directories, with the real path it leads to.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) links: Vec<(PathBuf, PathBuf)>,
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) climbed_out_of: Vec<PathBuf>,
 }
 
 /// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
@@ -59,12 +62,14 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
                 path: path.to_path_buf(),
                 error: Some(error),
                 links: Vec::new(),
+                climbed_out_of: Vec::new(),
             })
         }
     };
     let mut result = PathBuf::new();
     let mut failure = None;
     let mut links = Vec::new();
+    let mut climbed_out_of = Vec::new();
     let mut resolve_prefix = |prefix: &Path| {
         // macOS realpath can fold `file/..` (also inside link targets) without
         // checking that file is a directory, so let the kernel follow it first.
@@ -89,6 +94,9 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
             Component::CurDir => {}
             Component::ParentDir => {
                 let _ = resolve_prefix(&result.join(".."));
+                if result.parent().is_some() {
+                    climbed_out_of.push(result.clone());
+                }
                 result.pop();
             }
             Component::Normal(name) => {
@@ -106,6 +114,7 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
         path: result,
         error: failure,
         links,
+        climbed_out_of,
     })
 }
 
@@ -297,5 +306,25 @@ mod tests {
                 (root.join("real/sub/outer"), root.join("c/x")),
             ]
         );
+    }
+
+    #[test]
+    fn the_directories_a_path_climbs_out_of_are_reported_with_their_real_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = temp_root(&dir);
+        std::fs::create_dir_all(root.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+
+        let resolved = resolve_through_symlinks(&root.join("alias/sub/../../other")).unwrap();
+        assert!(resolved.error.is_none(), "{resolved:?}");
+        assert_eq!(resolved.path, root.join("other"));
+        assert_eq!(
+            resolved.climbed_out_of,
+            [root.join("real/sub"), root.join("real")]
+        );
+        assert!(resolve_through_symlinks(Path::new("/.."))
+            .unwrap()
+            .climbed_out_of
+            .is_empty());
     }
 }

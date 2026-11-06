@@ -644,9 +644,9 @@ mod tests {
             links: vec![GrantLink {
                 path: path_text(&root.join(path)).unwrap().into(),
                 target: path_text(&root.join(target)).unwrap().into(),
-                passes_through: Vec::new(),
+                ..Default::default()
             }],
-            inner: None,
+            ..Default::default()
         };
         let layout_link = link("opt/dns", "srv/dns");
         let snapshot_link = link("srv/dns/link", "srv");

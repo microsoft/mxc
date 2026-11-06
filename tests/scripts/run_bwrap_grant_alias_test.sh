@@ -164,6 +164,21 @@ host_holds() {
     [ "$(cat "$1" 2>/dev/null)" = "$2" ] || fail "host file $1 does not hold $2."
 }
 
+# Set OUTER to a bwrap command that runs lxc-exec on a stand-in host with these extra mounts.
+outer_sandbox() {
+    local entry
+    OUTER=(bwrap --unshare-pid --die-with-parent --ro-bind /usr /usr --ro-bind /etc /etc
+        --ro-bind "$LXC_EXEC" "$LXC_EXEC" --dev /dev --proc /proc "$@")
+    for entry in /bin /sbin /lib /lib32 /lib64 /libx32; do
+        if [ -L "$entry" ]; then
+            OUTER+=(--symlink "$(readlink "$entry")" "$entry")
+        elif [ -d "$entry" ]; then
+            OUTER+=(--ro-bind "$entry" "$entry")
+        fi
+    done
+    OUTER+=(--)
+}
+
 # /tmp is a private tmpfs in the sandbox, while the home directory has no
 # covering mount, so the links are recreated in two kinds of location.
 for parent in /tmp "$(cd "$HOME" && pwd -P)"; do
@@ -246,6 +261,35 @@ for parent in /tmp "$(cd "$HOME" && pwd -P)"; do
     host_holds "$R/real/through-links.txt" WRITTEN_THROUGH_LINKS
     host_holds "$R/real/secret.txt" SECRET_CONTENT
 
+    mkdir "$R/staging"
+    echo LEAK_CONTENT >"$R/staging/leak.txt"
+    ln -s "$R/staging/../real" "$R/home/climbing"
+    ln -s ../links/../real "$R/home/relative"
+    probe CLIMBING_READ "$(holds "$R/home/climbing/protected/hook" HOOK_CONTENT)" OPEN
+    probe RELATIVE_READ "$(holds "$R/home/relative/protected/hook" HOOK_CONTENT)" OPEN
+    probe CLIMBING_SECRET "$(holds "$R/home/climbing/secret.txt" SECRET_CONTENT)" BLOCKED
+    probe STAGING_HIDDEN "$(holds "$R/staging/leak.txt" LEAK_CONTENT)" BLOCKED
+    probe CWD_IS_REAL "[ \"\$(pwd -P)\" = '$R/real' ]" OPEN
+    run "links that climb out of a directory with .." \
+        "{\"readwritePaths\":[$(json "$R/home"),$(json "$R/home/climbing"),$(json "$R/home/relative")],\"deniedPaths\":[$(json "$R/real/secret.txt")]}" \
+        "$R/home/climbing"
+
+    mkdir "$R/shared-dir"
+    echo SHARED_CONTENT >"$R/shared-dir/file"
+    probe SHARED_READ "$(holds "$R/alias/../shared-dir/file" SHARED_CONTENT)" OPEN
+    probe ALIAS_EMPTY "$(holds "$R/alias/secret.txt" SECRET_CONTENT)" BLOCKED
+    probe CWD_IS_SHARED "[ \"\$(pwd -P)\" = '$R/shared-dir' ]" OPEN
+    run "grant spelled through a link and then .." \
+        "{\"readwritePaths\":[$(json "$R/alias/../shared-dir")]}" \
+        "$R/alias/../shared-dir"
+
+    probe PROTECTED_READ "$(holds "$R/real/sub/../protected/hook" HOOK_CONTENT)" OPEN
+    probe SUB_EMPTY "$(holds "$R/real/sub/secret.txt" SECRET_CONTENT)" BLOCKED
+    probe CWD_IS_PROTECTED "[ \"\$(pwd -P)\" = '$R/real/protected' ]" OPEN
+    run "grant spelled with .. and no link" \
+        "{\"readonlyPaths\":[$(json "$R/real/sub/../protected")]}" \
+        "$R/real/sub/../protected"
+
     mkdir -p "$R/work/sub/shared" "$R/work/shared"
     echo DECOY_CONTENT >"$R/work/sub/shared/m"
     echo SECRET_CONTENT >"$R/work/shared/m"
@@ -299,19 +343,9 @@ VAR_TMP=$(cd "$(mktemp -d "$(cd "$HOME" && pwd -P)/.mxc_bwrap_grant_alias_XXXXXX
 ROOTS+=("$VAR_TMP")
 mkdir "$VAR_TMP/project"
 echo SECRET_CONTENT >"$VAR_TMP/project/secret.txt"
-OUTER=(bwrap --unshare-pid --die-with-parent --ro-bind /usr /usr --ro-bind /etc /etc
-    --ro-bind "$LXC_EXEC" "$LXC_EXEC" --bind "$VAR_TMP" /var/tmp --symlink var/tmp /tmp
-    --dev /dev --proc /proc)
-for entry in /bin /sbin /lib /lib32 /lib64 /libx32; do
-    if [ -L "$entry" ]; then
-        OUTER+=(--symlink "$(readlink "$entry")" "$entry")
-    elif [ -d "$entry" ]; then
-        OUTER+=(--ro-bind "$entry" "$entry")
-    fi
-done
-OUTER+=(--)
+outer_sandbox --bind "$VAR_TMP" /var/tmp --symlink var/tmp /tmp
 if ! "${OUTER[@]}" bwrap --ro-bind / / true >/dev/null 2>&1; then
-    echo "SKIP: this host cannot run bwrap inside bwrap, so the symlinked /tmp cases did not run."
+    echo "SKIP: this host cannot run bwrap inside bwrap, so the symlinked /tmp and /var/run cases did not run."
     exit 77
 fi
 
@@ -337,5 +371,21 @@ if grep -qF "cannot be recreated" <<<"$OUTPUT"; then
 fi
 host_holds "$VAR_TMP/whole.txt" WRITTEN_TO_TMP
 host_holds "$VAR_TMP/project/secret.txt" SECRET_CONTENT
+
+# An outer sandbox whose /var/run is a symlink to somewhere other than /run.
+VAR_RUN=$(cd "$(mktemp -d "$(cd "$HOME" && pwd -P)/.mxc_bwrap_grant_alias_XXXXXX")" && pwd -P)
+ROOTS+=("$VAR_RUN")
+mkdir "$VAR_RUN/project"
+echo SECRET_CONTENT >"$VAR_RUN/project/secret.txt"
+outer_sandbox --tmpfs /tmp --bind "$VAR_RUN" /data/run --symlink ../data/run /var/run
+probe CWD_IS_REAL "[ \"\$(pwd -P)\" = /data/run/project ]" OPEN
+probe WRITE_VAR_RUN "$(accepts /var/run/project/written.txt WRITTEN_THROUGH_VAR_RUN)" OPEN
+probe READ_VAR_RUN "$(holds /var/run/project/secret.txt SECRET_CONTENT)" BLOCKED
+probe READ_DATA_RUN "$(holds /data/run/project/secret.txt SECRET_CONTENT)" BLOCKED
+run "grant through a /var/run that does not lead to /run" \
+    '{"readwritePaths":["/var/run/project"],"deniedPaths":["/var/run/project/secret.txt"]}' \
+    /var/run/project "${OUTER[@]}"
+host_holds "$VAR_RUN/project/written.txt" WRITTEN_THROUGH_VAR_RUN
+host_holds "$VAR_RUN/project/secret.txt" SECRET_CONTENT
 
 echo "Bubblewrap grant-alias test complete."

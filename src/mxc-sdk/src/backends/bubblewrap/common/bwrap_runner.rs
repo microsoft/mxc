@@ -656,7 +656,7 @@ impl BubblewrapScriptRunner {
         );
         for link in &unavailable_links {
             logger.warning_line(&format!(
-                "WARNING: Bubblewrap: a filesystem grant is named through the symlink {}, \
+                "WARNING: Bubblewrap: a filesystem grant is named through {}, \
                  which cannot be recreated inside the sandbox, so paths through it are \
                  unavailable there. Use {} instead.",
                 link.path, link.target
@@ -1414,25 +1414,23 @@ fn resolve_granted_paths(
             let grant = probe
                 .run(path, move |path| resolve_granted_path(path, list))
                 .map_err(FilesystemPolicyError::Host)??;
-            if grant.path != *path {
+            if grant.real_path != *path {
                 let _ = writeln!(
                     logger,
-                    "Bubblewrap: {list} entry '{path}' resolves through a symlink; mounting \
-                     its real path '{}' instead.",
-                    grant.path
+                    "Bubblewrap: {list} entry '{path}' is mounted at its real path '{}'.",
+                    grant.real_path
                 );
                 moved = true;
             }
             replaces_private_tmp |= grant
-                .alias
                 .links
                 .iter()
-                .any(|link| link.path == "/tmp" && link.target == grant.path);
-            if !grant.alias.links.is_empty() {
-                aliased.push(grant.alias);
+                .any(|link| link.path == "/tmp" && link.target == grant.real_path);
+            if !real_paths.contains(&grant.real_path) {
+                real_paths.push(grant.real_path.clone());
             }
-            if !real_paths.contains(&grant.path) {
-                real_paths.push(grant.path);
+            if !grant.links.is_empty() || !grant.climbs_out_of.is_empty() {
+                aliased.push(grant);
             }
         }
         Ok::<_, FilesystemPolicyError>(real_paths)
@@ -1450,15 +1448,10 @@ fn resolve_granted_paths(
     })
 }
 
-struct ResolvedGrant {
-    path: String,
-    alias: bwrap_command::AliasedGrant,
-}
-
 fn resolve_granted_path(
     path: &str,
     list: &'static str,
-) -> Result<ResolvedGrant, FilesystemPolicyError> {
+) -> Result<bwrap_command::AliasedGrant, FilesystemPolicyError> {
     #[cfg(test)]
     crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-granted", path);
 
@@ -1473,9 +1466,9 @@ fn resolve_granted_path(
         }
     };
     let Some(resolved) = resolve_through_symlinks(Path::new(path)) else {
-        return Ok(ResolvedGrant {
-            path: path.to_owned(),
-            alias: bwrap_command::AliasedGrant::default(),
+        return Ok(bwrap_command::AliasedGrant {
+            real_path: path.to_owned(),
+            ..Default::default()
         });
     };
     if let Some(error) = resolved.error {
@@ -1501,13 +1494,19 @@ fn resolve_granted_path(
             Ok::<_, FilesystemPolicyError>(bwrap_command::GrantLink {
                 path: text(location)?,
                 target: text(target)?,
-                passes_through: Vec::new(),
+                ..Default::default()
             })
         })
         .transpose()?;
-    Ok(ResolvedGrant {
-        path: text(resolved.path)?,
-        alias: bwrap_command::AliasedGrant { links, inner },
+    Ok(bwrap_command::AliasedGrant {
+        real_path: text(resolved.path)?,
+        links,
+        inner,
+        climbs_out_of: resolved
+            .climbed_out_of
+            .into_iter()
+            .map(text)
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -1526,6 +1525,7 @@ fn host_link(
         .unwrap_or(Path::new("/"))
         .join(std::fs::read_link(&location).map_err(refuse)?);
     let mut passes_through = Vec::new();
+    let mut climbs_out_of = Vec::new();
     if let Some(resolved) = resolve_through_symlinks(&followed) {
         if let Some(error) = resolved.error {
             return Err(refuse(error));
@@ -1533,11 +1533,17 @@ fn host_link(
         for (hop, hop_target) in resolved.links {
             passes_through.push(host_link(hop, hop_target, depth + 1, refuse, text)?);
         }
+        climbs_out_of = resolved
+            .climbed_out_of
+            .into_iter()
+            .map(text)
+            .collect::<Result<_, _>>()?;
     }
     Ok(bwrap_command::GrantLink {
         path: text(location)?,
         target: text(target)?,
         passes_through,
+        climbs_out_of,
     })
 }
 
@@ -2886,7 +2892,7 @@ mod tests {
         bwrap_command::GrantLink {
             path: text(path),
             target: text(target),
-            passes_through: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -2930,29 +2936,78 @@ mod tests {
             [text(&real.join("sub/file")), text(&real.join("sub"))]
         );
         assert_eq!(moved.denied_paths, policy.denied_paths);
-        let alias = bwrap_command::AliasedGrant {
+        let alias = |real_path: &Path| bwrap_command::AliasedGrant {
+            real_path: text(real_path),
             links: vec![grant_link(&base.join("alias"), &real)],
-            inner: None,
+            ..Default::default()
         };
         assert_eq!(
             plan.aliased,
             [
-                alias.clone(),
+                alias(&real),
                 bwrap_command::AliasedGrant {
+                    real_path: text(&real.join("sub")),
                     links: vec![bwrap_command::GrantLink {
                         passes_through: vec![grant_link(&base.join("alias"), &real)],
                         ..grant_link(&base.join("chain"), &real)
                     }],
                     inner: Some(grant_link(&base.join("chain/sub"), &real.join("sub"))),
+                    ..Default::default()
                 },
                 bwrap_command::AliasedGrant {
+                    real_path: text(&real.join("sub/file")),
                     links: vec![grant_link(&base.join("file-link"), &real.join("sub/file"))],
-                    inner: None,
+                    ..Default::default()
                 },
-                alias,
+                bwrap_command::AliasedGrant {
+                    climbs_out_of: vec![text(&real.join("missing"))],
+                    ..alias(&real.join("sub"))
+                },
             ]
         );
         assert!(logger.get_buffer().contains("readwritePaths entry"));
+    }
+
+    #[test]
+    fn directories_that_a_grant_or_its_links_climb_out_of_are_recorded() {
+        use crate::mxc_common::logger::Mode;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        for directory in ["home", "data/staging", "data/app"] {
+            std::fs::create_dir_all(base.join(directory)).unwrap();
+        }
+        symlink(base.join("data/staging/../app"), base.join("home/app")).unwrap();
+
+        let policy = ContainerPolicy {
+            readwrite_paths: vec![
+                text(&base.join("home/app")),
+                text(&base.join("data/staging/../app")),
+            ],
+            ..Default::default()
+        };
+        let plan = resolve_granted_paths(&policy, &mut Logger::new(Mode::Buffer)).unwrap();
+        let app = text(&base.join("data/app"));
+        let staging = text(&base.join("data/staging"));
+        assert_eq!(
+            plan.aliased,
+            [
+                bwrap_command::AliasedGrant {
+                    real_path: app.clone(),
+                    links: vec![bwrap_command::GrantLink {
+                        climbs_out_of: vec![staging.clone()],
+                        ..grant_link(&base.join("home/app"), &base.join("data/app"))
+                    }],
+                    ..Default::default()
+                },
+                bwrap_command::AliasedGrant {
+                    real_path: app,
+                    climbs_out_of: vec![staging],
+                    ..Default::default()
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2989,11 +3044,13 @@ mod tests {
         assert_eq!(
             plan.aliased,
             [bwrap_command::AliasedGrant {
+                real_path: text(&base.join("var/tmp/project/src")),
                 links: vec![grant_link(&base.join("tmp"), &base.join("var/tmp"))],
                 inner: Some(grant_link(
                     &base.join("tmp/project"),
                     &base.join("var/tmp/project")
                 )),
+                ..Default::default()
             }]
         );
     }
