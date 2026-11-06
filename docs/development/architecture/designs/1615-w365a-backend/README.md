@@ -265,7 +265,7 @@ alternative to omission. Parsers preserve presence; backend code owns defaults.
 | Field | Allowed input and omitted/empty behavior |
 | --- | --- |
 | `w365Agents.provision.poolId` | Required string, 36-character hyphenated ASCII-hex GUID (`8-4-4-4-12`). No empty/blank value or automatic selection. |
-| Provision `userType` | `"HumanUser"` when supplied; empty/other values fail. Omission sends no `user-type` header and does not infer a human identity. |
+| Provision `userType` | `"Local"`, `"HumanUser"`, or `"Agentic"` when supplied; empty/other values fail. Omission sends no `user-type` header; MXC does not select an identity or session kind. |
 | Provision `userObjectId` | If supplied, a canonical GUID sent as `user-object-id`; empty/blank fails. Omission sends no header. |
 | Provision/stop/deprovision `cpBaseUrl` | Bare W365 service hostname for checkout and release, no scheme, credentials, query or path; otherwise use `W365A_CONTROLPLANE_URL`. Blank counts as absent. Missing/invalid resolved host fails before a service request. |
 | Provision/stop/deprovision `cpBearerToken` | Nonblank resource-specific token or `W365A_CP_TOKEN`; blank counts as absent. Missing resolved token fails. Explicit nonblank host requires its own explicit nonblank token. |
@@ -278,6 +278,17 @@ alternative to omission. Parsers preserve presence; backend code owns defaults.
 Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional
 protocol/port/capability overrides are outside the proposed initial scope.
+
+#### User types
+
+`userType` describes the account used for the Cloud PC session, not whether
+an agent or a human invokes MXC:
+
+| Value | Meaning |
+| --- | --- |
+| `Local` | Windows runs the session under a local account, not the selected owner's Microsoft Entra identity. `userObjectId` identifies the remote-control owner. No auxiliary token is allowed. |
+| `HumanUser` | A session for a human user's Microsoft Entra identity. An optional auxiliary token enables assertion-based startup and must represent that same human user. |
+| `Agentic` | A session for a Microsoft Entra Agent User identity. An auxiliary token is required and must represent the Agent User identified by `userObjectId`. |
 
 ### Process inputs and results
 
