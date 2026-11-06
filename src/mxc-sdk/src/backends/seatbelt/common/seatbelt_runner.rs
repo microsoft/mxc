@@ -35,8 +35,8 @@ use crate::learning_mode_core::capture_sibling_path;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    CaptureDenialsMode, CaptureDenialsOutput, ExecutionRequest, FailurePhase, ProxyAddress,
-    SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsMode, CaptureDenialsOutput, ExecutionRequest,
+    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
@@ -564,12 +564,21 @@ impl SeatbeltSandboxProcess {
         });
         if let Err(error) = &result {
             self.capture_error = Some((error.kind(), error.to_string()));
-            // SDK `wait` reports only `TimedOut`, so surface the capture failure here too.
-            if self.timed_out {
-                self.capture_warnings.push(format!(
-                    "Seatbelt captureDenials failed after the run timed out: {error}"
-                ));
+            if let Some(path) = &trace_path {
+                self.output_metadata = Some(SandboxOutputMetadata {
+                    capture_denials: None,
+                    capture_denials_error: Some(CaptureDenialsErrorOutput {
+                        message: error.to_string(),
+                        etl_path: path.to_string_lossy().into_owned(),
+                    }),
+                });
             }
+            // FFI waits expose only a status, so preserve capture diagnostics in warnings too.
+            self.capture_warnings.push(if self.timed_out {
+                format!("Seatbelt captureDenials failed after the run timed out: {error}")
+            } else {
+                format!("Seatbelt captureDenials failed: {error}")
+            });
         }
         result
     }
@@ -2009,7 +2018,11 @@ os.close(fd)
         assert!(trace.exists());
         assert!(!output.exists());
         assert!(!directory.path().join("denials.verbose.json").exists());
-        assert!(process.output_metadata().is_none());
+        let metadata = process.output_metadata().unwrap();
+        assert!(metadata.capture_denials.is_none());
+        let failure = metadata.capture_denials_error.as_ref().unwrap();
+        assert_eq!(failure.etl_path, trace.display().to_string());
+        assert!(failure.message.contains("did not write a report"));
     }
 
     #[test]

@@ -16,9 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # symlink). No config grants this directory, so the read is a default deny.
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-capture.XXXXXX)"
 LISTENER_PID=""
-# Unfinished background mxc-exec-mac runs, and a workload left by a killed one.
+# Unfinished background mxc-exec-mac runs.
 BACKGROUND_PIDS=""
-ORPHAN_WORKLOAD=""
 # Kills a workload shell and its children without relying on process groups.
 # Stopping the shell first keeps it from starting new children.
 kill_workload() {
@@ -29,11 +28,14 @@ kill_workload() {
 }
 cleanup_capture() {
     local pid
+    # Workloads outlive a killed mxc-exec-mac and its timeout, so stop them first.
+    for pid in $(pgrep -f "$TESTDIR/ungranted/"); do
+        kill_workload "$pid"
+    done
     for pid in $LISTENER_PID $BACKGROUND_PIDS; do
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
-    [ -z "$ORPHAN_WORKLOAD" ] || kill_workload "$ORPHAN_WORKLOAD"
     rm -rf "$TESTDIR" "$SEATBELT_TMP"
 }
 trap cleanup_capture EXIT
@@ -442,12 +444,10 @@ render_sentinel killed "$TESTDIR/out/killed.json"
 start_background "$SENTINEL_CONFIG" "$TESTDIR/killed.out"
 wait_for_collector "the run to kill starts" "$BG_PID" killed "$TESTDIR/killed.out"
 # The workload outlives a killed MXC; clean it up here.
-ORPHAN_WORKLOAD="$WORKLOAD"
 kill -KILL "$BG_PID"
 finish_background "$BG_PID" "$TESTDIR/killed.out"
 expect_collector_gone "killing mxc-exec-mac stops its log stream" "$COLLECTOR"
-kill_workload "$ORPHAN_WORKLOAD"
-ORPHAN_WORKLOAD=""
+kill_workload "$WORKLOAD"
 
 # --- collector's watchdog shell killed mid-run ---------------------------------
 

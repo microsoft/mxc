@@ -690,6 +690,59 @@ fn seatbelt_capture_failure_after_timeout_is_a_warning() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_capture_failure_after_exit_reports_the_kept_trace() {
+    use std::os::unix::fs::PermissionsExt;
+    // The workload makes the report directory read-only, so the report write
+    // fails after a normal exit while the open trace keeps its file.
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("report directory");
+    let request = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": format!("chmod a-w {}", out.display()) },
+        "filesystem": { "readwritePaths": [dir.path()] },
+        "seatbelt": {
+            "captureDenials": { "outputPath": out.join("denials.json"), "retainEtl": true }
+        }
+    });
+    let mut proc =
+        mxc_sdk::v1::dev::spawn_json(&request.to_string(), Default::default()).expect("spawn");
+    let error = proc.wait().expect_err("the report write fails").to_string();
+    let metadata = proc.output_metadata();
+    let warnings = proc.warnings();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    assert!(
+        warnings.iter().any(
+            |warning| warning.starts_with("Seatbelt captureDenials failed: ")
+                && warning.contains(&error)
+        ),
+        "{warnings:?}"
+    );
+
+    let failure = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials_error.as_ref())
+        .expect("captureDenialsError");
+    let trace = std::path::Path::new(&failure.etl_path);
+    assert!(error.contains(&failure.etl_path), "{error}");
+    assert_eq!(trace.parent(), Some(out.as_path()));
+    assert!(
+        failure.etl_path.ends_with(".seatbelt.log"),
+        "{}",
+        failure.etl_path
+    );
+    assert!(
+        failure.message.contains("captureDenials"),
+        "{}",
+        failure.message
+    );
+    assert!(trace.exists());
+}
+
 // Process lifetime: nothing the workload starts may outlive the run, including
 // a process that leaves MXC's session (`detached: true` calls `setsid()`).
 
