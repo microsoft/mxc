@@ -25,16 +25,17 @@ use crate::seatbelt_common::seatbelt_runner::apply_profile_before_exec;
 const LOG_TOOL: &str = "/usr/bin/log";
 // `log stream` only notices a closed stdout when it next writes, so it would
 // outlive a killed MXC. The shell kills it once MXC's end of stdin closes.
-// Both run in their own process group so `stop` can kill them together.
+// Both run in their own process group so `stop` can kill them together. The
+// shell signals its own group, not a saved PID that macOS may have reused.
 const WATCHDOG_SHELL: &str = "/bin/sh";
-const WATCHDOG_SCRIPT: &str =
-    r#""$@" & pid=$!; exec >/dev/null 2>&1; read _; kill -KILL "$pid"; wait "$pid""#;
+const WATCHDOG_SCRIPT: &str = r#""$@" & exec >/dev/null 2>&1; read _; kill -KILL 0"#;
 const MARKER_PROBE: &str = "/bin/ls";
 // Must exist: Seatbelt does not report lookups of missing paths.
 const MARKER_TARGET: &str = "/private/var/empty";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_RETRY: Duration = Duration::from_millis(250);
+const PROBE_POLL: Duration = Duration::from_millis(5);
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: u64 = 4 * 1024;
 pub(crate) const MAX_TRACE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -114,9 +115,8 @@ impl DenialCollector {
     /// this run's tagged Seatbelt reports. Raw lines are copied to `trace`.
     pub(crate) fn start(tag: &str, trace: Option<File>) -> Result<Self, String> {
         let mut child = Command::new(WATCHDOG_SHELL)
-            .args(["-c", WATCHDOG_SCRIPT, "sh", LOG_TOOL])
-            .args(["stream", "--style", "ndjson", "--predicate"])
-            .arg(stream_predicate(tag))
+            .args(["-c", WATCHDOG_SCRIPT, "sh"])
+            .args(log_command(tag))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -156,7 +156,8 @@ impl DenialCollector {
             stderr_reader: Some(stderr_reader),
             shared,
         };
-        match collector.wait_for_marker(CaptureMarker::Ready, READY_TIMEOUT) {
+        let ready_timeout = marker_timeout(READY_TIMEOUT);
+        match collector.wait_for_marker(CaptureMarker::Ready, ready_timeout) {
             Ok(true) => Ok(collector),
             Ok(false) => {
                 let stderr = collector.stop();
@@ -164,7 +165,7 @@ impl DenialCollector {
                     format!(
                         "captureDenials could not confirm within {}s that '{LOG_TOOL} stream' \
                          receives Seatbelt reports",
-                        READY_TIMEOUT.as_secs()
+                        ready_timeout.as_secs()
                     ),
                     &stderr,
                 ))
@@ -178,7 +179,7 @@ impl DenialCollector {
 
     /// Waits for late events, stops `log stream`, and returns what it captured.
     pub(crate) fn finish(mut self) -> Result<CollectedEvents, String> {
-        let drained = self.wait_for_marker(CaptureMarker::Done, DRAIN_TIMEOUT);
+        let drained = self.wait_for_marker(CaptureMarker::Done, marker_timeout(DRAIN_TIMEOUT));
         let stderr = self.stop();
         let drained = drained.map_err(|error| with_log_stderr(error, &stderr))?;
         let mut state = self.shared.lock();
@@ -196,7 +197,7 @@ impl DenialCollector {
     fn wait_for_marker(&self, marker: CaptureMarker, timeout: Duration) -> Result<bool, String> {
         let deadline = Instant::now() + timeout;
         loop {
-            emit_marker(&self.tag, marker)?;
+            emit_marker(&self.tag, marker, deadline)?;
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .min(MARKER_RETRY);
@@ -332,24 +333,97 @@ fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
 }
 
 /// Runs a short sandboxed probe whose only effect is one tagged deny report.
-fn emit_marker(tag: &str, marker: CaptureMarker) -> Result<(), String> {
+/// A probe still running at `deadline` is killed.
+fn emit_marker(tag: &str, marker: CaptureMarker, deadline: Instant) -> Result<(), String> {
     let profile = format!(
         r#"(version 1)(allow default)(deny file-read-metadata (with message "{tag}:{}") (literal "{MARKER_TARGET}"))"#,
         marker.as_str()
     );
     let profile = CString::new(profile)
         .map_err(|_| "captureDenials marker profile contains a NUL byte".to_string())?;
-    let mut command = Command::new(MARKER_PROBE);
+    let mut command = marker_command();
     command
-        .args(["-d", MARKER_TARGET])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     apply_profile_before_exec(&mut command, profile);
-    command
-        .status()
-        .map(|_| ())
-        .map_err(|e| format!("captureDenials could not run its log marker probe: {e}"))
+    let mut probe = command
+        .spawn()
+        .map_err(|e| format!("captureDenials could not run its log marker probe: {e}"))?;
+    loop {
+        match probe.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(PROBE_POLL),
+            result => {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                return result.map(|_| ()).map_err(|e| {
+                    format!("captureDenials could not wait for its log marker probe: {e}")
+                });
+            }
+        }
+    }
+}
+
+fn log_command(tag: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(command) = test_tools::get().log {
+        return command;
+    }
+    [LOG_TOOL, "stream", "--style", "ndjson", "--predicate"]
+        .into_iter()
+        .map(str::to_string)
+        .chain([stream_predicate(tag)])
+        .collect()
+}
+
+fn marker_command() -> Command {
+    #[cfg(test)]
+    if let Some(command) = test_tools::get().marker {
+        let mut probe = Command::new(&command[0]);
+        probe.args(&command[1..]);
+        return probe;
+    }
+    let mut probe = Command::new(MARKER_PROBE);
+    probe.args(["-d", MARKER_TARGET]);
+    probe
+}
+
+fn marker_timeout(default: Duration) -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = test_tools::get().timeout {
+        return timeout;
+    }
+    default
+}
+
+/// Lets tests replace the collector's commands and timeouts on their thread.
+#[cfg(test)]
+pub(crate) mod test_tools {
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    #[derive(Clone, Default)]
+    pub(crate) struct TestTools {
+        /// Replaces `log stream` and its arguments.
+        pub(crate) log: Option<Vec<String>>,
+        /// Replaces the marker probe and its arguments.
+        pub(crate) marker: Option<Vec<String>>,
+        /// Replaces both the readiness and drain timeouts.
+        pub(crate) timeout: Option<Duration>,
+    }
+
+    thread_local! {
+        static TOOLS: RefCell<TestTools> = RefCell::default();
+    }
+
+    pub(crate) fn set(tools: TestTools) {
+        TOOLS.with(|current| *current.borrow_mut() = tools);
+    }
+
+    pub(super) fn get() -> TestTools {
+        TOOLS.with(|current| current.borrow().clone())
+    }
 }
 
 fn with_log_stderr(message: String, stderr: &str) -> String {
@@ -483,6 +557,80 @@ mod tests {
             .map(|d| d.resource.as_str())
             .collect();
         assert_eq!(resources, ["/first", "/second"]);
+    }
+
+    fn process_exits(pid: libc::pid_t) -> bool {
+        (0..100).any(|_| {
+            // SAFETY: signal 0 only checks whether the process exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if alive {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !alive
+        })
+    }
+
+    #[test]
+    fn watchdog_kills_its_group_after_the_collector_exits() {
+        // The stand-in collector exits at once and leaves a process behind.
+        let mut watchdog = Command::new(WATCHDOG_SHELL)
+            .args(["-c", WATCHDOG_SCRIPT, "sh", "/bin/sh", "-c"])
+            .arg("/bin/sleep 60 & echo $!")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(watchdog.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let leftover: libc::pid_t = line.trim().parse().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        drop(watchdog.stdin.take());
+        watchdog.wait().unwrap();
+
+        let gone = process_exits(leftover);
+        if !gone {
+            // SAFETY: the test owns this sleep process.
+            unsafe { libc::kill(leftover, libc::SIGKILL) };
+        }
+        assert!(gone, "the watchdog left its process group running");
+    }
+
+    fn stalled_marker() -> test_tools::TestTools {
+        test_tools::TestTools {
+            marker: Some(vec!["/bin/sleep".to_string(), "60".to_string()]),
+            timeout: Some(Duration::from_secs(1)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stalled_marker_probe_cannot_hold_startup_past_its_deadline() {
+        test_tools::set(stalled_marker());
+        let started = Instant::now();
+
+        let error = DenialCollector::start("mxc-capture-stalledstart", None)
+            .err()
+            .expect("readiness fails");
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(error.contains("could not confirm within 1s"), "{error}");
+    }
+
+    #[test]
+    fn a_stalled_marker_probe_cannot_hold_the_drain_past_its_deadline() {
+        let collector = DenialCollector::start("mxc-capture-stalleddrain", None)
+            .unwrap_or_else(|error| panic!("log stream unavailable on this host: {error}"));
+        test_tools::set(stalled_marker());
+        let started = Instant::now();
+
+        let collected = collector.finish().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!collected.drained);
     }
 
     #[test]

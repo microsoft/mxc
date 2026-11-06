@@ -64,6 +64,14 @@ use crate::seatbelt_common::run_marker::RunMarker;
 /// How long cleanup may keep finding new processes in a run before it gives up.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn exit_cleanup_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = tests::EXIT_CLEANUP_TIMEOUT.get() {
+        return timeout;
+    }
+    CLEANUP_TIMEOUT
+}
+
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
 /// override the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` values we inject (or
@@ -550,6 +558,13 @@ impl SeatbeltSandboxProcess {
                      terminated",
                 ));
             }
+            if !self.cleanup_failures.is_empty() {
+                // Surviving processes can keep causing denials after collection ends.
+                return Err(std::io::Error::other(format!(
+                    "captureDenials did not write a report: {}",
+                    self.cleanup_failures.join("; ")
+                )));
+            }
             self.write_capture(collected, &output_path, trace_path.as_deref(), exit_code)
         });
         let result = result.map_err(|error| match &trace_path {
@@ -887,7 +902,7 @@ impl SeatbeltSandboxProcess {
             return;
         }
         self.members_cleaned = true;
-        if let Err(error) = self.marker.kill_members(CLEANUP_TIMEOUT) {
+        if let Err(error) = self.marker.kill_members(exit_cleanup_timeout()) {
             self.cleanup_failures.push(format!(
                 "Seatbelt: the process exited, but processes it started could not be \
                  terminated: {error}"
@@ -1240,6 +1255,12 @@ mod tests {
     use crate::mxc_common::models::{
         ExecutionRequest, NetworkAction, NetworkEgressPolicy, ProxyAddress, SeatbeltConfig,
     };
+
+    thread_local! {
+        /// Shortens cleanup after a normal exit so a test can make it fail.
+        pub(super) static EXIT_CLEANUP_TIMEOUT: std::cell::Cell<Option<Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
 
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {
@@ -1978,6 +1999,87 @@ os.close(fd)
         }
     }
 
+    /// Runs a capture request whose `log stream` is replaced by `log`, checks
+    /// that it was rejected before the workload ran, and returns the error.
+    fn rejected_capture_start(log: &str, directory: &Path) -> String {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+        use crate::seatbelt_common::denial_capture::test_tools;
+
+        test_tools::set(test_tools::TestTools {
+            log: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                log.to_string(),
+            ]),
+            timeout: Some(Duration::from_secs(1)),
+            ..Default::default()
+        });
+        let sentinel = directory.join("workload-ran");
+        let output_dir = directory.join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        let mut request = base_request();
+        request.script_code = format!("touch '{}'", sentinel.display());
+        request.policy.readwrite_paths = vec![directory.display().to_string()];
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(output_dir.join("denials.json").display().to_string()),
+            retain_etl: true,
+            ..Default::default()
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let started = Instant::now();
+
+        let error = match SeatbeltScriptRunner::new().spawn(&request, &mut logger, StdioMode::Pipes)
+        {
+            Ok(_) => panic!("the workload started without a ready log stream"),
+            Err(response) => response.error_message,
+        };
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!sentinel.exists(), "the workload ran");
+        let left: Vec<_> = std::fs::read_dir(&output_dir).unwrap().collect();
+        assert!(left.is_empty(), "the trace was not removed: {left:?}");
+        error
+    }
+
+    #[test]
+    fn a_log_stream_that_never_becomes_ready_rejects_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let pid_file = directory.join("collector.pid");
+
+        let error = rejected_capture_start(
+            &format!("echo $$ > '{}'; exec /bin/sleep 60", pid_file.display()),
+            &directory,
+        );
+
+        assert!(error.contains("could not confirm within 1s"), "{error}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stopped = (0..100).any(|_| {
+            // SAFETY: signal 0 only checks whether the process exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if alive {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !alive
+        });
+        assert!(stopped, "the stand-in log stream was left running");
+    }
+
+    #[test]
+    fn a_log_stream_that_exits_before_ready_rejects_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+
+        let error = rejected_capture_start("echo 'log: not permitted' >&2; exit 1", &directory);
+
+        assert!(error.contains("exited unexpectedly"), "{error}");
+        assert!(error.contains("log: not permitted"), "{error}");
+    }
+
     #[test]
     fn launch_failure_after_capture_start_removes_trace() {
         let directory = tempfile::tempdir().unwrap();
@@ -2023,6 +2125,48 @@ os.close(fd)
         let failure = metadata.capture_denials_error.as_ref().unwrap();
         assert_eq!(failure.etl_path, trace.display().to_string());
         assert!(failure.message.contains("did not write a report"));
+    }
+
+    #[test]
+    fn capture_after_exit_cleanup_failure_skips_report_and_keeps_trace() {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let mut request = base_request();
+        // Cleanup finds the leftover sleep, then fails because no time is left.
+        request.script_code = "/bin/sleep 30 & exit 0".to_string();
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(directory.join("denials.json").display().to_string()),
+            retain_etl: true,
+            ..Default::default()
+        });
+        EXIT_CLEANUP_TIMEOUT.set(Some(Duration::ZERO));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+
+        let error = process.wait().unwrap_err().to_string();
+
+        assert!(error.contains("did not write a report"), "{error}");
+        assert!(error.contains("could not be terminated"), "{error}");
+        let failure = process
+            .output_metadata()
+            .and_then(|metadata| metadata.capture_denials_error.as_ref())
+            .expect("captureDenialsError");
+        assert!(error.contains(&failure.etl_path), "{error}");
+        assert!(Path::new(&failure.etl_path).exists());
+        let reports: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".json"))
+            .collect();
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(process
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("could not be terminated")));
     }
 
     #[test]

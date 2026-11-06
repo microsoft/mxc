@@ -3,7 +3,7 @@
     "version": "1.1.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "cat {{TESTDIR}}/ungranted/{{NAME}}.txt 2>/dev/null || echo CAPTURE_SENTINEL_BLOCKED; until [ -e {{TESTDIR}}/gate/{{NAME}} ]; do sleep 0.1; done; cat {{TESTDIR}}/ungranted/{{NAME}}.txt 2>/dev/null || echo CAPTURE_SENTINEL_BLOCKED",
+        "commandLine": "cat {{TESTDIR}}/ungranted/{{NAME}}.txt 2>/dev/null || echo CAPTURE_SENTINEL_BLOCKED; until [ -e {{TESTDIR}}/gate/{{NAME}} ]; do sleep 0.1; done; cat {{TESTDIR}}/ungranted/{{NAME}}-after.txt 2>/dev/null || echo CAPTURE_SENTINEL_BLOCKED",
         "timeout": 60000
     },
     "filesystem": {

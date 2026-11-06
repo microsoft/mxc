@@ -98,20 +98,22 @@ verbose path comes from the report name.
 | Limit | Value |
 |---|---|
 | Line size | 64 KiB |
-| Events | 100,000 |
-| Bytes held in memory | 16 MiB (new) |
 | Unique denials | 10,000 |
 | Verbose groups | 4,096 |
+| Verbose signature bytes | 16 MiB (shared with Windows) |
+| `.seatbelt.log` size | 1 GiB |
 
-After a limit is reached, MXC stops storing new events but keeps reading the
-log stream. This lets the end-of-run marker arrive and lets teardown finish.
+MXC counts repeated denials as they arrive instead of storing each event, so
+repeats can't push other denials out. After a limit is reached, MXC only counts
+new denials but keeps reading the log stream, so the end-of-run marker arrives
+and teardown finishes.
 
 **Operations:**
 
 | Operation | Change |
 |---|---|
 | Create-and-run execution | Report written before the result returns |
-| Streaming (pipes and PTY) | Report written on `wait` |
+| Streaming (pipes and PTY) | Report written on `wait`; dropping or disposing without `wait` writes no report |
 | Discovery | Seatbelt reports the `captureDenials` capability |
 | `mxc-exec-mac --audit` | `allow` mode with a temp report |
 | Container lifecycle operations | Not applicable |
@@ -133,8 +135,8 @@ capture after parsing.
 - The `allow`-mode enforcement warning.
 - An incomplete-capture warning when MXC can't confirm it received every log
   event.
-- A capture-failure warning when the run also times out, naming any retained
-  trace.
+- A capture-failure warning whenever the report can't be written, naming any
+  retained trace.
 
 ## Execution and container lifecycle support
 
@@ -167,10 +169,10 @@ capture after parsing.
   Windows field names, so both backends share one capture shape.
 - **Output metadata:** no new fields. Seatbelt reports the retained
   `.seatbelt.log` path in the existing `etlPath`. Seatbelt reports capture
-  failures as run errors and never sets `captureDenialsError`. When a trace is
-  retained, the error names its path. If the run also times out, the SDK
-  `wait` returns only the timeout, so MXC adds the capture failure and any
-  trace path to the process warnings.
+  failures as run errors and also adds them to the process warnings. When a
+  trace is retained, the error names its path and `captureDenialsError` holds
+  the message and `etlPath`. If the run also times out, the SDK `wait` returns
+  only the timeout, and the warning carries the capture failure.
 - **V2 changes:** `retainEtl` and `etlPath` are Windows-specific names. As
   part of #1580, the
   [SDK major-version notes](../../versioning.md#sdk-major-version-namespaces)
@@ -253,7 +255,8 @@ sequenceDiagram
 
 Host: the macOS hosts in the `macos` job of
 `.github/workflows/Validation.Tests.Matrix.Job.yml`. Suite:
-`tests/scripts/run_seatbelt_capture_denials_test.sh`, run by
+`tests/scripts/run_seatbelt_capture_denials_test.sh` and the capture cases in
+`tests/scripts/run_seatbelt_network_test.sh`, run by
 `run_seatbelt_all_tests.sh` through
 `scripts/ci/run_backend_validation_tests.sh seatbelt`.
 
@@ -268,7 +271,14 @@ Host: the macOS hosts in the `macos` job of
 | Timeout plus report-write failure | CLI error includes both causes; SDK `wait` returns `TimedOut` with the capture failure in warnings | Existing, extended |
 | `profileOverride`, `1.0.0` field, `--audit` with capture | Rejected before start | Existing and new |
 | Two overlapping runs, same `outputPath` | Separate reports; each excludes the other's sentinel; no collectors left | New |
-| Byte budget reached before event limit | `deniedResourcesTruncated: true`, run completes | New |
+| 11,000 repeats of 10 denials, then one new denial | Report not truncated; new denial listed; repeats counted | New |
+| 15,000 different denials | 10,000 listed, `deniedResourcesTruncated` and `actionableLimitReached` set; no collector left | New |
+| External egress with `egress.default` deny or allow | `block` blocks and lists it; `allow` connects and lists it; an egress grant isn't listed | New |
+| `log stream` watchdog shell killed | Run completes; a read after the kill is listed; not truncated | New |
+| `log stream` never ready or exits early | Rejected before the workload starts; collector stopped | New (unit) |
+| Run processes survive cleanup after exit | Error, no report; retained trace kept | New (unit) |
+| Streaming pipes and PTY | Report on `wait`; drop without `wait` leaves no files | New, streaming tests in macOS CI |
+| Node `dispose()` before exit | No report or trace written | New, Node integration tests in macOS CI |
 | `retainEtl` | `.seatbelt.log` exists, and the pointer's `etlPath` names it | New |
 | Incomplete drain | CLI prints warning | New |
 | Termination failure | Error returned; no report files remain | New (unit-level; can't force on a real host) |
@@ -282,7 +292,7 @@ Host: the macOS hosts in the `macos` job of
 
 1. This spec PR.
 2. #1580, updated to match this spec: Seatbelt capture, development contract
-   field, `--audit`, shared report writer, byte budget, completeness and
+   field, `--audit`, shared report writer, repeat counting, completeness and
    warning fixes, and discovery. It also records the V2 rename and opens the
    V2 tracking issue.
 3. `retainEtl` for Seatbelt, reported in `etlPath`.

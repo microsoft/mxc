@@ -44,6 +44,7 @@ echo "CAPTURE_SECRET_CONTENT" >"$TESTDIR/ungranted/secret.txt"
 echo "CAPTURE_DENIED_CONTENT" >"$TESTDIR/denied/secret.txt"
 for name in overlap_a overlap_b drain killed watchdog; do
     echo "CAPTURE_SENTINEL_CONTENT" >"$TESTDIR/ungranted/$name.txt"
+    echo "CAPTURE_SENTINEL_CONTENT" >"$TESTDIR/ungranted/$name-after.txt"
 done
 chmod -R a+rX "$TESTDIR"
 SECRET="$TESTDIR/ungranted/secret.txt"
@@ -78,7 +79,7 @@ EOF
 }
 
 # Render the sentinel workload to its own file so several can run at once.
-# It reads its file, waits for open_gate NAME, then reads it again.
+# It reads NAME.txt, waits for open_gate NAME, then reads NAME-after.txt.
 SENTINEL_CONFIG=""
 render_sentinel() {
     local name="$1" output="$2" rendered
@@ -122,7 +123,7 @@ wait_for_collector() {
             COLLECTOR="$(pgrep -P "$shell" -f '/usr/bin/log stream')"
             WATCHDOG="$shell"
         done
-        WORKLOAD="$(pgrep -P "$mxc" -f "ungranted/$name.txt")"
+        WORKLOAD="$(pgrep -P "$mxc" -f "ungranted/$name")"
         [ -n "$COLLECTOR" ] && [ -n "$WORKLOAD" ] && return
         kill -0 "$mxc" 2>/dev/null || fail "$label (mxc-exec-mac exited early)" "$(cat "$output")"
         sleep 0.1
@@ -359,9 +360,10 @@ done
 
 # --- repeated denials ---------------------------------------------------------
 
-# 40,000 denials of ~1 KB paths (10 files read 4,000 times each), then one new
-# denial. Repeats are counted as they arrive, so none of them may push out the
-# late denial or mark the report truncated.
+# 11,000 denials of ~1 KB paths (10 files read 1,100 times each), then one new
+# denial. Repeats are counted as they arrive, so even more repeats than the
+# 10,000-denial limit may not push out the late denial or mark the report
+# truncated.
 LONGDIR="$TESTDIR/ungranted/$(/usr/bin/python3 -c 'print("/".join(["d" * 200] * 4))')"
 mkdir -p "$LONGDIR"
 for name in f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 late; do echo x >"$LONGDIR/$name"; done
@@ -378,15 +380,48 @@ expect_listed "a denial after heavy repeats is still listed" file "$LONGDIR/late
 import json, sys
 summary = json.load(open(sys.argv[1]))["summary"]
 assert not summary["processedEventsTruncated"], summary
-assert summary["totalOccurrences"] >= 40001, summary
+assert summary["totalOccurrences"] > 10000, summary
 EOF
-pass "every repeated denial is counted"
+pass "repeated denials are counted past the 10,000-denial limit"
 rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+
+# --- different-denial limit ---------------------------------------------------
+
+# 15,000 different denials; the margin covers reports `log stream` drops under
+# load. The report keeps the first 10,000, and the run still finishes cleanly.
+MANYDIR="$TESTDIR/ungranted/many"
+mkdir -p "$MANYDIR"
+/usr/bin/python3 - "$MANYDIR" <<'EOF' || fail "could not create the limit test files"
+import os, sys
+for i in range(15000):
+    open(os.path.join(sys.argv[1], str(i)), "w").close()
+EOF
+chmod -R a+rX "$MANYDIR"
+# The workload waits for open_gate many, so this run's collector can be found.
+start_background "$(render seatbelt_capture_denials_unique_limit.json TESTDIR "$TESTDIR" \
+    MANYDIR "$MANYDIR" COUNT 15000 OUTPUT "$TESTDIR/out/limit.json")" "$TESTDIR/limit.out"
+wait_for_collector "the different-denial limit run starts" "$BG_PID" many "$TESTDIR/limit.out"
+open_gate many
+finish_background "$BG_PID" "$TESTDIR/limit.out"
+expect_ok "a run past the different-denial limit completes" "CAPTURE_UNIQUE_LOOP_DONE"
+read_pointer "a run past the different-denial limit writes a report"
+[ "$(pointer_field deniedResourcesTruncated)" = True ] ||
+    fail "a report at the different-denial limit is not marked truncated" "$POINTER"
+pass "a report at the different-denial limit is marked truncated"
+/usr/bin/python3 - "$REPORT" "${REPORT%.json}.verbose.json" <<'EOF' || fail "the different-denial limit was not applied" "$POINTER"
+import json, sys
+report, verbose = (json.load(open(path)) for path in sys.argv[1:])
+assert len(report["denials"]) == 10000, len(report["denials"])
+assert verbose["summary"]["actionableLimitReached"], verbose["summary"]
+EOF
+pass "the report stops at 10,000 different denials"
+expect_collector_gone "a run past the different-denial limit stops its log stream" "$COLLECTOR"
+rm -rf "$MANYDIR" "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- overlapping runs with the same outputPath ---------------------------------
 
-# Each run reads its own sentinel again once both collectors are running, so
-# a collector not filtered to its own run would list both reads.
+# Each run reads its after-gate file once both collectors are running, so
+# a collector not filtered to its own run would list the other run's reads.
 render_sentinel overlap_a "$TESTDIR/out/overlap.json"
 CONFIG_A="$SENTINEL_CONFIG"
 render_sentinel overlap_b "$TESTDIR/out/overlap.json"
@@ -405,16 +440,16 @@ finish_background "$PID_A" "$TESTDIR/overlap_a.out"
 expect_ok "overlapping run A enforces the policy" "CAPTURE_SENTINEL_BLOCKED"
 read_pointer "overlapping run A writes a report"
 REPORT_A="$REPORT"
-expect_listed "overlapping run A lists its own read" file "$TESTDIR/ungranted/overlap_a.txt" read
+expect_listed "overlapping run A lists its own read" file "$TESTDIR/ungranted/overlap_a-after.txt" read
 finish_background "$PID_B" "$TESTDIR/overlap_b.out"
 expect_ok "overlapping run B enforces the policy" "CAPTURE_SENTINEL_BLOCKED"
 read_pointer "overlapping run B writes a report"
 REPORT_B="$REPORT"
-expect_listed "overlapping run B lists its own read" file "$TESTDIR/ungranted/overlap_b.txt" read
+expect_listed "overlapping run B lists its own read" file "$TESTDIR/ungranted/overlap_b-after.txt" read
 
 [ "$REPORT_A" != "$REPORT_B" ] || fail "overlapping runs wrote the same report: $REPORT_A"
-! grep -qF "overlap_b.txt" "$REPORT_A" || fail "run A's report lists run B's read" "$(cat "$REPORT_A")"
-! grep -qF "overlap_a.txt" "$REPORT_B" || fail "run B's report lists run A's read" "$(cat "$REPORT_B")"
+! grep -qF "ungranted/overlap_b" "$REPORT_A" || fail "run A's report lists run B's read" "$(cat "$REPORT_A")"
+! grep -qF "ungranted/overlap_a" "$REPORT_B" || fail "run B's report lists run A's read" "$(cat "$REPORT_B")"
 pass "each overlapping report excludes the other run's read"
 expect_collector_gone "overlapping run A's log stream stopped" "$COLLECTOR_A"
 expect_collector_gone "overlapping run B's log stream stopped" "$COLLECTOR_B"
@@ -468,8 +503,12 @@ if kill -0 "$BG_PID" 2>/dev/null; then
 fi
 finish_background "$BG_PID" "$TESTDIR/watchdog.out"
 expect_ok "a run whose watchdog shell was killed completes" "CAPTURE_SENTINEL_BLOCKED"
+! grep -qF "could not confirm that all sandbox log events" <<<"$OUT" ||
+    fail "a run whose watchdog shell was killed did not drain its log stream" "$OUT"
 read_pointer "a run whose watchdog shell was killed writes a report"
-expect_listed "the report lists the read made after the watchdog died" file "$TESTDIR/ungranted/watchdog.txt" read
+[ "$(pointer_field deniedResourcesTruncated)" = False ] ||
+    fail "a run whose watchdog shell was killed is marked truncated" "$POINTER"
+expect_listed "the report lists the read made after the watchdog died" file "$TESTDIR/ungranted/watchdog-after.txt" read
 expect_collector_gone "the orphaned log stream was stopped" "$COLLECTOR"
 
 # --- UI denials under guiAccess ---------------------------------------------

@@ -3,7 +3,7 @@
     "version": "1.1.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "/usr/bin/python3 -c 'for n in range(4000):\n for i in range(10):\n  try: open(\"{{LONGDIR}}/f%d\" % i).close()\n  except OSError: pass\ntry: open(\"{{LONGDIR}}/late\").close()\nexcept OSError: pass\nprint(\"CAPTURE_REPEAT_LOOP_DONE\")'",
+        "commandLine": "/usr/bin/python3 -c 'for n in range(1100):\n for i in range(10):\n  try: open(\"{{LONGDIR}}/f%d\" % i).close()\n  except OSError: pass\ntry: open(\"{{LONGDIR}}/late\").close()\nexcept OSError: pass\nprint(\"CAPTURE_REPEAT_LOOP_DONE\")'",
         "timeout": 120000
     },
     "filesystem": {
