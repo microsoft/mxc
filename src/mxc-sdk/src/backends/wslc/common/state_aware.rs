@@ -765,17 +765,27 @@ fn validate_session_sizing(config: Option<&WslcProvisionSessionConfig>) -> Resul
 /// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
 fn map_daemon_error(err: DaemonError) -> MxcError {
     match err {
-        DaemonError::Daemon { kind, message } => match kind {
-            ErrKind::NotProvisioned => MxcError::not_provisioned(message),
-            ErrKind::NotStarted => MxcError::not_started(message),
-            ErrKind::Unavailable => MxcError::backend_unavailable(message),
-            ErrKind::Rejected => MxcError::policy_validation(message),
-            ErrKind::Busy
-            | ErrKind::NotReady
-            | ErrKind::Protocol
-            | ErrKind::Backend
-            | ErrKind::Unknown => MxcError::backend_error(message),
-        },
+        DaemonError::Daemon {
+            kind,
+            message,
+            api_failure,
+        } => {
+            let error = match kind {
+                ErrKind::NotProvisioned => MxcError::not_provisioned(message),
+                ErrKind::NotStarted => MxcError::not_started(message),
+                ErrKind::Unavailable => MxcError::backend_unavailable(message),
+                ErrKind::Rejected => MxcError::policy_validation(message),
+                ErrKind::Busy
+                | ErrKind::NotReady
+                | ErrKind::Protocol
+                | ErrKind::Backend
+                | ErrKind::Unknown => MxcError::backend_error(message),
+            };
+            match api_failure {
+                Some(api_failure) => error.with_api_failure(api_failure.into()),
+                None => error,
+            }
+        }
         DaemonError::Transport(e) => MxcError::backend_error(format!("{e:#}")),
     }
 }
@@ -939,7 +949,9 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod stdin_relay_tests {
     use super::*;
     use crate::wslc_common::daemon_client::test_daemon::TestDaemon;
-    use crate::wslc_common::daemon_protocol::{DaemonRequest, DaemonResponse, StreamFrame};
+    use crate::wslc_common::daemon_protocol::{
+        DaemonApiFailure, DaemonRequest, DaemonResponse, StreamFrame,
+    };
     use std::os::windows::io::BorrowedHandle;
     use std::time::Duration;
 
@@ -1019,6 +1031,59 @@ mod stdin_relay_tests {
         exec.reply(&StreamFrame::Exit { code: 0 });
 
         assert_eq!(running.join().unwrap().unwrap(), ExecOutcome::Exited(0));
+    }
+
+    fn process_launch_failure() -> StreamFrame {
+        StreamFrame::Error {
+            message: "process launch failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcCreateContainerProcess".to_string(),
+                native_code: Some("0x80004005".to_string()),
+            }),
+        }
+    }
+
+    fn assert_process_launch_failure(error: &MxcError) {
+        assert_eq!(
+            error.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(error.message, "exec failed: process launch failed");
+        assert_eq!(error.operation(), Some("WslcCreateContainerProcess"));
+        assert_eq!(error.native_code(), Some("0x80004005"));
+    }
+
+    #[test]
+    fn a_relayed_exec_preserves_structured_daemon_failure() {
+        let daemon = TestDaemon::start();
+        let client = daemon.client.clone();
+        let running = std::thread::spawn(move || {
+            relay_exec(client, config(), None::<std::io::Empty>).unwrap_err()
+        });
+
+        let mut exec = daemon.next();
+        exec.reply(&DaemonResponse::Ok);
+        exec.reply(&process_launch_failure());
+
+        assert_process_launch_failure(&running.join().unwrap());
+    }
+
+    #[test]
+    fn a_piped_exec_preserves_structured_daemon_failure() {
+        let daemon = TestDaemon::start();
+        let handle = exec_piped(
+            daemon.client.clone(),
+            config(),
+            "exec-1".to_string(),
+            "run-1".to_string(),
+            false,
+        )
+        .unwrap();
+        let mut exec = daemon.next();
+        exec.reply(&DaemonResponse::Ok);
+        exec.reply(&process_launch_failure());
+
+        assert_process_launch_failure(&within("the waiter", handle.waiter).unwrap_err());
     }
 
     #[test]
@@ -1995,6 +2060,7 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::NotProvisioned,
             message: "unknown sandbox".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
@@ -2007,6 +2073,7 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::NotStarted,
             message: "not started".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
@@ -2019,6 +2086,7 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::Busy,
             message: "busy".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
@@ -2031,6 +2099,7 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::Unavailable,
             message: "WSLc components are missing".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
@@ -2043,6 +2112,7 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::Rejected,
             message: "network.allowLocalNetwork=true is not supported".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
@@ -2055,10 +2125,26 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::Unknown,
             message: "from a newer daemon".to_string(),
+            api_failure: None,
         });
         assert_eq!(
             err.code,
             crate::mxc_common::mxc_error::MxcErrorCode::BackendError
         );
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_api_failure() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Backend,
+            message: "WslcStartContainer failed with HRESULT 0x80072740: collision".to_string(),
+            api_failure: Some(crate::wslc_common::daemon_protocol::DaemonApiFailure {
+                operation: "WslcStartContainer".to_string(),
+                native_code: Some("0x80072740".to_string()),
+            }),
+        });
+
+        assert_eq!(err.operation(), Some("WslcStartContainer"));
+        assert_eq!(err.native_code(), Some("0x80072740"));
     }
 }

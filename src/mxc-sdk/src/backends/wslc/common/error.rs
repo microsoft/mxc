@@ -17,8 +17,47 @@
 use std::fmt;
 
 use crate::mxc_common::models::{FailurePhase, ScriptResponse};
+use crate::mxc_common::mxc_error::ApiFailure;
 
 use crate::wslc_common::wslc_bindings::HRESULT;
+
+#[derive(Debug)]
+pub struct WslcStepError {
+    pub failure_phase: FailurePhase,
+    pub error_message: String,
+    pub api_failure: Option<Box<ApiFailure>>,
+}
+
+impl WslcStepError {
+    pub fn with_api_failure(mut self, failure: ApiFailure) -> Self {
+        self.api_failure = Some(Box::new(failure));
+        self
+    }
+
+    pub fn into_response(self) -> ScriptResponse {
+        ScriptResponse::failed(self.failure_phase, &self.error_message)
+    }
+}
+
+impl From<ScriptResponse> for WslcStepError {
+    fn from(response: ScriptResponse) -> Self {
+        Self {
+            failure_phase: response.failure_phase,
+            error_message: response.error_message,
+            api_failure: None,
+        }
+    }
+}
+
+impl From<WslcStepError> for ScriptResponse {
+    fn from(error: WslcStepError) -> Self {
+        error.into_response()
+    }
+}
+
+pub(crate) fn sdk_api_failure(operation: &str, hr: HRESULT) -> ApiFailure {
+    ApiFailure::new(operation).with_native_code(format!("{:#010x}", hr as u32))
+}
 
 /// A WSLc backend failure, tagged with the phase it is attributable to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +105,14 @@ impl WslcError {
         }
     }
 
+    pub(crate) fn into_step_error(self) -> WslcStepError {
+        WslcStepError {
+            failure_phase: self.failure_phase(),
+            error_message: self.to_string(),
+            api_failure: None,
+        }
+    }
+
     /// Render as a [`ScriptResponse`] carrying the message verbatim.
     pub(crate) fn into_response(self) -> ScriptResponse {
         ScriptResponse::failed(self.failure_phase(), &self.to_string())
@@ -98,6 +145,12 @@ impl fmt::Display for WslcError {
 impl From<WslcError> for ScriptResponse {
     fn from(err: WslcError) -> Self {
         err.into_response()
+    }
+}
+
+impl From<WslcError> for WslcStepError {
+    fn from(err: WslcError) -> Self {
+        err.into_step_error()
     }
 }
 
@@ -156,6 +209,21 @@ mod tests {
         assert_eq!(typed.exit_code, -1);
         assert_eq!(typed.error_message, "bring-up failed");
         assert_eq!(typed.failure_phase, FailurePhase::LaunchFailed);
+    }
+
+    #[test]
+    fn a_step_error_becomes_the_response_create_and_run_returns() {
+        let hr = 0x8007_2740_u32 as HRESULT;
+        let error = WslcError::sdk("WslcStartContainer failed", hr, "collision");
+        let create_and_run = error.clone().into_response();
+        let step = error
+            .into_step_error()
+            .with_api_failure(sdk_api_failure("WslcStartContainer", hr));
+
+        assert_eq!(
+            serde_json::to_value(step.into_response()).unwrap(),
+            serde_json::to_value(create_and_run).unwrap()
+        );
     }
 
     /// A WSLc rejection has to cost the caller the same exit code a rejection
