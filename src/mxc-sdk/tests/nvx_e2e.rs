@@ -297,6 +297,15 @@ mod windows_x64 {
     }
 
     fn executor_output_with_mode(request: &Value, missing_bundle: bool, dry_run: bool) -> Output {
+        executor_output_with_env(request, missing_bundle, dry_run, &[])
+    }
+
+    fn executor_output_with_env(
+        request: &Value,
+        missing_bundle: bool,
+        dry_run: bool,
+        environment: &[(&str, &std::ffi::OsStr)],
+    ) -> Output {
         let directory = tempfile::tempdir().expect("executor request directory");
         let path = directory.path().join("request.json");
         std::fs::write(&path, request.to_string()).expect("write executor request");
@@ -309,6 +318,7 @@ mod windows_x64 {
             command.env(BUNDLE_ENV, directory.path().join("absent"));
         }
         let child = command
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -939,6 +949,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .arg(&request_path)
                 .env("TEMP", &state)
                 .env("TMP", &state)
+                .env("LOCALAPPDATA", &state)
                 .stdin(Stdio::null())
                 .stdout(std::fs::File::create(&stdout_path).expect("stdout file"))
                 .stderr(std::fs::File::create(&stderr_path).expect("stderr file"))
@@ -997,13 +1008,20 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             WAIT_OBJECT_0,
             "owned OpenVMM is still running",
         );
-        assert!(
-            std::fs::read_dir(&state)
-                .expect("run state listing")
-                .next()
-                .is_none(),
-            "cancelled run state was retained"
+        // The cancelled request must leave the shared agent state directory usable.
+        let after = executor_output_with_env(
+            &process_only_request("printf after-interrupt"),
+            false,
+            false,
+            &[("LOCALAPPDATA", state.as_os_str())],
         );
+        assert_eq!(
+            after.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&after.stderr)
+        );
+        assert_eq!(after.stdout, b"after-interrupt");
         assert!(std::fs::read(&stdout_path)
             .expect("stdout bytes")
             .is_empty());
@@ -1082,5 +1100,66 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         println!(
             "VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup"
         );
+    }
+
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_executor_reuses_registered_images() {
+        use std::ffi::OsStr;
+
+        // An isolated LOCALAPPDATA starts the executor with an empty agent state directory, and
+        // a proxy that refuses every connection makes any registry pull fail.
+        let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+        let state = [("LOCALAPPDATA", local_app_data.path().as_os_str())];
+        let offline = [
+            state[0],
+            ("HTTPS_PROXY", OsStr::new("http://127.0.0.1:9")),
+            ("HTTP_PROXY", OsStr::new("http://127.0.0.1:9")),
+        ];
+        let request = process_only_request("printf registered");
+        let image = request["microvm"]["image"]
+            .as_str()
+            .expect("image reference");
+
+        let output = executor_output_with_env(&request, false, false, &offline);
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "an unregistered image needs its registry"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(image),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = executor_output_with_env(&request, false, false, &state);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"registered");
+
+        // Later requests, including concurrent ones, boot the registered image without the registry.
+        let outputs: Vec<Output> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..3)
+                .map(|_| scope.spawn(|| executor_output_with_env(&request, false, false, &offline)))
+                .collect();
+            runs.into_iter()
+                .map(|run| run.join().expect("concurrent executor"))
+                .collect()
+        });
+        for output in outputs {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"registered");
+        }
+        println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
     }
 }

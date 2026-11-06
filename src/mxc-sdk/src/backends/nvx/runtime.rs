@@ -330,9 +330,14 @@ pub(super) fn lifecycle_state_root(
             "cannot resolve LOCALAPPDATA for the persistent NVX lifecycle state",
         )
     })?;
-    let local_app_data = PathBuf::from(local_app_data);
+    lifecycle_state_root_in(&PathBuf::from(local_app_data))
+}
+
+fn lifecycle_state_root_in(
+    local_app_data: &Path,
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
     crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
-        &local_app_data,
+        local_app_data,
         [
             std::ffi::OsStr::new("Microsoft"),
             std::ffi::OsStr::new("MXC"),
@@ -344,6 +349,56 @@ pub(super) fn lifecycle_state_root(
     .map_err(|error| {
         MxcError::backend_unavailable(format!(
             "cannot admit persistent NVX lifecycle state below '{}': {error}",
+            local_app_data.display()
+        ))
+    })
+}
+
+/// Returns the per-user directory where the agent keeps its sandbox records and registered images
+/// between create-and-run requests. The directory stays locked against replacement while the
+/// returned guard lives.
+///
+/// Each approved bundle gets its own directory, so an agent never opens state that another agent
+/// version wrote. Missing directories are created with an access list for only the current user
+/// and Local SYSTEM, so the lifecycle state directory that contains them keeps the access list
+/// that [`lifecycle_state_root`] requires.
+pub(super) fn state_root(
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
+        })
+        .ok_or_else(|| {
+            MxcError::backend_unavailable(
+                "NVX signed bundled agent: cannot resolve LOCALAPPDATA for the agent state directory",
+            )
+        })?;
+    state_root_in(&local_app_data)
+}
+
+fn state_root_in(
+    local_app_data: &Path,
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    // Only the bundle directory must already be private here; the lifecycle state directory
+    // above it is checked when lifecycle operations open it.
+    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        local_app_data,
+        [
+            std::ffi::OsStr::new("Microsoft"),
+            std::ffi::OsStr::new("MXC"),
+            std::ffi::OsStr::new("nvx"),
+            std::ffi::OsStr::new(&APPROVED_MANIFEST_SHA256[..16]),
+        ]
+        .as_slice(),
+        3,
+    )
+    .map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot open the agent state directory below {}: {error}",
             local_app_data.display()
         ))
     })
@@ -1687,6 +1742,35 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<SetupConfig>(json).unwrap(), setup);
+    }
+
+    #[test]
+    fn state_root_is_keyed_by_bundle_owned_by_the_user_and_reused() {
+        let local_app_data = tempfile::tempdir().unwrap();
+        let root = state_root_in(local_app_data.path()).unwrap();
+        assert_eq!(
+            root.path(),
+            local_app_data
+                .path()
+                .join(r"Microsoft\MXC\nvx")
+                .join(&APPROVED_MANIFEST_SHA256[..16])
+        );
+        assert!(crate::mxc_common::filesystem_security::owner_is_self(root.path()).unwrap());
+        std::fs::write(root.path().join("registered-image"), b"cached").unwrap();
+        assert_eq!(
+            state_root_in(local_app_data.path()).unwrap().path(),
+            root.path()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("registered-image")).unwrap(),
+            b"cached"
+        );
+        // Creating the bundle directory first must leave the lifecycle state directory private.
+        let lifecycle = lifecycle_state_root_in(local_app_data.path()).unwrap();
+        assert_eq!(
+            lifecycle.path(),
+            local_app_data.path().join(r"Microsoft\MXC\nvx")
+        );
     }
 
     #[test]
