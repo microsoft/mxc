@@ -654,7 +654,11 @@ impl HyperlightScriptRunner {
     /// `policy`: the kernel builds its mount table from them on resume,
     /// and the host serves them.
     fn boot_from_snapshot(rewind: Arc<Snapshot>, mounts: &[Mount]) -> Result<Guest, RunnerError> {
-        let builder = SandboxBuilder::from_snapshot(rewind).mounts(mounts.iter().cloned());
+        // We echo guest output and drain the kept copy each call without ever
+        // reading it, so cap that capture at 0 (default is unbounded).
+        let builder = SandboxBuilder::from_snapshot(rewind)
+            .mounts(mounts.iter().cloned())
+            .output_limit(0);
         let sandbox = builder
             .boot()
             .map_err(|e| RunnerError::Launch(format!("restore hyperlight snapshot: {e}")))?;
@@ -1041,6 +1045,8 @@ fn load_persisted_snapshot(
 fn rootfs_builder(home: &Path, runtime: HyperlightRuntime) -> SandboxBuilder {
     SandboxBuilder::from_initrd(home.join(INITRD_FILE))
         .scratch_mb(runtime_image(runtime).scratch_mb)
+        // Echoed and drained unread, same as the snapshot path; keep no copy.
+        .output_limit(0)
 }
 
 /// Pull the rootfs CPIO out of the published image into `dst`, straight
