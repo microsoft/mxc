@@ -1650,6 +1650,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "webpki-roots",
  "widestring",
  "windows",
  "windows-collections",

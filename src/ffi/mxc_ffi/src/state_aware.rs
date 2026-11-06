@@ -357,14 +357,8 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
             }
         };
         crate::execute_output(
-            execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
-                process.wait_with_output().map_err(|error| {
-                    mxc_sdk::v1::Error::new(
-                        crate::ErrorCode::BackendError,
-                        format!("waiting for the sandbox to complete failed: {error}"),
-                    )
-                })
-            }),
+            execute_lifecycle_json(request_json, experimental != 0)
+                .and_then(|process| process.wait_with_output().map_err(capture_wait_error)),
         )
     })
     .unwrap_or_else(|panic| {
@@ -375,6 +369,19 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
     // SAFETY: out is non-null and caller-guaranteed writable.
     unsafe { ptr::write(out, result) };
     status
+}
+
+fn capture_wait_error(error: std::io::Error) -> mxc_sdk::v1::Error {
+    if let Some(error) = error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<mxc_sdk::mxc_common::mxc_error::MxcError>())
+    {
+        return error.clone().into();
+    }
+    mxc_sdk::v1::Error::new(
+        crate::ErrorCode::BackendError,
+        format!("waiting for the sandbox to complete failed: {error}"),
+    )
 }
 
 /// Run a state-aware exec request with a caller-controlled pseudo-terminal.
@@ -582,6 +589,24 @@ pub unsafe extern "C" fn mxc_exec_state_aware_attached_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_preserves_native_failure_without_partial_success() {
+        let native = mxc_sdk::mxc_common::mxc_error::MxcError::backend_error("remote execution failed")
+            .with_details(serde_json::json!({
+                "code":"remote_exec_error", "remoteCode":"failed", "possiblySucceeded":true,
+                "sandboxId":"w365:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
+            }));
+        let error = capture_wait_error(std::io::Error::other(native.clone()));
+        assert_eq!(error.code, crate::ErrorCode::BackendError);
+        assert_eq!(error.message, native.message);
+        let result = crate::execute_output(Err(error));
+        assert_ne!(result.status, MXC_STATUS_SUCCESS);
+        assert!(result.stdout_utf8.is_null());
+        assert!(result.stderr_utf8.is_null());
+        let mut result = result;
+        result.free_strings();
+    }
     use std::ffi::CString;
 
     const WINDOWS_SANDBOX_PROVISION_REQUEST: &str =

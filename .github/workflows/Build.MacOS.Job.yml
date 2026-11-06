@@ -62,7 +62,7 @@ jobs:
           cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk --test state_aware
 
-      - name: Test W365 checkout and release with trusted TLS fixtures
+      - name: Test W365 lifecycle and execution with trusted TLS fixtures
         shell: bash
         run: |
           set -euo pipefail
@@ -70,7 +70,12 @@ jobs:
             --target-dir target/w365-fixture --features mxc-sdk/test-support
           export MXC_W365_TEST_EXECUTOR="$PWD/target/w365-fixture/aarch64-apple-darwin/debug/mxc-exec-mac"
           names="$(cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin -- --list)"
-          for case in lifecycle_contract_and_recovery_fixture lifecycle_fresh_executor_fixture; do
+          for case in lifecycle_contract_and_recovery_fixture lifecycle_fresh_executor_fixture \
+            readiness_contract_fixture execution::native_execution_streams_fixture \
+            execution::native_execution_backpressure_fixture \
+            execution::native_execution_failure_and_disposal_fixture \
+            execution::execution_upgrade_validation_fixture \
+            execution::execution_fresh_executor_fixture; do
             grep -Fq "backend_modules::w365agents::tests::$case: test" <<< "$names"
           done
           cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin w365 -- --include-ignored

@@ -17,11 +17,12 @@ additions are optional Rust/.NET error details; Node's existing member is
 preserved. These are proposed capabilities, not working W365 examples.
 Typed W365 configuration and contract publication remain out of scope.
 
-**Implementation boundary:** Phase 2 implements native executor checkout and
-terminal release only. All Dev SDK W365 JSON calls remain explicitly unavailable
+**Implementation boundary:** Phase 3 implements native checkout, readiness,
+executor relay, internal native pipe/capture adapters and terminal release.
+All Dev SDK W365 JSON calls remain explicitly unavailable
 until cross-SDK structured error metadata and SDK fixtures are ready.
-Start/readiness and exec are also deferred. The examples in this proposal are
-not runnable Phase 2 SDK examples. See the
+The examples in this proposal are not runnable SDK examples in this stage.
+No typed SDK authoring APIs or C ABI layout changes are introduced. See the
 [backend guide](../../../../backends/w365agents/w365agents-backend.md).
 
 ## Caller scenario

@@ -24,8 +24,8 @@ fn guid(value: &str) -> bool {
 }
 
 pub(super) struct Identity {
-    pool_id: String,
-    session_id: String,
+    pub(super) pool_id: String,
+    pub(super) session_id: String,
 }
 
 impl Identity {
@@ -42,7 +42,7 @@ impl Identity {
         })
     }
 
-    fn encode(&self) -> String {
+    pub(super) fn encode(&self) -> String {
         format!("w365:{}:{}", self.pool_id, self.session_id)
     }
 }
@@ -68,12 +68,16 @@ pub(super) fn validate_provision(
 
 // Deliberately no Debug: the client owns the caller's bearer token.
 pub(super) struct Client {
-    host: String,
-    token: String,
+    pub(super) host: String,
+    pub(super) token: String,
 }
 
 impl Client {
     pub(super) fn from_env() -> Result<Self, MxcError> {
+        Self::from_env_keys("W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN")
+    }
+
+    pub(super) fn from_env_keys(host_key: &str, token_key: &str) -> Result<Self, MxcError> {
         let read = |name: &str| {
             std::env::var(name).map_err(|_| {
                 MxcError::policy_validation(format!(
@@ -81,8 +85,8 @@ impl Client {
                 ))
             })
         };
-        let host = read("W365A_CONTROLPLANE_URL")?;
-        let token = read("W365A_CP_TOKEN")?;
+        let host = read(host_key)?;
+        let token = read(token_key)?;
         let valid_host = host.len() <= 253
             && host.split('.').all(|label| {
                 !label.is_empty()
@@ -94,19 +98,19 @@ impl Client {
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
             });
         if !valid_host {
-            return Err(MxcError::policy_validation(
-                "W365A_CONTROLPLANE_URL must be a bare ASCII DNS hostname (no URL, port or path)",
-            ));
+            return Err(MxcError::policy_validation(format!(
+                "{host_key} must be a bare ASCII DNS hostname (no URL, port or path)"
+            )));
         }
         if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(MxcError::policy_validation(
-                "W365A_CP_TOKEN must be nonempty ASCII without whitespace or control characters",
-            ));
+            return Err(MxcError::policy_validation(format!(
+                "{token_key} must be nonempty ASCII without whitespace or control characters"
+            )));
         }
         Ok(Self { host, token })
     }
 
-    fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
+    pub(super) fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
         let tls = TlsConfig::builder().provider(TlsProvider::Rustls);
         #[cfg(any(test, feature = "test-support"))]
         let (tls, port) = test_tls(tls)?;
@@ -310,7 +314,7 @@ impl Client {
     }
 }
 
-fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
+pub(super) fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
     response
         .headers()
         .get("x-ms-request-id")
@@ -323,7 +327,7 @@ fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String
         .map(str::to_owned)
 }
 
-fn failure(
+pub(super) fn failure(
     code: &str,
     operation: &str,
     status: Option<u16>,

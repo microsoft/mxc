@@ -41,6 +41,8 @@ mod request_probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
+#[doc(hidden)]
+pub use state_aware::exec_state_aware as exec_native_state_aware;
 #[cfg(target_os = "windows")]
 mod verbose_telemetry;
 

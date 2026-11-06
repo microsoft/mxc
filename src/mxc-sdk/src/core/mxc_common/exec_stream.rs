@@ -147,6 +147,7 @@ pub struct ExecSandboxProcess {
     /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
     /// the outcome rather than a code because a timeout has no code.
     exit: Option<ExecOutcome>,
+    wait_error: Option<MxcError>,
     /// Whether a termination request was **refused**. Recorded separately
     /// because `terminator` is consumed on both outcomes, so its absence alone
     /// cannot distinguish "killed" from "the kill was rejected" — and those
@@ -314,6 +315,7 @@ impl ExecSandboxProcess {
             native_stdio: Some(native_stdio),
             individual_stdio_taken: false,
             exit: None,
+            wait_error: None,
             kill_refused: false,
         })
     }
@@ -326,14 +328,23 @@ impl ExecSandboxProcess {
         if let Some(outcome) = self.exit {
             return outcome_to_io(outcome);
         }
+        if let Some(error) = &self.wait_error {
+            return Err(std::io::Error::other(error.clone()));
+        }
         let handle = self
             .waiter
             .take()
             .ok_or_else(|| std::io::Error::other("exec waiter already consumed"))?;
-        let outcome = handle
+        let result = handle
             .join()
-            .map_err(|_| std::io::Error::other("exec waiter thread panicked"))?
-            .map_err(|e: MxcError| std::io::Error::other(e.message))?;
+            .unwrap_or_else(|_| Err(MxcError::backend_error("exec waiter thread panicked")));
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.wait_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
+        };
         self.exit = Some(outcome);
         outcome_to_io(outcome)
     }
@@ -566,6 +577,9 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        if let Some(error) = &self.wait_error {
+            return Err(std::io::Error::other(error.clone()));
+        }
         if let Some(outcome) = self.exit {
             return outcome_to_io(outcome).map(Some);
         }
@@ -600,7 +614,7 @@ impl SandboxProcess for ExecSandboxProcess {
             // is the only surviving evidence of which outcome it produced.
             Some(terminator) => terminator().map_err(|e| {
                 self.kill_refused = true;
-                std::io::Error::other(e.message)
+                std::io::Error::other(e)
             }),
             // A kill that was refused stays refused, until an exit is
             // confirmed. Reporting `Ok` here would tell a caller retrying after

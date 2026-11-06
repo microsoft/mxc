@@ -53,6 +53,8 @@ libc.workspace = true
 libloading = { version = "0.8", optional = true }
 nix.workspace = true
 same-file.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -78,7 +80,6 @@ zip = { version = "9", default-features = false, features = ["deflate"], optiona
 
 [dev-dependencies]
 rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 filetime = "0.2"
 libloading = "0.8"
 quick-xml.workspace = true

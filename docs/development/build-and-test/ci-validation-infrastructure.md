@@ -13,11 +13,14 @@ the individual local test scripts are documented in
 
 ## At a glance
 
-W365 checkout/release uses offline trusted-TLS functional fixtures in the
+W365 lifecycle/execution uses offline trusted-TLS functional fixtures in the
 existing Windows, Linux and macOS **build jobs**, not the scheduled live-service
 matrix. Each job builds a separate `test-support` executor, checks discovery of
-`lifecycle_contract_and_recovery_fixture` and `lifecycle_fresh_executor_fixture`,
-and runs both through the normal parser/engine/native paths. Normal artifacts
+the checkout/release, readiness, native stream/backpressure/failure/upgrade and
+fresh-executor fixtures, and runs all through the normal parser/engine/native
+paths. These same build jobs run in `Validation.Tests.Scheduled.yml`, providing
+scheduled native backend coverage without tenant access. The separate
+live-service validation matrix is not enabled for W365. Normal artifacts
 include W365 without a Cargo opt-in; test trust never enters shipping artifacts.
 No OS/architecture matrix entry is removed. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md) for local

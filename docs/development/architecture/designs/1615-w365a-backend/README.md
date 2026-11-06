@@ -95,10 +95,13 @@ not separate reasons to choose W365A.
 
 ## Proposed behavior
 
-**Current implementation:** [Phase 2 checkout/release](../../../../backends/w365agents/w365agents-backend.md)
-implements the approved environment-only provision contract and terminal release.
-Start/readiness, exec and public Dev SDK access remain deferred. The full
-lifecycle and SDK behavior below describe later stages, not current capabilities.
+**Current implementation:** [Native lifecycle and execution](../../../../backends/w365agents/w365agents-backend.md)
+implements the environment-only provision contract, terminal release, readiness,
+executor relay and native pipe/capture adapters. Public Dev SDK access remains
+deferred until the cross-SDK metadata and validation stage; SDK behavior below is
+still a proposal. Native Phase 3 uses the supplied released `microsoft.exec`
+protocol rather than the earlier prototype's upgrade. See the backend guide for
+the staged access boundary, process mapping and actual service evidence.
 
 The proposal adds experimental containment `w365_agents` and the
 `w365Agents` phase settings.
@@ -279,16 +282,20 @@ fails locally; MXC does not acquire or renew tokens. Read configuration again
 for each invocation, including release in a fresh process with renewed credentials.
 The existing design budgets are 45000 ms for checkout and 30000 ms for release;
 there are no per-request timeout overrides or new renewal mechanism.
-Readiness and exec environment settings remain deferred with their implementation.
+Readiness and exec require `W365A_DP_SUFFIX` (a bare ASCII DNS suffix, prefixed
+by the reservation's pool GUID) and `W365A_DP_TOKEN` in the caller environment.
+They use independent credentials, not control-plane fallback. Start has a
+120-second client budget with one-second polling, bounded by remaining time.
 
 Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
-`1.0` and exec capability `microsoft.mxc-exec`. Additional
+`1.0` and exec capability `microsoft.exec` with HTTP/1.1 `Upgrade: exec`. Additional
 protocol/port/capability overrides are outside the proposed initial scope.
 
 ### Process inputs and results
 
-Only exec takes `process`. `commandLine` is a required nonempty string, executed
-by the remote DesktopControl.Exec host, not by a new local shell.
+Only exec takes `process`. `commandLine` is a required nonblank Windows executable
+command line, executed by the remote DesktopControl.Exec host with
+`shell: "raw"`, not by a new local or implicit remote shell.
 `cwd` is an optional guest path; omitted or `""` omits `cwd` from the relay
 payload. When omitted, exec currently uses the DesktopControl.Exec host process's
 working directory, normally its executable directory under the DesktopControl
@@ -311,10 +318,12 @@ value, and the last duplicate key wins. No environment from the machine
 running MXC is forwarded.
 
 `process.timeout` is unsigned 32-bit milliseconds, defaults to 0 and is sent
-as `timeoutMs`. Zero imposes no local MXC command deadline; execution remains
-subject to service-side timeout defaults and limits, so it does not guarantee
-unlimited runtime or checkout lifetime. A positive timeout is enforced by
-the remote exec protocol, not a local process-tree kill guarantee.
+as `timeoutMs`. Zero selects the released server's configured default, currently
+300000 ms, rather than unlimited execution. A positive value selects its
+remote timeout. The native client permits that duration plus 30000 ms for
+transport/drain; expiry without Exit is an error with uncertain remote outcome,
+not a local process-tree kill guarantee or a `TimedOut` result. An Exit sentinel
+alone, such as 124, is returned as a genuine exit code.
 Invalid types and unknown fields fail parsing.
 The encoded `EXEC_START` and each frame have a 64 KiB payload cap; oversized
 start payloads fail before connecting.
@@ -366,8 +375,8 @@ the Dev APIs, without new typed W365 configuration.
 
 ## Design and security
 
-The W365A backend resides in `mxc-sdk` modules under
-`src/mxc-sdk/src/backends/w365agents/common/`. `W365AgentsRunner` implements
+The W365A backend resides in internal `mxc-sdk` modules under
+`src/mxc-sdk/src/backends/w365agents/`. `Runner` implements
 `StatefulSandboxBackend` and delegates configuration, W365 service requests,
 readiness and command relay to those internal modules.
 `mxc_engine` owns experimental authorization, registration, checked dispatch
