@@ -22,12 +22,18 @@ Creates an LXC container to provide:
 
 ## Prerequisites
 
-- Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
-- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
-- Root privileges, or [unprivileged LXC](#running-without-root) for a policy
-  that asks for no network.
+- Linux kernel >= 3.12.
+- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime).
+- A GCC-compatible C11 compiler and target Linux userspace API headers for source builds.
+- Root access to run MXC and to configure LXC.
   Filtering egress or ingress installs iptables rules in the container's
   network namespace, which requires root.
+- Valid UID and GID root mappings to run LXC containers unprivileged.  See [LXC Getting Started](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-root-with-shared-uid-and-gid-ranges).
+
+MXC requires LXC containers to run unprivileged.  After starting the container,
+MXC reads `/proc/<pid>/uid_map` for the container's init process directly on the
+host before running the requested command.  MXC accepts the container when a
+readable range maps container root to a nonzero parent UID.
 
 ### Installation
 
@@ -55,8 +61,6 @@ for unprivileged LXC.  Everything else needs root.
 
 1. Follow LXC's
    [Create Unprivileged Containers as a User](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-a-user).
-2. Let the container's root user reach its files under your home directory:
-   `chmod o+x ~`.
 
 
 ### Container networking

@@ -216,8 +216,8 @@ fn container_is_running(name: &str) -> bool {
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains("RUNNING")
 }
 
-/// An LXC streaming request (`/tmp` read-write, no network) with the given
-/// command, container name, and timeout (ms; `0` == run until exit).
+/// An LXC streaming request with no network and the given command, container
+/// name, and timeout (ms; `0` == run until exit).
 ///
 /// Cases that end in `wait()` pass [`LIVE_TIMEOUT_MS`] rather than `0`: with no
 /// script timeout the backend waits on `lxc-attach` forever, so a wedged attach
@@ -257,7 +257,7 @@ fn lxc_request_with_network(
 ) -> mxc_sdk::v1::ContainerRequest {
     ContainerRequest {
         filesystem: Some(FilesystemPolicy {
-            readwrite_paths: vec!["/tmp".to_string()],
+            readwrite_paths: vec![],
             readonly_paths: vec![],
             denied_paths: vec![],
             clear_policy_on_exit: None,

@@ -18,7 +18,13 @@ fi
 # Create test directories
 READONLY_DIR=$(mktemp -d)
 READWRITE_DIR=$(mktemp -d)
+trap 'rm -rf "$READONLY_DIR" "$READWRITE_DIR"' EXIT
 echo "test content" > "$READONLY_DIR/test.txt"
+
+# Give mapped container users access to the host fixtures.
+chmod 755 "$READONLY_DIR"
+chmod 644 "$READONLY_DIR/test.txt"
+chmod 777 "$READWRITE_DIR"
 
 echo "Running LXC filesystem test..."
 echo "Readonly dir: $READONLY_DIR"
@@ -31,6 +37,4 @@ CONFIG=$(cat "$REPO_DIR/tests/configs/lxc_filesystem_test.json" | \
 
 echo "$CONFIG" | "$LXC_EXEC" --config /dev/stdin
 
-# Cleanup
-rm -rf "$READONLY_DIR" "$READWRITE_DIR"
 echo "LXC filesystem test complete."
