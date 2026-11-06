@@ -205,6 +205,60 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
     Ok(client)
 }
 
+/// Returns the per-user directory where the agent keeps its sandbox records and registered images
+/// between requests, creating it with an access list for only the current user and Local SYSTEM.
+///
+/// Each approved bundle gets its own directory, so an agent never opens state that another agent
+/// version wrote. The current user owns the directory, so the user's elevated and non-elevated
+/// requests share it.
+pub(super) fn state_root() -> Result<PathBuf, MxcError> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
+        })
+        .ok_or_else(|| {
+            MxcError::backend_unavailable(
+                "NVX signed bundled agent: cannot resolve LOCALAPPDATA for the agent state directory",
+            )
+        })?;
+    state_root_in(&local_app_data)
+}
+
+fn state_root_in(local_app_data: &Path) -> Result<PathBuf, MxcError> {
+    let root = local_app_data
+        .join("Microsoft")
+        .join("MXC")
+        .join("nvx")
+        .join(&APPROVED_MANIFEST_SHA256[..16]);
+    let root = std::path::absolute(&root).map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot resolve the agent state directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    std::fs::create_dir_all(&root).map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot create the agent state directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    // An elevated request can create the directory with the Administrators group as its owner,
+    // which the user's non-elevated requests would reject.
+    crate::mxc_common::filesystem_security::set_owner_only_dacl(&root, true)
+        .and_then(|()| crate::mxc_common::filesystem_security::set_current_user_owner(&root))
+        .map_err(|error| {
+            MxcError::backend_unavailable(format!(
+                "NVX signed bundled agent: cannot secure the agent state directory {}: {error}",
+                root.display()
+            ))
+        })?;
+    Ok(root)
+}
+
 fn verify_runtime_digests(info: &HostInfo) -> Result<(), MxcError> {
     for (name, actual, expected) in [
         (
@@ -1519,6 +1573,27 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<SetupConfig>(json).unwrap(), setup);
+    }
+
+    #[test]
+    fn state_root_is_keyed_by_bundle_owned_by_the_user_and_reused() {
+        let local_app_data = tempfile::tempdir().unwrap();
+        let root = state_root_in(local_app_data.path()).unwrap();
+        assert_eq!(
+            root,
+            local_app_data
+                .path()
+                .join(r"Microsoft\MXC\nvx")
+                .join(&APPROVED_MANIFEST_SHA256[..16])
+        );
+        // Owned by the user rather than an elevated token owner, so non-elevated requests accept it.
+        assert!(crate::mxc_common::filesystem_security::owner_is_current_user(&root).unwrap());
+        std::fs::write(root.join("registered-image"), b"cached").unwrap();
+        assert_eq!(state_root_in(local_app_data.path()).unwrap(), root);
+        assert_eq!(
+            std::fs::read(root.join("registered-image")).unwrap(),
+            b"cached"
+        );
     }
 
     #[test]
