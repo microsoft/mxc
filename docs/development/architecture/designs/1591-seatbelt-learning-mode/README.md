@@ -113,7 +113,7 @@ and teardown finishes.
 | Operation | Change |
 |---|---|
 | Create-and-run execution | Report written before the result returns |
-| Streaming (pipes and PTY) | Report written on `wait`; dropping or disposing without `wait` writes no report |
+| Streaming (pipes and PTY) | Report written on native wait; abandoning the handle before native wait writes no report. Node starts native wait automatically when it detects process exit, so `dispose()` prevents report creation only before that finalization starts. For completed Node captures, use `outputMetadata` to locate and delete the report, its `.verbose.json` sibling, and any retained trace. |
 | Discovery | Seatbelt reports the `captureDenials` capability |
 | `mxc-exec-mac --audit` | `allow` mode with a temp report |
 | Container lifecycle operations | Not applicable |
