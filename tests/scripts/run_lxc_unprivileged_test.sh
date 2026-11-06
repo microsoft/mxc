@@ -58,6 +58,14 @@ awk -v name="$CONTAINER" '$1 == name && $2 == "true" { found = 1 } END { exit !f
     <<< "$METADATA" || fail "fixture metadata did not report unprivileged: $METADATA"
 lxc-stop -n "$CONTAINER" -k
 
+# Make the container's cat report a shifted root mapping.
+rm "/var/lib/lxc/$CONTAINER/rootfs/bin/cat"
+cat > "/var/lib/lxc/$CONTAINER/rootfs/bin/cat" <<'EOF'
+#!/bin/sh
+echo '0 100000 65536'
+EOF
+chmod +x "/var/lib/lxc/$CONTAINER/rootfs/bin/cat"
+
 cat > "$WORK_DIR/request.json" <<EOF
 {
   "version": "1.0.0",
@@ -75,8 +83,8 @@ status=0
 OUTPUT="$("$LXC_EXEC" "$WORK_DIR/request.json" 2>&1)" || status=$?
 echo "$OUTPUT"
 [ "$status" -ne 0 ] || fail "MXC admitted a container with an identity UID map."
-grep -Eiq 'privileg|uid.?map|user.?namespace' <<< "$OUTPUT" \
-    || fail "MXC failed without identifying the privilege or UID-map check."
+grep -Fq 'has no unprivileged root UID mapping.' <<< "$OUTPUT" \
+    || fail "MXC failed without reporting the UID-map admission rejection."
 [ ! -e "/var/lib/lxc/$CONTAINER/rootfs/mxc-admission-workload-ran" ] \
     || fail "the rejected container ran its workload."
 STATE="$(lxc-info -n "$CONTAINER" -s -H)"
