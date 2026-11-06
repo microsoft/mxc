@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Development-only W365 Agents lifecycle settings. These do not enable a backend.
+//! Development-only W365 Agents provision settings. These do not enable a backend.
 
 use crate::mxc_contract::dev::{OptionalField, ProvisionPhase, Telemetry, Version};
 use serde::{Deserialize, Deserializer};
