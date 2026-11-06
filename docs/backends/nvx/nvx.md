@@ -253,8 +253,10 @@ enforcement against controlled reachable host endpoints, binary
 stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 An isolated-console scenario interrupts both startup and running execution,
-then verifies that the owned OpenVMM process has terminated and run storage
-has been removed.
+then verifies that the owned OpenVMM process has terminated and that a later
+request succeeds with the same agent state directory. Another scenario checks
+that later requests, including concurrent ones, boot a registered image while
+its registry is unreachable.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 
