@@ -120,7 +120,8 @@ Schema-valid fields do not imply backend support. MXC rejects unsupported
 policy before creating a VM rather than ignoring it.
 
 The executor's `--dry-run` checks the signed bundle's capabilities and native
-request validation without probing or starting a VM. The complete signed
+request validation without probing or starting a VM, so it never captures
+[platform snapshot](#platform-snapshots) templates. The complete signed
 bundle must be available even when only validating a request.
 
 The table describes this MXC integration, not every capability of NVX. The
@@ -255,8 +256,9 @@ process-wide console handler.
 
 ### Agent state directory
 
-The signed agent keeps its sandbox records, VM control data, diagnostics, and
-registered images in a per-user state directory,
+The signed agent keeps its sandbox records, VM control data, diagnostics,
+registered images, and [platform snapshot](#platform-snapshots) templates in a
+per-user state directory,
 `%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
 hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
 runtime keeps its own state. MXC obtains that digest from the pinned
@@ -270,12 +272,43 @@ operations and closes the client after each request; it does not maintain a
 persistent container database.
 
 To pull a reference again or reclaim disk space, delete the directory while no
-MicroVM request is running; the next request creates it again.
+MicroVM request is running; the next request creates it again and captures new
+templates.
 
 If deprovisioning fails, MXC reports the failure and the directory's location.
 The agent's records for that sandbox remain there rather than being deleted
 while a VM might remain. Runtime files in the directory can contain sensitive
 data; confirm that no VM is running before you remove the directory.
+
+### Platform snapshots
+
+Create-and-run MicroVMs, with captured or live output, start as clones of the
+agent's platform snapshot templates instead of booting their kernel. The first
+create-and-run request in a state directory captures two templates, one with a
+network device and one without. This adds about a second to that request and
+uses about 512 MiB of disk in the directory. Later requests, in any process,
+reuse the templates, and concurrent first requests capture them once. The
+templates fit sandboxes with one virtual processor and the agent's default
+256 MiB of memory, so a request that sets `microvm.provision.memoryMib` to
+another value cold boots. The agent captures a template again when it expires
+or a clone of it fails; meanwhile, the sandboxes that need it cold boot.
+
+Containers that lifecycle operations provision always cold boot. Lifecycle
+operations open the agent without platform snapshots, so none of them boots
+VMs to capture templates.
+
+When the agent captures a template, it writes a line such as
+`aci_edge_agent: template store …: captured generation 1 of the noNic template in 605 ms`
+to the process's standard error. In the executor, that stream also carries the
+workload's standard error.
+
+A clone runs with the guest kernel's default CPU vulnerability mitigations,
+which a cold boot turns off. Its boot-console log has no guest boot output, so
+startup failure diagnostics show less of the console. If the agent cannot
+capture the templates, MXC opens it without them and sandboxes cold boot. With
+`--log-file`, the log records why, and each start records its `bootMode`
+(`clone` or `cold`), its `template` or `coldReason`, and its
+`bootMilliseconds`.
 
 ## Validation
 
@@ -299,7 +332,11 @@ An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and that a later
 request succeeds with the same agent state directory. Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
-later concurrent requests boot it while its registry is unreachable.
+later concurrent requests boot it while its registry is unreachable. A third
+checks that create-and-run sandboxes, with and without a network device,
+start as clones of the platform snapshot templates, that a streaming request
+captures the templates too, that validation captures none, and that a host
+that cannot capture them cold boots sandboxes.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 
