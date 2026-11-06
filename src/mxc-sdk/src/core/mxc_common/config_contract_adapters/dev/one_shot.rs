@@ -34,15 +34,6 @@ fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     }
 }
 
-fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
-    let contract::Fallback {
-        allow_dacl_mutation,
-    } = value;
-    wire::Fallback {
-        allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
 fn convert_clipboard(value: contract::UiClipboard) -> wire::ClipboardPolicy {
     match value {
         contract::UiClipboard::None => wire::ClipboardPolicy::None,
@@ -282,7 +273,7 @@ pub(super) fn into_common_request_ir(
         lifecycle,
         process,
         filesystem,
-        fallback,
+        fallback: _,
         network,
         lxc,
         process_container,
@@ -294,6 +285,7 @@ pub(super) fn into_common_request_ir(
         windows_sandbox,
         wslc,
         hyperlight,
+        microvm,
     } = request;
     crate::mxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
@@ -311,7 +303,6 @@ pub(super) fn into_common_request_ir(
         lxc: lxc.into_option().map(convert_lxc),
         wslc: wslc.into_option().map(convert_wslc),
         filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: telemetry.into_option().map(convert_telemetry),
@@ -320,6 +311,13 @@ pub(super) fn into_common_request_ir(
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
+        microvm: microvm.into_option().map(|config| wire::MicroVm {
+            image: config.image.into_inner(),
+            memory_mib: config
+                .provision
+                .into_option()
+                .and_then(|provision| provision.memory_mib.into_option()),
+        }),
     }
 }
 

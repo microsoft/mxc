@@ -6,6 +6,7 @@ using System.Text;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.Tests;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
@@ -21,6 +22,35 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcContainerIsolationSessionE2ETests
 {
+    [Fact]
+    public async Task DevJson_PtySupportsInteractiveInputAndExitStatus()
+    {
+        IsolationSessionHost.Require();
+        const string request = """
+            {
+                "version":"1.1.0-alpha",
+                "containment":"isolation_session",
+                "network":{
+                    "egress":{"default":"allow"},
+                    "ingress":{"default":"allow","hostLoopback":"allow"}
+                },
+                "process":{"commandLine":"cmd.exe /q","timeout":30000}
+            }
+            """;
+        using var terminal = Dev.MxcContainer.SpawnWithPtyJson(request,
+            new Dev.PtyJsonOptions { Experimental = true, Size = new MxcPtySize(30, 90) });
+        using var reader = new StreamReader(terminal.Output, Encoding.UTF8);
+        var output = reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+        terminal.Resize(new MxcPtySize(40, 100));
+        await terminal.Input.WriteAsync(
+            Encoding.UTF8.GetBytes("set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n"),
+            TestContext.Current.CancellationToken);
+        var result = await terminal.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.False(result.TimedOut);
+        Assert.Equal(13, result.ExitCode);
+        Assert.Contains("DEV_PTY_OK", await output);
+    }
+
     // The backend wraps the command in `cmd.exe /c` itself, so these are bare
     // shell commands. Adding another wrapper nests two shells and the outer one
     // consumes the `&`, which silently changes what runs.

@@ -48,8 +48,7 @@ steps:
       useNextest: false
       testAllTargets: false
       buildAllTargets: false
-      # Do NOT default to --all-features: `tier2_bfs` must not ship on
-      # Win 11 25H2 (bfscfg.exe risks OS hang). See T3-Workloads.ps1.
+      # Use the explicitly supported production feature set.
       allFeatures: false
       activatedFeatures: ${{ parameters.cargoFeatures }}
       packages: ${{ parameters.cargoPackages }}

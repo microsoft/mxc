@@ -102,7 +102,11 @@ function decodeStateAwareResult(
       'state-aware request failed',
     );
   }
-  return decodeString(result.responseJsonUtf8) ?? '{}';
+  const responseJson = decodeString(result.responseJsonUtf8);
+  if (responseJson === undefined || responseJson.length === 0) {
+    throw new MxcError('backend_error', 'native lifecycle response is missing JSON');
+  }
+  return responseJson;
 }
 
 export async function runBindingStateAwareRequestWithNative(

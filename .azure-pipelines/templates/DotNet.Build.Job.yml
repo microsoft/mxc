@@ -27,7 +27,7 @@ jobs:
     os: windows
   variables:
     sdkProject: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj
-    sdkOutput: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\bin\Release\net8.0
+    sdkOutput: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\bin\Release
     packageRoot: $(Build.SourcesDirectory)\out\dotnet-package
     packageOutput: $(Build.SourcesDirectory)\out\dotnet-nuget
     x64NativeDir: $(Pipeline.Workspace)\dotnet-rust-x64
@@ -43,7 +43,7 @@ jobs:
     displayName: Use .NET SDK 10
     inputs:
       packageType: sdk
-      version: 10.x
+      version: 10.0.x
 
   - task: DownloadPipelineArtifact@2
     displayName: Download x64 Rust runtime
@@ -108,42 +108,43 @@ jobs:
         -p:MxcPrebuiltNativeDir="$(x64NativeDir)"
 
   - ${{ if eq(parameters.isOfficialBuild, true) }}:
-    - task: EsrpCodeSigning@5
-      displayName: Sign Microsoft.Mxc.Sdk.dll
-      inputs:
-        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
-        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
-        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
-        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
-        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
-        FolderPath: $(sdkOutput)
-        Pattern: Microsoft.Mxc.Sdk.dll
-        UseMinimatch: true
-        signConfigType: inlineSignParams
-        inlineOperation: >-
-          [
-            {
-              "KeyCode": "CP-230012",
-              "OperationCode": "SigntoolSign",
-              "ToolName": "sign",
-              "ToolVersion": "1.0",
-              "Parameters": {
-                "OpusName": "Microsoft",
-                "OpusInfo": "https://www.microsoft.com",
-                "FileDigest": "/fd SHA256",
-                "PageHash": "/NPH",
-                "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+    - ${{ each framework in split('net8.0,net10.0', ',') }}:
+      - task: EsrpCodeSigning@6
+        displayName: Sign Microsoft.Mxc.Sdk.dll (${{ framework }})
+        inputs:
+          ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+          AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+          AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+          AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+          AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+          AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+          FolderPath: $(sdkOutput)\${{ framework }}
+          Pattern: Microsoft.Mxc.Sdk.dll
+          UseMinimatch: true
+          signConfigType: inlineSignParams
+          inlineOperation: >-
+            [
+              {
+                "KeyCode": "CP-230012",
+                "OperationCode": "SigntoolSign",
+                "ToolName": "sign",
+                "ToolVersion": "1.0",
+                "Parameters": {
+                  "OpusName": "Microsoft",
+                  "OpusInfo": "https://www.microsoft.com",
+                  "FileDigest": "/fd SHA256",
+                  "PageHash": "/NPH",
+                  "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+                }
+              },
+              {
+                "KeyCode": "CP-230012",
+                "OperationCode": "SigntoolVerify",
+                "ToolName": "sign",
+                "ToolVersion": "1.0",
+                "Parameters": {}
               }
-            },
-            {
-              "KeyCode": "CP-230012",
-              "OperationCode": "SigntoolVerify",
-              "ToolName": "sign",
-              "ToolVersion": "1.0",
-              "Parameters": {}
-            }
-          ]
+            ]
 
   - task: NuGetToolInstaller@1
     displayName: Install NuGet
@@ -161,8 +162,10 @@ jobs:
     inputs:
       sourceFolder: $(sdkOutput)
       contents: |
-        Microsoft.Mxc.Sdk.dll
-        Microsoft.Mxc.Sdk.pdb
+        net8.0\Microsoft.Mxc.Sdk.dll
+        net8.0\Microsoft.Mxc.Sdk.pdb
+        net10.0\Microsoft.Mxc.Sdk.dll
+        net10.0\Microsoft.Mxc.Sdk.pdb
       targetFolder: $(packageRoot)\managed
 
   - task: CopyFiles@2
@@ -171,7 +174,6 @@ jobs:
       sourceFolder: $(x64NativeDir)
       contents: |
         mxc_ffi.dll
-        plm.exe
         wxc-wslc-daemon.exe
         wslcsdk.dll
       targetFolder: $(packageRoot)\runtimes\win-x64\native
@@ -182,7 +184,6 @@ jobs:
       sourceFolder: $(arm64NativeDir)
       contents: |
         mxc_ffi.dll
-        plm.exe
         wxc-wslc-daemon.exe
         wslcsdk.dll
       targetFolder: $(packageRoot)\runtimes\win-arm64\native

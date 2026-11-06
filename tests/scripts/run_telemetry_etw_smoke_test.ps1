@@ -7,15 +7,30 @@
     redirects before any MXC write, grants consent through the canonical
     session-bound presenter protocol, captures the public MXC ETW provider,
     and restores all process/machine state in finally.
+
+.PARAMETER IsolationSessionLifecycle
+    Captures two real IsolationSession lifecycles through the existing lifecycle
+    suite instead of the create-and-run smoke request. Requires an available
+    IsolationSession backend and Administrator; missing prerequisites fail.
+    The executor must be a local-only debug build with test-support and
+    isolation_session features.
+
+.PARAMETER CheckKeywords
+    Requires a local-only debug test-support executor built with
+    MXC_TELEMETRY_TEST_KEYWORDS=1. Checks actual Critical Data/Performance and
+    Measures/Usage metadata for development/published contracts, including failures.
 #>
 
 [CmdletBinding()]
 param(
     [string]$BinDir,
-    [switch]$SkipClean
+    [switch]$SkipClean,
+    [switch]$IsolationSessionLifecycle,
+    [switch]$CheckKeywords
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\TelemetryEtwAssertions.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $srcDir = Join-Path $repoRoot 'src'
 if (-not $BinDir) {
@@ -35,7 +50,7 @@ if ($wxcExe -match '\\release\\') {
 $expectedBody = @'
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
 
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability, including a random session ID that links events from the same container lifecycle. MXC does not send your commands, full file paths, credentials, or other customer content.
 '@ -replace "`r`n", "`n"
 
 $configFile = Join-Path $repoRoot 'tests\examples\28_telemetry_enabled.json'
@@ -92,7 +107,7 @@ function Invoke-CanonicalGrant {
     if ($presentation.result -ne 'presentationRequired' -or -not $presentation.challenge -or -not $presentation.prompt) {
         throw "Unexpected consent presentation: $presentationLine"
     }
-    if ($presentation.prompt.resourceVersion -ne 3 -or
+    if ($presentation.prompt.resourceVersion -ne 4 -or
         $presentation.prompt.locale -ne 'en-US' -or
         $presentation.prompt.title.text -ne 'Help improve Microsoft Products' -or
         $presentation.prompt.body.text -ne $expectedBody -or
@@ -125,6 +140,7 @@ function Invoke-CanonicalGrant {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if ($IsolationSessionLifecycle -or $CheckKeywords) { throw 'Administrator privileges are required for required ETW scenarios.' }
     Write-Host 'SKIPPED: Administrator privileges are required for ETW session creation.' -ForegroundColor Yellow
     exit 0
 }
@@ -148,6 +164,32 @@ $xmlFile = Join-Path $etlDir 'mxc_trace.xml'
 $sessionName = "MxcTelemetryTest_$runId"
 $traceStarted = $false
 
+function Invoke-TraceRequest {
+    param([hashtable]$Request, [switch]$RequireFailure)
+
+    $requestFile = Join-Path $tempDir ("request-" + [guid]::NewGuid().ToString('N') + '.json')
+    $Request | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $requestFile
+    $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', "`"$requestFile`"" -PassThru -NoNewWindow
+    try {
+        # Caching the handle keeps ExitCode readable after the process exits.
+        $null = $proc.Handle
+        if (-not $proc.WaitForExit(60000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw 'wxc-exec timed out after 60 seconds.'
+        }
+        if ($RequireFailure -and $proc.ExitCode -eq 0) { throw 'The deliberate backend failure unexpectedly succeeded.' }
+        [pscustomobject]@{
+            ProcessId = $proc.Id
+            ContractVersion = $Request.version
+            RequireProcessExit = -not $RequireFailure -and $proc.ExitCode -eq 0
+            RequireError = [bool]$RequireFailure
+        }
+    } finally {
+        $proc.Dispose()
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
     New-Item -ItemType Directory -Path $etlDir -Force | Out-Null
@@ -163,7 +205,7 @@ try {
             consent = $seed
             source = 'etw-smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 3
+            promptResourceVersion = 4
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }
@@ -191,55 +233,130 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create ETW trace session.' }
     $traceStarted = $true
 
-    $executionTimeoutSeconds = 60
-    $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
-    # Caching the handle keeps ExitCode readable after the process exits.
-    $null = $proc.Handle
-    if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
-        Stop-Process -Id $proc.Id -Force
-        $proc.WaitForExit()
-        throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+    if ($IsolationSessionLifecycle) {
+        $manifestFile = Join-Path $tempDir 'lifecycle-invocations.json'
+        $global:LASTEXITCODE = 0
+        & (Join-Path $PSScriptRoot 'run_isolation_session_state_aware_tests.ps1') `
+            -WxcExePath $wxcExe -TelemetryResultsPath $manifestFile -TelemetryKeywords:$CheckKeywords
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $manifestFile)) {
+            throw 'IsolationSession lifecycle telemetry scenario did not complete.'
+        }
+        $invocations = @(Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json)
+        $remainingRecords = @(Get-ChildItem -LiteralPath (Join-Path $tempDir 'mxc\correlation') -Filter '*.cv' -ErrorAction Stop)
+        if ($remainingRecords.Count -ne 0) { throw 'Deprovision left lifecycle correlation records behind.' }
+    } elseif ($CheckKeywords) {
+        $invocations = @(
+            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+                $request = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json -AsHashtable
+                $request.version = $version
+                $null = $request.Remove('$schema')
+                Invoke-TraceRequest -Request $request
+            }
+        )
+    } else {
+        $executionTimeoutSeconds = 60
+        $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
+        # Caching the handle keeps ExitCode readable after the process exits.
+        $null = $proc.Handle
+        if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+        }
+        Write-Host "wxc-exec exited with code $($proc.ExitCode)"
+        $invocations = @([pscustomobject]@{ ProcessId = $proc.Id })
     }
-    Write-Host "wxc-exec exited with code $($proc.ExitCode)"
+    $failureInvocations = @(
+        if ($CheckKeywords) {
+            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+                # Required diagnostics ignore the request flag; published
+                # contracts still need the explicit opt-in.
+                Invoke-TraceRequest -RequireFailure -Request @{
+                    version = $version
+                    containment = 'bubblewrap'
+                    process = @{ commandLine = 'true' }
+                    telemetry = @{ enabled = ($version -ne '1.1.0-alpha') }
+                }
+            }
+        }
+    )
+    if ($CheckKeywords) {
+        $failureInvocations | ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
+    }
+
+    # Required diagnostics ignore consent, the request flag and administrative
+    # policy; published contracts still need consent.
+    $gatingCases = @()
+    if ($CheckKeywords) {
+        function Set-GatingState([string]$Consent, $Policy) {
+            if ($Consent -eq 'absent') { Remove-Item $consentFile -Force -ErrorAction SilentlyContinue }
+            else {
+                $record = [pscustomobject]@{
+                    schemaVersion = 2; consent = $Consent; source = 'etw-smoke-proof'
+                    promptedMxcVersion = '0.0.0-smoke'; promptResourceVersion = 4
+                    promptLocale = 'en-US'; updatedAtEpoch = 0
+                }
+                [IO.File]::WriteAllText($consentFile, ($record | ConvertTo-Json -Compress),
+                    (New-Object Text.UTF8Encoding $false))
+            }
+            if ($null -eq $Policy) { Remove-ItemProperty -Path $policyPath -Name AllowTelemetry -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -Path $policyPath -Name AllowTelemetry -Value $Policy -Type DWord }
+        }
+        foreach ($case in @(
+            @{ Name = 'development, consent denied'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 3; Emits = $true },
+            @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Policy = 3; Emits = $true },
+            @{ Name = 'development, no policy'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = $null; Emits = $true },
+            @{ Name = 'development, policy 1'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 1; Emits = $true },
+            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $true },
+            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $true },
+            @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Policy = 3; Emits = $false },
+            @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Policy = 3; Emits = $false }
+        )) {
+            Set-GatingState $case.Consent $case.Policy
+            $gatingCases += [pscustomobject]@{
+                Name = $case.Name
+                Emits = $case.Emits
+                Invocation = Invoke-TraceRequest -RequireFailure -Request @{
+                    version = $case.Version
+                    containment = 'bubblewrap'
+                    process = @{ commandLine = 'true' }
+                    telemetry = @{ enabled = $true }
+                }
+            }
+        }
+        Set-GatingState 'granted' 3
+    }
     Start-Sleep -Seconds 2
 
     logman stop $sessionName -ets 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to stop ETW trace session.' }
     $traceStarted = $false
     if (-not (Test-Path $etlFile) -or (Get-Item $etlFile).Length -eq 0) {
         throw 'ETL output was absent or empty.'
     }
     tracerpt "$etlFile" -o "$xmlFile" -of XML -lr -y 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to decode ETW trace.' }
     if (-not (Test-Path $xmlFile)) { throw 'tracerpt did not produce XML.' }
     $xml = Get-Content $xmlFile -Raw
-    $eventCount = ([regex]::Matches($xml, '<Event ')).Count
-    if ($eventCount -eq 0) {
-        throw 'No parseable MXC events were captured.'
-    }
-    if ($xml -notmatch [regex]::Escape($providerGuid)) {
-        throw "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)."
-    }
-    if ($xml -notmatch 'MXC\.Execution|MXC\.Error') {
-        throw 'Captured events did not preserve the MXC.Execution/MXC.Error identities.'
-    }
-    $expectedFields = @(
-        'PartA_PrivacyProduct',
-        'PartA_PrivacyDataCategory',
-        'PartA_PrivTags',
-        'mxc.sandbox_kind',
-        'mxc.backend',
-        'mxc.exit_code',
-        'mxc.outcome',
-        'mxc.duration_ms'
-    )
-    $eventBlocks = [regex]::Matches($xml, '(?s)<Event\b.*?</Event>')
-    $matchingEvent = $eventBlocks | Where-Object {
-        $eventXml = $_.Value
-        -not ($expectedFields | Where-Object {
-            $eventXml -notmatch [regex]::Escape($_)
-        })
-    } | Select-Object -First 1
-    if ($null -eq $matchingEvent) {
-        throw "No MXC event contained all required telemetry fields: $($expectedFields -join ', ')."
+    Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+        -Invocations $invocations -RequireLifecycles:$IsolationSessionLifecycle -CheckKeywords:$CheckKeywords
+    if ($CheckKeywords) {
+        Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+            -Invocations $failureInvocations -CheckKeywords
+        $traceDoc = [xml]$xml
+        foreach ($case in $gatingCases) {
+            $count = @($traceDoc.SelectNodes("//*[local-name()='Event']") | Where-Object {
+                [int]$_.System.Execution.ProcessID -eq $case.Invocation.ProcessId
+            }).Count
+            if ($case.Emits) {
+                Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+                    -Invocations @($case.Invocation) -CheckKeywords
+            } elseif ($count -ne 0) {
+                throw "Gating case '$($case.Name)' emitted $count events but must emit none."
+            }
+            Write-Host "PASS: gating case '$($case.Name)'"
+        }
     }
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {

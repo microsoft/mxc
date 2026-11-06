@@ -13,6 +13,118 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+Windows builds first run host-only regression checks for loopback command
+quoting and native-process output capture. These verify direct and
+shell-wrapped launches, normal stdout/stderr capture, and prompt failure when
+an exited process leaves a descendant holding an output handle. Result-gate
+regressions also reject empty selections and skipped SDK streaming cases.
+These checks do not require PSEC; scheduled ProcessContainer hosts execute the
+prebuilt public SDK streaming tests from the Windows SDK test bundle.
+
+### Telemetry component build checks
+
+The Windows workflow also runs a separate `Telemetry component` check on native
+x64 and arm64 hosts. It checks that the default release build loads the bundled
+signed DLL, an empty component path builds without routing, and a tampered DLL
+fails Authenticode verification. Each failure fails the check.
+
+Run locally on Windows from the repository root:
+
+```powershell
+.\scripts\ci\check-telemetry-component.ps1
+```
+
+The script uses `src\target\telemetry-component-check` for its Cargo output,
+removes the tampered copy, and restores the caller's environment.
+
+### Native module lifetime regression
+
+From `src`, run:
+
+```text
+cargo build --locked -p mxc-sdk --example module_lifetime_fixture
+cargo test --locked -p mxc-sdk --test module_lifetime
+```
+
+The fixture runs the production filesystem probe until it times out. The test
+then closes its library handle, releases the blocked operation, and checks that
+the worker can finish. Removing the probe's module pin must fail this regression.
+It runs in a subprocess so an unload
+regression cannot crash the test runner. The full native Cargo test suites also
+build the fixture example and run this test on Windows and macOS. Both Linux
+matrix lanes explicitly build the fixture and run the test in their release
+profile with the lane's target.
+
+### Filesystem probe request deadlines
+
+The Windows and Linux builds run public SDK requests with a blocked existence,
+object-identity, or delegation probe. Separate cases let those checks finish,
+then block Bubblewrap denied-path resolution, LXC rebound/denied-mount resolution,
+or WSLC overlap canonicalization. Each must return a path-specific timeout
+without executing the workload. WSLC coverage also calls container provisioning.
+A separate process enforces a 15-second watchdog so a missing timeout fails
+rather than hanging CI. Fault injection is compiled only under `cfg(test)`;
+shipping libraries and executors contain no blocking-path switch.
+
+Run locally from `src`:
+
+```text
+cargo test --locked -p mxc-sdk --lib filesystem_probe::launch_tests:: -- --ignored --skip lxc_mount_paths_reject_stalls
+cargo test --locked -p mxc-sdk --lib --features wslc filesystem_probe::launch_tests:: -- --ignored
+```
+
+Use the first command on Linux (with Bubblewrap installed) and the second on
+Windows. Run `lxc_mount_paths_reject_stalls` separately as root with the LXC
+command-line tools installed. It creates an empty container without downloading
+an image or starting a workload, uses private container storage, and verifies
+timeout cleanup. The builds stage `mxc-filesystem-probe-tests` (`.exe` on Windows)
+alongside the executor artifacts, but exclude it from the published npm SDK
+package. Scheduled Bubblewrap, LXC, and WSLC suites
+require this executable, verify the expected tests are present, and run their
+backend's cases without rebuilding.
+
+### .NET SDK validation
+
+The SDK, behavioral tests, and Native AOT smoke test target `net8.0` and
+`net10.0`; samples and the console driver target `net10.0`. Use the .NET 10 SDK
+selected by the root `global.json`; its Microsoft.Testing.Platform runner
+selection also applies to `dotnet test`. Windows test bundles explicitly
+publish `net10.0`; the Azure two-branch template selects `net8.0` for older
+checkouts that do not support `net10.0`.
+
+The .NET SDK job builds and tests both frameworks on Windows, Linux, and macOS.
+The Linux LXC and Bubblewrap regression checks and Windows optional-backend
+checks run separately for each framework and reject empty test selections.
+It installs the pinned Rust toolchain before building either framework.
+It publishes and runs the reflection-free JSON Native AOT smoke test for
+both .NET 8 and .NET 10, then packs the SDK and installs it into separate
+temporary .NET 8 and .NET 10 applications outside the checkout. Each application
+calls the platform and backend discovery APIs without `MXC_FFI_DIR` and checks
+that its managed SDK assembly matches the package asset for its target
+framework. An unsupported-host result is valid; native loading, interop, and
+deserialization exceptions still fail the check. These package checks do not
+require an available containment backend.
+
+From `sdk/dotnet`, run:
+
+```text
+dotnet build Microsoft.Mxc.Sdk.slnx -c Release
+dotnet test --solution Microsoft.Mxc.Sdk.slnx -c Release --no-build
+```
+
+To run the same packed-SDK check as CI, use PowerShell 7 from any directory:
+
+```powershell
+& <repo>\scripts\ci\test-dotnet-package.ps1
+```
+
+First build the solution as above to restore its dependencies. The script
+packs the SDK in Release configuration, runs both temporary consumers, and
+removes their isolated package caches and output afterward. Use
+`-Configuration Debug` to pack a Debug build instead. It temporarily clears
+`MXC_FFI_DIR` and restores the caller's value when finished. Both .NET 8 and
+.NET 10 runtimes must be installed.
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds
@@ -46,6 +158,12 @@ for a stacked head.
 The Linux .NET SDK job also installs LXC and runs the public V1
 `MxcContainerLxcE2ETests` as root. Keep its test filter aligned with the class
 name; the job rejects an empty selection or a run without passing tests.
+
+The Linux .NET SDK job also installs Bubblewrap and strictly runs
+`MxcContainerBubblewrapE2ETests.Spawn_OutlivesTheThreadThatSpawnedIt`. The
+backend availability gate turns a missing Bubblewrap prerequisite into a
+failure, and the exact-method filter plus result-count check ensures the
+regression itself ran and passed.
 
 ### Local Windows SDK proxy checks
 

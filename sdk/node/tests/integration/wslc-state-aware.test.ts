@@ -22,6 +22,7 @@ import {
 import {
   deprovisionContainer,
   spawnInContainer,
+  spawnInContainerWithStdin,
   runInContainer,
   provisionContainer,
   startContainer,
@@ -29,6 +30,7 @@ import {
   type ContainerId,
 } from '@microsoft/mxc-sdk/v1';
 import { safeDeprovision } from './test-helpers.js';
+import * as dev from '@microsoft/mxc-sdk/v1/dev';
 
 const wslcImage = process.env.MXC_WSLC_TEST_IMAGE ?? 'alpine:latest';
 
@@ -57,13 +59,91 @@ function collect(
   });
 }
 
+function collectBytes(stream: NodeJS.ReadableStream | null): Promise<Buffer> {
+  if (stream === null) {
+    return Promise.resolve(Buffer.alloc(0));
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve(Buffer.concat(chunks)));
+    stream.once('error', reject);
+  });
+}
+
 describe('WSLC state-aware lifecycle E2E', {
   skip: !isWslcAvailable
     ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK'
     : undefined,
 }, () => {
+  it('V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership', { timeout: 180000 }, async () => {
+    const reply = (json: string): Record<string, unknown> => {
+      const envelope: { result: Record<string, unknown> } = JSON.parse(json);
+      assert.ok(envelope.result && typeof envelope.result === 'object');
+      return envelope.result;
+    };
+    const provision = JSON.stringify({
+      version: '1.1.0-alpha', phase: 'provision', containment: 'wslc',
+      wslc: { provision: { image: wslcImage } },
+    });
+    assert.deepEqual(reply(await dev.validateProvisionJson(provision)), {});
+    const provisioned = reply(await dev.provisionContainerJson(provision));
+    const sandboxId = provisioned.sandboxId;
+    assert.ok(typeof sandboxId === 'string' && sandboxId.length > 0);
+    const phase = (name: string) => JSON.stringify({ version: '1.0.0', phase: name, sandboxId });
+    const exec = (commandLine: string) => JSON.stringify({
+      version: '1.1.0-alpha', phase: 'exec', sandboxId,
+      process: { commandLine, timeout: 30000 },
+    });
+    let started = false;
+    try {
+      assert.deepEqual(reply(await dev.validateStartJson(phase('start'))), {});
+      assert.deepEqual(reply(await dev.startContainerJson(phase('start'), { experimental: true })), {});
+      started = true;
+      assert.deepEqual(reply(await dev.validateProcessJson(exec('touch /tmp/dev-must-not-run'))), {});
+      const captured = await dev.runInContainerJson(exec(
+        "test ! -e /tmp/dev-must-not-run || exit 99; cat; printf 'DEV_WSLC_OUT\\n'; printf 'DEV_WSLC_ERR\\n' >&2; exit 7"));
+      assert.equal(captured.exitCode, 7);
+      assert.equal(captured.timedOut, false);
+      assert.match(captured.stdout, /DEV_WSLC_OUT/);
+      assert.match(captured.stderr, /DEV_WSLC_ERR/);
+
+      const proc = await dev.spawnInContainerJson(exec("cat; echo DEV_WSLC_PIPE; exit 9"));
+      try {
+        assert.equal(proc.standardInput, null);
+        const stdout = collect(proc.standardOutput);
+        const stderr = collect(proc.standardError);
+        const result = await proc.wait();
+        assert.equal(result.exitCode, 9);
+        assert.equal(result.timedOut, false);
+        assert.match(await stdout, /DEV_WSLC_PIPE/);
+        assert.equal(await stderr, '');
+      } finally {
+        proc.dispose();
+      }
+      assert.deepEqual(reply(await dev.validateStopJson(phase('stop'))), {});
+      const retained = await dev.runInContainerJson(exec('echo DEV_WSLC_STILL_OWNED'));
+      assert.equal(retained.exitCode, 0);
+      assert.match(retained.stdout, /DEV_WSLC_STILL_OWNED/);
+      assert.deepEqual(reply(await dev.stopContainerJson(phase('stop'))), {});
+      started = false;
+      assert.deepEqual(reply(await dev.validateDeprovisionJson(phase('deprovision'))), {});
+    } finally {
+      try {
+        if (started) await dev.stopContainerJson(phase('stop'));
+      } finally {
+        assert.deepEqual(reply(await dev.deprovisionContainerJson(phase('deprovision'))), {});
+      }
+    }
+    await assert.rejects(dev.startContainerJson(phase('start')),
+      (error: unknown) => error instanceof MxcError && error.code === 'not_provisioned');
+  });
+
   it(
-    'preserves lifecycle, streaming, timeout, and stale-id behavior',
+    'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior',
     { timeout: 180_000 },
     async () => {
       const { containerId } = await provisionContainer({ containment: 'wslc', image: wslcImage });
@@ -96,7 +176,7 @@ describe('WSLC state-aware lifecycle E2E', {
           assert.equal(
             streamed.standardInput,
             null,
-            'WSLC must explicitly expose no stdin',
+            'spawnInContainer gives a WSLC command no stdin',
           );
           const stdoutPromise = collect(streamed.standardOutput, (chunk) => {
             if (
@@ -127,6 +207,28 @@ describe('WSLC state-aware lifecycle E2E', {
         } finally {
           streamed.dispose();
         }
+
+        const payload = Buffer.alloc(64 * 1024);
+        for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
+        const echoed = await spawnInContainerWithStdin(containerId, { command: 'cat', timeoutMs: 60_000 });
+        try {
+          const stdin = echoed.standardInput;
+          assert.ok(stdin !== null, 'spawnInContainerWithStdin exposes stdin');
+          const stdoutPromise = collectBytes(echoed.standardOutput);
+          stdin.end(payload);
+          const [result, stdout] = await Promise.all([echoed.wait(), stdoutPromise]);
+          assert.equal(result.timedOut, false, 'cat must end once stdin is closed');
+          assert.equal(result.exitCode, 0);
+          assert.ok(stdout.equals(payload), 'every byte value reaches the command unchanged');
+        } finally {
+          echoed.dispose();
+        }
+
+        const readsStdin = await runInContainer(containerId, { command: "sh -c 'cat; echo RUN_SAW_EOF'",
+          timeoutMs: 60_000 });
+        assert.equal(readsStdin.timedOut, false, 'a captured run has no input to wait for');
+        assert.equal(readsStdin.exitCode, 0);
+        assert.equal(readsStdin.stdout.trim(), 'RUN_SAW_EOF');
 
         const timeoutStart = performance.now();
         const timed = await spawnInContainer(containerId, { command: 'sleep 10',

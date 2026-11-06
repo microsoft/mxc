@@ -78,11 +78,16 @@ match the pinned SDK.
    This extracts `include/wslcsdk.h` from the new `.nupkg` and rewrites
    `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`.
 
+   If the new header adds an enum, add it to `$bitfieldEnums` (OR-able
+   `Wslc*Flags` masks) or `$newtypeEnums` (exclusive values) in the script and
+   regenerate. An enum in neither list is emitted as a bare integer alias with
+   loose constants instead of a typed newtype.
+
 5. **Build — this is where drift surfaces.**
 
    ```powershell
    cd src
-   cargo build -p wslc_common
+   cargo build -p mxc-sdk --features wslc
    ```
 
    If the header changed struct layout, sizes, signatures, or enum names, one of
@@ -100,9 +105,9 @@ match the pinned SDK.
 
    ```powershell
    cd src
-   cargo test -p wslc_common      # includes ABI size/enum asserts
-   cargo fmt -p wslc_common -- --check
-   cargo clippy -p wslc_common --all-targets -- -D warnings
+   cargo test -p mxc-sdk --features wslc --lib wslc::common   # includes ABI size/enum asserts
+   cargo fmt --all -- --check
+   cargo clippy -p mxc-sdk --features wslc --all-targets -- -D warnings
    ```
 
 7. **Run the WSLC E2E suite on a live WSL host** (cannot run in GitHub Actions —
@@ -111,11 +116,20 @@ match the pinned SDK.
 
    ```powershell
    cargo build -p wxc --features wslc --release --target x86_64-pc-windows-msvc  # aarch64-pc-windows-msvc on ARM64
+   cargo build -p mxc-sdk --bin wxc-wslc-daemon --features wslc --release --target x86_64-pc-windows-msvc
    .\tests\scripts\run_wslc_all_tests.ps1
    ```
 
    Expect all configs to pass (the `quay.io` custom registry test and the two tar-import
    tests are environment-dependent and may skip).
+
+   Then run the stdin handle probe, which checks which stdio handles the SDK
+   returns for each process flag and callback combination. Run it while no
+   other WSLC test is running, since it uses the create-and-run image store:
+
+   ```powershell
+   cargo test -p mxc-sdk --features wslc --test wslc_stdin_handle_probe -- --ignored --nocapture
+   ```
 
 8. **Commit** the regenerated `wslcsdk_sys.rs` **together with** the
    `WSLC_SDK_VERSION` + `expected_sha256()` change (and any facade/runner fixes)

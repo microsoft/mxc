@@ -308,6 +308,7 @@ Backend and phase semantics are validated by the native engine.
 | `provisionContainer` | `ProvisionRequest`, `ProvisionOptions?` | `Promise<ProvisionResult>` |
 | `startContainer` | `ContainerId`, `StartOptions?` | `Promise<LifecycleResult>` |
 | `spawnInContainer` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |
+| `spawnInContainerWithStdin` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |
 | `runInContainer` | `ContainerId`, `ExecutionRequest`, `RunInContainerOptions?` | `Promise<ExecutionResult>` |
 | `spawnInContainerWithPty` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerWithPtyOptions?` (includes `size`) | `Promise<MxcPtyProcess>` |
 | `stopContainer` | `ContainerId`, `StopOptions?` | `Promise<LifecycleResult>` |
@@ -323,7 +324,9 @@ and `validateProcess` use native dry-run validation and return no execution
 result. There is no `dryRun` execution option or public attached-exec API.
 Captured and streaming execution are asynchronous. Live processes own wait,
 kill, and disposal.
-IsolationSession has stdin; WSLC currently provides stdout/stderr only.
+IsolationSession provides stdin, stdout, and stderr. WSLC provides stdout and
+stderr; only `spawnInContainerWithStdin` also gives it a writable stdin, as
+`spawnWithStdin` does for create-and-run execution.
 
 ### 6.3 Example
 
@@ -512,11 +515,11 @@ Provision and session JSON still contains `containment`; sandbox-addressed opera
 than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
 only one-shot JSON.
 
-`--operation` cannot be combined with delete or maintenance routing, including
-`--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
-audit modes. Lifecycle identity comes only from `--container-id` or `--session-id`,
-which are mutually exclusive; an operation supplied the wrong one is told which it
-wanted. Conflicting options are rejected rather than ignored.
+`--operation` cannot be combined with maintenance routing, including setup modes,
+probing, force-reclaim, or audit modes. Lifecycle identity comes only from
+`--container-id` or `--session-id`, which are mutually exclusive; an operation
+supplied the wrong one is told which it wanted. Conflicting options are rejected
+rather than ignored.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):
@@ -570,8 +573,9 @@ Compile-time enforcement of valid combinations lives on the SDK's per-(backend, 
 Configs (§6.1), not on this illustrative aggregate. "MXC request JSON" containing
 backend sections is validated by the exact Rust contract and
 `validate_<phase>` hooks at runtime (§10.1). Runtime experimental authorization
-is supplied separately through `SandboxSpawnOptions.experimental` or the
-executor's `--experimental` flag; it is not a request JSON field.
+is supplied separately through the native entry points' `experimental` argument
+(which the published v1 SDKs always pass as off) or the executor's
+`--experimental` flag; it is not a request JSON field.
 
 For one-shot calls (phase absent), the top-level backend section directly holds
 the one-shot config object (e.g., `wslc?: WslcConfig`), as documented in
@@ -612,9 +616,9 @@ diagnostic. The rejection is recorded through the same `ConfigRejected` audit pa
 Diagnostics are never duplicated to stdout, and lifecycle stderr is not gated on
 `--debug`.
 
-Without `--operation`, `wxc-exec` accepts only one-shot requests. Input-source and
-pre-parse failures on that path retain the legacy primary diagnostic on stderr and do
-not emit a lifecycle envelope. Raw SDK and FFI lifecycle calls do not use this CLI
+Without `--operation`, `wxc-exec` accepts only create-and-run requests. Input-source
+and pre-parse failures on that path emit a typed `{error}` envelope on stderr rather
+than the lifecycle envelope on stdout. Raw SDK and FFI lifecycle calls do not use this CLI
 stream protocol; they return their status and error data through their binding result
 surfaces.
 
@@ -667,7 +671,10 @@ because a script's stderr may not end in a newline.
 `code` and `message` are always present. `code` is the machine-readable category a
 consumer branches on; `message` is the human-readable description, and for a failure
 raised by an underlying platform API it is that API's own message, passed through
-verbatim rather than concatenated with the other fields.
+verbatim rather than concatenated with the other fields. The executor's own exit
+code follows `code`: a refused request exits `1`, and an unavailable host or a
+runtime fault exits `-1`. See the error contract in
+[versioning.md](versioning.md#error-contract).
 
 The three optional named fields carry structured failure detail. `operation` and
 `nativeCode` describe an underlying platform call; `remediation` describes the failure:

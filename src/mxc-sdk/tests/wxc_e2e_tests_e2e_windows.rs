@@ -12,18 +12,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/wxc_e2e_tests.rs"]
 mod wxc_e2e_tests;
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 use serde::Serialize;
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+use wxc_e2e_tests::repo_root;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
     assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_runtime,
-    has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
-    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example,
-    test_configs_dir, TempDirs,
+    has_hyperlight_snapshot, has_test_driver, has_windows_sandbox_feature, has_wxc_exe,
+    run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example, test_configs_dir,
+    TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
 static HAS_TEST_DRIVER: OnceLock<bool> = OnceLock::new();
-static HAS_NANVIX_BINARIES: OnceLock<bool> = OnceLock::new();
 static HAS_WINDOWS_SANDBOX: OnceLock<bool> = OnceLock::new();
 static HAS_HYPERLIGHT: OnceLock<bool> = OnceLock::new();
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -37,11 +39,6 @@ fn cached_has_wxc_exe() -> bool {
 /// Caches the test driver probe for the duration of the test process.
 fn cached_has_test_driver() -> bool {
     *HAS_TEST_DRIVER.get_or_init(has_test_driver)
-}
-
-/// Caches the NanVix binary probe to avoid repeated prerequisite work.
-fn cached_has_nanvix_binaries() -> bool {
-    *HAS_NANVIX_BINARIES.get_or_init(has_nanvix_binaries)
 }
 
 /// Caches the Windows Sandbox feature probe.
@@ -69,27 +66,26 @@ fn processcontainer_basic() {
     assert_wxc_success("basic_processcontainer.json", &["--debug"]);
 }
 
-fn processcontainer_lpac() {
-    assert_wxc_success("processcontainer_basic_lpac.json", &["--debug"]);
-}
-
-fn filesystem_bfs() {
+fn processcontainer_filesystem() {
     let _temp = TempDirs::create(&["C:\\temp\\wxc_test_allowed", "C:\\temp\\wxc_test_denied"]);
-    assert_wxc_success("filesystem_bfs_test.json", &["--debug"]);
+    assert_wxc_success("processcontainer_filesystem_test.json", &["--debug"]);
 }
 
-fn filesystem_bfs_readonly() {
+fn processcontainer_filesystem_readonly() {
     let temp = TempDirs::create(&["C:\\temp\\wxc_test_allowedreadonly"]);
     temp.write_absolute_file(
         "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
         "Test Input",
     );
-    assert_wxc_success("filesystem_bfs_readonly_test.json", &["--debug"]);
+    assert_wxc_success(
+        "processcontainer_filesystem_readonly_test.json",
+        &["--debug"],
+    );
 }
 
-fn filesystem_bfs_spaces() {
+fn processcontainer_filesystem_spaces() {
     let _temp = TempDirs::create(&["C:\\Users\\Public\\wxc bfs test"]);
-    assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
+    assert_wxc_success("processcontainer_filesystem_spaces_test.json", &["--debug"]);
 }
 
 fn pwsh_setlocation() {
@@ -124,96 +120,12 @@ fn examples() {
     assert_success(&result);
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 fn microvm_basic() {
-    assert_wxc_success("microvm_hello.json", &["--debug", "--experimental"]);
-}
-
-fn microvm_network() {
-    // Drives the `-allow-host-networking` path: the guest opens a loopback TCP
-    // socket, completes a ping/pong round-trip, and prints NET_OK. Without host
-    // networking enabled the guest's socket() call fails (errno 134) and the
-    // process exits non-zero, so a clean exit + marker proves the flag wiring.
-    let result = run_wxc_config("microvm_network.json", &["--debug", "--experimental"]);
-    assert_eq!(
-        result.code,
-        Some(0),
-        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
-        result.code,
-        result.stdout,
-        result.stderr
-    );
-    let combined = result.combined_output_with_decoded_base64();
-    assert!(
-        combined.contains("NET_OK"),
-        "guest network round-trip marker missing\ncombined: {}",
-        combined
-    );
-}
-
-/// Full network isolation is supported; directional filtering is separately
-/// rejected because the legacy guest filter does not implement that contract.
-fn microvm_network_blocked() {
-    let source = "import _socket\n\
-                  try:\n\
-                  \x20   s = _socket.socket(2, 1, 0)\n\
-                  \x20   print('UNEXPECTED_NETWORK', flush=True)\n\
-                  except OSError as e:\n\
-                  \x20   print('RESULT ERRNO %d' % (e.errno,), flush=True)\n";
-    let blocked = serde_json::json!({
-        "version": "1.1.0-alpha",
-        "process": { "commandLine": source, "timeout": 30000 },
-        "containment": "microvm",
-        "network": {
-            "egress": { "default": "deny" },
-            "ingress": { "default": "deny", "hostLoopback": "deny" }
-        }
-    });
-    let blocked_result = run_wxc_config_value(
-        "microvm_network_blocked",
-        &blocked,
+    let config = microvm_configs_dir().join("microvm_hello.json");
+    assert_wxc_success(
+        &config.display().to_string(),
         &["--debug", "--experimental"],
-    );
-    let blocked_out = blocked_result.combined_output_with_decoded_base64();
-    assert_eq!(
-        blocked_result.code,
-        Some(0),
-        "isolated run should exit cleanly (the guest catches the error)\ncombined: {}",
-        blocked_out
-    );
-    assert!(
-        blocked_out.contains("RESULT ERRNO 134"),
-        "isolated guest sockets should remain unavailable (errno 134)\ncombined: {}",
-        blocked_out
-    );
-
-    let filtered = serde_json::json!({
-        "version": "1.1.0-alpha",
-        "process": { "commandLine": "print('UNEXPECTED_EXECUTION')", "timeout": 30000 },
-        "containment": "microvm",
-        "network": {
-            "egress": {
-                "default": "allow",
-                "deny": [{ "to": [{ "cidr": "203.0.113.0/24" }] }]
-            },
-            "ingress": { "default": "allow", "hostLoopback": "allow" }
-        }
-    });
-    let filtered_result = run_wxc_config_value(
-        "microvm_directional_filter_rejected",
-        &filtered,
-        &["--debug", "--experimental"],
-    );
-    let filtered_out = filtered_result.combined_output_with_decoded_base64();
-    assert_ne!(
-        filtered_result.code,
-        Some(0),
-        "unsupported directional filtering must fail before execution\ncombined: {}",
-        filtered_out
-    );
-    assert!(
-        filtered_out.contains("NanVix cannot enforce directional egress rules"),
-        "expected the backend's explicit unsupported-filtering error\ncombined: {}",
-        filtered_out
     );
 }
 
@@ -495,7 +407,42 @@ fn processcontainer_capture_denials_timeout_retention() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+fn test_processcontainer_probe_rejects_lpac_and_preserves_host_diagnostics() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(|| {
+        let config = serde_json::json!({
+            "version": "1.0.0",
+            "containment": "processcontainer",
+            "process": { "commandLine": "cmd.exe /d /c exit 0" },
+            "processContainer": { "leastPrivilege": true }
+        });
+        let result = run_wxc_config_value("processcontainer_lpac_probe", &config, &["--probe"]);
+        assert_eq!(result.code, Some(1), "{result:?}");
+        let rejected: serde_json::Value =
+            serde_json::from_str(&result.stdout).expect("request probe emits JSON");
+        assert!(rejected["error"].is_string());
+        assert!(rejected.get("tier").is_none());
+        assert!(rejected.get("needsDaclAugmentation").is_none());
+
+        let exe = wxc_e2e_tests::find_binary("wxc-exec.exe").expect("executor is available");
+        let host_output = std::process::Command::new(exe)
+            .arg("--probe")
+            .output()
+            .expect("host-only probe runs");
+        assert!(host_output.status.success(), "{host_output:?}");
+        let host: serde_json::Value =
+            serde_json::from_slice(&host_output.stdout).expect("host-only probe emits JSON");
+        assert_eq!(
+            rejected["probes"]["baseContainerApiPresent"],
+            host["probes"]["baseContainerApiPresent"]
+        );
+    });
+}
+
+#[test]
+#[ignore] // Requires an enabled native PSEC contract
 fn test_processcontainer_basic() {
     if !cached_has_wxc_exe() {
         return;
@@ -505,17 +452,7 @@ fn test_processcontainer_basic() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_processcontainer_lpac() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    assert_python();
-    with_test_lock(processcontainer_lpac);
-}
-
-#[test]
-#[ignore] // Live capture needs the brokered learning-mode API + BFS velocity key; skips otherwise
+#[ignore] // Live capture needs native PSEC and compatible Learning Mode support; skips otherwise
 fn test_processcontainer_capture_denials_output_file() {
     if !cached_has_wxc_exe() {
         return;
@@ -533,7 +470,7 @@ fn test_processcontainer_proxy_capture_uses_native_capture() {
 }
 
 #[test]
-#[ignore] // Live capture needs the brokered learning-mode API + BFS velocity key; skips otherwise
+#[ignore] // Live capture needs native PSEC and compatible Learning Mode support; skips otherwise
 fn test_processcontainer_capture_denials_timeout_retention() {
     if !cached_has_wxc_exe() {
         return;
@@ -542,37 +479,37 @@ fn test_processcontainer_capture_denials_timeout_retention() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs() {
+#[ignore] // Requires an enabled native PSEC contract
+fn test_processcontainer_filesystem() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs);
+    with_test_lock(processcontainer_filesystem);
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_readonly() {
+#[ignore] // Requires an enabled native PSEC contract
+fn test_processcontainer_filesystem_readonly() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs_readonly);
+    with_test_lock(processcontainer_filesystem_readonly);
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_spaces() {
+#[ignore] // Requires an enabled native PSEC contract
+fn test_processcontainer_filesystem_spaces() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs_spaces);
+    with_test_lock(processcontainer_filesystem_spaces);
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires an enabled native PSEC contract
 fn test_pwsh_setlocation() {
     if !cached_has_wxc_exe() {
         return;
@@ -582,7 +519,7 @@ fn test_pwsh_setlocation() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires an enabled native PSEC contract
 fn test_test_configs() {
     if !cached_has_test_driver() {
         return;
@@ -591,7 +528,7 @@ fn test_test_configs() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
+#[ignore] // Requires an enabled native PSEC contract
 fn test_examples() {
     if !cached_has_test_driver() {
         return;
@@ -600,36 +537,13 @@ fn test_examples() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+#[ignore = "VM: requires Windows x64, WHP and the signed NVX bundle"]
 fn test_microvm_basic() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
     with_test_lock(microvm_basic);
-}
-
-#[test]
-fn test_microvm_network() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_network);
-}
-
-#[test]
-fn test_microvm_network_blocked() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_network_blocked);
 }
 
 #[test]
@@ -645,11 +559,10 @@ fn test_windows_sandbox() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+#[ignore = "VM: requires Windows x64, WHP and the signed NVX bundle"]
 fn test_microvm_suite() {
     if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
         return;
     }
     with_test_lock(microvm_suite);
@@ -667,9 +580,8 @@ fn test_on_repeat() {
         for pass in 1..=10 {
             println!("=== Pass {pass} of 10 ===");
             processcontainer_basic();
-            filesystem_bfs();
-            filesystem_bfs_readonly();
-            processcontainer_lpac();
+            processcontainer_filesystem();
+            processcontainer_filesystem_readonly();
         }
     });
 }
@@ -805,7 +717,16 @@ fn run_sandbox_case(case: &SandboxCase) {
 // MicroVM suite
 // ---------------------------------------------------------------------------
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+fn microvm_configs_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("microvm")
+}
+
 #[derive(Debug)]
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 struct MicrovmCase {
     config: &'static str,
     expected_exit: Option<i32>,
@@ -814,6 +735,7 @@ struct MicrovmCase {
     expect_non_zero: bool,
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 #[derive(Debug, Serialize)]
 struct MicrovmPerfOutput {
     commit: String,
@@ -821,6 +743,7 @@ struct MicrovmPerfOutput {
     results: Vec<MicrovmPerfEntry>,
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 #[derive(Debug, Serialize)]
 struct MicrovmPerfEntry {
     test: String,
@@ -830,6 +753,7 @@ struct MicrovmPerfEntry {
     status: String,
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 fn microvm_suite() {
     let cases = [
         MicrovmCase {
@@ -856,8 +780,8 @@ fn microvm_suite() {
         MicrovmCase {
             config: "microvm_stdlib.json",
             expected_exit: Some(0),
-            description: "Stdlib (json, math, hashlib)",
-            output_contains: Some("pi"),
+            description: "POSIX guest shell and OS",
+            output_contains: Some("shell=posix"),
             expect_non_zero: false,
         },
         MicrovmCase {
@@ -870,8 +794,8 @@ fn microvm_suite() {
         MicrovmCase {
             config: "microvm_error.json",
             expected_exit: Some(1),
-            description: "Python exception",
-            output_contains: Some("ValueError"),
+            description: "Shell error",
+            output_contains: Some("intentional test error"),
             expect_non_zero: false,
         },
         MicrovmCase {
@@ -887,14 +811,18 @@ fn microvm_suite() {
     let mut failures = Vec::new();
 
     for case in cases {
-        let config_path = test_configs_dir().join(case.config);
-        if !config_path.exists() {
-            println!("SKIPPED: config not found: {}", config_path.display());
-            continue;
-        }
+        let config_path = microvm_configs_dir().join(case.config);
+        assert!(
+            config_path.is_file(),
+            "Missing MicroVM fixture: {}",
+            config_path.display()
+        );
 
         println!("--- {} ({}) ---", case.description, case.config);
-        let result = run_wxc_config(case.config, &["--debug", "--experimental"]);
+        let result = run_wxc_config(
+            &config_path.display().to_string(),
+            &["--debug", "--experimental"],
+        );
         let status = if command_matches(&result, &case) {
             "PASS"
         } else {
@@ -930,6 +858,7 @@ fn microvm_suite() {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 fn command_matches(result: &wxc_e2e_tests::CommandResult, case: &MicrovmCase) -> bool {
     if case.expect_non_zero {
         if result.code == Some(0) {
@@ -948,6 +877,7 @@ fn command_matches(result: &wxc_e2e_tests::CommandResult, case: &MicrovmCase) ->
         .contains(expected)
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 fn expected_exit_description(case: &MicrovmCase) -> String {
     if case.expect_non_zero {
         "non-zero exit".to_string()
@@ -1210,6 +1140,7 @@ fn test_hyperlight_suite() {
 // MicroVM perf results
 // ---------------------------------------------------------------------------
 
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
 fn write_microvm_perf_results(results: Vec<MicrovmPerfEntry>) {
     let output = MicrovmPerfOutput {
         commit: std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_string()),

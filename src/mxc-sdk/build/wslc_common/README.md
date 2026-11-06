@@ -4,7 +4,7 @@
 
 **Package:** `Microsoft.WSL.Containers`
 **Version:** pinned in `src/mxc-sdk/build/build_wslc_common.rs`
-(`WSLC_SDK_VERSION`, currently **2.9.9**)
+(`WSLC_SDK_VERSION`, currently **3.0.3**)
 **Source:** the [`MxcDependencies`](https://dev.azure.com/shine-oss/mxc/_artifacts/feed/MxcDependencies)
 Azure Artifacts feed — a public, anonymous-read mirror of nuget.org.
 
@@ -42,7 +42,7 @@ environment variable.
 
 ## Contents
 
-- `Microsoft.WSL.Containers.2.9.9.nupkg` — vendored fallback copy of the SDK
+- `Microsoft.WSL.Containers.3.0.3.nupkg` — vendored fallback copy of the SDK
   (header `wslcsdk.h`, import libs `wslcsdk.lib`, and runtime `wslcsdk.dll` for
   x64 and ARM64). Must match `WSLC_SDK_VERSION` in `build.rs`.
 
@@ -53,9 +53,8 @@ environment variable.
 2. Update `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`.
 3. Replace the vendored `.nupkg` in this directory with the matching version (or
    remove it once the vendored fallback is retired).
-4. Re-validate the hand-written FFI bindings in
-   `src/mxc-sdk/src/backends/wslc/common/wslc_bindings.rs` against the new
-   `include/wslcsdk.h` (struct sizes, exported symbol names, signatures) — the
-   SDK is in preview and its ABI can change between releases.
+4. Regenerate the FFI bindings with `scripts/generate-wslc-bindings.ps1` and
+   follow the runbook in
+   [`docs/development/build-and-test/wslc-sdk-bindings.md`](../../../../docs/development/build-and-test/wslc-sdk-bindings.md).
 5. Update the required WSL runtime floor in
    `docs/backends/wslc/wsl-container-getting-started.md` if it changed.

@@ -30,9 +30,6 @@ function Invoke-BunCase {
         "readonlyPaths": $((ConvertTo-Json -InputObject @((Split-Path -Parent $bun), $env:SystemRoot) -Compress)),
         "readwritePaths": $((ConvertTo-Json -InputObject @($WorkDirectory) -Compress))
     },
-    "fallback": {
-        "allowDaclMutation": true
-    },
     "ui": {
         "disable": false
     }

@@ -169,7 +169,7 @@ try {
     # newtypes via --bitfield-enum; exclusive-value enums become opaque
     # newtypes via --newtype-enum. Both keep the C ABI while avoiding UB from
     # out-of-range discriminants that a plain Rust `enum` would allow.
-    $bitfieldEnums = 'Wslc(ContainerFlags|SessionFeatureFlags|ContainerStartFlags|DeleteContainerFlags|ComponentFlags|VhdRequirementsFlags)'
+    $bitfieldEnums = 'Wslc(ContainerFlags|SessionFeatureFlags|ContainerStartFlags|DeleteContainerFlags|ComponentFlags|VhdRequirementsFlags|ProcessFlags)'
     $newtypeEnums  = 'Wslc(PortProtocol|Signal|ProcessIOHandle|ContainerNetworkingMode|VhdType|SessionTerminationReason|ContainerState|ProcessState|ImageProgressStatus)'
 
     $generatedFile = if ($Check) { Join-Path $staging "wslcsdk_sys.rs" } else { $outFile }

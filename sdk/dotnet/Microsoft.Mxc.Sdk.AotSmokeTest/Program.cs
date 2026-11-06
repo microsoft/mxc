@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 
 static void Check(bool condition, string what)
 {
@@ -34,6 +35,13 @@ static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 }
 
 var initialPtySize = new MxcPtySize(40, 120);
+CheckRoundTrip(new Dev.JsonOptions { Experimental = true },
+    x => x.Experimental, "dev JSON options experimental authorization");
+CheckRoundTrip(new Dev.PtyJsonOptions(),
+    x => !x.Experimental && x.Size is null, "dev PTY options without initial dimensions");
+CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },
+    x => x.Experimental && x.Size == initialPtySize,
+    "dev PTY options experimental authorization and initial dimensions");
 CheckRoundTrip(new TelemetryConfig(), x => x.Enabled is null, "omitted telemetry enabled");
 CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false, "explicit disabled telemetry");
 foreach (var enabled in new bool?[] { null, true, false })

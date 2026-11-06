@@ -18,6 +18,9 @@ param
     [Parameter(Mandatory, ParameterSetName = 'Validate')]
     [switch] $ValidateOnly,
 
+    [Parameter(ParameterSetName = 'Package')]
+    [switch] $VerifyMicrovmTests,
+
     [string] $ManifestPath = 'src/Cargo.toml',
     [string] $RootCrate = 'mxc-sdk',
     [string] $PackageRegistry = 'crates-io',
@@ -26,6 +29,11 @@ param
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($VerifyMicrovmTests -and -not $IsWindows)
+{
+    throw 'MicroVM crate verification requires Windows and targets x86_64-pc-windows-msvc.'
+}
 
 $metadata = cargo metadata --locked --format-version 1 --no-deps --manifest-path $ManifestPath | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit $LASTEXITCODE" }
@@ -114,6 +122,39 @@ $archive = Join-Path $metadata.target_directory "package/$RootCrate-$($package.v
 if (-not (Test-Path -LiteralPath $archive))
 {
     throw "cargo package did not produce $archive"
+}
+if ($VerifyMicrovmTests)
+{
+    $extraction = Join-Path ([System.IO.Path]::GetTempPath()) ("mxc-crate-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $extraction | Out-Null
+    try
+    {
+        tar --extract --gzip --file $archive --directory $extraction
+        if ($LASTEXITCODE -ne 0) { throw "crate extraction failed with exit $LASTEXITCODE" }
+        $extractedPackage = Join-Path $extraction "$RootCrate-$($package.version)"
+        foreach ($fixture in @(
+            'microvm_hello.json', 'microvm_exit_code.json', 'microvm_multiline.json',
+            'microvm_stdlib.json', 'microvm_large_output.json', 'microvm_error.json',
+            'microvm_timeout.json'
+        ))
+        {
+            $fixturePath = Join-Path $extractedPackage "tests\fixtures\microvm\$fixture"
+            if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf))
+            {
+                throw "Packaged MicroVM fixture is missing: $fixture"
+            }
+        }
+        cargo test --offline --locked --release --target x86_64-pc-windows-msvc `
+            --manifest-path (Join-Path $extractedPackage 'Cargo.toml') `
+            --target-dir $metadata.target_directory `
+            --no-default-features --features microvm --test nvx_e2e --no-run
+        if ($LASTEXITCODE -ne 0) { throw "packaged MicroVM test compilation failed with exit $LASTEXITCODE" }
+        Write-Host 'Compiled the MicroVM test target from the extracted mxc-sdk archive.'
+    }
+    finally
+    {
+        Remove-Item -LiteralPath $extraction -Recurse -Force
+    }
 }
 if (Test-Path -LiteralPath $OutDir)
 {

@@ -19,7 +19,7 @@ pub enum CaptureDenialsMode {
 /// Its presence enables capture: the runner records the sandboxed process's
 /// ungranted access attempts and writes a JSON denials document, reported
 /// through
-/// [`ExecutionMetadata::capture_denials`](crate::v1::ExecutionMetadata).
+/// [`ExecutionMetadata::capture_denials`](crate::v1::ExecutionMetadata::capture_denials).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CaptureDenials {

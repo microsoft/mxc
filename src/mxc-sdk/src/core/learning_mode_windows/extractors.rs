@@ -84,7 +84,7 @@ const COM_CALL_OBJECT_TYPE: &str = "ComCallOnInterface";
 /// Pre-decoded event payload handed to the extractors.
 ///
 /// The trace consumer decodes each raw `EVENT_RECORD` into this shape via
-/// [`crate::learning_mode_windows::tdh_decode::decode_event_parts`] before routing it here. The
+/// `crate::learning_mode_windows::tdh_decode::decode_event_parts` before routing it here. The
 /// extractors take only this representation so they stay unit-testable.
 #[derive(Debug, Clone)]
 pub struct DecodedEventParts {

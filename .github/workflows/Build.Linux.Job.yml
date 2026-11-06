@@ -132,6 +132,25 @@ jobs:
             exit 1
           fi
 
+      - name: Test Bubblewrap seccomp, resolver, argument-builder, runner, tool lookup, and version modules
+        working-directory: src
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
+            cargo test --locked --release --target "${{ matrix.target }}" \
+              -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+              echo "::error::Bubblewrap $module module filter ran no tests."
+              exit 1
+            fi
+          done
+
       # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
       # the install. Strict mode makes a failed availability probe fail this
@@ -152,6 +171,39 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --doc
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
+
+      - name: Test native module lifetime
+        working-directory: src
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" -p mxc-sdk --example module_lifetime_fixture
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test module_lifetime
+
+      - name: Test and stage filesystem probe request deadlines
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-sdk --lib --no-run --message-format=json |
+            python3 -c 'import json,sys; items=[json.loads(line) for line in sys.stdin]; paths=[m["executable"] for m in items if m.get("reason")=="compiler-artifact" and m["target"]["name"]=="mxc_sdk" and m["profile"]["test"] and m.get("executable")]; assert len(paths)==1, paths; print(paths[0])')"
+          destination="target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
+          cp "$payload" "$destination"
+          for case in bubblewrap_launch_rejects_stalled_paths lxc_launch_rejects_stalled_paths \
+            bubblewrap_denied_paths_reject_stalls lxc_mount_paths_reject_stalls; do
+            test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+            "$destination" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
+          done
+          "$destination" --ignored filesystem_probe::launch_tests:: --skip lxc_mount_paths_reject_stalls
+
+      - name: Test LXC mount-probe deadlines
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lxc-utils
+          sudo "target/${{ matrix.target }}/release/mxc-filesystem-probe-tests" --ignored --exact \
+            core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::lxc_mount_paths_reject_stalls
 
       # This lane selects lib tests by module, so mxc_pty needs an explicit
       # step; the macOS lane picks it up via the package-wide run. The tests
@@ -204,8 +256,12 @@ jobs:
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
+      # Strict mode fails a test whose Bubblewrap or python3 prerequisite is
+      # missing instead of letting it pass without running.
       - name: Test Bubblewrap executor characterization
         working-directory: src
+        env:
+          MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_bubblewrap_characterization
 
@@ -214,21 +270,6 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
-      # PLM (Permissive Learning Mode) is functionally Windows-only, but the
-      # crate builds cross-platform: the lib's helper modules compile on every
-      # target, and the binary has a no-op stub `fn main()` for non-Windows so
-      # the crate lives in the workspace `default-members` list. This gate
-      # keeps the cross-platform/Windows-only split a CI-enforced contract — if
-      # someone adds a `use windows::…` without a `#[cfg]` gate the Linux
-      # build fails fast rather than rotting silently.
-      - name: Build plm (cross-platform stub + lib)
-        working-directory: src
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
-
-      - name: Test plm (cross-platform modules)
-        working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
-
       # These are separate workspace members, not dependencies of lxc.
       - name: Build Node runtime dependencies
         working-directory: src
@@ -254,5 +295,6 @@ jobs:
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
             src/target/${{ matrix.target }}/release/libmxc_ffi.so
+            src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests
           if-no-files-found: error
           retention-days: 1

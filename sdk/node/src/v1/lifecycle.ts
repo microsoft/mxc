@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { Readable } from 'node:stream';
 import { diagLog } from '../diagnostic.js';
+import { captureProcessOutput } from './capture.js';
 import { MxcError } from './errors.js';
 import {
   runBindingStateAwareRequestAsync,
@@ -143,6 +143,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions,
   apiName: string,
+  stdin = false,
 ): Promise<MxcProcess> {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
@@ -150,6 +151,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
     false,
     request.timeoutMs,
+    stdin,
   );
 }
 
@@ -165,33 +167,6 @@ function assertStateAwareStreamingOptions(
       `${apiName} does not support dryRun; use an explicit validation API`,
     );
   }
-}
-
-const MAX_CAPTURED_OUTPUT_BYTES = 1024 * 1024;
-
-function collectStream(
-  stream: Readable | null,
-): Promise<{ text: string; truncated: boolean }> {
-  if (stream === null) {
-    return Promise.resolve({ text: '', truncated: false });
-  }
-  return new Promise((resolve, reject) => {
-    const buffer = Buffer.alloc(MAX_CAPTURED_OUTPUT_BYTES);
-    let length = 0;
-    let truncated = false;
-    stream.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const retained = Math.min(bytes.length, MAX_CAPTURED_OUTPUT_BYTES - length);
-      bytes.copy(buffer, length, 0, retained);
-      length += retained;
-      truncated ||= retained < bytes.length;
-    });
-    stream.once('end', () => resolve({
-      text: buffer.subarray(0, length).toString('utf-8'),
-      truncated,
-    }));
-    stream.once('error', reject);
-  });
 }
 
 /**
@@ -250,7 +225,8 @@ export async function startContainer<C extends LifecycleContainmentKind>(
 /**
  * Streams a script execution inside a started IsolationSession or WSLC container over Node
  * pipes, returning an owning `MxcProcess` for waiting, termination,
- * stream access, and disposal.
+ * stream access, and disposal. A WSLC command reads end-of-file on stdin; use
+ * {@link spawnInContainerWithStdin} to give it input.
  */
 export async function spawnInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -263,6 +239,25 @@ export async function spawnInContainer<C extends PipedExecuteBackend>(
     request,
     options,
     'spawnInContainer',
+  );
+}
+
+/**
+ * {@link spawnInContainer} with a writable `standardInput` whose end gives the
+ * command end-of-file.
+ */
+export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(
+  containerId: ContainerId<C>,
+  request: ExecutionRequest<C>,
+  options: SpawnInContainerOptions = {},
+): Promise<MxcProcess> {
+  assertStateAwareStreamingOptions('spawnInContainerWithStdin', options);
+  return spawnStateAwareExecProcess(
+    containerId,
+    request,
+    options,
+    'spawnInContainerWithStdin',
+    true,
   );
 }
 
@@ -316,26 +311,16 @@ export async function runInContainer<C extends PipedExecuteBackend>(
   assertStateAwareStreamingOptions('runInContainer', options);
   assertPipedExecBackend('runInContainer', containerId);
   const proc = await spawnInContainer(containerId, request, options);
-  const stdoutPromise = collectStream(proc.standardOutput);
-  const stderrPromise = collectStream(proc.standardError);
-  const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
+  const waitPromise = captureProcessOutput(proc);
   let failed = false;
   try {
-    const [result, stdout, stderr] = await waitPromise;
-    const warnings = [...proc.warnings];
-    for (const [stream, output] of [['stdout', stdout], ['stderr', stderr]] as const) {
-      if (output.truncated) {
-        warnings.push(
-          `${stream} capture truncated at ${MAX_CAPTURED_OUTPUT_BYTES} bytes; use streaming APIs for complete output`,
-        );
-      }
-    }
+    const { result, stdout, stderr, warnings } = await waitPromise;
     return {
-      stdout: stdout.text,
-      stderr: stderr.text,
+      stdout,
+      stderr,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      warnings,
+      warnings: [...proc.warnings, ...warnings],
       ...(proc.outputMetadata === undefined
         ? {}
         : { outputMetadata: proc.outputMetadata }),

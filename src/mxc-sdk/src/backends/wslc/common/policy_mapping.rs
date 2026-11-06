@@ -10,6 +10,8 @@
 //! injected, so its logic stays testable without touching disk.
 
 use crate::mxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
 use crate::wslc_common::wslc_bindings::WslcContainerNetworkingMode;
@@ -302,12 +304,10 @@ pub fn validate_denied_path_overlap(
     readonly_paths: &[String],
     denied_paths: &[String],
 ) -> Result<(), String> {
-    validate_denied_path_overlap_with(
-        readwrite_paths,
-        readonly_paths,
-        denied_paths,
-        canonicalize_allowing_absent_tail,
-    )
+    let mut probe = FilesystemProbe::default();
+    validate_denied_path_overlap_with(readwrite_paths, readonly_paths, denied_paths, |path| {
+        probe.run(path, canonicalize_allowing_absent_tail)
+    })
 }
 
 /// The complete WSLc provision-time filesystem-policy gate, shared by the
@@ -331,13 +331,13 @@ pub fn validate_denied_path_overlap(
 ///
 /// Returns the tightened policy when normalization changed something (the caller
 /// rebuilds the request around it) or `None` when the policy was already
-/// conflict-free. Any failure is returned as a `String`; callers map it to their
-/// own error envelope (`ScriptResponse` / `MxcError`). Normalization diagnostics
+/// conflict-free. Callers map a failure to their own error envelope
+/// (`ScriptResponse` / `MxcError`). Normalization diagnostics
 /// are written to `logger`; callers decide how to surface them.
 pub fn apply_provision_policy_gate(
     request: &ExecutionRequest,
     logger: &mut Logger,
-) -> Result<Option<ContainerPolicy>, String> {
+) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
     let normalized =
         crate::mxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
     let effective = normalized.as_ref().unwrap_or(&request.policy);
@@ -346,7 +346,8 @@ pub fn apply_provision_policy_gate(
         &effective.readwrite_paths,
         &effective.readonly_paths,
         &effective.denied_paths,
-    )?;
+    )
+    .map_err(FilesystemPolicyError::Policy)?;
     Ok(normalized)
 }
 
@@ -367,12 +368,11 @@ fn overlap_error(denied: &str, mounted: &str, list_name: &str, via_alias: bool) 
     )
 }
 
-/// Inner overlap validator with an injected path resolver (for testability).
 fn validate_denied_path_overlap_with(
     readwrite_paths: &[String],
     readonly_paths: &[String],
     denied_paths: &[String],
-    resolve: impl Fn(&str) -> PathCanonical,
+    mut resolve: impl FnMut(&str) -> Result<PathCanonical, String>,
 ) -> Result<(), String> {
     if denied_paths.is_empty() {
         return Ok(());
@@ -402,12 +402,14 @@ fn validate_denied_path_overlap_with(
 
     // Tier 2: canonicalize on disk to collapse alias spellings, then re-compare.
     // Fail closed on an unresolvable path (Unknown) since deniedPaths are present.
-    let denied_canon: Vec<(&String, PathCanonical)> =
-        denied_paths.iter().map(|d| (d, resolve(d))).collect();
+    let denied_canon: Vec<(&String, PathCanonical)> = denied_paths
+        .iter()
+        .map(|d| resolve(d).map(|canonical| (d, canonical)))
+        .collect::<Result<_, _>>()?;
     let mount_canon: Vec<(&String, &str, PathCanonical)> = mounts
         .iter()
-        .map(|(m, list)| (*m, *list, resolve(m)))
-        .collect();
+        .map(|(m, list)| resolve(m).map(|canonical| (*m, *list, canonical)))
+        .collect::<Result<_, _>>()?;
 
     for (path, canon) in denied_canon
         .iter()
@@ -665,19 +667,32 @@ mod tests {
         paths.iter().map(|path| (*path).to_string()).collect()
     }
 
-    /// Build a fake path resolver from explicit mappings; unmapped paths resolve
-    /// to `Absent` (cleanly missing), so tier 2 skips them.
-    fn resolver(map: Vec<(&'static str, PathCanonical)>) -> impl Fn(&str) -> PathCanonical {
+    fn resolver(
+        map: Vec<(&'static str, PathCanonical)>,
+    ) -> impl Fn(&str) -> Result<PathCanonical, String> {
         move |path: &str| {
-            map.iter()
+            Ok(map
+                .iter()
                 .find(|(key, _)| *key == path)
                 .map(|(_, value)| value.clone())
-                .unwrap_or(PathCanonical::Absent)
+                .unwrap_or(PathCanonical::Absent))
         }
     }
 
     fn canonical(path: &str) -> PathCanonical {
         PathCanonical::Canonical(path.to_string())
+    }
+
+    #[test]
+    fn canonical_probe_failure_rejects_before_comparing_aliases() {
+        let error = validate_denied_path_overlap_with(
+            &strings(&[r"C:\mount"]),
+            &[],
+            &strings(&[r"C:\slow"]),
+            |path| Err(format!("probe for {path} timed out")),
+        )
+        .unwrap_err();
+        assert_eq!(error, r"probe for C:\slow timed out");
     }
 
     #[test]

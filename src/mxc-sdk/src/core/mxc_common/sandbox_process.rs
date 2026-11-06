@@ -584,9 +584,9 @@ pub trait SandboxBackend {
     /// stdio wired per `stdio`, returning a handle. On a validation or spawn
     /// failure returns a [`ScriptResponse`] carrying the error.
     ///
-    /// Implementations must apply shared validation and [`Self::validate`]
-    /// before performing any process-launch side effects. This keeps direct
-    /// streaming callers and the [`Runner`] bridge on the same safe path.
+    /// Implementations must apply shared and backend-specific request validation
+    /// before launching. Environmental checks may instead be enforced by the
+    /// actual sandbox setup, before the workload is allowed to run.
     fn spawn(
         &mut self,
         request: &ExecutionRequest,
@@ -637,7 +637,7 @@ impl<B: SandboxBackend> Runner<B> {
             Err(response) => return response,
         };
 
-        match child.wait() {
+        let mut response = match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
@@ -673,7 +673,10 @@ impl<B: SandboxBackend> Runner<B> {
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
                 response
             }
-        }
+        };
+        // Backends report failures after exit, such as cleanup, here.
+        response.extend_warnings(child.warnings());
+        response
     }
 }
 
@@ -719,7 +722,9 @@ mod runner_tests {
 
     use super::*;
 
-    struct CompletedProcess;
+    struct CompletedProcess {
+        warnings: Vec<String>,
+    }
 
     struct NativePipeSource;
 
@@ -840,6 +845,10 @@ mod runner_tests {
     }
 
     impl SandboxProcess for CompletedProcess {
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -894,8 +903,44 @@ mod runner_tests {
             validate_common(request)?;
             self.validate(request)?;
             self.direct_spawns.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(CompletedProcess))
+            Ok(Box::new(CompletedProcess {
+                warnings: Vec::new(),
+            }))
         }
+    }
+
+    struct CleanupWarningBackend;
+
+    impl SandboxBackend for CleanupWarningBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            Ok(Box::new(CompletedProcess {
+                warnings: vec!["cleanup failed".to_string()],
+            }))
+        }
+    }
+
+    #[test]
+    fn runner_reports_process_warnings_with_the_exit_code() {
+        let mut runner = Runner::new(CleanupWarningBackend);
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.warnings(), ["cleanup failed"]);
     }
 
     #[test]

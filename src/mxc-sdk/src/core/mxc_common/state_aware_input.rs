@@ -37,9 +37,6 @@ impl StateAwareInput {
         if common.container_id.is_some() {
             contradictory.push("containerId");
         }
-        if common.fallback.is_some() {
-            contradictory.push("fallback");
-        }
         if common.seatbelt.is_some() {
             contradictory.push("seatbelt");
         }
@@ -51,6 +48,9 @@ impl StateAwareInput {
         }
         if common.wslc.is_some() {
             contradictory.push("wslc");
+        }
+        if common.microvm.is_some() {
+            contradictory.push("microvm");
         }
         if common.lifecycle.is_some() {
             contradictory.push("lifecycle");

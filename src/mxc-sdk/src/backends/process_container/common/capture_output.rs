@@ -1,28 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Shared `processContainer.captureDenials` JSON-output plumbing.
-//!
-//! Both the native BaseContainer capture path (`base_container_runner`,
-//! decoding its own sealed ETL) and the guarded-WPR legacy-tier fallback
-//! (`appcontainer_runner`, consuming an already-decoded [`AnalysisResult`]
-//! handed back by the elevated PLM guardian) must emit byte-for-byte the same
-//! [`DenialsDocument`] JSON shape, username-redacted verbose logging sibling,
-//! [`CaptureDenialsOutput`] summary, and resolved output-path convention.
-//! Centralizing that here is what guarantees the two paths can't drift.
-//!
-//! Deliberately free of any Windows API or [`ScriptResponse`] coupling so it
-//! can be shared by both runner modules without either owning the other's
-//! error type; callers map the plain `String` errors into their own error
-//! type at the call site.
+//! Native `processContainer.captureDenials` JSON output and error composition.
+//! Retained ETLs use the runner's protected managed-capture store, independently
+//! of caller-selected JSON output paths.
 
 use std::path::{Path, PathBuf};
 
 use crate::learning_mode_core::{
     capture_diagnostics::{write_capture_verbose_logging_document, CaptureAnalysis},
-    verbose_logging_sibling_path, write_document, write_paired_output_files,
-    write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
-    DenialsOutputPointer, DeniedResource, ExistingOutputPolicy, VerboseLoggingDocument,
+    verbose_logging_sibling_path, write_document, write_paired_output_files, DenialSummary,
+    DenialsDocument, DenialsOutputPointer, DeniedResource, ExistingOutputPolicy,
 };
 use crate::mxc_common::models::CaptureDenialsOutput;
 
@@ -43,33 +31,6 @@ pub fn is_retained_capture_run_dir(directory: &Path) -> bool {
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name.eq_ignore_ascii_case(RETAINED_CAPTURE_DIR_NAME))
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct DenialsOutputPaths {
-    pub denials: PathBuf,
-    pub etl: Option<PathBuf>,
-}
-
-/// Writes a bounded [`AnalysisResult`] as the actionable denials document and
-/// deterministic verbose logging sibling, then returns caller-facing metadata for
-/// the actionable document.
-///
-/// Never overwrites an existing file: a run whose output path collides with a
-/// leftover file from a previous run fails loudly rather than clobbering it.
-pub fn write_denials_document(
-    analysis: AnalysisResult,
-    exit_code: i32,
-    output_path: &Path,
-) -> std::io::Result<CaptureDenialsOutput> {
-    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
-    write_denials_document_pair(
-        analysis.denials,
-        analysis.denied_resources_truncated,
-        exit_code,
-        output_path,
-        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
-    )
 }
 
 /// Writes native capture analysis with the complete internal v5 diagnostics.
@@ -151,61 +112,14 @@ pub fn insert_run_id_into_stem(path: &Path, run_id: &str) -> PathBuf {
     }
 }
 
-/// Resolves the paired denials and optional retained-ETL paths for one run.
-///
-/// Both names contain the same run identifier. The retained path is always
-/// distinct, including when the configured denials path has no extension or
-/// already ends in `.etl`.
-pub fn unique_denials_output_paths(
-    configured_path: Option<&str>,
-    retain_etl: bool,
-) -> Result<DenialsOutputPaths, String> {
+/// Resolve a unique caller-selected or temporary JSON output path.
+pub fn unique_denials_output_path(configured_path: Option<&str>) -> Result<PathBuf, String> {
     let suffix = random_capture_suffix()?;
     let run_id = format!("{}_{suffix}", std::process::id());
-    Ok(denials_output_paths_for_run(
-        configured_path,
-        &run_id,
-        retain_etl,
-    ))
-}
-
-fn denials_output_paths_for_run(
-    configured_path: Option<&str>,
-    run_id: &str,
-    retain_etl: bool,
-) -> DenialsOutputPaths {
-    let denials = match configured_path {
-        Some(path) => insert_run_id_into_stem(Path::new(path), run_id),
+    Ok(match configured_path {
+        Some(path) => insert_run_id_into_stem(Path::new(path), &run_id),
         None => std::env::temp_dir().join(format!("mxc_denials_{run_id}.json")),
-    };
-    let etl = retain_etl.then(|| match configured_path {
-        Some(path) => retained_etl_path(Path::new(path), run_id),
-        None => std::env::temp_dir().join(format!("mxc_denials_{run_id}.etl")),
-    });
-    DenialsOutputPaths { denials, etl }
-}
-
-fn retained_etl_path(configured_path: &Path, run_id: &str) -> PathBuf {
-    let file_name = configured_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("denials");
-    let extension = configured_path.extension().and_then(|ext| ext.to_str());
-    let stem = configured_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(file_name);
-    let retained_name = match extension {
-        Some(ext) if ext.eq_ignore_ascii_case("etl") => {
-            format!("{stem}.{run_id}.trace.etl")
-        }
-        Some(_) => format!("{stem}.{run_id}.etl"),
-        None => format!("{file_name}.{run_id}.etl"),
-    };
-    match configured_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(retained_name),
-        _ => PathBuf::from(retained_name),
-    }
+    })
 }
 
 /// A short random hex suffix used to keep per-run temp/output paths from
@@ -274,9 +188,8 @@ pub fn combine_capture_and_cleanup_results<T>(
 /// Combines a sandboxed process's wait result with a best-effort
 /// `captureDenials` teardown result, preferring the teardown error when both
 /// are present so a capture failure is never silently swallowed by a
-/// successful process exit. Shared by the native BaseContainer capture path
-/// and the guarded-WPR legacy-tier fallback so both surface capture failures
-/// through [`crate::mxc_common::sandbox_process::SandboxProcess::wait`] identically.
+/// successful process exit. Used by native capture through
+/// [`crate::mxc_common::sandbox_process::SandboxProcess::wait`].
 ///
 /// When *both* the wait and teardown fail, the wait error kind is preserved
 /// while both messages are returned. This keeps retained-ETL paths and other
@@ -314,54 +227,8 @@ mod tests {
         CaptureVerboseLoggingSignature, CaptureVerboseLoggingSummary, ConfigurationRecommendation,
         NetworkDecisionReason, NetworkEndpoint, CAPTURE_VERBOSE_LOGGING_VERSION,
     };
-    use crate::learning_mode_core::{
-        AccessType, DeniedResource, ResourceType, VerboseLoggingOutcomeReason,
-        VerboseLoggingProvider, VerboseLoggingSignature,
-    };
+    use crate::learning_mode_core::{AccessType, DeniedResource, ResourceType};
     use std::io::Write;
-
-    #[test]
-    fn write_denials_document_writes_summary_and_document() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-        let analysis = AnalysisResult::complete(vec![DeniedResource {
-            resource: r"C:\blocked.txt".to_string(),
-            resource_type: ResourceType::File,
-            access_type: AccessType::Read,
-            pid: 42,
-            filetime: 99,
-        }]);
-
-        let metadata =
-            write_denials_document(analysis, 7, &output_path).expect("write should succeed");
-
-        assert_eq!(metadata.kind, CaptureDenialsOutput::KIND);
-        assert_eq!(metadata.exit_code, 7);
-        assert_eq!(metadata.total_denials, 1);
-        assert!(!metadata.denied_resources_truncated);
-        let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
-        assert_eq!(document.denials.len(), 1);
-        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
-            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(verbose_logging.version, VerboseLoggingDocument::VERSION);
-    }
-
-    #[test]
-    fn write_denials_document_handles_empty_result() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-
-        let metadata =
-            write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
-                .expect("write should succeed");
-
-        assert_eq!(metadata.total_denials, 0);
-        assert!(output_path.exists());
-        assert!(verbose_logging_output_path(&output_path).unwrap().exists());
-    }
 
     #[test]
     fn native_capture_writes_version_five_reason_specific_guidance() {
@@ -432,33 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn write_denials_document_writes_verbose_logging_aggregates() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-        let mut analysis = AnalysisResult::complete(Vec::new());
-        analysis.verbose_logging.record(VerboseLoggingSignature {
-            provider: VerboseLoggingProvider::KernelGeneral,
-            provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
-            event_id: 14,
-            reason: VerboseLoggingOutcomeReason::Actionable,
-            pid: 42,
-            access_type: Some(crate::learning_mode_core::AccessType::Read),
-            resource_type: Some(crate::learning_mode_core::ResourceType::File),
-            properties: vec![("Sid".to_string(), "S-1-15-3-1".to_string())],
-        });
-
-        write_denials_document(analysis, 0, &output_path).expect("write should succeed");
-
-        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
-            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(verbose_logging.signatures.len(), 1);
-        assert_eq!(verbose_logging.signatures[0].count, 1);
-        assert_eq!(verbose_logging.signatures[0].signature.pid, 42);
-    }
-
-    #[test]
     fn verbose_logging_path_is_a_deterministic_json_sibling() {
         assert_eq!(
             verbose_logging_output_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
@@ -468,20 +308,6 @@ mod tests {
             verbose_logging_output_path(Path::new("denials")).unwrap(),
             PathBuf::from("denials.verbose.json")
         );
-    }
-
-    #[test]
-    fn verbose_logging_collision_leaves_actionable_output_absent() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
-        std::fs::write(&verbose_logging_path, b"existing").expect("seed verbose logging output");
-
-        write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
-            .expect_err("collision should fail");
-
-        assert!(!output_path.exists());
-        assert_eq!(std::fs::read(verbose_logging_path).unwrap(), b"existing");
     }
 
     #[test]
@@ -556,12 +382,8 @@ mod tests {
 
     #[test]
     fn managed_denials_paths_are_unique_per_run() {
-        let first = unique_denials_output_paths(None, false)
-            .expect("first path")
-            .denials;
-        let second = unique_denials_output_paths(None, false)
-            .expect("second path")
-            .denials;
+        let first = unique_denials_output_path(None).expect("first path");
+        let second = unique_denials_output_path(None).expect("second path");
 
         assert_ne!(first, second);
         assert_eq!(first.parent(), Some(std::env::temp_dir().as_path()));
@@ -570,34 +392,24 @@ mod tests {
     }
 
     #[test]
-    fn paired_paths_preserve_run_id_for_extensionless_output() {
-        let paths = denials_output_paths_for_run(Some(r"C:\app\denials"), "77_abcd", true);
-
-        assert_eq!(paths.denials, PathBuf::from(r"C:\app\denials.77_abcd"));
-        assert_eq!(
-            paths.etl,
-            Some(PathBuf::from(r"C:\app\denials.77_abcd.etl"))
-        );
-    }
-
-    #[test]
-    fn paired_paths_are_distinct_for_etl_output() {
-        let paths = denials_output_paths_for_run(Some(r"C:\app\denials.ETL"), "77_abcd", true);
-
-        assert_eq!(paths.denials, PathBuf::from(r"C:\app\denials.77_abcd.ETL"));
-        assert_eq!(
-            paths.etl,
-            Some(PathBuf::from(r"C:\app\denials.77_abcd.trace.etl"))
-        );
-        assert_ne!(
-            paths.denials.to_string_lossy().to_ascii_lowercase(),
-            paths
-                .etl
-                .as_ref()
-                .expect("retained path")
-                .to_string_lossy()
-                .to_ascii_lowercase()
-        );
+    fn explicit_denials_paths_are_unique_siblings() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let configured = directory.path().join("capture.json");
+        let first = unique_denials_output_path(configured.to_str()).expect("first");
+        let second = unique_denials_output_path(configured.to_str()).expect("second");
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), configured.parent());
+        assert_eq!(second.parent(), configured.parent());
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("capture."));
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("capture."));
     }
 
     #[test]
