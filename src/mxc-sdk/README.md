@@ -217,6 +217,17 @@ directory beside the application executable. See the
 [NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
 for host requirements, image references, and supported operations and policy.
 
+### Experimental ACI support
+
+Enable the `aci` Cargo feature on Windows for experimental captured
+create-and-run execution in Azure Container Instances (ACI) sandboxes with
+`v1::dev::run_json`. Supply an ACI JSON request that names the sandbox group
+and image, and set `JsonOptions { experimental: true }`. Typed V1 APIs do not
+expose ACI selection. Requests use Azure CLI credentials or the
+`MXC_ACI_ARM_TOKEN` environment variable. See the
+[ACI backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/aci/aci.md)
+for requirements, credentials, and supported operations and policy.
+
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes
 only the versioned public SDK and explicitly hidden compatibility surfaces used

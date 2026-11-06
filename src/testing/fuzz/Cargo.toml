@@ -16,6 +16,7 @@ cargo-fuzz = true
 [features]
 # Enable runner-specific validation in the `validator` fuzz target.
 # These pull in heavier deps so they're opt-in for local dev.
+aci = ["mxc-sdk/aci"]
 hyperlight = ["mxc-sdk/hyperlight"]
 isolation_session = ["mxc-sdk/isolation_session"]
 microvm = ["mxc-sdk/microvm"]

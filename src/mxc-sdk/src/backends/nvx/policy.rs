@@ -9,18 +9,18 @@ use aci_edge_sandboxes::{
     SandboxSpec,
 };
 
+use crate::mxc_common::guest_process::validate_process as validate_guest_process;
+#[cfg(test)]
+use crate::mxc_common::guest_process::{
+    MAX_CWD_BYTES, MAX_ENVIRONMENT_BYTES, MAX_ENVIRONMENT_ENTRIES, MAX_TIMEOUT_MS,
+    PROXY_ENVIRONMENT_KEYS,
+};
 use crate::mxc_common::models::{
     ExecutionRequest, MicroVmProvisionConfig, NetworkAction, NetworkCidr,
     NetworkPeer as MxcNetworkPeer, NetworkPort as MxcNetworkPort,
     NetworkProtocol as MxcNetworkProtocol, NetworkRule as MxcNetworkRule,
 };
 use crate::mxc_common::mxc_error::MxcError;
-
-const MAX_ENVIRONMENT_BYTES: usize = 32 * 1024;
-const MAX_TIMEOUT_MS: u32 = 3_600_000;
-const MAX_ENVIRONMENT_ENTRIES: usize = 256;
-const MAX_CWD_BYTES: usize = 4095;
-const PROXY_ENVIRONMENT_KEYS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 
 pub(super) fn provision_request(
     request: &ExecutionRequest,
@@ -76,7 +76,8 @@ pub(super) fn validate_provision_request(
         .map(|config| config.image.as_str())
         .or(request.microvm_image.as_deref())
         .ok_or_else(|| MxcError::malformed_request("microvm.image is required"))?;
-    crate::mxc_contract::dev::ImageReference::validate(image).map_err(MxcError::malformed_request)
+    crate::mxc_contract::dev::ImageReference::validate(image, "microvm.image")
+        .map_err(MxcError::malformed_request)
 }
 
 pub(super) fn exec_request(
@@ -171,7 +172,7 @@ pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcErro
         .microvm_image
         .as_deref()
         .ok_or_else(|| MxcError::malformed_request("microvm.image is required"))?;
-    crate::mxc_contract::dev::ImageReference::validate(image)
+    crate::mxc_contract::dev::ImageReference::validate(image, "microvm.image")
         .map_err(MxcError::malformed_request)?;
     validate_process(request)
 }
@@ -196,74 +197,7 @@ fn validate_common_request(request: &ExecutionRequest) -> Result<(), MxcError> {
 }
 
 fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if request.script_code.contains('\0') || request.working_directory.contains('\0') {
-        return Err(MxcError::malformed_request(
-            "NVX process.commandLine and process.cwd must not contain null bytes",
-        ));
-    }
-
-    if request.script_timeout > MAX_TIMEOUT_MS {
-        return Err(MxcError::policy_validation(
-            "NVX process.timeout must not exceed 3600000 ms (one hour)",
-        ));
-    }
-    if request
-        .working_directory
-        .split('/')
-        .any(|component| component == "..")
-    {
-        return Err(MxcError::policy_validation(
-            "NVX process.cwd must not contain '..' path components",
-        ));
-    }
-    if !request.working_directory.is_empty() && !request.working_directory.starts_with('/') {
-        return Err(MxcError::policy_validation(
-            "NVX process.cwd must be an absolute POSIX guest path",
-        ));
-    }
-    if request.working_directory.len() > MAX_CWD_BYTES {
-        return Err(MxcError::policy_validation(
-            "NVX process.cwd must not exceed 4095 UTF-8 bytes",
-        ));
-    }
-    if let Some(environment) = &request.env {
-        if !request.inherit_default_env {
-            return Err(MxcError::policy_validation(
-                "NVX process.env requires inheritDefaultEnv=true",
-            ));
-        }
-        if environment.len() > MAX_ENVIRONMENT_ENTRIES {
-            return Err(MxcError::policy_validation(
-                "NVX process.env must not exceed 256 entries",
-            ));
-        }
-        let bytes = environment
-            .iter()
-            .map(|entry| entry.len().saturating_add(1))
-            .sum::<usize>();
-        if bytes > MAX_ENVIRONMENT_BYTES {
-            return Err(MxcError::policy_validation(
-                "NVX process.env must not exceed 32 KiB",
-            ));
-        }
-        for entry in environment {
-            if entry.contains('\0') || entry.split_once('=').is_none_or(|(key, _)| key.is_empty()) {
-                return Err(MxcError::malformed_request(
-                    "NVX process.env entries must be KEY=VALUE without null bytes",
-                ));
-            }
-            let key = entry.split_once('=').map_or(entry.as_str(), |(key, _)| key);
-            if PROXY_ENVIRONMENT_KEYS
-                .iter()
-                .any(|candidate| key.eq_ignore_ascii_case(candidate))
-            {
-                return Err(MxcError::policy_validation(
-                    "NVX rejects proxy environment variables; use runtimeConfig.networkProxy",
-                ));
-            }
-        }
-    }
-    Ok(())
+    validate_guest_process(request, "NVX")
 }
 
 pub(super) fn validate_process_request(request: &ExecutionRequest) -> Result<(), MxcError> {

@@ -119,6 +119,18 @@ jobs:
             throw 'The NVX module lifetime regression must execute and pass.'
           }
 
+      # The ACI backend is not part of the release feature set; its tests that
+      # need Azure are ignored here and run against a sandbox group on demand.
+      - name: Test ACI backend
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --no-default-features --features aci
+             --lib backend_modules::aci::
+
+      - name: Test ACI request handling without Azure
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --no-default-features --features aci
+             --test aci_e2e
+
       - name: Test and stage filesystem probe request deadlines
         shell: pwsh
         run: |

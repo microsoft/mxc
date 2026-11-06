@@ -75,13 +75,61 @@ use crate::mxc_common::sandbox_process::{
 use crate::mxc_common::state_aware_request::MxcRequest;
 use crate::mxc_common::telemetry;
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
-pub(crate) use crate::nvx_runner::{CapturedOutcome, CapturedRun as CapturedExecutionResult};
+pub(crate) use crate::mxc_common::captured_run::{
+    CapturedOutcome, CapturedRun as CapturedExecutionResult,
+};
 
 pub(crate) enum OneShotExecution {
-    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    // Constructed only by builds that include a captured-output backend.
+    #[cfg_attr(
+        not(any(
+            all(target_os = "windows", target_arch = "x86_64", feature = "microvm"),
+            all(target_os = "windows", feature = "aci")
+        )),
+        allow(dead_code)
+    )]
     Captured(CapturedExecutionResult),
     Streaming(Box<dyn SandboxProcess>),
+}
+
+type CapturedRunFn =
+    fn(&ExecutionRequest, &mut Logger) -> Result<CapturedExecutionResult, MxcError>;
+
+/// The create-and-run function of a backend that returns captured output
+/// instead of a streaming process, or `None` for streaming backends. A
+/// captured backend missing from this build or host is `backend_unavailable`.
+fn captured_backend(backend: &ContainmentBackend) -> Option<Result<CapturedRunFn, MxcError>> {
+    match backend {
+        ContainmentBackend::MicroVm => Some({
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+            {
+                Ok(|request, logger| {
+                    crate::nvx_runner::NvxRunner::new().run_captured(request, logger)
+                })
+            }
+            #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+            {
+                Err(MxcError::backend_unavailable(
+                    "MicroVM requires Windows x64 and a build with the microvm feature",
+                ))
+            }
+        }),
+        ContainmentBackend::Aci => Some({
+            #[cfg(all(target_os = "windows", feature = "aci"))]
+            {
+                Ok(|request, logger| {
+                    crate::aci_runner::AciRunner::new().run_captured(request, logger)
+                })
+            }
+            #[cfg(not(all(target_os = "windows", feature = "aci")))]
+            {
+                Err(MxcError::backend_unavailable(
+                    "ACI requires Windows and a build with the aci feature",
+                ))
+            }
+        }),
+        _ => None,
+    }
 }
 
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
@@ -139,33 +187,23 @@ pub(crate) fn execute_one_shot_json(
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
 
-    if request.containment == ContainmentBackend::MicroVm {
+    if let Some(run_captured) = captured_backend(&request.containment) {
         experimental::require_experimental_optin(
             &request.containment,
             request.experimental_enabled,
         )?;
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
-        {
-            return invoke_execution_request(&request, logger, |request, logger| {
-                run::log_policy_hash(request, logger);
-                crate::mxc_common::validator::validate_common(request).map_err(|response| {
-                    if request.script_code.is_empty() {
-                        MxcError::malformed_request(response.error_message)
-                    } else {
-                        MxcError::policy_validation(response.error_message)
-                    }
-                })?;
-                crate::nvx_runner::NvxRunner::new()
-                    .run_captured(request, logger)
-                    .map(OneShotExecution::Captured)
-            });
-        }
-        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
-        {
-            return Err(Error::from(MxcError::backend_unavailable(
-                "MicroVM requires Windows x64 and a build with the microvm feature",
-            )));
-        }
+        let run_captured = run_captured.map_err(Error::from)?;
+        return invoke_execution_request(&request, logger, |request, logger| {
+            run::log_policy_hash(request, logger);
+            crate::mxc_common::validator::validate_common(request).map_err(|response| {
+                if request.script_code.is_empty() {
+                    MxcError::malformed_request(response.error_message)
+                } else {
+                    MxcError::policy_validation(response.error_message)
+                }
+            })?;
+            run_captured(request, logger).map(OneShotExecution::Captured)
+        });
     }
 
     spawn_execution_request_with_logger(&request, logger, false).map(OneShotExecution::Streaming)
@@ -213,7 +251,6 @@ fn spawn_execution_request_with_logger_and(
         spawn(request, logger).map(OneShotExecution::Streaming)
     })? {
         OneShotExecution::Streaming(process) => Ok(process),
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         OneShotExecution::Captured(_) => {
             unreachable!("streaming invocation returned captured output")
         }
@@ -285,7 +322,6 @@ fn invoke_execution_request(
             ));
             Ok(OneShotExecution::Streaming(process))
         }
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         OneShotExecution::Captured(mut result) => {
             telemetry::emit_sdk_completion_with_kind(
                 telemetry_registration.transfer(),
@@ -1481,7 +1517,6 @@ mod telemetry_process_tests {
         assert_eq!(process.warnings(), ["PTY spawn warning"]);
     }
 
-    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
     #[test]
     fn shared_invocation_preserves_captured_results_warnings_and_errors() {
         use telemetry::events::test_sink;
@@ -1520,6 +1555,7 @@ mod telemetry_process_tests {
                         warnings: vec!["backend warning".to_owned()],
                         stdout: b"\xff\0\xfe".to_vec(),
                         stderr: b"\x80\0\x81".to_vec(),
+                        backend_label: "TEST",
                     }))
                 })
                 .unwrap();

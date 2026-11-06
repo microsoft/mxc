@@ -785,7 +785,7 @@ applied network policy to report (M-ETW-4); that row changes only if the
 separate network-proxy requirement is implemented for that backend.
 
 Backends outside the requirement's scope — Windows Sandbox, WSLC,
-MicroVM/Hyperlight, LXC, Bubblewrap, and Seatbelt — are not covered by this
+MicroVM/Hyperlight, ACI, LXC, Bubblewrap, and Seatbelt — are not covered by this
 matrix. See [Platform scope](#platform-scope).
 
 ### Correlating with existing OS telemetry

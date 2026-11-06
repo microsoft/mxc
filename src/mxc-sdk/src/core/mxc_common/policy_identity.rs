@@ -257,6 +257,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         hyperlight,
         microvm_image,
         microvm_memory_mib,
+        aci,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -283,6 +284,25 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
             config["provision"] = serde_json::json!({"memoryMib": memory});
         }
         root.insert("microvm".into(), config);
+    }
+    // The sandbox group selects the network and identity configuration the
+    // sandbox runs under, so it is hashed with the image and sizing.
+    if let Some(aci) = aci {
+        let mut config = serde_json::json!({
+            "sandboxGroup": aci.sandbox_group,
+            "image": aci.image,
+        });
+        let mut provision = Map::new();
+        if let Some(cpu) = aci.cpu {
+            provision.insert("cpu".into(), cpu.into());
+        }
+        if let Some(memory_gb) = aci.memory_gb {
+            provision.insert("memoryGb".into(), memory_gb.into());
+        }
+        if !provision.is_empty() {
+            config["provision"] = Value::Object(provision);
+        }
+        root.insert("aci".into(), config);
     }
 
     root.insert(
@@ -561,6 +581,40 @@ mod tests {
             })
         );
         assert_ne!(absent, explicit);
+    }
+
+    #[test]
+    fn aci_sandbox_group_image_and_sizing_are_hashed_at_their_json_locations() {
+        let mut request = request();
+        let group = "/subscriptions/51aca303-03da-4510-849d-d4f32d3f39ac/resourceGroups/rg/providers/Microsoft.ContainerInstance/sandboxGroups/sbg";
+        request.aci = Some(crate::mxc_common::models::AciConfig {
+            sandbox_group: group.to_owned(),
+            image: "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),
+            cpu: None,
+            memory_gb: None,
+        });
+        let without_sizing = policy_projection(&request);
+        assert_eq!(
+            without_sizing["aci"],
+            serde_json::json!({
+                "sandboxGroup": group,
+                "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+            })
+        );
+        let without_sizing_hash = policy_hash(&request);
+
+        let aci = request.aci.as_mut().unwrap();
+        aci.cpu = Some(2);
+        aci.memory_gb = Some(4);
+        assert_eq!(
+            policy_projection(&request)["aci"]["provision"],
+            serde_json::json!({"cpu": 2, "memoryGb": 4})
+        );
+        assert_ne!(policy_hash(&request), without_sizing_hash);
+
+        let mut other_group = request.clone();
+        other_group.aci.as_mut().unwrap().sandbox_group = group.replace("sbg", "other");
+        assert_ne!(policy_hash(&other_group), policy_hash(&request));
     }
 
     #[test]
@@ -845,6 +899,7 @@ mod tests {
             ContainmentBackend::Vm,
             ContainmentBackend::MicroVm,
             ContainmentBackend::Hyperlight,
+            ContainmentBackend::Aci,
             ContainmentBackend::WindowsSandbox,
             ContainmentBackend::IsolationSession,
             ContainmentBackend::Seatbelt,

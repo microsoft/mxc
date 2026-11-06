@@ -36,6 +36,8 @@ string_enum! {
         Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],
+        /// Select an Azure Container Instances (ACI) sandbox.
+        Aci => ["aci"],
 
         // Stable values introduced in `0.9.0-alpha`.
         /// Select the WSL container backend.
@@ -112,6 +114,9 @@ pub struct Request {
     /// Required image selection when containment is MicroVM.
     #[serde(default)]
     pub microvm: OptionalField<OneShotMicroVm>,
+    /// Required sandbox group and image when containment is ACI.
+    #[serde(default)]
+    pub aci: OptionalField<super::OneShotAci>,
 }
 
 /// Creation settings for the development MicroVM backend.

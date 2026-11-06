@@ -147,6 +147,9 @@ mod backend_modules;
 mod core_modules;
 
 #[doc(hidden)]
+#[cfg(all(target_os = "windows", feature = "aci"))]
+pub use backend_modules::aci::runner as aci_runner;
+#[doc(hidden)]
 pub use backend_modules::bubblewrap::common as bwrap_common;
 #[doc(hidden)]
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -437,7 +440,6 @@ pub mod __ffi {
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
         match crate::mxc_engine::execute_one_shot_json(request_json, experimental)? {
-            #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
             crate::mxc_engine::OneShotExecution::Captured(result) => {
                 Ok(captured_execution_result(result))
             }
@@ -535,7 +537,6 @@ pub mod __ffi {
     }
 }
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
 fn captured_execution_result(
     result: crate::mxc_engine::CapturedExecutionResult,
 ) -> ExecutionResult {

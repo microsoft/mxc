@@ -44,15 +44,15 @@ sandbox.
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
 | `fallback` | Optional `allowDaclMutation` boolean accepted for 1.x compatibility and ignored. Removing this accepted field requires a new major contract. |
 | `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
-| `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight` | Backend-specific settings; only the section matching the selected backend is accepted. |
+| `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight`, `aci` | Backend-specific settings; only the section matching the selected backend is accepted. |
 | `test` | Optional development-only placeholder with an optional string `message`; it has no policy enforcement effect. |
 
 ### Process and filesystem
 
 | Field | Type and meaning |
 |---|---|
-| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight, a guest shell command for NVX MicroVM). |
-| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight rejects an explicit working directory; MicroVM uses a guest path, as described in the [NVX guide](../../backends/nvx/nvx.md#working-directory-and-environment). |
+| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight, a guest shell command for NVX MicroVM and ACI). |
+| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight rejects an explicit working directory; MicroVM and ACI use a guest path, as described in the [NVX guide](../../backends/nvx/nvx.md#working-directory-and-environment) and the [ACI guide](../../backends/aci/aci.md#working-directory-and-environment). |
 | `process.timeout` | Optional integer milliseconds, `0` to `4294967295`; `0` means no timeout. |
 | `process.env` | Optional array of `KEY=VALUE` strings. Omitted uses the backend default; supplied entries replace it unless `inheritDefaultEnv` is `true`. |
 | `process.inheritDefaultEnv` | Optional boolean (default `false`); layers supplied `env` entries over the backend default, with caller entries winning. |
@@ -66,8 +66,10 @@ environment. Windows ProcessContainer refuses a supplied environment missing
 default environment and requires `inheritDefaultEnv: true` for supplied `env`.
 Hyperlight checks denied paths against its mounted grants. See the
 [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy)
-for MicroVM filesystem and environment support. Path strings use the selected
-host/backend's conventions.
+for MicroVM filesystem and environment support. ACI rejects filesystem policy
+and supports the same environment settings as MicroVM; see the
+[ACI guide](../../backends/aci/aci.md#supported-operations-and-policy). Path
+strings use the selected host/backend's conventions.
 
 ### Network and UI
 
@@ -130,10 +132,11 @@ is absent. Do not assume another backend enforces an omitted UI policy.
 `"process"` resolves to ProcessContainer on Windows, Bubblewrap on Linux, or
 Seatbelt on macOS. `"vm"` resolves to Windows Sandbox on Windows. Explicit
 values are `"processcontainer"`, `"lxc"`, `"bubblewrap"`, `"seatbelt"`,
-`"windows_sandbox"`, `"microvm"`, `"hyperlight"`, `"isolation_session"`,
-and `"wslc"`. The old `appcontainer` / `appContainer` and `macos_sandbox`
-spellings are not accepted. Windows Sandbox, MicroVM, and Hyperlight require
-experimental authorization and suitable host/build support.
+`"windows_sandbox"`, `"microvm"`, `"hyperlight"`, `"aci"`,
+`"isolation_session"`, and `"wslc"`. The old `appcontainer` /
+`appContainer` and `macos_sandbox` spellings are not accepted. Windows
+Sandbox, MicroVM, Hyperlight, and ACI require experimental authorization and
+suitable host/build support.
 
 | Section | Supported fields and important constraints |
 |---|---|
@@ -145,6 +148,7 @@ experimental authorization and suitable host/build support.
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
 | `hyperlight` | Optional `runtime`: `agent` (default), `python`, `python-shell`, `node`, `bash`, or `dotnet-jit`. The command line supplies source for that guest runtime. |
 | `microvm` | Required explicit registry-qualified `image`. Optional positive integer `provision.memoryMib` selects guest memory when the verified runtime advertises `spec.memory`. See [NVX supported operations and policy](../../backends/nvx/nvx.md#supported-operations-and-policy). |
+| `aci` | Required `sandboxGroup`, the ARM resource ID of a `Microsoft.ContainerInstance/sandboxGroups` resource, and explicit registry-qualified `image`. Optional positive integers `provision.cpu` (whole cores) and `provision.memoryGb` (whole GiB); omit them to use the service defaults. See [ACI supported operations and policy](../../backends/aci/aci.md#supported-operations-and-policy). |
 
 For Seatbelt, `profileOverride` replaces the generated profile, so
 `filesystem`, `network`, and `ui` restrictions in the request are not
@@ -158,6 +162,8 @@ restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
 section is rejected for IsolationSession. MicroVM networking support is
 described in the [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy).
+ACI rejects a supplied `network` section and a runtime proxy; its sandbox
+group determines network access.
 Hyperlight rejects a supplied `network` section. Windows Sandbox
 create-and-run execution blocks networking when
 `network` is omitted; it rejects supplied `network.egress` or

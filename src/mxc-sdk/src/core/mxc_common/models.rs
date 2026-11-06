@@ -30,6 +30,9 @@ pub enum ContainmentBackend {
     /// hermetic via snapshot restore. Experimental — requires
     /// --experimental. Cross-platform (Linux KVM, Windows WHP).
     Hyperlight,
+    /// Azure Container Instances (ACI) sandbox: a Linux VM in Azure that runs
+    /// the workload image. Experimental — requires --experimental.
+    Aci,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
     /// Isolation Session — process isolation via the IsolationSession API.
@@ -59,6 +62,7 @@ impl ContainmentBackend {
             ContainmentBackend::Vm => "vm",
             ContainmentBackend::MicroVm => "microvm",
             ContainmentBackend::Hyperlight => "hyperlight",
+            ContainmentBackend::Aci => "aci",
             ContainmentBackend::WindowsSandbox => "windows_sandbox",
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
@@ -82,6 +86,7 @@ impl ContainmentBackend {
             ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
+            | ContainmentBackend::Aci
             | ContainmentBackend::Vm => None,
         }
     }
@@ -128,6 +133,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Lxc => Self::Lxc,
             W::Microvm => Self::MicroVm,
             W::Hyperlight => Self::Hyperlight,
+            W::Aci => Self::Aci,
             W::Wslc => Self::Wslc,
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
@@ -280,6 +286,36 @@ pub struct W365AgentsProvisionConfig {
     pub pool_id: String,
     pub user_type: Option<String>,
     pub user_object_id: Option<String>,
+}
+
+/// ACI sandbox settings for a create-and-run request (`aci`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AciConfig {
+    /// ARM resource ID of the sandbox group that creates the sandbox.
+    pub sandbox_group: String,
+    /// Registry image the service pulls for the sandbox.
+    pub image: String,
+    /// Whole CPU cores. The service chooses its default when absent.
+    pub cpu: Option<u32>,
+    /// Memory in GB. The service chooses its default when absent.
+    pub memory_gb: Option<u32>,
+}
+
+impl AciConfig {
+    pub(crate) fn validate_sizing(&self) -> Result<(), crate::mxc_common::error::WxcError> {
+        for (field, value) in [
+            ("aci.provision.cpu", self.cpu),
+            ("aci.provision.memoryGb", self.memory_gb),
+        ] {
+            if value == Some(0) {
+                return Err(crate::mxc_common::error::WxcError::ConfigParse(format!(
+                    "{field} must be greater than zero"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -1030,6 +1066,8 @@ pub struct ExecutionRequest {
     pub microvm_image: Option<String>,
     /// Explicit MicroVM creation memory; absent leaves the backend default unchanged.
     pub microvm_memory_mib: Option<u32>,
+    /// ACI sandbox settings (used when containment == Aci).
+    pub aci: Option<AciConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success

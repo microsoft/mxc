@@ -125,6 +125,13 @@ pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), Request
             message: "microvm.image is required exactly when containment is microvm",
         });
     }
+    let selects_aci = matches!(request.containment.as_ref(), Some(OneShotContainment::Aci));
+    if selects_aci != request.aci.as_ref().is_some() {
+        return Err(RequestParseError::InvalidCombination {
+            contract: "one-shot",
+            message: "the aci section is required exactly when containment is aci",
+        });
+    }
     match request.containment.as_ref() {
         Some(OneShotContainment::IsolationSession) => {
             validate_isolation_session_one_shot_network(request)

@@ -30,4 +30,5 @@ pub(crate) struct CommonRequestIR {
     pub(crate) windows_sandbox: Option<wire::WindowsSandbox>,
     pub(crate) hyperlight: Option<wire::Hyperlight>,
     pub(crate) microvm: Option<wire::MicroVm>,
+    pub(crate) aci: Option<wire::Aci>,
 }

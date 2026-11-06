@@ -189,18 +189,19 @@ pub struct ImageReference(String);
 impl ImageReference {
     /// Validate image input before any backend state is opened.
     pub fn new(value: String) -> Result<Self, String> {
-        Self::validate(&value)?;
+        Self::validate(&value, "image")?;
         Ok(Self(value))
     }
 
-    /// Require a registry and repository without validating the complete reference.
-    pub fn validate(value: &str) -> Result<(), String> {
+    /// Require a registry and repository without validating the complete
+    /// reference. `field` names the input in the error, such as `aci.image`.
+    pub fn validate(value: &str, field: &str) -> Result<(), String> {
         if value.is_empty()
             || value
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || c == '\u{feff}')
         {
-            return Err("microvm.image must be a nonempty image reference without whitespace or control characters".to_owned());
+            return Err(format!("{field} must be a nonempty image reference without whitespace or control characters"));
         }
         let valid_registry = |registry: &str| {
             registry == "localhost"
@@ -220,7 +221,7 @@ impl ImageReference {
                     .next()
                     .is_some_and(|c| !matches!(c, '/' | ':' | '@'))
         }) {
-            return Err("microvm.image must include a registry host and image repository, such as docker.io/library/python:3.12-alpine".to_owned());
+            return Err(format!("{field} must include a registry host and image repository, such as docker.io/library/python:3.12-alpine"));
         }
         Ok(())
     }
@@ -250,6 +251,154 @@ impl schemars::JsonSchema for ImageReference {
         string.pattern = Some(
             r"^(?:localhost|[^\s\x00-\x1f\x7f-\x9f/][^\s\x00-\x1f\x7f-\x9f/.]*\.[^\s\x00-\x1f\x7f-\x9f/]+|[^\s\x00-\x1f\x7f-\x9f/]+:[0-9]+)/[^/:\u0040\s\x00-\x1f\x7f-\x9f][^\s\x00-\x1f\x7f-\x9f]*(?![\s\S])".to_owned(),
         );
+        schema.into()
+    }
+}
+
+/// The ARM resource ID of an Azure Container Instances (ACI) sandbox group,
+/// `/subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.ContainerInstance/sandboxGroups/<name>`.
+///
+/// Fixed segments match case-insensitively, as in ARM. The subscription is a
+/// GUID and the names use ASCII letters, digits, and `._()-`, so the ID can
+/// be placed in a request URL without escaping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AciSandboxGroupId(String);
+
+impl AciSandboxGroupId {
+    const SHAPE: &'static str = "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ContainerInstance/sandboxGroups/<sandbox-group>";
+    const MAX_RESOURCE_GROUP_LEN: usize = 90;
+    const MAX_NAME_LEN: usize = 260;
+
+    /// Validate a sandbox group ID before any backend state is opened.
+    pub fn new(value: String) -> Result<Self, String> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Require the ARM resource ID shape described on [`AciSandboxGroupId`].
+    pub fn validate(value: &str) -> Result<(), String> {
+        let invalid = || {
+            format!(
+                "sandbox group must be an ARM resource ID of the form {}",
+                Self::SHAPE
+            )
+        };
+        let segments: Vec<&str> = value
+            .strip_prefix('/')
+            .ok_or_else(invalid)?
+            .split('/')
+            .collect();
+        let [subscriptions, subscription, resource_groups, resource_group, providers, namespace, sandbox_groups, name] =
+            segments.as_slice()
+        else {
+            return Err(invalid());
+        };
+        let fixed = [
+            (subscriptions, "subscriptions"),
+            (resource_groups, "resourceGroups"),
+            (providers, "providers"),
+            (namespace, "Microsoft.ContainerInstance"),
+            (sandbox_groups, "sandboxGroups"),
+        ];
+        if fixed
+            .iter()
+            .any(|(actual, expected)| !actual.eq_ignore_ascii_case(expected))
+        {
+            return Err(invalid());
+        }
+        if !is_guid(subscription) {
+            return Err("sandbox group subscription ID must be a GUID".to_owned());
+        }
+        let resource_group_char =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '(' | ')' | '-');
+        if resource_group.is_empty()
+            || resource_group.len() > Self::MAX_RESOURCE_GROUP_LEN
+            || !resource_group.chars().all(resource_group_char)
+            || resource_group.ends_with('.')
+        {
+            return Err(format!(
+                "sandbox group resource group name must be 1-{} ASCII letters, digits, or `._()-` and must not end with `.`",
+                Self::MAX_RESOURCE_GROUP_LEN
+            ));
+        }
+        let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+        if name.len() > Self::MAX_NAME_LEN
+            || !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+            || !name.chars().all(name_char)
+        {
+            return Err(format!(
+                "sandbox group name must be 1-{} ASCII letters, digits, or `._-` and start with a letter or digit",
+                Self::MAX_NAME_LEN
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the validated resource ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the validated input.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+fn is_guid(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, c)| match index {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+impl<'de> Deserialize<'de> for AciSandboxGroupId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for AciSandboxGroupId {
+    fn schema_name() -> String {
+        "AciSandboxGroupId".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // JSON Schema patterns have no case-insensitive flag, so fixed ARM
+        // segments are spelled as per-letter character classes.
+        let any_case = |literal: &str| -> String {
+            literal
+                .chars()
+                .map(|c| match c {
+                    c if c.is_ascii_alphabetic() => {
+                        format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+                    }
+                    '.' => r"\.".to_owned(),
+                    c => c.to_string(),
+                })
+                .collect()
+        };
+        let hex = |count: usize| format!("[0-9a-fA-F]{{{count}}}");
+        let mut schema = <String as schemars::JsonSchema>::json_schema(generator).into_object();
+        let string = schema.string.get_or_insert_with(Default::default);
+        string.min_length = Some(1);
+        string.pattern = Some(format!(
+            r"^/{}/{}-{}-{}-{}-{}/{}/[A-Za-z0-9._()-]{{0,{}}}[A-Za-z0-9_()-]/{}/{}/{}/[A-Za-z0-9][A-Za-z0-9._-]{{0,{}}}(?![\s\S])",
+            any_case("subscriptions"),
+            hex(8),
+            hex(4),
+            hex(4),
+            hex(4),
+            hex(12),
+            any_case("resourceGroups"),
+            Self::MAX_RESOURCE_GROUP_LEN - 1,
+            any_case("providers"),
+            any_case("Microsoft.ContainerInstance"),
+            any_case("sandboxGroups"),
+            Self::MAX_NAME_LEN - 1,
+        ));
         schema.into()
     }
 }
@@ -352,6 +501,59 @@ mod tests {
         let field: OptionalField<String> = OptionalField::default();
 
         assert_eq!(field.into_option(), None);
+    }
+
+    const SANDBOX_GROUP: &str = "/subscriptions/51aca303-03da-4510-849d-d4f32d3f39ac/resourceGroups/tryme-01/providers/Microsoft.ContainerInstance/sandboxGroups/sbg-001";
+
+    #[test]
+    fn aci_sandbox_group_id_accepts_arm_resource_ids_in_any_case() {
+        for id in [
+            SANDBOX_GROUP,
+            "/SUBSCRIPTIONS/51ACA303-03DA-4510-849D-D4F32D3F39AC/resourcegroups/rg_(1).a/PROVIDERS/microsoft.containerinstance/SANDBOXGROUPS/Group.Name_1",
+        ] {
+            let parsed = AciSandboxGroupId::new(id.to_owned()).unwrap();
+            assert_eq!(parsed.as_str(), id);
+        }
+    }
+
+    #[test]
+    fn aci_sandbox_group_id_rejects_other_shapes_and_url_unsafe_names() {
+        for id in [
+            String::new(),
+            SANDBOX_GROUP.trim_start_matches('/').to_owned(),
+            format!("{SANDBOX_GROUP}/"),
+            format!("{SANDBOX_GROUP}/sandboxes/x"),
+            SANDBOX_GROUP.replace("Microsoft.ContainerInstance", "Microsoft.Compute"),
+            SANDBOX_GROUP.replace("sandboxGroups", "containerGroups"),
+            SANDBOX_GROUP.replace("51aca303-03da-4510-849d-d4f32d3f39ac", "not-a-guid"),
+            SANDBOX_GROUP.replace("tryme-01", ""),
+            SANDBOX_GROUP.replace("tryme-01", "trailing."),
+            SANDBOX_GROUP.replace("tryme-01", "has space"),
+            SANDBOX_GROUP.replace("tryme-01", &"r".repeat(91)),
+            SANDBOX_GROUP.replace("sbg-001", "-leading"),
+            SANDBOX_GROUP.replace("sbg-001", "a?b"),
+            SANDBOX_GROUP.replace("sbg-001", "a%2fb"),
+            SANDBOX_GROUP.replace("sbg-001", ".."),
+            SANDBOX_GROUP.replace("sbg-001", "sbg#1"),
+            SANDBOX_GROUP.replace("sbg-001", &"s".repeat(261)),
+        ] {
+            let error = AciSandboxGroupId::new(id.clone()).unwrap_err();
+            assert!(error.starts_with("sandbox group"), "{id}: {error}");
+        }
+    }
+
+    #[test]
+    fn image_reference_errors_name_the_caller_field() {
+        let error = ImageReference::validate("python:3.12", "aci.image").unwrap_err();
+        assert!(
+            error.starts_with("aci.image must include a registry host"),
+            "{error}"
+        );
+        let error = ImageReference::new(" ".to_owned()).unwrap_err();
+        assert!(
+            error.starts_with("image must be a nonempty image reference"),
+            "{error}"
+        );
     }
 
     #[cfg(feature = "schema-gen")]

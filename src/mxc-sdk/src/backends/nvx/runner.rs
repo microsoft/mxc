@@ -11,8 +11,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName};
+use crate::mxc_common::captured_run::{
+    error_response, finish_with_cleanup, CapturedOutcome, CapturedRun,
+};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::proxy_env::proxy_url_has_credentials;
 use crate::mxc_common::sandbox_process::{SandboxProcess, StreamCloser};
@@ -24,36 +27,7 @@ use super::runtime::{Event, NvxClient, PreparedProvision, SandboxClient};
 use aci_edge_sandboxes::{Capabilities, ExecRequest};
 use aci_edge_sandboxes::{ExecOutcome, ExecRequest as NativeExecRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapturedOutcome {
-    Exited(i32),
-    TimedOut,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapturedRun {
-    pub outcome: CapturedOutcome,
-    pub warnings: Vec<String>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-impl CapturedRun {
-    pub(crate) fn response(&self) -> ScriptResponse {
-        match self.outcome {
-            CapturedOutcome::Exited(exit_code) => ScriptResponse {
-                exit_code,
-                ..Default::default()
-            },
-            CapturedOutcome::TimedOut => ScriptResponse {
-                exit_code: -1,
-                error_message: "NVX workload timed out".to_owned(),
-                failure_phase: FailurePhase::Timeout,
-                ..Default::default()
-            },
-        }
-    }
-}
+const BACKEND_LABEL: &str = "NVX";
 
 #[derive(Debug, Default)]
 pub struct NvxRunner {
@@ -217,6 +191,7 @@ fn run_with_client(
         warnings: Vec::new(),
         stdout: output.stdout,
         stderr: output.stderr,
+        backend_label: BACKEND_LABEL,
     })
 }
 
@@ -849,25 +824,7 @@ pub(super) fn finish_run<T>(
     cleanup_errors: Vec<MxcError>,
     logger: &mut Logger,
 ) -> Result<T, MxcError> {
-    match primary {
-        Ok(output) if cleanup_errors.is_empty() => Ok(output),
-        Ok(_) => Err(MxcError::backend_error(format!(
-            "NVX cleanup failed after workload completion: {}",
-            cleanup_errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))),
-        Err(mut error) => {
-            for cleanup in cleanup_errors {
-                logger.warning_line(&format!("NVX cleanup failed: {cleanup}"));
-                error.message.push_str("; cleanup failure: ");
-                error.message.push_str(&cleanup.to_string());
-            }
-            Err(error)
-        }
-    }
+    finish_with_cleanup(BACKEND_LABEL, primary, cleanup_errors, logger)
 }
 
 impl ScriptRunner for NvxRunner {
@@ -886,26 +843,12 @@ impl ScriptRunner for NvxRunner {
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         let result = self.run_captured(request, logger).and_then(|result| {
-            captured_to_script_response(
-                result,
-                &mut std::io::stdout().lock(),
-                &mut std::io::stderr().lock(),
-            )
+            result.relay(&mut std::io::stdout().lock(), &mut std::io::stderr().lock())
         });
         match result {
             Ok(response) => response,
             Err(error) => error_response(error),
         }
-    }
-}
-
-fn error_response(error: MxcError) -> ScriptResponse {
-    match error.code {
-        MxcErrorCode::PolicyValidation | MxcErrorCode::MalformedRequest => {
-            ScriptResponse::rejected(&error.message)
-        }
-        MxcErrorCode::BackendUnavailable => ScriptResponse::unavailable(&error.message),
-        _ => ScriptResponse::failed(FailurePhase::PostLaunchFailed, &error.to_string()),
     }
 }
 
@@ -922,28 +865,14 @@ fn map_outcome(outcome: ExecOutcome) -> Result<CapturedOutcome, MxcError> {
     }
 }
 
-fn captured_to_script_response(
-    result: CapturedRun,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> Result<ScriptResponse, MxcError> {
-    stdout
-        .write_all(&result.stdout)
-        .and_then(|()| stdout.flush())
-        .map_err(|error| MxcError::backend_error(format!("cannot relay NVX stdout: {error}")))?;
-    stderr
-        .write_all(&result.stderr)
-        .and_then(|()| stderr.flush())
-        .map_err(|error| MxcError::backend_error(format!("cannot relay NVX stderr: {error}")))?;
-    Ok(result.response())
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::Write;
 
     use super::super::runtime::{ExecOutput, ProvisionOutput, SandboxId};
     use super::*;
+    use crate::mxc_common::models::FailurePhase;
     use aci_edge_sandboxes::agent::SandboxDiagnostics;
     use aci_edge_sandboxes::{BootMode, ColdReason, StartResult};
 
@@ -1017,102 +946,42 @@ mod tests {
     }
 
     #[test]
-    fn executor_adapter_preserves_exit_and_output() {
-        for (expected_stdout, expected_stderr) in [
-            (b"out".as_slice(), b"err".as_slice()),
-            (b"\xff\0\xfe".as_slice(), b"\x80\0\x81".as_slice()),
-            (b"".as_slice(), b"".as_slice()),
-        ] {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let response = captured_to_script_response(
-                CapturedRun {
-                    outcome: CapturedOutcome::Exited(42),
-                    warnings: Vec::new(),
-                    stdout: expected_stdout.to_vec(),
-                    stderr: expected_stderr.to_vec(),
-                },
-                &mut stdout,
-                &mut stderr,
-            )
-            .unwrap();
-            assert_eq!(response.exit_code, 42);
-            assert_eq!(stdout, expected_stdout);
-            assert_eq!(stderr, expected_stderr);
-            assert!(response.standard_out.is_empty());
-            assert!(response.standard_err.is_empty());
-            assert!(response.error_message.is_empty());
-        }
-    }
-
-    #[test]
-    fn executor_adapter_marks_timeout() {
+    fn executor_adapter_names_nvx_in_timeout_and_relay_failures() {
+        let run = |outcome| CapturedRun {
+            outcome,
+            warnings: Vec::new(),
+            stdout: b"partial-out\xff".to_vec(),
+            stderr: b"partial-err\x80".to_vec(),
+            backend_label: BACKEND_LABEL,
+        };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let response = captured_to_script_response(
-            CapturedRun {
-                outcome: CapturedOutcome::TimedOut,
-                warnings: Vec::new(),
-                stdout: b"partial-out\xff".to_vec(),
-                stderr: b"partial-err\x80".to_vec(),
-            },
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
+        let response = run(CapturedOutcome::TimedOut)
+            .relay(&mut stdout, &mut stderr)
+            .unwrap();
         assert_eq!(response.exit_code, -1);
         assert_eq!(response.failure_phase, FailurePhase::Timeout);
         assert_eq!(response.error_message, "NVX workload timed out");
         assert_eq!(stdout, b"partial-out\xff");
         assert_eq!(stderr, b"partial-err\x80");
-        assert!(response.standard_out.is_empty());
-        assert!(response.standard_err.is_empty());
-    }
 
-    #[test]
-    fn executor_adapter_surfaces_output_write_and_flush_failures() {
-        struct FailingWriter {
-            on_flush: bool,
-        }
+        struct FailingWriter;
 
         impl Write for FailingWriter {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if self.on_flush {
-                    Ok(bytes.len())
-                } else {
-                    Err(std::io::Error::other("test write failure"))
-                }
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("test write failure"))
             }
 
             fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::other("test flush failure"))
+                Ok(())
             }
         }
 
-        for on_flush in [false, true] {
-            for stream in ["stdout", "stderr"] {
-                let result = CapturedRun {
-                    outcome: CapturedOutcome::Exited(0),
-                    warnings: Vec::new(),
-                    stdout: b"out".to_vec(),
-                    stderr: b"err".to_vec(),
-                };
-                let mut failing = FailingWriter { on_flush };
-                let mut sink = std::io::sink();
-                let error = if stream == "stdout" {
-                    captured_to_script_response(result, &mut failing, &mut sink)
-                } else {
-                    captured_to_script_response(result, &mut sink, &mut failing)
-                }
-                .unwrap_err();
-                assert_eq!(error.code, MxcErrorCode::BackendError);
-                let operation = if on_flush { "flush" } else { "write" };
-                assert_eq!(
-                    error.message,
-                    format!("cannot relay NVX {stream}: test {operation} failure")
-                );
-            }
-        }
+        let error = run(CapturedOutcome::Exited(0))
+            .relay(&mut FailingWriter, &mut std::io::sink())
+            .unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::BackendError);
+        assert_eq!(error.message, "cannot relay NVX stdout: test write failure");
     }
 
     #[test]

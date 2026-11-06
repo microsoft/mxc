@@ -134,6 +134,9 @@ to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
 For MicroVM networking and proxy support, see the
 [NVX backend capability table](backends/nvx/nvx.md#supported-operations-and-policy).
+ACI rejects `network` and `runtimeConfig.networkProxy`; its sandbox group
+determines network access, as described in the
+[ACI backend guide](backends/aci/aci.md#supported-operations-and-policy).
 
 ```json
 {
@@ -357,6 +360,7 @@ use:
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
 | MicroVM | The guest default; see [NVX working-directory behaviour](backends/nvx/nvx.md#working-directory-and-environment). |
+| ACI | The sandbox's default; see [ACI working directory and environment](backends/aci/aci.md#working-directory-and-environment). |
 | Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
@@ -405,6 +409,8 @@ neither authors nor enumerates — see
 
 For MicroVM environment support and limits, see
 [NVX working directory and environment](backends/nvx/nvx.md#working-directory-and-environment).
+ACI applies the same limits; see
+[ACI working directory and environment](backends/aci/aci.md#working-directory-and-environment).
 
 ### Filesystem Policy
 
@@ -418,7 +424,8 @@ The `filesystem` section defines path access policy shared across backends:
 
 Backend support for filesystem policy is described in each backend guide; see
 the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
-for MicroVM. Backend-specific sections, including
+for MicroVM. ACI rejects filesystem policy because its sandboxes run in Azure,
+where host paths are unavailable. Backend-specific sections, including
 `processContainer.filesystem.enumeratePaths`, can only accompany their matching
 `containment` selection.
 
@@ -566,6 +573,7 @@ force a particular backend.
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"microvm"` | MicroVM isolation via NVX on Windows x64 |
+| `"aci"` | A Linux sandbox that Azure Container Instances creates for each request in a caller-selected sandbox group (experimental). Requires a Windows host and Azure credentials. No abstract intent resolves to ACI; request it explicitly — see [`docs/backends/aci/aci.md`](backends/aci/aci.md). |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |

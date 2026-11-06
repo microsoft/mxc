@@ -123,6 +123,149 @@ fn both_microvm_creation_contracts_preserve_optional_provision_presence() {
     }
 }
 
+const ACI_GROUP: &str = "/subscriptions/51aca303-03da-4510-849d-d4f32d3f39ac/resourceGroups/tryme-01/providers/Microsoft.ContainerInstance/sandboxGroups/sbg-001";
+
+fn aci_request(aci: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "aci",
+        "aci": aci,
+        "process": {"commandLine": "echo"}
+    })
+}
+
+#[test]
+fn aci_creation_requires_a_sandbox_group_and_image() {
+    let image = "mcr.microsoft.com/azurelinux/base/core:3.0";
+    for aci in [
+        serde_json::json!({}),
+        serde_json::json!({"image": image}),
+        serde_json::json!({"sandboxGroup": ACI_GROUP}),
+        serde_json::json!({"sandboxGroup": ACI_GROUP, "image": ""}),
+        serde_json::json!({"sandboxGroup": ACI_GROUP, "image": "python:3.12"}),
+        serde_json::json!({"sandboxGroup": ACI_GROUP, "image": null}),
+        serde_json::json!({"sandboxGroup": "", "image": image}),
+        serde_json::json!({"sandboxGroup": "/subscriptions/x", "image": image}),
+        serde_json::json!({"sandboxGroup": format!("{ACI_GROUP}/sandboxes/s"), "image": image}),
+        serde_json::json!({"sandboxGroup": ACI_GROUP, "image": image, "location": "westus"}),
+    ] {
+        let request = aci_request(aci);
+        assert!(parse_request(&request.to_string()).is_err(), "accepted {request}");
+    }
+    let request = aci_request(serde_json::json!({"sandboxGroup": ACI_GROUP, "image": image}));
+    assert!(matches!(
+        parse_request(&request.to_string()),
+        Ok(Request::OneShot(_))
+    ));
+}
+
+#[test]
+fn aci_image_reference_cases_match_the_microvm_contract() {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("image_reference_cases.json")).unwrap();
+    for case in cases {
+        let image = case["image"].as_str().unwrap();
+        let request = aci_request(serde_json::json!({"sandboxGroup": ACI_GROUP, "image": image}));
+        assert_eq!(
+            parse_request(&request.to_string()).is_ok(),
+            case["valid"].as_bool().unwrap(),
+            "{image:?}"
+        );
+    }
+}
+
+#[test]
+fn aci_section_is_required_exactly_when_containment_is_aci() {
+    let section = serde_json::json!({
+        "sandboxGroup": ACI_GROUP,
+        "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+    });
+    let mut without_section = aci_request(section.clone());
+    without_section.as_object_mut().unwrap().remove("aci");
+    let error = parse_request(&without_section.to_string()).unwrap_err();
+    assert!(error.to_string().contains("aci section"), "{error}");
+    for containment in [Some("process"), Some("microvm"), None] {
+        let mut request = aci_request(section.clone());
+        match containment {
+            Some(containment) => request["containment"] = serde_json::json!(containment),
+            None => {
+                request.as_object_mut().unwrap().remove("containment");
+            }
+        }
+        assert!(parse_request(&request.to_string()).is_err(), "accepted {request}");
+    }
+}
+
+#[test]
+fn aci_creation_preserves_optional_provision_presence() {
+    for (provision, present, cpu, memory_gb) in [
+        (None, false, None, None),
+        (Some(serde_json::json!({})), true, None, None),
+        (Some(serde_json::json!({"cpu": 2})), true, Some(2), None),
+        (Some(serde_json::json!({"memoryGb": 4})), true, None, Some(4)),
+        (
+            Some(serde_json::json!({"cpu": 1, "memoryGb": 2})),
+            true,
+            Some(1),
+            Some(2),
+        ),
+    ] {
+        let mut aci = serde_json::json!({
+            "sandboxGroup": ACI_GROUP,
+            "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+        });
+        if let Some(provision) = provision {
+            aci["provision"] = provision;
+        }
+        let Request::OneShot(request) = parse_request(&aci_request(aci).to_string()).unwrap()
+        else {
+            panic!("expected a one-shot request");
+        };
+        let provision = request.aci.into_option().unwrap().provision;
+        assert_eq!(provision.as_ref().is_some(), present);
+        let provision = provision.into_option();
+        assert_eq!(
+            provision.as_ref().and_then(|p| p.cpu.as_ref().copied()),
+            cpu
+        );
+        assert_eq!(
+            provision.as_ref().and_then(|p| p.memory_gb.as_ref().copied()),
+            memory_gb
+        );
+    }
+    for provision in [
+        serde_json::json!({"cpu": -1}),
+        serde_json::json!({"cpu": "2"}),
+        serde_json::json!({"cpu": null}),
+        serde_json::json!({"memoryGb": 1.5}),
+        serde_json::json!({"memoryMib": 512}),
+    ] {
+        let request = aci_request(serde_json::json!({
+            "sandboxGroup": ACI_GROUP,
+            "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+            "provision": provision
+        }));
+        assert!(parse_request(&request.to_string()).is_err(), "accepted {request}");
+    }
+}
+
+#[test]
+fn aci_is_not_a_lifecycle_containment() {
+    let json = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "phase": "provision",
+        "containment": "aci",
+        "aci": {
+            "sandboxGroup": ACI_GROUP,
+            "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+        }
+    });
+    assert!(matches!(
+        parse_request(&json.to_string()).unwrap_err(),
+        RequestParseError::Containment(ContainmentProbeError::UnsupportedContainment(_))
+    ));
+}
+
 #[test]
 fn no_phase_selects_one_shot_request() {
     let json = r#"{

@@ -31,7 +31,7 @@ pub(crate) struct BackendRegistration {
     pub(crate) probe_coverage: ProbeCoverage,
 }
 
-static BACKENDS: [BackendRegistration; 11] = [
+static BACKENDS: [BackendRegistration; 12] = [
     BackendRegistration {
         backend: ContainmentBackend::ProcessContainer,
         experimental: false,
@@ -92,6 +92,14 @@ static BACKENDS: [BackendRegistration; 11] = [
             "remote service usability is not locally detectable",
         ),
     },
+    BackendRegistration {
+        backend: ContainmentBackend::Aci,
+        experimental: true,
+        probe_coverage: ProbeCoverage::NotDetected(
+            "cloud backend; availability depends on Azure credentials and access to the \
+             configured sandbox group, not on a host capability",
+        ),
+    },
 ];
 
 /// Every registered backend, for callers that must stay exhaustive over them.
@@ -116,6 +124,7 @@ pub(crate) const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
     (ContainmentBackend::Seatbelt, "seatbelt"),
     (ContainmentBackend::Bubblewrap, "bubblewrap"),
     (ContainmentBackend::W365Agents, "w365_agents"),
+    (ContainmentBackend::Aci, "aci"),
 ];
 
 /// Every canonical backend wire name.
@@ -155,6 +164,7 @@ pub(crate) fn registration(backend: &ContainmentBackend) -> &'static BackendRegi
         ContainmentBackend::Seatbelt => 8,
         ContainmentBackend::Bubblewrap => 9,
         ContainmentBackend::W365Agents => 10,
+        ContainmentBackend::Aci => 11,
     };
     &BACKENDS[index]
 }
@@ -171,7 +181,7 @@ mod tests {
             assert!(names.insert(entry.backend.wire_name()));
             assert!(std::ptr::eq(registration(&entry.backend), entry));
         }
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
     }
 
     #[test]
@@ -183,7 +193,13 @@ mod tests {
             .collect();
         assert_eq!(
             experimental,
-            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox", "w365_agents"])
+            BTreeSet::from([
+                "microvm",
+                "hyperlight",
+                "windows_sandbox",
+                "w365_agents",
+                "aci"
+            ])
         );
     }
 

@@ -163,7 +163,9 @@ these dispatchers, which map a matrix backend id to the suites above:
 | `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt` |
 
 The Unix dispatcher recognizes the catalog's `microvm` entry but exits nonzero
-because that suite is not wired. Neither dispatcher accepts `hyperlight`.
+because that suite is not wired. Neither dispatcher accepts `hyperlight` or
+`aci`; the ACI suite needs Azure credentials and runs manually, as described in
+the [ACI backend guide](../../docs/backends/aci/aci.md#validation).
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
 handler name. The `process` case requires `wxc-exec --probe` to report an
