@@ -5,8 +5,9 @@
 - **Issue:** [#1462](https://github.com/microsoft/mxc/issues/1462)
 - **Feature design spec:** [`README.md`](README.md)
 
-No public API changes. WSLC accepts network values through the existing v1
-types that it rejects today.
+Two additive v1 changes: a `WslcProxiedNetworking` backend capability, and
+`runtimeConfig` on Node's WSLC provision `network`. Otherwise WSLC accepts
+network values through the existing v1 types that it rejects today.
 
 ## Caller scenario
 
@@ -103,12 +104,21 @@ available in v1 SDKs; use [MXC request JSON](../../../../schema.md#mxc-request-j
 
 ## Proposed signatures and types
 
-- **Rust:** `mxc_sdk::v1`. Fits the existing version; no new or changed
-  declarations.
-- **.NET:** `Microsoft.Mxc.Sdk.V1`. Fits the existing version; no new or
-  changed declarations.
-- **Node:** `@microsoft/mxc-sdk/v1`. Fits the existing version; no new or
-  changed declarations.
+- **Rust:** `mxc_sdk::v1`. Adds `BackendCapability::WslcProxiedNetworking`; the
+  enum is `#[non_exhaustive]`.
+- **.NET:** `Microsoft.Mxc.Sdk.V1`. Adds `BackendCapability.WslcProxiedNetworking`;
+  older SDKs read unknown values as `Unknown`.
+- **Node:** `@microsoft/mxc-sdk/v1`. Adds `'wslcProxiedNetworking'` to
+  `BackendCapability`. The WSLC provision `network` changes from
+  `DirectionalNetworkConfig` to `NetworkPolicy`, which adds optional
+  `runtimeConfig`.
+
+`WslcProxiedNetworking` means WSLC can run proxied mode: egress rules and
+mixed `egress`/`ingress`/`hostLoopback` defaults (WSL 3.0.5 or later). Like
+Bubblewrap's `ProxyEnforcement`, it's backend-specific and reported only
+because support varies by host; other backends enforce egress rules without
+reporting a capability. It doesn't cover proxied `hostLoopback: allow` under
+the `AllowWSLContainerPrivileged` admin policy, which still fails at run time.
 
 Existing types used: `NetworkPolicy`, `NetworkEgressPolicy` /
 `NetworkEgressConfig`, `NetworkIngressPolicy` / `NetworkIngressConfig`,
@@ -123,13 +133,14 @@ and cancellation are unchanged.
   the design spec's [proposed behavior](README.md#proposed-behavior). Omitted
   optional fields stay omitted, as today.
 
-- **Results:** unchanged. Errors for the new rejections (proposed):
+- **Results:** unchanged. Errors for the new rejections:
 
   | Case | Error code |
   |---|---|
-  | Non-TCP allow rule, `networkProxy` plus egress rules, overlapping CIDR | `PolicyValidation` / `policy_validation` |
+  | Non-TCP allow rule, `networkProxy` plus egress rules, `networkProxy` plus `egress.default: allow` in proxied mode, overlapping CIDR | `PolicyValidation` / `policy_validation` |
   | WSL older than 3.0.5 for any proxied config | `BackendUnavailable` / `backend_unavailable` |
   | `AllowWSLContainerPrivileged=0` with proxied `hostLoopback: allow` | `BackendUnavailable` / `backend_unavailable` |
+  | Controller image tar missing or its ID doesn't match | `BackendUnavailable` / `backend_unavailable` |
 
   Rust returns `v1::Error`, .NET throws `MxcException`, Node rejects with its
   error type; each carries the code and a message naming the WSL version or
@@ -139,22 +150,25 @@ and cancellation are unchanged.
   to the container and are released by create-and-run cleanup or
   `deprovision`.
 
-- **Discovery:** unchanged; see [Open questions](#open-questions).
+- **Discovery:** WSLC reports `WslcProxiedNetworking` on WSL 3.0.5 or later, so
+  callers can check support before running. Without it, proxied configs fail
+  with `backend_unavailable`.
 
-- **SDK differences:** one existing difference matters here. Rust and .NET
-  provision requests carry `NetworkPolicy.runtime_config` / `RuntimeConfig`;
-  Node's provision `DirectionalNetworkConfig` has none. WSLC rejects a proxy
-  at provision today. The resolution is design spec
-  [open question 1](README.md#open-questions).
+- **SDK differences:** Rust and .NET provision requests already carry
+  `NetworkPolicy.runtime_config` / `RuntimeConfig`; Node's WSLC provision
+  gains it. All three send it once the development provision contract with
+  `runtimeConfig` is published.
 
 ## Compatibility and request mapping
 
 - Existing callers compile and behave the same, except for the
   [runtime behavior changes](README.md#contracts-apis-and-compatibility):
   previously rejected requests now run, and `BRIDGED` containers may gain
-  Windows loopback access.
+  Windows loopback access. Code that matches every Node `BackendCapability`
+  value exhaustively must handle `'wslcProxiedNetworking'`.
 
-- Request mapping is unchanged (contract `1.0.0`):
+- Request mapping is unchanged (contract `1.0.0`), apart from provision
+  `runtimeConfig` in the development contract:
 
   | SDK input | MXC request field |
   |---|---|
@@ -182,21 +196,18 @@ and cancellation are unchanged.
   - .NET `MxcContainerWslcE2ETests.cs` and `MxcLifecycleWslcE2ETests.cs`: one
     proxied create-and-run and one lifecycle run.
   - Error-code conversion for the new rejections in each SDK.
+  - Discovery reports `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or later, in
+    each SDK.
+  - Node provision `runtimeConfig` maps to the provision request.
 
-- References: no signature changes to `docs/api-reference/{rust,dotnet,node}/v1/`.
-  Update the WSLC notes in the Rust, .NET and Node SDK READMEs if they
-  describe WSLC networking as all-or-nothing.
+- References: update `BackendCapability` in
+  `docs/api-reference/{rust,dotnet,node}/v1/types.md`, and Node's WSLC
+  provision `network` type. Update the WSLC notes in the Rust, .NET and Node
+  SDK READMEs if they describe WSLC networking as all-or-nothing.
 
 ## Open questions
 
-1. **Discovery capability:** should `BackendCapability` gain a value for WSLC
-   egress rules or host loopback, so callers can detect support before
-   running? Without one, unsupported hosts fail at run time with
-   `backend_unavailable`. Adding a value is non-breaking: the enum is
-   `#[non_exhaustive]` in Rust and has an `Unknown` value in .NET. Owners:
-   `@theelliotm` and SDK maintainers.
-
-2. **Error codes:** confirm the proposed codes above. Owners: SDK maintainers.
+None.
 
 ## Review checklist
 

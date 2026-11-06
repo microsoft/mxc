@@ -5,7 +5,7 @@
 - **Status:** Proposed
 - **Issue:** [#1462](https://github.com/microsoft/mxc/issues/1462)
 - **Contributor:** `@theelliotm`
-- **Implementation PRs:** Not started.
+- **Implementation PRs:** [#1679](https://github.com/microsoft/mxc/pull/1679) (SDK 3.0.5).
 
 WSLC networking today supports only all-allow (`BRIDGED`) or all-deny (`NONE`).
 This design adds a per-container controller container that enforces TCP CIDR
@@ -90,8 +90,8 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 - Omitted fields keep their current WSLC defaults.
 
 - Changed operations: create-and-run, provision, start, exec, stop and
-  deprovision. Discovery and validation are unchanged apart from the newly
-  accepted values.
+  deprovision. Discovery adds the `WslcProxiedNetworking` capability; validation
+  is unchanged apart from the newly accepted values.
 
 ### Egress filtering
 
@@ -113,6 +113,11 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 - The DNS forwarder runs only when `egress.default` is `allow`, an allow rule
   exists or `networkProxy` is set. Otherwise the controller refuses DNS, since
   query names can carry data out even when every destination is denied.
+
+- **DNS is outside the egress rules.** The controller resolves names through
+  Docker's resolver (`127.0.0.11`), WSL and Windows, which pick the server per
+  name, so a deny rule covering UDP 53 doesn't block lookups. __Document
+  this.__
 
 ### hostLoopback
 
@@ -209,8 +214,10 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 
 - **`networkProxy` plus egress rules:** rejected.
 
-- **`networkProxy` plus `egress.default: allow`:** see
-  [open question 7](#open-questions).
+- **`networkProxy` plus `egress.default: allow` in proxied mode:** rejected,
+  like Bubblewrap. The controller forwards only to the custom proxy, so
+  `allow` would behave like `deny`. `BRIDGED` with everything allowed plus the
+  cooperative proxy is unchanged.
 
 - **Loopback proxy URL:** the controller relays only to the proxy's port on
   Windows `127.0.0.1`, independent of `hostLoopback`. No other host-loopback
@@ -225,6 +232,7 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 These are rejected before the workload is created:
 
 - Non-TCP allow rules, `networkProxy` plus egress rules, and UDP port mappings.
+- `networkProxy` plus `egress.default: allow` in proxied mode.
 - A proxy hostname with no IPv4 answer on Windows.
 - An `https://` `networkProxy` whose host is an IP address or loopback.
 - Proxied `hostLoopback: allow` when `AllowWSLContainerPrivileged` is `0`; the
@@ -256,8 +264,9 @@ These are rejected before the workload is created:
     `apply_cooperative_proxy_env`. This also applies when the exec replaces
     the environment, since the variables are added before the `env -i`
     command is built. An exec `networkProxy` must be omitted or match the
-    provision value; any other value is rejected. How provision receives
-    `networkProxy` is [open question 1](#open-questions).
+    provision value; any other value is rejected. Provision receives
+    `networkProxy` through `runtimeConfig`; see
+    [Contracts, APIs, and compatibility](#contracts-apis-and-compatibility).
   - `exec` credentials in a proxied container: `env -i` puts every variable
     in the command line, readable through `/proc/<pid>/cmdline`. Before
     injecting, MXC runs `reject_proxy_credentials_in_argv` on the URL it will
@@ -275,12 +284,12 @@ These are rejected before the workload is created:
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
-| WSLC | Yes | WSL 3.0.5+ for in-SDK networking and host loopback (`WSLC_E_RUNTIME_UPDATE_NEEDED`); capability additions allowed for proxied `hostLoopback: allow` (`WSLC_E_CAPABILITY_ADDITIONS_DISABLED`) | Unchanged: WSLC available or unavailable. No per-feature capability; see [`api.md`](api.md#open-questions) |
+| WSLC | Yes | WSL 3.0.5+ for in-SDK networking and host loopback (`WSLC_E_RUNTIME_UPDATE_NEEDED`); capability additions allowed for proxied `hostLoopback: allow` (`WSLC_E_CAPABILITY_ADDITIONS_DISABLED`) | WSLC available or unavailable, plus the new `WslcProxiedNetworking` capability on WSL 3.0.5 or later; see [`api.md`](api.md) |
 
 - WSLC can be available but unable to run proxied mode on WSL older than
-  3.0.5, or proxied host loopback under the admin policy. This is detected
-  when the session or controller is created, before the workload exists, and
-  fails closed.
+  3.0.5; it then omits `WslcProxiedNetworking`. Proxied host loopback under the
+  admin policy isn't reported. Both are detected when the session or
+  controller is created, before the workload exists, and fail closed.
 
 - Unenforceable policy is rejected as listed in
   [Rejected requests](#rejected-requests).
@@ -288,10 +297,13 @@ These are rejected before the workload is created:
 ## Contracts, APIs, and compatibility
 
 - **Request fields:** no new fields for create-and-run. WSLC accepts values it
-  rejects today. Accepting `networkProxy` at provision may need a contract
-  change; see [Open questions](#open-questions).
+  rejects today. WSLC provision gains `runtimeConfig` (for `networkProxy`) in
+  the development contract, as MicroVM provision has. SDKs send it once that
+  contract is published.
 
-- **Public APIs:** no signature changes. See [`api.md`](api.md).
+- **Public APIs:** additive only: a `WslcProxiedNetworking` capability value, and
+  `runtimeConfig` on Node's WSLC provision `network`. Rust and .NET provision
+  requests already carry it. See [`api.md`](api.md).
 
 - **Runtime behavior:** changes.
   - Previously rejected configs are accepted.
@@ -486,7 +498,31 @@ probes used direct TCP connections, ignoring the proxy variables.
   proxy URL that exec will inject, not only the exec request's own.
 
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
-  packaged as an image and imported from a tar. No new crate.
+  packaged as an image tar. No new crate. See [Controller image](#controller-image).
+
+- `mxc_engine/probe.rs`: report `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or
+  later.
+
+### Controller image
+
+- **Build:** the official pipeline builds one image tar per architecture
+  (`mxc-wslc-controller-{x64,arm64}.tar`) from an in-repo Dockerfile: the
+  controller binary and nftables on a minimal base pinned by digest.
+
+- **Distribution:** each tar ships next to `wxc-exec.exe` and
+  `wxc-wslc-daemon.exe` in the same packages. MXC never pulls it: proxied
+  mode exists for restricted egress, and a registry pull runs on the host's
+  network outside any policy. The WSLC C SDK can't build images.
+
+- **Integrity:** Authenticode doesn't apply to a tar, and WSLC doesn't verify
+  image signatures. The build embeds the image's SHA-256 ID in the signed
+  `wxc-exec.exe` and daemon. MXC loads the tar with
+  `WslcLoadSessionImageFromFile` unless the store already has that ID,
+  confirms the ID with `WslcListSessionImages`, and creates the controller
+  from the ID, not a tag, so an image placed under the tag isn't used. A
+  missing tar or a mismatched ID fails closed before the workload exists.
+
+- **Signing:** the controller binary is ESRP-signed like `lxc-exec`.
 
 ### Alternatives
 
@@ -523,8 +559,15 @@ probes used direct TCP connections, ignoring the proxy variables.
   are orphaned. MXC force-deletes the workload and controller (ignoring not
   found), then the networks, which frees their names and subnets. Containers
   go first because a network can't be deleted while one is attached
-  (`ERROR_SHARING_VIOLATION`). How MXC identifies them is
-  [open question 5](#open-questions).
+  (`ERROR_SHARING_VIOLATION`).
+
+- **Identifying leftovers:** the 3.0.5 SDK can't list or label containers, so
+  MXC keeps an ownership record. Before creating them, MXC writes their names
+  to a file under `%LOCALAPPDATA%\mxc`, and cleanup deletes only recorded
+  names. Names derive from existing IDs (`containerId` for create-and-run,
+  `sandboxId` for the daemon). A lost record leaves leftovers in place but
+  never deletes another tool's resources in a store shared through
+  `wslc.storagePath`.
 
 - **Controller exits during use:** the workload loses network access. MXC
   doesn't restart the controller; the caller must deprovision.
@@ -545,9 +588,10 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | Everything denied, with a port mapping | Windows `127.0.0.1:<port>` reaches the workload; workload egress and DNS refused | Proposed config |
 | `hostLoopback: allow` / `deny` | Windows loopback services reached, including on the controller's DNS and proxy ports; UDP to `host.wslc.internal` gets no answer / name and relay address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
-| `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (not yet measured) | Proposed config |
+| `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
-| Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Matches the resolution of [open question 7](#open-questions); `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
+| Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
+| Controller image tar missing, or its ID doesn't match the embedded ID | Fails before the workload exists; no container created | Proposed test |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
@@ -569,8 +613,9 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 
 Delivery order:
 
-1. Controller binary and image build: a Linux cross-build and signing.
-   `build.bat` has neither today.
+1. Controller binary and image: a Linux musl cross-build, per-architecture
+   image tars in the official pipeline, binary signing and the embedded image
+   ID. `build.bat` has none of these today.
 2. Backend for create-and-run: policy classification, controller, networks,
    port mappings and leftover cleanup at session start.
 3. Backend for lifecycle operations: daemon tracking, proxy variables on
@@ -578,87 +623,28 @@ Delivery order:
 4. Host loopback: session hostname and controller relay.
 5. Docs and SDK tests; no API changes.
 
-- **SDK pin:** MXC pins `WSLC_SDK_VERSION` to 3.0.3
-  (`build/build_wslc_common.rs`), which has neither the network nor the host
-  loopback APIs. 3.0.5+ is the first WSL version with both; pin it once a version with it 
-  ships.
-  This isn't the first step, but CI needs it to test PRs 2–4, since CI installs
-  WSL from the pin.
+- **SDK pin:** [#1679](https://github.com/microsoft/mxc/pull/1679) pins
+  `WSLC_SDK_VERSION` to 3.0.5, the first WSL version with both the network
+  and host loopback APIs. CI installs WSL from the pin.
 
-- **Contract:** a contract change is needed only if `networkProxy` is accepted at
-  provision through MXC request JSON. It goes first, in the development
-  contract.
+- **Contract:** `runtimeConfig` on WSLC provision goes first, in the
+  development contract.
 
 - **Docs:**
   - [`schema.md`](../../../../schema.md).
   - [WSLC getting started](../../../../backends/wslc/wsl-container-getting-started.md):
     network configuration, network proxy, port mappings, UDP/ICMP in proxied
-    mode, hostLoopback partial support, the behavior change and
-    prerequisites.
+    mode, DNS outside the egress rules, hostLoopback partial support, the
+    behavior change and prerequisites.
   - [WSLC lifecycle](../../../../backends/wslc/wslc-state-aware.md): supported
     and rejected policy fields.
 
 - **Cost:** one extra container and two networks per container, plus startup
-  time.
+  time, and one controller image tar per architecture in each package.
 
 ## Open questions
 
-1. **Provision `networkProxy`:** the controller is created at provision, so
-   it needs the proxy then. Today WSLC accepts the proxy only at exec
-   (`validate_provision_policy` rejects it), and the MXC request JSON
-   provision contract has no `runtimeConfig`. Rust and .NET typed provision
-   requests carry it; Node's doesn't. Potential options:
-   - Add `runtimeConfig` to the development provision contract and Node's
-     provision request.
-   - Support custom proxies only for create-and-run, and reject them for
-     lifecycle containers.
-
-   Owners: `@theelliotm` and WSLC maintainers.
-
-2. **Host loopback on older runtimes:** Currently valid `BRIDGED` contracts running 
-   on WSL 3.0.3 will NOT get host loopback while those contracts running on 3.0.5 will. 
-   Is this acceptable?
-
-3. **Controller image distribution:** a bundled tar or a registry, and how is
-   it signed? Owners: build maintainers.
-
-4. **DNS and deny rules:** a deny rule covering UDP 53 is bypassed: the
-   controller's DNS lookups go through Docker's resolver (`127.0.0.11`), WSL
-   and Windows, which picks the server per name. 
-   Potential options:
-   - Query Windows' DNS servers directly, checking each IP against the rules
-     first (matches LXC). Stale after network changes; VPN DNS reachability
-     from WSLC is unverified.
-   - Turn DNS off when any deny rule covers UDP 53 (fail closed; over-blocks).
-   - Document DNS as outside egress rules.
-
-5. **Identifying leftovers:** the 3.0.5 SDK can't list containers, label them
-   or disconnect a network, so MXC must find leftovers by name. A prefix match
-   alone could delete another tool's `mxc-...` resources in a store shared
-   through `wslc.storagePath`. Potential options:
-   - **Ownership record:** before creating them, MXC writes the names to a
-     file under `%LOCALAPPDATA%\mxc` and cleanup deletes only those names. A
-     lost record leaves leftovers in place but never deletes another tool's
-     resources.
-   - **Exact names:** derive every name from one MXC ID (`mxc-<id>` for the
-     workload via `WslcSetContainerSettingsName`, plus `-ctl`, `-int` and
-     `-out`), list networks with `WslcListSessionNetworks`, and delete only
-     full-pattern matches. Unlikely to collide, but not ruled out.
-   - **Default stores only:** skip cleanup when `wslc.storagePath` is set.
-   - Ask WSLC for SDK support for listing containers.
-
-6. **Discovery:** see [`api.md`](api.md#open-questions).
-
-7. **`egress.default: allow` plus `networkProxy` in proxied mode:** a denied
-   `ingress` or `hostLoopback` selects proxied mode, where the controller
-   forwards only to the custom proxy. `allow` and `deny` then behave the same.
-   Potential options:
-   - Reject it, like Bubblewrap. `deny` plus `networkProxy` gives the same
-     result.
-   - Accept it and document that `allow` has no effect with a custom proxy.
-
-   `BRIDGED` with everything allowed plus the cooperative proxy is unchanged
-   either way.
+None.
 
 ## Review checklist
 
