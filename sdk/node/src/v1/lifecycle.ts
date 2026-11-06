@@ -295,6 +295,8 @@ export async function spawnInContainerWithPty<C extends LifecycleContainmentKind
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
+ * Retains the first 1 MiB per stream, drains excess output, and reports
+ * truncation in `warnings`. Use streaming APIs for complete output.
  */
 export async function runInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -312,13 +314,13 @@ export async function runInContainer<C extends PipedExecuteBackend>(
   const waitPromise = captureProcessOutput(proc);
   let failed = false;
   try {
-    const { result, stdout, stderr } = await waitPromise;
+    const { result, stdout, stderr, warnings } = await waitPromise;
     return {
       stdout,
       stderr,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      warnings: [...proc.warnings],
+      warnings: [...proc.warnings, ...warnings],
       ...(proc.outputMetadata === undefined
         ? {}
         : { outputMetadata: proc.outputMetadata }),

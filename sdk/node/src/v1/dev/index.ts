@@ -175,12 +175,12 @@ export async function runInContainerJson(
   );
   let failed = false;
   try {
-    const { result: outcome, stdout, stderr } = await captureProcessOutput(proc);
+    const { result: outcome, stdout, stderr, warnings } = await captureProcessOutput(proc);
     return {
       stdout, stderr,
       exitCode: outcome.exitCode,
       timedOut: outcome.timedOut,
-      warnings: [...proc.warnings],
+      warnings: [...proc.warnings, ...warnings],
       ...(proc.outputMetadata === undefined ? {} : { outputMetadata: proc.outputMetadata }),
     };
   } catch (error) {

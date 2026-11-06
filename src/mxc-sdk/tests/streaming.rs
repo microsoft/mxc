@@ -63,6 +63,23 @@ fn streaming_double_take_returns_none() {
 }
 
 #[test]
+fn seatbelt_captured_execution_bounds_and_drains_both_streams() {
+    let request = seatbelt_request(
+        "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; exit 7",
+        30_000,
+    );
+    let output = mxc_sdk::v1::run(request, Default::default()).expect("bounded capture");
+    assert_eq!(output.outcome, WaitResult::Exited(7));
+    assert_eq!(output.stdout, vec![0; 1048576]);
+    assert_eq!(output.stderr, vec![0; 1048576]);
+    for stream in ["stdout", "stderr"] {
+        assert!(output.warnings.contains(&format!(
+            "{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output"
+        )));
+    }
+}
+
+#[test]
 fn seatbelt_pty_supports_io_resize_and_merged_output() {
     unix_pty_contract::assert_round_trip(seatbelt_request(
         unix_pty_contract::ROUND_TRIP_COMMAND,

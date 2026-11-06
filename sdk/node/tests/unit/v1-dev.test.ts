@@ -160,6 +160,50 @@ it('typed and raw captured execs return partial output when pipes stay open afte
   }
 });
 
+for (const timedOut of [false, true]) {
+  it(`raw captured exec bounds both streams and preserves warnings (timeout=${timedOut})`, {
+    timeout: 2000,
+  }, async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    _setStateAwareBindingSandboxProcessFactory(() => new MxcProcess({
+      id: 42,
+      standardInput: null,
+      standardOutput: stdout,
+      standardError: stderr,
+      poll: () => ({ exitCode: timedOut ? -1 : 7, timedOut, running: false }),
+      wait: async () => ({ exitCode: timedOut ? -1 : 7, timedOut }),
+      warnings: () => ['native warning'],
+      outputMetadata: () => undefined,
+      kill: () => {},
+      killForTimeout: () => {},
+      free: async () => {},
+    }));
+    stdout.write('x'.repeat(1048577));
+    stderr.write('y'.repeat(1048577));
+    if (!timedOut) {
+      stdout.end();
+      stderr.end();
+    }
+    const result = await dev.runInContainerJson(
+      '{"version":"1.0.0","phase":"exec","sandboxId":"iso:abc","process":{"commandLine":"emit output"}}',
+    );
+    assert.deepStrictEqual(result, {
+      stdout: 'x'.repeat(1048576),
+      stderr: 'y'.repeat(1048576),
+      exitCode: timedOut ? -1 : 7,
+      timedOut,
+      warnings: [
+        'native warning',
+        'stdout capture truncated at 1048576 bytes; use streaming APIs for complete output',
+        'stderr capture truncated at 1048576 bytes; use streaming APIs for complete output',
+      ],
+    });
+    assert.strictEqual(stdout.destroyed, true);
+    assert.strictEqual(stderr.destroyed, true);
+  });
+}
+
 it('settles capture before a pending native read permits stream close', {
   timeout: 2000,
 }, async (t) => {
@@ -195,7 +239,7 @@ it('settles capture before a pending native read permits stream close', {
     output.on('end', externalEnd);
     output.on('close', externalClose);
     output.on('error', externalError);
-    const concat = t.mock.method(Buffer, 'concat');
+    const decode = t.mock.method(Buffer.prototype, 'toString');
     try {
       if (waitFails) {
         await assert.rejects(captureProcessOutput(proc), /native wait failed/);
@@ -204,6 +248,7 @@ it('settles capture before a pending native read permits stream close', {
           result: { exitCode: -1, timedOut: true },
           stdout: 'partial output',
           stderr: '',
+          warnings: [],
         });
       }
       assert.strictEqual(output.destroyed, true);
@@ -211,17 +256,17 @@ it('settles capture before a pending native read permits stream close', {
       assert.deepStrictEqual(output.listeners('end'), [externalEnd]);
       assert.deepStrictEqual(output.listeners('close'), [externalClose]);
       assert.ok(output.listeners('error').includes(externalError));
-      assert.strictEqual(concat.mock.callCount(), 1);
+      assert.strictEqual(decode.mock.callCount(), 1);
       output.emit('end');
       output.emit('error', new Error('late native read failure'));
       const closed = once(output, 'close');
       finishDestroy?.();
       await closed;
-      assert.strictEqual(concat.mock.callCount(), 1);
+      assert.strictEqual(decode.mock.callCount(), 1);
     } finally {
       finishDestroy?.();
       proc.dispose();
-      concat.mock.restore();
+      decode.mock.restore();
     }
   }
 });
@@ -328,6 +373,7 @@ it('successful stream EOF does not finish capture before process exit', async ()
       result: { exitCode: 0, timedOut: false },
       stdout: 'finished',
       stderr: '',
+      warnings: [],
     });
   } finally {
     proc.dispose();

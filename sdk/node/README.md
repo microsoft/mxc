@@ -47,6 +47,12 @@ console.log(output.stdout, output.exitCode);
 `run` returns a `Promise<ExecutionResult>` containing captured stdout, stderr,
 the workload exit code, timeout state, warnings, and optional output metadata.
 
+`run` and `runInContainer` retain the first 1 MiB (1,048,576 bytes) of each
+output stream before text decoding. Excess output is drained and discarded;
+each truncated stream adds an entry to `ExecutionResult.warnings`. Exit codes
+and timeout reporting are unchanged. Use streaming APIs and process both
+streams incrementally when complete output is required.
+
 On Windows, `getPlatformSupport` reports ProcessContainer only when native PSEC
 is available; other backends are detected independently. `probe(request)` from
 `@microsoft/mxc-sdk/v1` checks request compatibility without creating a container.

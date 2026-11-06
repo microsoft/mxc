@@ -113,10 +113,13 @@ public class MxcProcess : IMxcProcess
     // does not spin a core.
     private static readonly TimeSpan MinPollInterval = TimeSpan.FromMilliseconds(1);
     private static readonly TimeSpan MaxPollInterval = TimeSpan.FromMilliseconds(50);
+    private const int MaxCapturedOutputBytes = 1024 * 1024;
 
     private readonly object _controlLock = new();
     private readonly MxcSandboxHandle _handle;
     private bool _disposed;
+    private bool _stdoutTruncated;
+    private bool _stderrTruncated;
 
     // Takes up to a minute on WSLC. While it runs, nothing else may use the native handle.
     private Task<WaitResult>? _finishing;
@@ -276,7 +279,8 @@ public class MxcProcess : IMxcProcess
 
     /// <summary>
     /// Security warnings emitted while applying the container policy, and
-    /// cleanup steps that failed after the workload exited.
+    /// cleanup steps that failed after the workload exited, and output capture
+    /// truncation reported by <see cref="WaitForExitWithOutputAsync"/>.
     /// </summary>
     /// <remarks>
     /// While a wait is finishing the process's cleanup, this returns the
@@ -289,7 +293,7 @@ public class MxcProcess : IMxcProcess
             lock (_controlLock)
             {
                 ThrowIfDisposed();
-                return _isFinishing ? _warningsBeforeFinishing : ReadWarnings();
+                return AddCaptureWarnings(_isFinishing ? _warningsBeforeFinishing : ReadWarnings());
             }
         }
     }
@@ -322,6 +326,24 @@ public class MxcProcess : IMxcProcess
                 NativeMethods.mxc_string_free(json);
             }
         }
+    }
+
+    private IReadOnlyList<string> AddCaptureWarnings(IReadOnlyList<string> warnings)
+    {
+        if (!_stdoutTruncated && !_stderrTruncated)
+        {
+            return warnings;
+        }
+        var result = new List<string>(warnings);
+        if (_stdoutTruncated)
+        {
+            result.Add($"stdout capture truncated at {MaxCapturedOutputBytes} bytes; use streaming APIs for complete output");
+        }
+        if (_stderrTruncated)
+        {
+            result.Add($"stderr capture truncated at {MaxCapturedOutputBytes} bytes; use streaming APIs for complete output");
+        }
+        return result;
     }
 
     /// <summary>
@@ -720,6 +742,9 @@ public class MxcProcess : IMxcProcess
     /// <see cref="StandardOutput"/> and <see cref="StandardError"/> to end, so an
     /// output-heavy child cannot deadlock. The deadlock-free counterpart of
     /// taking the streams and waiting by hand.
+    /// Retains the first 1 MiB per stream and drains and discards excess output.
+    /// Truncation is reported in <see cref="Warnings"/>. Read the streams
+    /// directly when complete output is required.
     /// </summary>
     public async Task<(WaitResult Result, byte[] Stdout, byte[] Stderr)> WaitForExitWithOutputAsync(
         CancellationToken cancellationToken = default)
@@ -729,8 +754,10 @@ public class MxcProcess : IMxcProcess
         using var outCloser = outStream is null ? null : StandardOutputCloser;
         using var errCloser = errStream is null ? null : StandardErrorCloser;
 
-        Task<byte[]> ReadAll(Stream? s) =>
-            s is null ? Task.FromResult(Array.Empty<byte>()) : ReadToEndAsync(s, cancellationToken);
+        Task<(byte[] Bytes, bool Truncated)> ReadAll(Stream? s) =>
+            s is null
+                ? Task.FromResult((Array.Empty<byte>(), false))
+                : CaptureOutputAsync(s, cancellationToken);
 
         var stdoutTask = ReadAll(outStream);
         var stderrTask = ReadAll(errStream);
@@ -751,7 +778,12 @@ public class MxcProcess : IMxcProcess
             }
             var stdout = await stdoutTask.ConfigureAwait(false);
             var stderr = await stderrTask.ConfigureAwait(false);
-            return (result, stdout, stderr);
+            lock (_controlLock)
+            {
+                _stdoutTruncated |= stdout.Truncated;
+                _stderrTruncated |= stderr.Truncated;
+            }
+            return (result, stdout.Bytes, stderr.Bytes);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -839,11 +871,25 @@ public class MxcProcess : IMxcProcess
         }
     }
 
-    private static async Task<byte[]> ReadToEndAsync(Stream s, CancellationToken ct)
+    internal static async Task<(byte[] Bytes, bool Truncated)> CaptureOutputAsync(
+        Stream stream,
+        CancellationToken cancellationToken)
     {
-        using var ms = new MemoryStream();
-        await s.CopyToAsync(ms, ct).ConfigureAwait(false);
-        return ms.ToArray();
+        using var captured = new MemoryStream();
+        var buffer = new byte[8192];
+        var truncated = false;
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+            var retained = Math.Min(read, MaxCapturedOutputBytes - (int)captured.Length);
+            captured.Write(buffer, 0, retained);
+            truncated |= retained < read;
+        }
+        return (captured.ToArray(), truncated);
     }
 
     /// <summary>Kill the child and its whole process tree.</summary>
