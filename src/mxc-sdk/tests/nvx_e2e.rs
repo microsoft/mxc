@@ -1294,6 +1294,20 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let directory = tempfile::tempdir().expect("interruption test directory");
         let state = directory.path().join("state");
         std::fs::create_dir(&state).expect("isolated state directory");
+        // Capture the platform snapshot templates and register the image first, so the first VM
+        // of the interrupted request is its own sandbox rather than a template capture.
+        let warm = executor_output_with_env(
+            &process_only_request("printf warm"),
+            false,
+            false,
+            &[("LOCALAPPDATA", state.as_os_str())],
+        );
+        assert_eq!(
+            warm.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&warm.stderr)
+        );
         let request_path = directory.path().join("request.json");
         let log_path = directory.path().join("executor.log");
         let stdout_path = directory.path().join("stdout");
@@ -1520,5 +1534,85 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             assert_eq!(output.stdout, b"registered");
         }
         println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
+    }
+
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_executor_starts_sandboxes_from_platform_snapshots() {
+        let run = |request: &Value, local_app_data: &Path| {
+            let directory = tempfile::tempdir().expect("executor request directory");
+            let request_path = directory.path().join("request.json");
+            let log_path = directory.path().join("executor.log");
+            std::fs::write(&request_path, request.to_string()).expect("write executor request");
+            let output = Command::new(executor())
+                .arg("--experimental")
+                .arg("--log-file")
+                .arg(&log_path)
+                .arg(&request_path)
+                .env("LOCALAPPDATA", local_app_data)
+                .stdin(Stdio::null())
+                .output()
+                .expect("MXC executor output");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let log = std::fs::read_to_string(&log_path).expect("executor log");
+            (output.stdout, log)
+        };
+
+        // The first request in an empty state directory captures the templates, and every start
+        // that a template fits, including the first, starts as a clone of it.
+        let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+        let (stdout, log) = run(
+            &process_only_request("cat /proc/cpuinfo"),
+            local_app_data.path(),
+        );
+        assert_host_cpu_profile(&stdout);
+        assert!(log.contains(r#""bootMode":"clone""#), "{log}");
+        assert!(log.contains(r#""class":"noNic""#), "{log}");
+        let mut network = process_only_request("ls /sys/class/net");
+        network["network"] = json!({"egress": {"default": "allow"}});
+        let (stdout, log) = run(&network, local_app_data.path());
+        assert!(String::from_utf8_lossy(&stdout).contains("eth0"));
+        assert!(log.contains(r#""bootMode":"clone""#), "{log}");
+        assert!(log.contains(r#""class":"nic""#), "{log}");
+
+        // Validation never captures templates, since capturing boots VMs.
+        let blocked = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+        let state = [("LOCALAPPDATA", blocked.path().as_os_str())];
+        let output =
+            executor_output_with_env(&process_only_request("printf ok"), false, true, &state);
+        assert!(output.status.success(), "{output:?}");
+        let templates = agent_state_directory(blocked.path()).join("templates");
+        assert!(!templates.exists());
+
+        // A host that cannot capture templates still runs sandboxes, by cold booting them.
+        std::fs::write(&templates, b"not a template store").expect("block the template store");
+        let (stdout, log) = run(&process_only_request("printf cold"), blocked.path());
+        assert_eq!(stdout, b"cold");
+        assert!(
+            log.contains("NVX platform snapshots are unavailable"),
+            "{log}"
+        );
+        assert!(log.contains(r#""bootMode":"cold""#), "{log}");
+        println!(
+            "VM_EXECUTED executor platform snapshot clones, validation, and cold-boot fallback"
+        );
+    }
+
+    fn agent_state_directory(local_app_data: &Path) -> PathBuf {
+        let directories: Vec<PathBuf> =
+            std::fs::read_dir(local_app_data.join(r"Microsoft\MXC\nvx"))
+                .expect("agent state directories")
+                .map(|entry| entry.expect("agent state directory").path())
+                .collect();
+        assert_eq!(directories.len(), 1, "{directories:?}");
+        directories
+            .into_iter()
+            .next()
+            .expect("agent state directory")
     }
 }
