@@ -14,6 +14,52 @@ use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
+fn processcontainer_relative_denied_path_rejected_before_run_and_spawn() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let secret = workspace.path().join("secret.txt");
+    std::fs::write(&secret, "DENIED_FILE_CONTROL").expect("write fixture");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("host read control"),
+        "DENIED_FILE_CONTROL"
+    );
+    for path in [
+        "secret.txt",
+        r".\secret.txt",
+        r"C:secret.txt",
+        r"\secret.txt",
+    ] {
+        let executed = workspace.path().join("executed.txt");
+        let request = ContainerRequest {
+            working_directory: Some(workspace.path().to_string_lossy().into_owned()),
+            filesystem: Some(FilesystemPolicy {
+                readwrite_paths: vec![workspace.path().to_string_lossy().into_owned()],
+                readonly_paths: vec![],
+                denied_paths: vec![path.into()],
+                clear_policy_on_exit: None,
+            }),
+            containment: Containment::ProcessContainer(ProcessContainerConfig::default()),
+            ..ContainerRequest::new(
+                "cmd.exe /d /c \"echo executed>executed.txt & type secret.txt\"",
+            )
+        };
+        let run_error = mxc_sdk::v1::run(request.clone(), Default::default())
+            .expect_err("relative deny must reject run");
+        let spawn_error = spawn(request, Default::default())
+            .err()
+            .expect("relative deny must reject spawn");
+        for error in [run_error, spawn_error] {
+            assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+            assert!(
+                error.message.contains("filesystem.deniedPaths[0]")
+                    && error.message.contains("fully qualified"),
+                "{error}"
+            );
+        }
+        assert!(!executed.exists(), "rejected request launched its workload");
+    }
+}
+
+#[test]
 #[ignore = "requires a PSEC-capable Windows host"]
 fn dev_json_processcontainer_capture_and_pipes() {
     use mxc_sdk::v1::dev::{self, JsonOptions};

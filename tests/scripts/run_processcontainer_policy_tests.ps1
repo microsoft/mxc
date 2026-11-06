@@ -220,6 +220,37 @@ function New-FilesystemPolicyRequest {
 }
 $filesystem = New-FilesystemPolicyRequest
 Invoke-PolicyCase -Name 'filesystem-grants-denials-and-aliases' -Request $filesystem -ObserveSecurity
+$secret = Join-Path $ScratchRoot 'rw\secret.txt'
+Set-Content -LiteralPath $secret -Value 'DENIED_FILE_CONTROL' -NoNewline
+if ((Get-Content -LiteralPath $secret -Raw) -cne 'DENIED_FILE_CONTROL') {
+    throw 'Host denied-file read control failed.'
+}
+$fileControl = New-PolicyRequest -Mode 'denied-file' -ProbeArguments @('0')
+Invoke-PolicyCase -Name 'broad-grant-allows-file-read' -Request $fileControl
+if ($facts.baseContainerSupportsDenyPaths) {
+    $fileDeny = New-PolicyRequest -Mode 'denied-file' -ProbeArguments @('1')
+    $fileDeny.filesystem.deniedPaths = @($secret)
+    Invoke-PolicyCase -Name 'absolute-child-file-deny-blocks-read' -Request $fileDeny
+}
+foreach ($field in @('readwritePaths', 'readonlyPaths', 'deniedPaths', 'enumeratePaths')) {
+    foreach ($explicitCwd in @($true, $false)) {
+        $relative = New-PolicyRequest -Mode 'denied-file'
+        if (-not $explicitCwd) { $relative.process.Remove('cwd') }
+        $fieldPath = "filesystem.$field"
+        $index = 0
+        if ($field -eq 'enumeratePaths') {
+            $relative.processContainer.filesystem = @{ enumeratePaths = @('secret.txt') }
+            $fieldPath = 'processContainer.filesystem.enumeratePaths'
+        } else {
+            if (-not $relative.filesystem.ContainsKey($field)) { $relative.filesystem[$field] = @() }
+            $index = @($relative.filesystem[$field]).Count
+            $relative.filesystem[$field] += @('secret.txt')
+        }
+        Invoke-PolicyCase -Name "relative-$field-cwd-$explicitCwd-rejected" -Request $relative -Reject `
+            -RejectionMessage "${fieldPath}[$index] must be a fully qualified Windows filesystem path" `
+            -WorkingDirectory (Join-Path $ScratchRoot 'launcher')
+    }
+}
 if ((Get-Content -LiteralPath (Join-Path $ScratchRoot 'ro\seed.txt') -Raw) -cne 'seed') {
     throw 'The read-only host seed changed.'
 }
