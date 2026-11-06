@@ -1479,6 +1479,28 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let image = request["microvm"]["image"]
             .as_str()
             .expect("image reference");
+        let run_concurrently = |environment: &[(&str, &OsStr)]| {
+            let outputs: Vec<Output> = std::thread::scope(|scope| {
+                let runs: Vec<_> = (0..3)
+                    .map(|_| {
+                        scope
+                            .spawn(|| executor_output_with_env(&request, false, false, environment))
+                    })
+                    .collect();
+                runs.into_iter()
+                    .map(|run| run.join().expect("concurrent executor"))
+                    .collect()
+            });
+            for output in outputs {
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(output.stdout, b"registered");
+            }
+        };
 
         let output = executor_output_with_env(&request, false, false, &offline);
         assert_ne!(
@@ -1492,33 +1514,10 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let output = executor_output_with_env(&request, false, false, &state);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(output.stdout, b"registered");
-
-        // Later requests, including concurrent ones, boot the registered image without the registry.
-        let outputs: Vec<Output> = std::thread::scope(|scope| {
-            let runs: Vec<_> = (0..3)
-                .map(|_| scope.spawn(|| executor_output_with_env(&request, false, false, &offline)))
-                .collect();
-            runs.into_iter()
-                .map(|run| run.join().expect("concurrent executor"))
-                .collect()
-        });
-        for output in outputs {
-            assert_eq!(
-                output.status.code(),
-                Some(0),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(output.stdout, b"registered");
-        }
+        // Concurrent first requests race to register the image, and each must boot it.
+        run_concurrently(&state);
+        // Later concurrent requests boot the registered image without the registry.
+        run_concurrently(&offline);
         println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
     }
 }
