@@ -361,7 +361,8 @@ fn lifecycle_state_root_in(
 /// Each approved bundle gets its own directory, so an agent never opens state that another agent
 /// version wrote. Missing directories are created with an access list for only the current user
 /// and Local SYSTEM, so the lifecycle state directory that contains them keeps the access list
-/// that [`lifecycle_state_root`] requires.
+/// that [`lifecycle_state_root`] requires. The current user owns the bundle directory, so the
+/// user's elevated and non-elevated requests share it.
 pub(super) fn state_root(
 ) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
     let local_app_data = env::var_os("LOCALAPPDATA")
@@ -385,7 +386,7 @@ fn state_root_in(
 ) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
     // Only the bundle directory must already be private here; the lifecycle state directory
     // above it is checked when lifecycle operations open it.
-    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+    let root = crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
         local_app_data,
         [
             std::ffi::OsStr::new("Microsoft"),
@@ -401,7 +402,18 @@ fn state_root_in(
             "NVX signed bundled agent: cannot open the agent state directory below {}: {error}",
             local_app_data.display()
         ))
-    })
+    })?;
+    // An elevated request can create the directory with the Administrators group as its owner,
+    // which the user's non-elevated requests would reject.
+    crate::mxc_common::filesystem_security::set_current_user_owner(root.path()).map_err(
+        |error| {
+            MxcError::backend_unavailable(format!(
+                "NVX signed bundled agent: cannot secure the agent state directory {}: {error}",
+                root.path().display()
+            ))
+        },
+    )?;
+    Ok(root)
 }
 
 fn verify_runtime_digests(info: &HostInfo) -> Result<(), MxcError> {
@@ -1755,7 +1767,10 @@ mod tests {
                 .join(r"Microsoft\MXC\nvx")
                 .join(&APPROVED_MANIFEST_SHA256[..16])
         );
-        assert!(crate::mxc_common::filesystem_security::owner_is_self(root.path()).unwrap());
+        // Owned by the user rather than an elevated token owner, so non-elevated requests accept it.
+        assert!(
+            crate::mxc_common::filesystem_security::owner_is_current_user(root.path()).unwrap()
+        );
         std::fs::write(root.path().join("registered-image"), b"cached").unwrap();
         assert_eq!(
             state_root_in(local_app_data.path()).unwrap().path(),

@@ -220,12 +220,13 @@ The signed agent keeps its sandbox records, VM control data, diagnostics, and
 registered images in a per-user state directory,
 `%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
 hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
-runtime keeps its own state. MXC creates the directory with an access list for
-only the current user and Local SYSTEM. Every create-and-run request reuses it,
-so an image is pulled once rather than for every request, and concurrent
-requests share it. MXC coordinates the agent's stop and deprovision operations
-and closes the client after each request; it does not maintain a persistent
-container database.
+runtime keeps its own state. MXC makes the current user the directory's owner
+and gives it an access list for only that user and Local SYSTEM, so the user's
+elevated and non-elevated requests can share it. Every create-and-run request
+reuses it, so an image is pulled once rather than for every request, and
+concurrent requests share it. MXC coordinates the agent's stop and deprovision
+operations and closes the client after each request; it does not maintain a
+persistent container database.
 
 Container lifecycle operations keep their state in the parent directory,
 `%LOCALAPPDATA%\Microsoft\MXC\nvx`, so removing a `<bundle>` directory does not
