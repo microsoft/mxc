@@ -6,25 +6,32 @@
 //! desktop-session boundary.
 //!
 //! Two relay variants:
-//! - [`create_relay_thread`] — cancellable; used for stdout / stderr and for
-//!   pipe/file-backed stdin. Ends at EOF or when its [`PipeReadCanceller`]
-//!   fires.
+//! - [`create_relay_thread`] — cancellable and progress-reporting; used for
+//!   stdout / stderr and pipe/file-backed stdin. Ends at EOF or when its
+//!   [`PipeReadCanceller`] fires.
 //! - [`create_relay_thread_with_stop`] — stop-event-aware; used for
 //!   console-backed stdin when the agent can exit while the local stdin handle
 //!   remains open.
 
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::process_util::{InterruptiblePipeReader, OwnedHandle, PipeReadCanceller};
+use crate::mxc_common::sandbox_process::StreamCloser;
 
-use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
 use windows::Win32::System::Threading::{
     CreateThread, GetCurrentProcess, WaitForMultipleObjects, THREAD_CREATION_FLAGS,
 };
 
 const BUFFER_SIZE: u32 = 4096;
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 pub(super) fn duplicate_handle(handle: HANDLE) -> Result<OwnedHandle, WxcError> {
     let mut duplicated = HANDLE::default();
@@ -46,12 +53,47 @@ pub(super) fn duplicate_handle(handle: HANDLE) -> Result<OwnedHandle, WxcError> 
 /// Parameters for a pipe relay thread. The thread reads `reader` and writes
 /// every chunk to `h_write`, flushing after each write.
 ///
+/// `progress_bytes` is bumped after each successful destination write. The
+/// teardown path polls it to distinguish a healthy slow drain from a relay that
+/// is stuck because a child process still holds the pipe open.
+///
 /// # Ownership
 /// Ownership of this struct transfers to the relay thread, which frees it on
 /// exit. The caller must **not** keep or free it. Both handles are owned.
 struct PipeRelayParams {
     reader: InterruptiblePipeReader,
     h_write: OwnedHandle,
+    progress_bytes: Arc<AtomicU64>,
+}
+
+pub(super) struct PipeRelay {
+    thread: OwnedHandle,
+    canceller: PipeReadCanceller,
+    progress_bytes: Arc<AtomicU64>,
+}
+
+impl PipeRelay {
+    pub(super) fn into_thread_and_canceller(self) -> (OwnedHandle, PipeReadCanceller) {
+        (self.thread, self.canceller)
+    }
+
+    pub(super) fn thread(&self) -> &OwnedHandle {
+        &self.thread
+    }
+
+    pub(super) fn cancel_read(&self) {
+        self.canceller.close();
+    }
+
+    fn progress_bytes(&self) -> u64 {
+        self.progress_bytes.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutputRelayDrain {
+    Drained,
+    GaveUp,
 }
 
 /// Thread procedure for relaying data between two handles.
@@ -84,6 +126,9 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
         {
             break;
         }
+        params
+            .progress_bytes
+            .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
         let _ = FlushFileBuffers(params.h_write.get());
     }
@@ -91,8 +136,8 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
     0
 }
 
-/// Create a relay thread via `CreateThread`. Returns the thread HANDLE wrapped
-/// in `OwnedHandle`, plus a canceller that ends the relay's read on demand.
+/// Create a relay thread via `CreateThread`, returning a `PipeRelay` that
+/// wraps the thread handle, a read canceller, and a shared progress counter.
 ///
 /// The thread reads a **duplicate** of `h_read` and writes a **duplicate** of
 /// `h_write`, so releasing either source handle cannot invalidate it, and
@@ -101,12 +146,14 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
 pub(super) unsafe fn create_relay_thread(
     h_read: HANDLE,
     h_write: HANDLE,
-) -> Result<(OwnedHandle, PipeReadCanceller), WxcError> {
+) -> Result<PipeRelay, WxcError> {
     let reader = InterruptiblePipeReader::new(duplicate_handle(h_read)?);
     let canceller = reader.canceller();
+    let progress_bytes = Arc::new(AtomicU64::new(0));
     let raw = Box::into_raw(Box::new(PipeRelayParams {
         reader,
         h_write: duplicate_handle(h_write)?,
+        progress_bytes: Arc::clone(&progress_bytes),
     }));
     match unsafe {
         CreateThread(
@@ -118,7 +165,11 @@ pub(super) unsafe fn create_relay_thread(
             None,
         )
     } {
-        Ok(handle) => Ok((OwnedHandle::new(handle), canceller)),
+        Ok(handle) => Ok(PipeRelay {
+            thread: OwnedHandle::new(handle),
+            canceller,
+            progress_bytes,
+        }),
         Err(e) => {
             // The thread never started, so nothing will run the proc that
             // frees the box. Reclaim it here or it leaks.
@@ -129,6 +180,67 @@ pub(super) unsafe fn create_relay_thread(
             )))
         }
     }
+}
+
+/// Wait for output relays to finish while they are still making progress.
+///
+/// Each successful output write restarts the idle timeout, but not the overall
+/// timeout. On timeout, reads cancel. Blocked writes or flushes cannot be
+/// cancelled, so callers must also limit how long they wait for the relay
+/// threads to exit.
+pub(super) fn drain_output_relays_within(
+    relays: &[&PipeRelay],
+    idle_window: Duration,
+    absolute_cap: Duration,
+) -> Result<OutputRelayDrain, WxcError> {
+    if relays.is_empty() {
+        return Ok(OutputRelayDrain::Drained);
+    }
+
+    let handles: Vec<HANDLE> = relays.iter().map(|relay| relay.thread().get()).collect();
+    let started = Instant::now();
+    let mut idle_started = started;
+    let mut last_progress = total_progress(relays);
+
+    loop {
+        let now = Instant::now();
+        let progress = total_progress(relays);
+        if progress != last_progress {
+            last_progress = progress;
+            idle_started = now;
+        }
+
+        let idle_elapsed = now.saturating_duration_since(idle_started);
+        let total_elapsed = now.saturating_duration_since(started);
+        let remaining_idle = idle_window.saturating_sub(idle_elapsed);
+        let remaining_cap = absolute_cap.saturating_sub(total_elapsed);
+        let wait_for = DRAIN_POLL_INTERVAL.min(remaining_idle).min(remaining_cap);
+        // SAFETY: relays own all handles throughout the wait.
+        match unsafe { WaitForMultipleObjects(&handles, true, wait_for.as_millis() as u32) } {
+            WAIT_OBJECT_0 => return Ok(OutputRelayDrain::Drained),
+            WAIT_TIMEOUT => {
+                if idle_elapsed >= idle_window || total_elapsed >= absolute_cap {
+                    for relay in relays {
+                        relay.cancel_read();
+                    }
+                    return Ok(OutputRelayDrain::GaveUp);
+                }
+            }
+            _ => {
+                return Err(WxcError::Process(format!(
+                    "WaitForMultipleObjects for output relays failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+    }
+}
+
+fn total_progress(relays: &[&PipeRelay]) -> u64 {
+    relays
+        .iter()
+        .map(|relay| relay.progress_bytes())
+        .sum::<u64>()
 }
 
 // ── Stop-event-aware pipe relay ────────────────────────────────────────────
@@ -261,9 +373,8 @@ pub(super) unsafe fn create_relay_thread_with_stop(
 mod tests {
     use super::*;
     use crate::mxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
-    use crate::mxc_common::sandbox_process::StreamCloser;
     use crate::mxc_common::string_util;
-    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, WAIT_TIMEOUT};
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{
         CreateEventW, CreateProcessW, SetEvent, WaitForSingleObject, CREATE_NO_WINDOW,
@@ -338,8 +449,7 @@ mod tests {
         let (source_read, source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, _canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
 
         // Read from dest concurrently — the relay calls FlushFileBuffers after
         // each write, which blocks until the reader drains the pipe buffer.
@@ -366,7 +476,7 @@ mod tests {
 
         // Wait for relay thread to finish
         unsafe {
-            WaitForSingleObject(relay_thread.get(), 5000);
+            WaitForSingleObject(relay.thread().get(), 5000);
         }
 
         // Close the dest write end so the reader sees EOF
@@ -387,21 +497,20 @@ mod tests {
         let (source_read, _source_write) = create_test_pipes();
         let (_dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
 
         // Parked in `ReadFile`: nothing was written and `_source_write` keeps
         // the pipe from reporting EOF.
         assert_eq!(
-            unsafe { WaitForSingleObject(relay_thread.get(), 250) },
+            unsafe { WaitForSingleObject(relay.thread().get(), 250) },
             WAIT_TIMEOUT,
             "the relay should still be blocked before the cancel"
         );
 
-        canceller.close();
+        relay.cancel_read();
 
         assert_eq!(
-            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
             WAIT_OBJECT_0,
             "the cancelled relay should exit without EOF"
         );
@@ -416,7 +525,8 @@ mod tests {
         let (mut dest_read, dest_write) = create_test_pipes();
 
         let (relay_thread, canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() }
+                .into_thread_and_canceller();
 
         // Mirror `process.Close()`: the caller drops its original agent-stdin
         // write handle while the relay's duplicate is still live.
@@ -448,8 +558,7 @@ mod tests {
         let (source_read, source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, _canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
 
         drop(source_read);
 
@@ -464,7 +573,7 @@ mod tests {
         drop(source_write);
 
         assert_eq!(
-            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
             WAIT_OBJECT_0,
             "the relay should reach EOF on its own duplicate"
         );
@@ -478,8 +587,7 @@ mod tests {
         let (source_read, mut source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, _canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
 
         // Write data larger than the pipe buffer (4096 bytes default).
         // Use ASCII to avoid from_utf8_lossy expansion of invalid bytes.
@@ -511,7 +619,7 @@ mod tests {
         writer.join().unwrap();
         // Wait for relay thread to finish (source EOF propagated)
         unsafe {
-            WaitForSingleObject(relay_thread.get(), 5000);
+            WaitForSingleObject(relay.thread().get(), 5000);
         }
         // Close the dest write end so the reader sees EOF
         drop(dest_write);
@@ -530,7 +638,7 @@ mod tests {
         // dest: non-inheritable (only the test reads here)
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, _canceller) =
+        let relay =
             unsafe { create_relay_thread(child_stdout_read.get(), dest_write.get()).unwrap() };
 
         // Concurrent reader to avoid FlushFileBuffers deadlock
@@ -550,7 +658,7 @@ mod tests {
         // Child exits → last write-end closes → relay sees EOF → relay exits
         unsafe {
             WaitForSingleObject(child.get(), 10000);
-            WaitForSingleObject(relay_thread.get(), 5000);
+            WaitForSingleObject(relay.thread().get(), 5000);
         }
 
         // Close relay's dest write so reader sees EOF
@@ -577,7 +685,7 @@ mod tests {
         let (mut child_stdout_read, child_stdout_write) = create_std_pipes(true).unwrap();
 
         // Relay: test input → child stdin
-        let (relay_thread, _canceller) =
+        let relay =
             unsafe { create_relay_thread(source_read.get(), child_stdin_write.get()).unwrap() };
 
         // findstr /R "." echoes all non-empty lines from stdin to stdout
@@ -611,7 +719,7 @@ mod tests {
         drop(source_write);
 
         unsafe {
-            WaitForSingleObject(relay_thread.get(), 5000);
+            WaitForSingleObject(relay.thread().get(), 5000);
         }
 
         // Close child_stdin_write → child sees EOF → child exits
@@ -627,6 +735,232 @@ mod tests {
             "Expected relayed input in child output, got: {:?}",
             output
         );
+    }
+
+    #[test]
+    fn output_drain_waits_for_all_relays_to_exit() {
+        let (first_read, first_write) = create_test_pipes();
+        let (second_read, mut second_write) = create_test_pipes();
+        let (_destination_read, destination_write) = create_test_pipes();
+        let first =
+            unsafe { create_relay_thread(first_read.get(), destination_write.get()).unwrap() };
+        let second =
+            unsafe { create_relay_thread(second_read.get(), destination_write.get()).unwrap() };
+        drop(first_write);
+        assert_eq!(
+            unsafe { WaitForSingleObject(first.thread().get(), 1000) },
+            WAIT_OBJECT_0
+        );
+
+        let source = SendOwnedHandle::take(&mut second_write);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(source);
+        });
+        let result = drain_output_relays_within(
+            &[&first, &second],
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let second_finished = unsafe { WaitForSingleObject(second.thread().get(), 0) };
+        writer.join().unwrap();
+
+        assert_eq!(result, OutputRelayDrain::Drained);
+        assert_eq!(second_finished, WAIT_OBJECT_0, "must wait for both relays");
+        assert_eq!(
+            drain_output_relays_within(&[&first, &second], Duration::ZERO, Duration::ZERO).unwrap(),
+            OutputRelayDrain::Drained,
+            "finished relays must be recognized even with no remaining drain time"
+        );
+    }
+
+    #[test]
+    fn output_drain_without_relays_finishes_immediately() {
+        assert_eq!(
+            drain_output_relays_within(&[], Duration::ZERO, Duration::ZERO).unwrap(),
+            OutputRelayDrain::Drained
+        );
+    }
+
+    #[test]
+    fn output_drain_reports_a_failed_thread_wait() {
+        let (source_read, _source_write) = create_test_pipes();
+        let (_destination_read, destination_write) = create_test_pipes();
+        let mut relay =
+            unsafe { create_relay_thread(source_read.get(), destination_write.get()).unwrap() };
+        let thread = std::mem::replace(&mut relay.thread, OwnedHandle::new(HANDLE::default()));
+        let result =
+            drain_output_relays_within(&[&relay], Duration::from_secs(1), Duration::from_secs(2));
+        relay.cancel_read();
+        assert_eq!(
+            unsafe { WaitForSingleObject(thread.get(), 1000) },
+            WAIT_OBJECT_0
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("WaitForMultipleObjects"),
+            "wait failures must not be reported as successful draining"
+        );
+    }
+
+    #[test]
+    fn output_drain_extends_while_progress_continues() {
+        let (source_read, mut source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let source_send = SendOwnedHandle::take(&mut source_write);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..8 {
+                let mut written = 0u32;
+                unsafe {
+                    WriteFile(
+                        source_send.get(),
+                        Some(b"chunk\n"),
+                        Some(&mut written),
+                        None,
+                    )
+                    .unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            drop(source_send);
+        });
+
+        let started = Instant::now();
+        let result = drain_output_relays_within(
+            &[&relay],
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        writer.join().unwrap();
+        drop(dest_write);
+        let output = reader.join().unwrap();
+
+        assert_eq!(result, OutputRelayDrain::Drained);
+        assert!(
+            elapsed >= Duration::from_millis(120),
+            "the drain returned before the slow producer finished: {elapsed:?}"
+        );
+        assert_eq!(output, "chunk\n".repeat(8));
+    }
+
+    #[test]
+    fn output_drain_cancels_and_releases_handles_once_idle() {
+        let (source_read, source_write) = create_test_pipes();
+        let (dest_read, dest_write) = create_test_pipes();
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        drop(source_read);
+        drop(dest_write);
+
+        let started = Instant::now();
+        let result = drain_output_relays_within(
+            &[&relay],
+            Duration::from_millis(30),
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(result, OutputRelayDrain::GaveUp);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the drain must be bounded, took {elapsed:?}"
+        );
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+            WAIT_OBJECT_0,
+            "the relay must exit while the source writer is still open"
+        );
+        let mut written = 0;
+        let error = unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(b"still open"),
+                Some(&mut written),
+                None,
+            )
+        }
+        .unwrap_err();
+        assert!(
+            error.code() == ERROR_BROKEN_PIPE.to_hresult()
+                || error.code() == ERROR_NO_DATA.to_hresult(),
+            "expected the relay's source duplicate to be closed: {error}"
+        );
+        assert_eq!(
+            read_from_pipe(dest_read.get()),
+            "",
+            "destination must reach EOF"
+        );
+    }
+
+    #[test]
+    fn output_drain_honors_absolute_cap_while_progress_continues() {
+        let (source_read, mut source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let relay = unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+        drop(source_read);
+        drop(dest_write);
+
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+        let source_send = SendOwnedHandle::take(&mut source_write);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..200 {
+                let mut written = 0;
+                if let Err(error) = unsafe {
+                    WriteFile(
+                        source_send.get(),
+                        Some(b"chunk\n"),
+                        Some(&mut written),
+                        None,
+                    )
+                } {
+                    assert!(
+                        error.code() == ERROR_BROKEN_PIPE.to_hresult()
+                            || error.code() == ERROR_NO_DATA.to_hresult(),
+                        "expected cancellation to close the reader: {error}"
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let cap = Duration::from_millis(600);
+        let started = Instant::now();
+        let result =
+            drain_output_relays_within(&[&relay], Duration::from_millis(300), cap).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+            WAIT_OBJECT_0
+        );
+        writer.join().unwrap();
+        let output = reader.join().unwrap();
+
+        assert_eq!(result, OutputRelayDrain::GaveUp);
+        assert!(
+            elapsed >= cap,
+            "the idle timer fired during progress: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1600),
+            "cap was exceeded: {elapsed:?}"
+        );
+        assert!(output.len() >= 12 && output.len() < 200 * 6);
+        assert_eq!(output, "chunk\n".repeat(output.len() / 6));
+        assert_eq!(relay.progress_bytes(), output.len() as u64);
     }
 
     // ── Tests for `create_relay_thread_with_stop` ──────────────────────────
