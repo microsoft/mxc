@@ -160,8 +160,11 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
         _config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         let sandbox_id = SandboxId::from_mxc(sandbox_id)?;
+        // Lifecycle operations have no diagnostic log for the boot mode that start reports.
+        let mut logger =
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
         self.client()?
-            .start(&sandbox_id)
+            .start(&sandbox_id, &mut logger)
             .map_err(|error| super::runner::protect_native_error(error, "start", true))?;
         Ok(StartResult { metadata: None })
     }

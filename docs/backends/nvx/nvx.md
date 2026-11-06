@@ -30,17 +30,19 @@ From the repository root, build the executor:
 build.bat --with-microvm
 ```
 
-The build stages the pinned official `aci-edge-sandboxes.zip` release
-`v0.1.0-dev.0430ce79d125`, from NVX revision
-`0430ce79d125203c20f0aa69243480513a774296`. Distribute the complete
-`aci-edge-sandboxes` directory beside the executable, including its manifests,
-runtime binaries, guest images, and provenance files. Do not substitute a
-standalone OpenVMM executable or a partial bundle.
+The build stages the pinned official bundle
+`aci-edge-sandboxes-0.1.0-build188642429.zip` from the
+[`v0.1.0-build188642429`](https://github.com/Azure/aci-edge-sandbox/releases/tag/v0.1.0-build188642429)
+release of `Azure/aci-edge-sandbox`, whose agent speaks sandbox ABI 3.
+Distribute the complete `aci-edge-sandboxes` directory beside the executable,
+including its manifests, runtime binaries, guest images, licenses, notices,
+and provenance and source files. Do not substitute a standalone OpenVMM
+executable or a partial bundle.
 
 Windows x64 Azure build artifacts, release ZIPs, and VPack artifacts include
 this complete directory beside the executor. The Node SDK package excludes
 it because typed V1 does not support MicroVM targeting. The bundle retains the
-NVX release's signatures and pinned hashes; MXC's executable-signing step does
+release's signatures and pinned hashes; MXC's executable-signing step does
 not modify it.
 
 Use the development `1.1.0-alpha` request contract:
@@ -101,16 +103,16 @@ Schema-valid fields do not imply backend support. MXC rejects unsupported
 policy before creating a VM rather than ignoring it.
 
 The executor's `--dry-run` checks the signed bundle's capabilities and native
-request validation without probing or starting a VM. The complete signed
+request validation without probing or starting a VM, so it never captures
+[platform snapshot](#platform-snapshots) templates. The complete signed
 bundle must be available even when only validating a request.
 
 The table describes this MXC integration, not every capability of NVX. The
 signed agent limits workloads to one hour and constrains their working
 directories and environments as described below. Refusal of UI, writable
 stdin, and PTY operations are restrictions of this MXC integration.
-The [signed-agent documentation](https://github.com/microsoft/nvx/blob/0430ce79d125203c20f0aa69243480513a774296/aci_edge_sandboxes/README.md#agent-backend-opt-in)
-describes its contract; the direct OpenVMM backend uses a different guest and
-does not define the limits of this integration.
+The [signed-agent documentation](https://github.com/Azure/aci-edge-sandbox/blob/41d28e566fc3b2ff18055b063597107bc6a489f4/aci-edge-sandbox/README.md#agent-backend)
+describes its contract.
 
 | Surface | Support |
 |---|---|
@@ -216,8 +218,9 @@ process-wide console handler.
 
 ### Agent state directory
 
-The signed agent keeps its sandbox records, VM control data, diagnostics, and
-registered images in a per-user state directory,
+The signed agent keeps its sandbox records, VM control data, diagnostics,
+registered images, and [platform snapshot](#platform-snapshots) templates in a
+per-user state directory,
 `%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
 hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
 runtime keeps its own state. MXC makes the current user the directory's owner
@@ -233,12 +236,41 @@ Container lifecycle operations keep their state in the parent directory,
 affect lifecycle containers.
 
 To pull a reference again or reclaim disk space, delete the directory while no
-MicroVM request is running; the next request creates it again.
+MicroVM request is running; the next request creates it again and captures new
+templates.
 
 If deprovisioning fails, MXC reports the failure and the directory's location.
 The agent's records for that sandbox remain there rather than being deleted
 while a VM might remain. Runtime files in the directory can contain sensitive
 data; confirm that no VM is running before you remove the directory.
+
+### Platform snapshots
+
+Create-and-run MicroVMs start as clones of the agent's platform snapshot
+templates instead of booting their kernel. The first create-and-run request in
+a state directory captures two templates, one with a network device and one
+without. This adds about a second to that request and uses about 512 MiB of
+disk in the directory. Later requests, in any process, reuse the templates,
+and concurrent first requests capture them once. The templates hold one
+virtual processor and up to the agent's default 256 MiB of memory, so a
+sandbox with a larger `microvm.provision.memoryMib`, or one smaller than a
+template's memory, cold boots. The agent captures a template again when it
+expires or a clone of it fails; meanwhile, the sandboxes that need it cold
+boot. Container lifecycle operations do not use the templates, so their
+sandboxes always cold boot.
+
+When the agent captures a template, it writes a line such as
+`aci_edge_agent: template store …: captured generation 1 of the noNic template in 605 ms`
+to the process's standard error. In the executor, that stream also carries the
+workload's standard error.
+
+A clone runs with the guest kernel's default CPU vulnerability mitigations,
+which a cold boot turns off. Its boot-console log has no guest boot output, so
+startup failure diagnostics show less of the console. If the agent cannot
+capture the templates, MXC opens it without them and sandboxes cold boot. With
+`--log-file`, the log records why, and each start records its `bootMode`
+(`clone` or `cold`), its `template` or `coldReason`, and its
+`bootMilliseconds`.
 
 ## Validation
 
@@ -257,7 +289,10 @@ An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and that a later
 request succeeds with the same agent state directory. Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
-later concurrent requests boot it while its registry is unreachable.
+later concurrent requests boot it while its registry is unreachable. A third
+checks that sandboxes, with and without a network device, start as clones of
+the platform snapshot templates, that validation captures no templates, and
+that a host that cannot capture them cold boots sandboxes.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 
@@ -280,7 +315,7 @@ Update the pinned release as one reviewed change. Do not remove verification
 or accept arbitrary replacement files to get an upgrade working.
 
 1. Select an official signed release from
-   [microsoft/nvx releases](https://github.com/microsoft/nvx/releases).
+   [Azure/aci-edge-sandbox releases](https://github.com/Azure/aci-edge-sandbox/releases).
    Review its signing and provenance records and confirm the supported host
    architecture and guest image. Hashing a downloaded archive alone does not
    establish its provenance.
@@ -288,12 +323,12 @@ or accept arbitrary replacement files to get an upgrade working.
 2. Download the candidate archive and inventory its hashes. For example:
 
    ```powershell
-   $release = 'v0.1.0-dev.0430ce79d125' # Replace with the reviewed candidate.
+   $release = 'v0.1.0-build188642429' # Replace with the reviewed candidate.
    $download = Join-Path $env:TEMP "mxc-nvx-$release"
    $bundle = Join-Path $download 'bundle'
    New-Item -ItemType Directory -Force -Path $download | Out-Null
-   gh release download $release --repo microsoft/nvx --pattern aci-edge-sandboxes.zip --dir $download
-   $archive = Join-Path $download 'aci-edge-sandboxes.zip'
+   gh release download $release --repo Azure/aci-edge-sandbox --pattern 'aci-edge-sandboxes-*.zip' --dir $download
+   $archive = (Get-ChildItem -LiteralPath $download -Filter 'aci-edge-sandboxes-*.zip').FullName
    Get-FileHash -LiteralPath $archive -Algorithm SHA256
    Expand-Archive -LiteralPath $archive -DestinationPath $bundle
    Get-ChildItem -LiteralPath $bundle -File -Recurse | ForEach-Object {
@@ -318,7 +353,8 @@ or accept arbitrary replacement files to get an upgrade working.
    helper, and provenance file in the inventory.
 
 5. Update the pinned-release assertions in
-   `src/mxc-sdk/tests/nvx_bundle_integrity.rs` and the release/revision
+   `src/mxc-sdk/tests/nvx_bundle_integrity.rs`, the inventory size in
+   `scripts/tests/microvm-validation.test.js`, and the release/revision
    references in this guide and `src/mxc-sdk/README.md`. Review any changed
    policy or process limits against the candidate agent before adjusting them.
 
@@ -334,7 +370,8 @@ or accept arbitrary replacement files to get an upgrade working.
    ```
 
 For an offline build, set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to a directory
-containing the exact pinned archive or its complete extracted contents. The
+containing the exact pinned archive, renamed `aci-edge-sandboxes.zip`, or its
+complete extracted contents. The
 build still verifies the pinned archive and/or file hashes. Stage the resulting
 complete `aci-edge-sandboxes` directory with the executor, and validate the
 packaged artifact on a prepared host before accepting the upgrade.

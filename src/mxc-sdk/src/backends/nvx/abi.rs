@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Checked C ABI v1 bindings for the signed bundled `aci_edge_agent.dll`.
+//! Checked C ABI v3 bindings for the signed bundled `aci_edge_agent.dll`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::mxc_common::models::{NetworkAction, NetworkProtocol};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 
-pub(super) const SANDBOX_ABI_VERSION: u32 = 1;
+pub(super) const SANDBOX_ABI_VERSION: u32 = 3;
 
 pub(super) const STATUS_OK: i32 = 0;
 pub(super) const STATUS_ERROR: i32 = 1;
@@ -128,6 +128,19 @@ pub(super) struct SetupConfig {
     pub state_root: PathBuf,
     pub runtime: RuntimeSource,
     pub cpu_profile: CpuProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_snapshots: Option<PlatformSnapshots>,
+}
+
+/// Templates that the agent captures when it first opens a state directory, so that sandboxes
+/// start as clones of them instead of cold booting. The capacities bound the sandboxes that a
+/// template fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PlatformSnapshots {
+    pub enabled: bool,
+    pub max_vcpus: u32,
+    pub max_memory_mib: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +168,10 @@ pub(super) struct HostInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_image: Option<String>,
     pub runtime_digests: RuntimeDigests,
+    // Each start reports whether it cloned a template, so the adapter does not read the host's
+    // template list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_snapshots: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +346,22 @@ impl SandboxSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum ImageSource {
     Reference(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ImageRegistration {
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RegisteredImage {
+    pub id: String,
+    pub path: PathBuf,
+    pub length: u64,
+    pub trusted: bool,
+    pub intact: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +915,18 @@ impl AgentLibrary {
         decode_json(reply, "provision result")
     }
 
+    pub fn image_register(
+        &self,
+        host: u64,
+        registration: &ImageRegistration,
+    ) -> Result<RegisteredImage, MxcError> {
+        let encoded = encode_json(registration)?;
+        decode_json(
+            self.with_input(self.exports.image_register, host, &encoded)?,
+            "image registration",
+        )
+    }
+
     pub fn start(&self, host: u64, token: &str) -> Result<StartResult, MxcError> {
         decode_json(
             self.with_input(self.exports.start, host, token.as_bytes())?,
@@ -1070,6 +1115,11 @@ pub(super) mod tests {
                 },
             },
             cpu_profile: CpuProfile::Host,
+            platform_snapshots: Some(PlatformSnapshots {
+                enabled: true,
+                max_vcpus: 1,
+                max_memory_mib: 256,
+            }),
         };
         let setup_json = serde_json::to_value(&setup).unwrap();
         assert_eq!(setup_json["schemaVersion"], 1);
@@ -1080,6 +1130,41 @@ pub(super) mod tests {
             "d5".repeat(32)
         );
         assert_eq!(setup_json["cpuProfile"], "host");
+        assert_eq!(
+            setup_json["platformSnapshots"],
+            serde_json::json!({"enabled": true, "maxVcpus": 1, "maxMemoryMib": 256})
+        );
+
+        let info: HostInfo = serde_json::from_value(serde_json::json!({
+            "runtimeDigests": {"initrd": "11", "kernel": "22", "openvmm": "33"},
+            "platformSnapshots": {
+                "templates": [
+                    {"class": "noNic", "state": "ready", "key": "ab".repeat(32),
+                     "generation": 1, "capturedAt": "2026-10-29T07:00:00Z"},
+                    {"class": "nic", "state": "unavailable", "lastError": "capture failed"}
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(info.runtime_digests.openvmm, "33");
+        assert!(info.platform_snapshots.is_some());
+
+        assert_eq!(
+            serde_json::to_string(&ImageRegistration {
+                reference: "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),
+            })
+            .unwrap(),
+            r#"{"reference":"mcr.microsoft.com/azurelinux/base/core:3.0"}"#
+        );
+        let registered: RegisteredImage = serde_json::from_value(serde_json::json!({
+            "id": format!("sha256:{}", "cd".repeat(32)),
+            "path": r"C:\state\images\image.raw",
+            "length": 4096,
+            "trusted": false,
+            "intact": true
+        }))
+        .unwrap();
+        assert!(registered.intact);
 
         let prov = ProvisionInput {
             request: ProvisionRequest::default(),

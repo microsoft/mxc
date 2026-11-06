@@ -79,7 +79,10 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        let (_state_root, mut client) = open_client()?;
+        // Capturing platform snapshot templates boots VMs, so validation opens the agent without
+        // them.
+        let state_root = super::runtime::state_root()?;
+        let mut client = super::runtime::create_client(state_root.path(), false)?;
         validate_with_client(&mut client, request)
     }
 
@@ -90,7 +93,8 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
-        let (state_root, mut client) = open_client()?;
+        let state_root = super::runtime::state_root()?;
+        let mut client = open_run_client(state_root.path(), logger)?;
         run_with_client(
             &mut client,
             state_root.path(),
@@ -101,12 +105,15 @@ impl NvxRunner {
     }
 }
 
-/// Opens the agent on the shared create-and-run state directory. The returned guard keeps the
-/// directory locked, so it must outlive the client.
-fn open_client() -> Result<(LockedDirectoryPath, NvxClient), MxcError> {
-    let state_root = super::runtime::state_root()?;
-    let client = super::runtime::create_client(state_root.path())?;
-    Ok((state_root, client))
+/// Opens the agent with platform snapshots, so that sandboxes start as clones of its templates. A
+/// host that cannot capture the templates cold boots sandboxes instead.
+fn open_run_client(state_root: &Path, logger: &mut Logger) -> Result<NvxClient, MxcError> {
+    super::runtime::create_client(state_root, true).or_else(|error| {
+        logger.log_diagnostic_line(&format!(
+            "NVX platform snapshots are unavailable, so sandboxes cold boot: {error}"
+        ));
+        super::runtime::create_client(state_root, false)
+    })
 }
 
 pub(super) fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
@@ -196,7 +203,7 @@ fn run_with_client(
             cancellation.check()?;
         }
         client
-            .start(&sandbox_id)
+            .start(&sandbox_id, logger)
             .map_err(|error| start_error(client, &sandbox_id, error, sensitive_proxy))?;
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
@@ -398,7 +405,8 @@ pub(crate) fn spawn_streaming(
     super::policy::validate_request(request)?;
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
-    let (state_root, mut client) = open_client()?;
+    let state_root = super::runtime::state_root()?;
+    let mut client = open_run_client(state_root.path(), logger)?;
     let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -418,7 +426,7 @@ pub(crate) fn spawn_streaming(
             .str("runtime", "signed-bundled-agent"),
     );
     let started = client
-        .start(&sandbox_id)
+        .start(&sandbox_id, logger)
         .map_err(|error| start_error(&client, &sandbox_id, error, sensitive_proxy))
         .and_then(|()| {
             let execution_started = Instant::now();
@@ -1231,7 +1239,7 @@ mod tests {
                 })
         }
 
-        fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+        fn start(&self, _sandbox_id: &SandboxId, _logger: &mut Logger) -> Result<(), MxcError> {
             self.record("start");
             self.start_res.clone()
         }

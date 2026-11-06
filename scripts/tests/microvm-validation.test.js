@@ -133,6 +133,9 @@ fn main() {
         if mode != "missing-image-reuse-discovery" {
             println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
         }
+        if mode != "missing-platform-snapshots-discovery" {
+            println!("windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots: test");
+        }
         if mode != "missing-discovery" {
             println!("windows_x64::signed_bundle_facade_create_and_run: test");
         }
@@ -181,6 +184,9 @@ fn main() {
     }
     if mode != "missing-image-reuse" {
         println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
+    }
+    if mode != "missing-platform-snapshots" {
+        println!("VM_EXECUTED executor platform snapshot clones, validation, and cold-boot fallback");
     }
     if mode != "missing-network" {
         println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
@@ -299,7 +305,7 @@ function azureBundleFixture(mode = "") {
   mkdirSync(join(outputDirectory, triplet), { recursive: true });
   const pins = readFileSync(join(root, "src", "mxc-sdk", "build", "build_nvx_bundled.rs"), "utf8");
   const inventory = [...pins.matchAll(/"([^"\r\n]+)",\s*"([0-9a-f]{64})"/g)].map((match) => match[1]);
-  assert.equal(inventory.length, 18, "fixture must exercise the complete approved bundle inventory");
+  assert.equal(inventory.length, 147, "fixture must exercise the complete approved bundle inventory");
   if (mode !== "absent") {
     mkdirSync(bundle);
     if (mode !== "empty") {
@@ -523,6 +529,7 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption /);
   assert.match(log, /VM_EXECUTED executor registered-image reuse offline and concurrent/);
+  assert.match(log, /VM_EXECUTED executor platform snapshot clones, validation, and cold-boot fallback/);
   assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement/);
   assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
   assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
@@ -539,6 +546,7 @@ for (const [mode, message] of [
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
   ["missing-image-reuse", /did not execute the executor image reuse VM scenario/],
+  ["missing-platform-snapshots", /did not execute the executor platform snapshots VM scenario/],
   ["missing-network", /did not execute the network rules VM scenario/],
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
   ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
@@ -601,6 +609,7 @@ for (const [mode, message] of [
   ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
   ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
+  ["missing-platform-snapshots-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots/],
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
   ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
@@ -617,6 +626,7 @@ for (const [mode, message] of [
       "missing-sdk-json-discovery",
       "missing-interruption-discovery",
       "missing-image-reuse-discovery",
+      "missing-platform-snapshots-discovery",
       "missing-network-discovery",
       "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",
