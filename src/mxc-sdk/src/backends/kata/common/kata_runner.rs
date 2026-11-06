@@ -84,7 +84,7 @@ impl SandboxBackend for KataBackend {
             ));
         }
         let (plan, install) = prepare(request, logger).map_err(KataError::into_response)?;
-        let state_root = host::state_dir(&host::process_env);
+        let state_root = host::state_dir(&host::process_env).map_err(KataError::into_response)?;
         logger.log_line(&format!(
             "Starting a Kata sandbox on {} with rootfs {}",
             plan.hypervisor.wire_name(),

@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::error::KataError;
 use crate::mxc_common::models::KataHypervisor;
 
 /// Prefix of a Kata install such as the static release tarball, which keeps
@@ -180,16 +181,24 @@ pub(crate) fn locate_installed(hypervisor: KataHypervisor) -> Result<Install, St
         &|path: &Path| path.is_file(),
         &path_dirs,
     )?;
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("cannot determine the current directory: {e}"))?;
-    Ok(install.relative_to(&cwd))
+    Ok(install.relative_to(&current_dir()?))
 }
 
-/// The directory that holds sandbox state.
-pub(crate) fn state_dir(env: EnvLookup<'_>) -> PathBuf {
-    env(ENV_STATE_DIR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR))
+fn current_dir() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|e| format!("cannot determine the current directory: {e}"))
+}
+
+/// The directory that holds sandbox state, as an absolute path. The shim runs
+/// in the bundle directory, where a relative path no longer resolves, and
+/// every path under the state directory is passed to it.
+pub(crate) fn state_dir(env: EnvLookup<'_>) -> Result<PathBuf, KataError> {
+    let dir = env(ENV_STATE_DIR).map_or_else(|| PathBuf::from(DEFAULT_STATE_DIR), PathBuf::from);
+    if dir.is_absolute() {
+        return Ok(dir);
+    }
+    current_dir()
+        .map(|cwd| cwd.join(dir))
+        .map_err(KataError::failed)
 }
 
 /// What the host must provide before a sandbox can start: root privileges for
@@ -422,11 +431,18 @@ mod tests {
 
     #[test]
     fn the_state_directory_defaults_and_can_be_moved() {
-        assert_eq!(state_dir(&env_of(&[])), Path::new("/run/mxc-kata"));
+        assert_eq!(state_dir(&env_of(&[])).unwrap(), Path::new("/run/mxc-kata"));
         assert_eq!(
-            state_dir(&env_of(&[(ENV_STATE_DIR, "/var/lib/mxc")])),
+            state_dir(&env_of(&[(ENV_STATE_DIR, "/var/lib/mxc")])).unwrap(),
             Path::new("/var/lib/mxc")
         );
+    }
+
+    #[test]
+    fn a_relative_state_directory_is_resolved_against_the_current_directory() {
+        let dir = state_dir(&env_of(&[(ENV_STATE_DIR, "kata-state")])).unwrap();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_eq!(dir, std::env::current_dir().unwrap().join("kata-state"));
     }
 
     #[test]

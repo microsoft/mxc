@@ -54,7 +54,9 @@ fn token_of(sandbox_id: &str) -> Result<&str, MxcError> {
 
 fn open(sandbox_id: &str) -> Result<Sandbox, MxcError> {
     let token = token_of(sandbox_id)?;
-    Sandbox::open(&host::state_dir(&host::process_env), token).map_err(KataError::into_mxc_error)
+    host::state_dir(&host::process_env)
+        .and_then(|state_root| Sandbox::open(&state_root, token))
+        .map_err(KataError::into_mxc_error)
 }
 
 /// Accepts a provision request and finds what it needs on the host.
@@ -153,9 +155,9 @@ impl StatefulSandboxBackend for KataStateAwareRunner {
         let (plan, install) =
             plan_provision(request, config.as_ref()).map_err(KataError::into_mxc_error)?;
         // Kept until deprovisioned, so no process owns it.
-        let sandbox =
-            Sandbox::provision(&plan, &install, &host::state_dir(&host::process_env), false)
-                .map_err(KataError::into_mxc_error)?;
+        let sandbox = host::state_dir(&host::process_env)
+            .and_then(|state_root| Sandbox::provision(&plan, &install, &state_root, false))
+            .map_err(KataError::into_mxc_error)?;
         Ok(ProvisionResult {
             sandbox_id: format!("kata:{}", sandbox.token()),
             metadata: None,

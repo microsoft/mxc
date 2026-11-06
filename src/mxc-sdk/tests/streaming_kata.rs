@@ -662,6 +662,29 @@ fn kata_kill_and_drop_release_the_sandbox() {
 }
 
 #[test]
+fn kata_resolves_a_relative_state_directory() {
+    for hypervisor in hypervisors() {
+        let _guard = exclusive();
+        let Some(live) = live(&hypervisor) else {
+            continue;
+        };
+        println!("== {hypervisor}: relative state directory");
+        // The shim runs elsewhere, so a path left relative would not resolve.
+        let up: PathBuf = (1..std::env::current_dir().unwrap().components().count())
+            .map(|_| "..")
+            .collect();
+        let relative = up.join(live.state_dir.strip_prefix("/").unwrap());
+        // SAFETY: this test holds `exclusive()`, so no other test thread is
+        // reading or writing the environment.
+        unsafe { std::env::set_var("MXC_KATA_STATE_DIR", &relative) };
+        let (outcome, stdout, _) = run(&one_shot(&live, "echo relative", json!({})));
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}");
+        assert_eq!(stdout.trim(), "relative", "{hypervisor}");
+        assert_nothing_left(&live);
+    }
+}
+
+#[test]
 fn kata_reports_a_shim_failure_and_leaves_nothing_behind() {
     for hypervisor in hypervisors() {
         let _guard = exclusive();

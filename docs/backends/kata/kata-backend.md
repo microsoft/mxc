@@ -63,7 +63,7 @@ environment variables:
 | `MXC_KATA_ROOT` | Install prefix. The shim is `<root>/runtime-rs/bin/containerd-shim-kata-v2` (or `<root>/bin/...`), and configuration files are in `<root>/share/defaults/kata-containers/runtime-rs`. Without it, the shim is looked up on `PATH` and configuration files in `/usr/share/defaults/kata-containers/runtime-rs`. |
 | `MXC_KATA_HYPERVISOR` | Hypervisor to use when the request names none. Default `qemu`. |
 | `MXC_KATA_CONFIG_QEMU`, `MXC_KATA_CONFIG_CLH`, `MXC_KATA_CONFIG_FIRECRACKER`, `MXC_KATA_CONFIG_DRAGONBALL` | A Kata configuration file to use for that hypervisor instead of the shipped one. |
-| `MXC_KATA_STATE_DIR` | Directory for sandbox state. Default `/run/mxc-kata`. |
+| `MXC_KATA_STATE_DIR` | Directory for sandbox state. Default `/run/mxc-kata`. A relative path is resolved against the current directory. |
 
 A request cannot name a configuration file or an install path, so a caller of
 MXC cannot choose which binary runs as root.
