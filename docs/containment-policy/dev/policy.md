@@ -324,6 +324,18 @@ In `1.1.0-alpha`, provision accepts `containment: "w365_agents"` and
 | `userType` | Optional; `"Local"`, `"HumanUser"`, or `"Agentic"`. |
 | `userObjectId` | Optional; the same GUID format as `poolId`. |
 
+`Local` runs Windows under a local account; `userObjectId` identifies the
+remote-control owner, not the Windows account. `HumanUser` uses a human user's
+Microsoft Entra identity. `Agentic` uses an Agent User identity identified by
+`userObjectId`. These values describe the session account, not whether a human
+or an agent invokes MXC.
+
+Service authentication differs by kind: `Local` disallows an auxiliary token;
+`HumanUser` allows one for assertion-based startup if it represents the same
+human user; `Agentic` requires one representing the selected Agent User.
+This contract slice does not provide auxiliary-token settings or implement
+session authentication.
+
 The backend is not implemented: provision returns `backend_unavailable`, even
 with experimental opt-in. Later phases using a `w365:` ID return
 `unsupported_containment`.
