@@ -32,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             echo "error: --with-microvm is currently supported only by build.bat on Windows x64" >&2
             exit 1
             ;;
+        --with-aci)
+            echo "error: --with-aci is currently supported only by build.bat on Windows" >&2
+            exit 1
+            ;;
         --help|-h)
             echo "Usage: build.sh [OPTIONS]"
             echo ""

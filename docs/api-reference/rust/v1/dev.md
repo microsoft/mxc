@@ -55,6 +55,12 @@ See the [MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends
 for the 64 MiB capture limit, caller-owned streams, and sensitive
 `Error.details.nvxRecovery` information when provision succeeds but cleanup fails.
 
+ACI provides captured output without live pipes; it requires Windows, a build
+with the `aci` Cargo feature, experimental authorization, and the Azure
+sandbox group and credentials described in the
+[ACI guide](https://github.com/microsoft/mxc/blob/main/docs/backends/aci/aci.md).
+Missing platform or build support returns `BackendUnavailable`.
+
 Pipe and PTY spawns and existing-container capture require the selected
-backend's corresponding I/O and lifecycle support. Unsupported modes fail
-rather than switching to another I/O mode.
+backend's corresponding I/O and lifecycle support. ACI does not support these
+operations. Unsupported modes fail rather than switching to another I/O mode.

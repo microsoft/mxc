@@ -78,6 +78,11 @@ fn one_shot_dispatch(one_shot: Value) -> Value {
                 json!({"not": {"required": ["microvm"]}})
             ),
             branch(
+                discriminator("containment", "aci"),
+                json!({"required": ["aci"]}),
+                json!({"not": {"required": ["aci"]}})
+            ),
+            branch(
                 discriminator("containment", "isolation_session"),
                 json!({
                     "required": ["network"],

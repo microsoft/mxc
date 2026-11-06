@@ -195,6 +195,7 @@ impl SdkStateAwareInput {
             windows_sandbox: None,
             hyperlight: None,
             microvm: None,
+            aci: None,
         };
         StateAwareInput::new(common, self.operation)
     }

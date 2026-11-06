@@ -32,6 +32,7 @@ serde_json.workspace = true
 default = []
 test-support = ["mxc-sdk/test-support"]
 microvm = ["mxc-sdk/microvm"]
+aci = ["mxc-sdk/aci"]
 wslc = ["mxc-sdk/wslc"]
 hyperlight = ["mxc-sdk/hyperlight"]
 isolation_session = ["mxc-sdk/isolation_session"]

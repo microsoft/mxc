@@ -98,6 +98,7 @@ fn state_aware_common(
         ui: None,
         hyperlight: None,
         microvm: None,
+        aci: None,
     }
 }
 

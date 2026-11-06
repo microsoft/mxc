@@ -281,6 +281,7 @@ pub(super) fn into_common_request_ir(
         windows_sandbox: None,
         hyperlight: None,
         microvm: None,
+        aci: None,
     }
 }
 

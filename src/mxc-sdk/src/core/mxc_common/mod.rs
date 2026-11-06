@@ -4,6 +4,7 @@
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
 pub mod audit;
+pub mod captured_run;
 pub mod cmdline;
 mod common_request_ir;
 mod config_deserialize;
@@ -17,6 +18,7 @@ pub mod filesystem_canonical;
 pub mod filesystem_object;
 pub(crate) mod filesystem_probe;
 pub mod filesystem_resolve;
+pub mod guest_process;
 pub mod hashing;
 pub mod id;
 pub mod log_symbols;

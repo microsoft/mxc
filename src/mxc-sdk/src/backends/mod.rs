@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(all(target_os = "windows", feature = "aci"))]
+pub mod aci;
+
 pub mod bubblewrap {
     pub mod common;
 }

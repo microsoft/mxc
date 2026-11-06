@@ -128,7 +128,7 @@ impl StateAwareOperation {
                     "microvm.image is required".to_owned(),
                 )
             })?;
-            crate::mxc_contract::dev::ImageReference::validate(&config.image)
+            crate::mxc_contract::dev::ImageReference::validate(&config.image, "microvm.image")
                 .map_err(crate::mxc_common::error::WxcError::Validation)?;
         }
         match self {

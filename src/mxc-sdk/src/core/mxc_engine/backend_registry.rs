@@ -31,7 +31,7 @@ pub(crate) struct BackendRegistration {
     pub(crate) probe_coverage: ProbeCoverage,
 }
 
-static BACKENDS: [BackendRegistration; 10] = [
+static BACKENDS: [BackendRegistration; 11] = [
     BackendRegistration {
         backend: ContainmentBackend::ProcessContainer,
         experimental: false,
@@ -85,6 +85,14 @@ static BACKENDS: [BackendRegistration; 10] = [
         experimental: false,
         probe_coverage: ProbeCoverage::Detected(&["linux"]),
     },
+    BackendRegistration {
+        backend: ContainmentBackend::Aci,
+        experimental: true,
+        probe_coverage: ProbeCoverage::NotDetected(
+            "cloud backend; availability depends on Azure credentials and access to the \
+             configured sandbox group, not on a host capability",
+        ),
+    },
 ];
 
 /// Every registered backend, for callers that must stay exhaustive over them.
@@ -108,6 +116,7 @@ pub(crate) const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
     (ContainmentBackend::IsolationSession, "isolation_session"),
     (ContainmentBackend::Seatbelt, "seatbelt"),
     (ContainmentBackend::Bubblewrap, "bubblewrap"),
+    (ContainmentBackend::Aci, "aci"),
 ];
 
 /// Every canonical backend wire name.
@@ -146,6 +155,7 @@ pub(crate) fn registration(backend: &ContainmentBackend) -> &'static BackendRegi
         ContainmentBackend::IsolationSession => 7,
         ContainmentBackend::Seatbelt => 8,
         ContainmentBackend::Bubblewrap => 9,
+        ContainmentBackend::Aci => 10,
     };
     &BACKENDS[index]
 }
@@ -162,7 +172,7 @@ mod tests {
             assert!(names.insert(entry.backend.wire_name()));
             assert!(std::ptr::eq(registration(&entry.backend), entry));
         }
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -174,7 +184,7 @@ mod tests {
             .collect();
         assert_eq!(
             experimental,
-            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox"])
+            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox", "aci"])
         );
     }
 

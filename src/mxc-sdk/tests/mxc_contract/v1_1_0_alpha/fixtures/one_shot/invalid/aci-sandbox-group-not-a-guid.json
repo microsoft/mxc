@@ -1,0 +1,11 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "aci",
+  "aci": {
+    "sandboxGroup": "/subscriptions/my-subscription/resourceGroups/tryme-01/providers/Microsoft.ContainerInstance/sandboxGroups/sbg-001",
+    "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+  },
+  "process": {
+    "commandLine": "echo hello"
+  }
+}
