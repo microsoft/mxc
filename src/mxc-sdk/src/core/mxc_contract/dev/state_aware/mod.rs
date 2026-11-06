@@ -63,6 +63,9 @@ mod provision;
 mod provision_session;
 mod start;
 mod stop;
+mod w365_agents;
+
+pub use w365_agents::*;
 
 pub use deprovision::{DeprovisionPhase, DeprovisionRequest};
 pub use deprovision_session::{DeprovisionSessionPhase, WslcDeprovisionSessionRequest};

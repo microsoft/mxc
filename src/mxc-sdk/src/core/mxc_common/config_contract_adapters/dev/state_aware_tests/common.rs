@@ -18,7 +18,7 @@ pub(super) fn adapt(
     else {
         panic!("expected state-aware request");
     };
-    input.into_parts()
+    input.into_parts().unwrap()
 }
 pub(super) fn assert_clean_common(common: &crate::mxc_common::common_request_ir::CommonRequestIR) {
     assert!(common.phase.is_none());

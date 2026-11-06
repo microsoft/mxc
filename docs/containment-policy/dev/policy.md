@@ -182,7 +182,8 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
 | `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
-| `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
+| `provision` / `w365_agents` | Contract only; optional `w365Agents.provision` settings (below). No process or local policy sections. Runtime returns `backend_unavailable`. |
+| `start`, `stop`, `deprovision` | Required `sandboxId`; no process, policy, or backend-specific settings. |
 | `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All three backends reject supplied network policy at exec and inherit their provision posture. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
 | `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
 
@@ -311,3 +312,18 @@ via `--container-id`, and a release's `sessionId` via `--session-id` instead
 of putting those fields in the JSON file; the executor inserts them before
 parsing. Placement's nested `wslc.provision.sessionId` stays in JSON.
 JSON library/FFI calls include routing fields as shown above.
+
+### W365 Agents (contract only)
+
+In `1.1.0-alpha`, provision accepts `containment: "w365_agents"` and
+`w365Agents.provision`:
+
+| Field | Requirement |
+|---|---|
+| `poolId` | Required when the provision settings object is supplied; hyphenated ASCII-hex GUID (`8-4-4-4-12`). |
+| `userType` | Optional; `"Local"`, `"HumanUser"`, or `"Agentic"`. |
+| `userObjectId` | Optional; the same GUID format as `poolId`. |
+
+The backend is not implemented: provision returns `backend_unavailable`, even
+with experimental opt-in. Later phases using a `w365:` ID return
+`unsupported_containment`.

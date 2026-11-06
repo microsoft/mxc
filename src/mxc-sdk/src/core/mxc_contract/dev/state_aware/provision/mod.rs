@@ -17,6 +17,8 @@ pub enum ProvisionRequest {
     MicroVm(MicroVmProvisionRequest),
     /// A WSLC provision request.
     Wslc(WslcProvisionRequest),
+    /// A development-only W365 Agents provision request.
+    W365Agents(super::W365AgentsProvisionRequest),
 }
 
 mod containment;

@@ -578,6 +578,10 @@ fn deserialize_development_request(
                     deserialize_development_root(json, "WSLC provision", "1.1", true)
                         .map(ProvisionRequest::Wslc)
                 }
+                Containment::W365Agents => {
+                    deserialize_development_root(json, "W365 Agents provision", "1.1", true)
+                        .map(ProvisionRequest::W365Agents)
+                }
             }?;
             Ok(Request::Provision(request))
         }
@@ -1735,7 +1739,7 @@ fn normalize_state_aware(
     logger: &mut Logger,
     preserve_source_contract: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    let (common, operation) = input.into_parts();
+    let (common, operation) = input.into_parts()?;
     let mut request = normalize_state_aware_common(
         common,
         NormalizationContext {

@@ -389,7 +389,11 @@ mod tests {
             let operation = wslc_provision_in_session(Some(session_id));
             let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation.clone())
                 .expect("1.1.0-alpha declares wslc.provision.sessionId");
-            let (_, observed) = input.into_normalization_input().unwrap().into_parts();
+            let (_, observed) = input
+                .into_normalization_input()
+                .unwrap()
+                .into_parts()
+                .unwrap();
             assert_eq!(observed, operation);
         }
     }
