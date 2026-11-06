@@ -412,6 +412,14 @@ On Windows, `deniedPaths` is enforced natively when PSEC advertises
 `PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
 rejected before execution.
 
+Windows BaseContainer can also receive access through Windows permissions granted
+to `ALL_APPLICATION_PACKAGES`. An applicable explicit `deniedPaths` rule takes
+precedence over access supplied by that group. See
+[ProcessContainer filesystem access](backends/process-container/filesystem.md)
+for implicit grants, their interaction with explicit policy, and an observed
+common baseline. Baseline fragments are documentation, not replacement policies;
+overlapping explicit grants and denies follow the rules below.
+
 #### Overlapping paths for Windows BaseContainer
 
 When paths overlap across `readwritePaths` and `deniedPaths`:
