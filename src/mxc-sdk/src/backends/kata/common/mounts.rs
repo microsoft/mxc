@@ -51,9 +51,18 @@ pub(crate) fn mounts_under(mountinfo: &str, root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// `root` as `/proc/self/mountinfo` spells it, with symlinks resolved. A root
+/// reached through a symlink would otherwise match none of its mounts, and the
+/// caller would delete through them.
+fn as_listed(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
 /// Unmounts everything at or below `root`. Returns the mounts that could not
 /// be removed.
 pub(crate) fn unmount_under(root: &Path) -> io::Result<Vec<(PathBuf, io::Error)>> {
+    let root = as_listed(root);
+    let root = root.as_path();
     // A mount can hide another at the same path, so look again after each
     // pass until nothing is left.
     for _ in 0..8 {
@@ -141,6 +150,23 @@ mod tests {
     #[test]
     fn nothing_is_returned_when_the_root_has_no_mounts() {
         assert!(mounts_under(SAMPLE, Path::new("/run/mxc-kata/none")).is_empty());
+    }
+
+    #[test]
+    fn a_root_behind_a_symlink_is_matched_by_its_real_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mountinfo = format!(
+            "40 24 0:30 / {}/rootfs rw - overlay overlay rw\n",
+            real.display()
+        );
+        assert!(mounts_under(&mountinfo, &link).is_empty());
+        assert_eq!(
+            mounts_under(&mountinfo, &as_listed(&link)),
+            [real.join("rootfs")]
+        );
     }
 
     #[test]
