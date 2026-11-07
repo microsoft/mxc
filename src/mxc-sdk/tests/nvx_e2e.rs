@@ -964,24 +964,21 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         println!("VM_EXECUTED executor configs all seven fixtures");
     }
 
+    /// How a test asks a running executor to cancel its request.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interruption {
+        /// A real Ctrl-C delivered to the executor's console.
+        ConsoleControl,
+        /// Closing the stdin pipe of an executor run with `--cancel-on-stdin-close`.
+        StdinClose,
+    }
+
     #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_console_interrupt() {
-        use mxc_sdk::mxc_common::process_util::OwnedHandle;
         use std::os::windows::process::CommandExt;
-        use std::time::Duration;
-        use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, WAIT_OBJECT_0, WAIT_TIMEOUT};
-        use windows::Win32::System::Console::{
-            GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_C_EVENT,
-        };
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        };
-        use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, WaitForSingleObject, CREATE_NEW_CONSOLE,
-            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-        };
+        use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
+        use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 
         const CHILD_ENV: &str = "MXC_NVX_CONSOLE_CHILD";
         if std::env::var_os(CHILD_ENV).is_none() {
@@ -1014,8 +1011,44 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         unsafe extern "system" fn helper_handler(event: u32) -> windows::core::BOOL {
             windows::core::BOOL(i32::from(event == CTRL_C_EVENT))
         }
+        // Clear an inherited "ignore Ctrl-C" attribute, which some launchers
+        // set, so the executor this helper starts receives the event.
+        unsafe { SetConsoleCtrlHandler(None, false) }.expect("restore Ctrl-C processing");
         unsafe { SetConsoleCtrlHandler(Some(helper_handler), true) }
             .expect("helper control handler");
+        let phase = std::env::var(CHILD_ENV).expect("interruption phase");
+        interrupt_executor(&phase, Interruption::ConsoleControl);
+        unsafe { SetConsoleCtrlHandler(Some(helper_handler), false) }
+            .expect("remove helper handler");
+    }
+
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_executor_stdin_close_cancels() {
+        for phase in ["startup", "execution"] {
+            interrupt_executor(phase, Interruption::StdinClose);
+        }
+        println!(
+            "VM_EXECUTED executor stdin-close cancellation startup/execution/owned-vmm/cleanup"
+        );
+    }
+
+    /// Interrupts a `sleep 600` request during template capture, VM startup, or execution, then
+    /// checks that the executor stops its OpenVMM processes, exits with 130, and leaves the agent
+    /// state directory usable.
+    fn interrupt_executor(phase: &str, interruption: Interruption) {
+        use mxc_sdk::mxc_common::process_util::OwnedHandle;
+        use std::time::Duration;
+        use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_C_EVENT};
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE,
+        };
 
         struct ExecutorGuard {
             child: std::process::Child,
@@ -1089,7 +1122,6 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let directory = tempfile::tempdir().expect("interruption test directory");
         let state = directory.path().join("state");
         std::fs::create_dir(&state).expect("isolated state directory");
-        let phase = std::env::var(CHILD_ENV).expect("interruption phase");
         if phase != "capture" {
             // Capture the platform snapshot templates and register the image first, so the first
             // VM of the interrupted request is its own sandbox rather than a template capture.
@@ -1113,15 +1145,23 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let mut request = process_only_request("sleep 600");
         request["process"]["timeout"] = json!(0);
         std::fs::write(&request_path, request.to_string()).expect("interruption request");
+        let mut command = Command::new(executor());
+        command
+            .args(["--experimental", "--log-file"])
+            .arg(&log_path);
+        if interruption == Interruption::StdinClose {
+            command.arg("--cancel-on-stdin-close");
+        }
         let mut guard = ExecutorGuard {
-            child: Command::new(executor())
-                .args(["--experimental", "--log-file"])
-                .arg(&log_path)
+            child: command
                 .arg(&request_path)
                 .env("TEMP", &state)
                 .env("TMP", &state)
                 .env("LOCALAPPDATA", &state)
-                .stdin(Stdio::null())
+                .stdin(match interruption {
+                    Interruption::ConsoleControl => Stdio::null(),
+                    Interruption::StdinClose => Stdio::piped(),
+                })
                 .stdout(std::fs::File::create(&stdout_path).expect("stdout file"))
                 .stderr(std::fs::File::create(&stderr_path).expect("stderr file"))
                 .spawn()
@@ -1149,7 +1189,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             let executing = log.contains("NVX execution started");
             if guard.vmm.is_some() && (phase != "execution" || executing) {
                 assert!(
-                    match phase.as_str() {
+                    match phase {
                         "capture" => !provisioned,
                         "startup" => !executing,
                         _ => true,
@@ -1165,7 +1205,12 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             std::thread::sleep(Duration::from_millis(20));
         }
         let interrupted = Instant::now();
-        unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }.expect("real Ctrl-C delivery");
+        match interruption {
+            Interruption::ConsoleControl => {
+                unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }.expect("real Ctrl-C delivery")
+            }
+            Interruption::StdinClose => drop(guard.child.stdin.take().expect("executor stdin")),
+        }
         let exit = loop {
             if let Some(exit) = guard.child.try_wait().expect("cancelled executor status") {
                 break exit;
@@ -1179,7 +1224,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         assert_eq!(
             exit.code(),
             Some(130),
-            "Ctrl-C must exit through coordinated cancellation"
+            "{interruption:?} during {phase} must exit through coordinated cancellation"
         );
         assert_eq!(
             unsafe { WaitForSingleObject(guard.vmm.as_ref().expect("owned VM").get(), 0) },
@@ -1220,8 +1265,6 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         } else {
             assert!(log.contains("mxc.SandboxTornDown"), "{log}");
         }
-        unsafe { SetConsoleCtrlHandler(Some(helper_handler), false) }
-            .expect("remove helper handler");
     }
 
     #[test]

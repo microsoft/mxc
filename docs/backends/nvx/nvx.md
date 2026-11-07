@@ -248,12 +248,15 @@ diagnostics to avoid exposing them; the error code and failed operation are
 still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
-VM shutdown and deprovisioning before exit code 130 is returned. A request
-received during startup, including a [platform snapshot](#platform-snapshots)
-template capture, is observed when the native call returns.
-Closing the console or forcibly terminating the process does not provide this
-cooperative-cleanup guarantee. Embedding the SDK does not install a
-process-wide console handler.
+VM shutdown and deprovisioning before exit code 130 is returned. A launcher
+that cannot send console control events, such as one that starts the executor
+without a console, can pass `--cancel-on-stdin-close` and keep the executor's
+stdin open: closing it has the same effect. The executor discards anything
+written to stdin. A request received during startup, including a
+[platform snapshot](#platform-snapshots) template capture, is observed when
+the native call returns. Closing the console or forcibly terminating the
+process does not provide this cooperative-cleanup guarantee. Embedding the SDK
+does not install a process-wide console handler.
 
 ### Agent state directory
 

@@ -192,10 +192,13 @@ not exist; that request fails when the wait ends. The error includes the last
 sandbox state that ACI reported, such as `creating`.
 
 In the Windows executor, Ctrl-C and Ctrl-Break stop the request, delete the
-sandbox, and return exit code 130. Closing the console or forcibly terminating
-the process skips deletion; find leftover sandboxes in the group by their
-`mxc-` name prefix and `createdBy: mxc` tag. Embedding the SDK does not install
-a process-wide console handler.
+sandbox, and return exit code 130. A launcher that cannot send console control
+events, such as one that starts the executor without a console, can pass
+`--cancel-on-stdin-close` and keep the executor's stdin open: closing it has
+the same effect. The executor discards anything written to stdin. Closing the
+console or forcibly terminating the process skips deletion; find leftover
+sandboxes in the group by their `mxc-` name prefix and `createdBy: mxc` tag.
+Embedding the SDK does not install a process-wide console handler.
 
 ### Credentials
 
@@ -248,8 +251,9 @@ cargo test -p mxc-sdk --features aci --test aci_e2e -- --include-ignored --test-
 
 They cover the executor and `v1::dev::run_json`, stdout and stderr, exit
 codes, environment entries, the working directory, sizing, timeouts, start
-failures, image references that ACI rejects, `--dry-run`, Ctrl-C during startup
-and during execution, and deletion of every sandbox they create.
+failures, image references that ACI rejects, `--dry-run`, Ctrl-C and closing
+stdin with `--cancel-on-stdin-close` during startup and during execution, and
+deletion of every sandbox they create.
 `MXC_ACI_E2E_IMAGE` overrides the default image,
 `mcr.microsoft.com/mirror/docker/library/alpine:3.16`.
 

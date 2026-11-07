@@ -464,6 +464,7 @@ function Invoke-MicroVmTests {
         'executor platform snapshots' = 'VM_EXECUTED executor platform snapshot clones, streaming capture, validation, and cold-boot fallback'
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
+        'executor stdin close' = 'VM_EXECUTED executor stdin-close cancellation '
         'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
         'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges'
         'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls'

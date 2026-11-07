@@ -186,7 +186,9 @@ sequenceDiagram
 - Failures, timeouts, and Ctrl-C: after any create attempt, MXC deletes the
   sandbox, including when creation, startup, or the command fails. It renews
   the data-plane session first if it is about to expire. REST calls retry
-  throttling, server errors, and transport failures.
+  throttling, server errors, and transport failures. With
+  `--cancel-on-stdin-close`, closing the executor's stdin cancels like Ctrl-C,
+  for launchers that cannot send console control events.
 
 - Process exit or loss of connectivity: a killed process deletes nothing.
   The sandbox keeps running in the group and is identifiable by its `mxc-`
@@ -215,6 +217,7 @@ sequenceDiagram
 | Image rejected by ACI | `malformed_request` with HTTP 400 | `aci_e2e` live, manual |
 | Dry run | Success without a sandbox; missing group gives `backend_unavailable` | `aci_e2e` live, manual |
 | Ctrl-C during startup and execution | Exit code 130 and audit teardown `ok` | `aci_e2e` live, manual |
+| Closing stdin with `--cancel-on-stdin-close` during startup and execution | Exit code 130 and audit teardown `ok` | `aci_e2e` live, manual |
 | Opt-in, streaming, PTY, lifecycle, unsupported build | `backend_unavailable`, `unsupported_containment`, or `malformed_request` before any Azure call | `aci_e2e`, "Test ACI request handling without Azure" (Windows PR, x64 and arm64) |
 | Policy rejection matrix | Each rejected field fails before any Azure call | `aci_e2e`, same step |
 | Runner ordering, cleanup, startup, and error mapping | Deletion follows every create attempt; cleanup failures are reported | `backends/aci` unit tests, "Test ACI backend" |

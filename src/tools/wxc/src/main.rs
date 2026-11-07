@@ -211,6 +211,24 @@ struct Cli {
     #[arg(long)]
     audit_verbose: bool,
 
+    /// Treat end-of-file on stdin as Ctrl-C: stop the run, tear down its
+    /// sandbox, and exit with code 130. For launchers that cannot send console
+    /// control events; they must keep stdin open for the whole run and close
+    /// it to cancel. Executor input is discarded. Only containments that
+    /// cancel cooperatively (microvm and aci) accept it.
+    #[cfg(target_os = "windows")]
+    #[arg(
+        long = "cancel-on-stdin-close",
+        conflicts_with_all = [
+            "operation",
+            "probe",
+            "setup_hyperlight",
+            "setup_wslc",
+            "telemetry_consent"
+        ]
+    )]
+    cancel_on_stdin_close: bool,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -909,6 +927,35 @@ fn request_console_cancellation(ctrl_type: u32, cancellation: Option<&RunCancell
     false
 }
 
+#[cfg(target_os = "windows")]
+fn stdin_close_unsupported_message(containment: &ContainmentBackend) -> String {
+    format!(
+        "--cancel-on-stdin-close requires a containment that cancels cooperatively \
+         (microvm or aci); resolved containment is '{}'",
+        containment.wire_name()
+    )
+}
+
+/// Request cancellation once `input` reaches end-of-file or fails to read.
+///
+/// The watcher thread owns no lifecycle resources: like the console handler,
+/// it only signals, and the execution owner observes the request and tears
+/// the run down. A request after the run completes is ignored.
+#[cfg(target_os = "windows")]
+fn cancel_when_closed(mut input: impl std::io::Read, cancellation: &RunCancellation) {
+    let mut discarded = [0_u8; 512];
+    loop {
+        match input.read(&mut discarded) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            // A broken or invalid handle cannot keep the run alive either.
+            Err(_) => break,
+        }
+    }
+    cancellation.request();
+}
+
 /// Claim cooperative interrupts; otherwise emit telemetry before default termination.
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn executor_ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
@@ -1510,7 +1557,44 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     #[cfg(target_os = "windows")]
-    let console_run = ConsoleRunGuard::new(runner.cancellation());
+    let cancellation = runner.cancellation();
+    #[cfg(target_os = "windows")]
+    if cli.cancel_on_stdin_close {
+        let Some(signal) = cancellation.clone() else {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::UnsupportedFieldForBackend,
+                request.containment.wire_name(),
+                "containment",
+                "",
+            );
+            telemetry::emit_early_exit_with_kind(
+                telemetry_active,
+                &request.containment,
+                requested_sandbox_kind,
+                telemetry::FailureReason::ConfigError,
+            );
+            emit_mxc_error_exit(&MxcError::policy_validation(
+                stdin_close_unsupported_message(&request.containment),
+            ));
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("stdin-close".to_owned())
+            .spawn(move || cancel_when_closed(std::io::stdin(), &signal))
+        {
+            telemetry::emit_early_exit_with_kind(
+                telemetry_active,
+                &request.containment,
+                requested_sandbox_kind,
+                telemetry::FailureReason::InitError,
+            );
+            emit_mxc_error_exit(&MxcError::backend_error(format!(
+                "cannot watch stdin for --cancel-on-stdin-close: {error}"
+            )));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    let console_run = ConsoleRunGuard::new(cancellation);
     let run_start = Instant::now();
     let mut response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -3010,6 +3094,102 @@ mod tests {
             Some(&cancellation)
         ));
         assert!(RUN_CANCELLATION_SLOT.lock().unwrap().is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cli_cancel_on_stdin_close_applies_only_to_create_and_run_requests() {
+        assert!(
+            parse_cli(&["wxc-exec", "--cancel-on-stdin-close", "policy.json"])
+                .cancel_on_stdin_close
+        );
+        assert!(!parse_cli(&["wxc-exec", "policy.json"]).cancel_on_stdin_close);
+        for argv in [
+            &[
+                "wxc-exec",
+                "--cancel-on-stdin-close",
+                "--operation",
+                "exec",
+                "policy.json",
+            ][..],
+            &["wxc-exec", "--cancel-on-stdin-close", "--probe"],
+            &["wxc-exec", "--cancel-on-stdin-close", "--setup-hyperlight"],
+            &[
+                "wxc-exec",
+                "--cancel-on-stdin-close",
+                "--setup-wslc",
+                "--image",
+                "alpine",
+            ],
+            &[
+                "wxc-exec",
+                "--cancel-on-stdin-close",
+                "--telemetry-consent",
+                "status",
+            ],
+        ] {
+            let error = match Cli::try_parse_from(argv) {
+                Err(error) => error,
+                Ok(_) => panic!("{argv:?} must be rejected"),
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn stdin_close_requests_cancellation_once_input_ends() {
+        struct Input {
+            reads: std::collections::VecDeque<std::io::Result<usize>>,
+            cancellation: RunCancellation,
+        }
+        impl std::io::Read for Input {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    self.cancellation.check().is_ok(),
+                    "input and interrupted reads must not cancel"
+                );
+                self.reads.pop_front().expect("read after the input ended")
+            }
+        }
+        for end in [Ok(0), Err(std::io::ErrorKind::BrokenPipe.into())] {
+            let cancellation = RunCancellation::default();
+            let input = Input {
+                reads: [
+                    Ok(3),
+                    Err(std::io::ErrorKind::Interrupted.into()),
+                    Ok(1),
+                    end,
+                ]
+                .into(),
+                cancellation: cancellation.clone(),
+            };
+            cancel_when_closed(input, &cancellation);
+            assert!(
+                cancellation.check().is_err(),
+                "the end of input must cancel"
+            );
+        }
+
+        let finished = RunCancellation::default();
+        finished.complete();
+        cancel_when_closed(std::io::empty(), &finished);
+        assert!(
+            !finished.was_cancelled(),
+            "closing stdin after the run must not mark it cancelled"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn stdin_close_rejection_names_the_resolved_containment() {
+        let message = stdin_close_unsupported_message(&ContainmentBackend::ProcessContainer);
+        assert!(message.contains("'processcontainer'"), "{message}");
+        assert!(message.contains("microvm or aci"), "{message}");
     }
 
     #[test]
