@@ -279,12 +279,14 @@ The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
 They check executor configurations, JSON requests that collect output, image
 selection, file access rules, and network address and port rules. They also
 check that traffic through a proxy works while direct connections are blocked,
-and that interrupting startup or execution removes the VM and leaves the agent
-state directory usable. Another scenario checks that concurrent first requests
-for an unregistered image all succeed, and that later concurrent requests boot
-it while its registry is unreachable. A third checks that sandboxes start as
-clones of the platform snapshot templates, that validation captures no
-templates, and that a host that cannot capture them cold boots sandboxes.
+and that interrupting startup or execution, with Ctrl-C or by closing the
+executor's stdin with `--cancel-on-stdin-close`, removes the VM and leaves the
+agent state directory usable. Another scenario checks that concurrent first
+requests for an unregistered image all succeed, and that later concurrent
+requests boot it while its registry is unreachable. A third checks that
+sandboxes start as clones of the platform snapshot templates, that validation
+captures no templates, and that a host that cannot capture them cold boots
+sandboxes.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

@@ -400,15 +400,22 @@ mod windows_host {
         assert!(!error.message.contains("cleanup failure"), "{error}");
     }
 
+    /// How a test asks a running executor to cancel its request.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interruption {
+        /// A real Ctrl-C delivered to the executor's console.
+        ConsoleControl,
+        /// Closing the stdin pipe of an executor run with `--cancel-on-stdin-close`.
+        StdinClose,
+    }
+
     /// Ctrl-C during startup and during execution must stop waiting, delete
     /// the sandbox, and exit with 130.
     #[test]
     #[ignore = "Azure: creates and deletes ACI sandboxes; needs MXC_ACI_E2E_SANDBOX_GROUP and wxc-exec.exe"]
     fn executor_console_interrupt_deletes_the_sandbox() {
         use std::os::windows::process::CommandExt;
-        use windows::Win32::System::Console::{
-            GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_C_EVENT,
-        };
+        use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
         use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 
         const CHILD_ENV: &str = "MXC_ACI_CONSOLE_CHILD";
@@ -443,6 +450,26 @@ mod windows_host {
         // set, so the executor this helper starts receives the event.
         unsafe { SetConsoleCtrlHandler(None, false) }.expect("restore Ctrl-C processing");
         unsafe { SetConsoleCtrlHandler(Some(ignore_ctrl_c), true) }.expect("helper handler");
+        interrupt_executor(
+            phase.to_str().expect("interruption phase"),
+            Interruption::ConsoleControl,
+        );
+    }
+
+    /// Closing stdin of an executor run with `--cancel-on-stdin-close` during
+    /// startup and during execution must cancel like Ctrl-C.
+    #[test]
+    #[ignore = "Azure: creates and deletes ACI sandboxes; needs MXC_ACI_E2E_SANDBOX_GROUP and wxc-exec.exe"]
+    fn executor_stdin_close_deletes_the_sandbox() {
+        for phase in ["startup", "execution"] {
+            interrupt_executor(phase, Interruption::StdinClose);
+        }
+    }
+
+    /// Interrupts a `sleep 600` request during sandbox startup or execution,
+    /// then checks that the executor deletes the sandbox and exits with 130.
+    fn interrupt_executor(phase: &str, interruption: Interruption) {
+        use windows::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_C_EVENT};
 
         let directory = tempfile::tempdir().expect("interruption test directory");
         let request_path = directory.path().join("request.json");
@@ -450,11 +477,19 @@ mod windows_host {
         let mut request = live_request("sleep 600");
         request["process"]["timeout"] = json!(0);
         std::fs::write(&request_path, request.to_string()).expect("interruption request");
-        let mut child = Command::new(executor())
+        let mut command = Command::new(executor());
+        command
             .args(["--experimental", "--debug", "--log-file"])
-            .arg(&log_path)
+            .arg(&log_path);
+        if interruption == Interruption::StdinClose {
+            command.arg("--cancel-on-stdin-close");
+        }
+        let mut child = command
             .arg(&request_path)
-            .stdin(Stdio::null())
+            .stdin(match interruption {
+                Interruption::ConsoleControl => Stdio::null(),
+                Interruption::StdinClose => Stdio::piped(),
+            })
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -484,7 +519,12 @@ mod windows_host {
             std::thread::sleep(Duration::from_millis(20));
         }
         let interrupted = Instant::now();
-        unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }.expect("Ctrl-C delivery");
+        match interruption {
+            Interruption::ConsoleControl => {
+                unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }.expect("Ctrl-C delivery")
+            }
+            Interruption::StdinClose => drop(child.stdin.take().expect("executor stdin")),
+        }
         let status = loop {
             if let Some(status) = child.try_wait().expect("cancelled executor status") {
                 break status;
@@ -494,22 +534,26 @@ mod windows_host {
                 let log = std::fs::read_to_string(&log_path).unwrap_or_default();
                 let tail: Vec<&str> = log.lines().rev().take(15).collect();
                 panic!(
-                    "executor did not stop after Ctrl-C during {phase:?}; log tail:\n{}",
+                    "executor did not stop after {interruption:?} during {phase:?}; log tail:\n{}",
                     tail.into_iter().rev().collect::<Vec<_>>().join("\n")
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
         };
         let log = std::fs::read_to_string(&log_path).expect("executor log");
-        assert_eq!(status.code(), Some(130), "{phase:?}\n{log}");
+        assert_eq!(
+            status.code(),
+            Some(130),
+            "{interruption:?} {phase:?}\n{log}"
+        );
         assert!(
             log.lines()
                 .any(|line| line.contains("mxc.SandboxTornDown")
                     && line.contains(r#""status":"ok""#)),
-            "{phase:?}: the sandbox was not deleted cleanly:\n{log}"
+            "{interruption:?} {phase:?}: the sandbox was not deleted cleanly:\n{log}"
         );
         println!(
-            "ACI {phase:?} interruption completed in {:?}",
+            "ACI {interruption:?} {phase:?} interruption completed in {:?}",
             interrupted.elapsed()
         );
     }
