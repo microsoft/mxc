@@ -180,6 +180,9 @@ fn main() {
         if mode != "missing-interruption-discovery" {
             println!("windows_x64::signed_bundle_executor_console_interrupt: test");
         }
+        if mode != "missing-stdin-close-discovery" {
+            println!("windows_x64::signed_bundle_executor_stdin_close_cancels: test");
+        }
         if mode != "missing-image-reuse-discovery" {
             println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
         }
@@ -263,6 +266,9 @@ fn main() {
         println!("VM_EXECUTED executor console interruption capture/startup/execution/owned-vmm/cleanup");
     } else {
         println!("VM_EXECUTED executor console interruption startup/execution/owned-vmm/cleanup");
+    }
+    if mode != "missing-stdin-close" {
+        println!("VM_EXECUTED executor stdin-close cancellation startup/execution/owned-vmm/cleanup");
     }
     if mode != "missing-image-reuse" {
         println!("VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation");
@@ -630,6 +636,7 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED JSON selected-image filesystem read\/write\/deny and cleanup confirmed clones/);
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption capture\/startup\/execution\/owned-vmm\/cleanup/);
+  assert.match(log, /VM_EXECUTED executor stdin-close cancellation startup\/execution\/owned-vmm\/cleanup/);
   assert.match(log, /VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation/);
   assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement confirmed clones/);
   assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges confirmed clones/);
@@ -653,6 +660,7 @@ for (const [mode, message] of [
   ["missing-executor", /did not execute the executor VM scenario/],
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
+  ["missing-stdin-close", /did not execute the executor stdin close VM scenario/],
   ["missing-image-reuse", /did not execute the executor image reuse VM scenario/],
   ["missing-network", /did not execute the network rules VM scenario/],
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
@@ -754,6 +762,7 @@ for (const [mode, message] of [
   ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
   ["missing-sdk-lifecycle-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
+  ["missing-stdin-close-discovery", /did not discover windows_x64::signed_bundle_executor_stdin_close_cancels/],
   ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
   ["missing-platform-snapshots-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots/],
   ["missing-snapshot-memory-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_snapshot_memory_capacity/],
@@ -777,6 +786,7 @@ for (const [mode, message] of [
       "missing-sdk-json-discovery",
       "missing-sdk-lifecycle-discovery",
       "missing-interruption-discovery",
+      "missing-stdin-close-discovery",
       "missing-image-reuse-discovery",
       "missing-platform-snapshots-discovery",
       "missing-snapshot-memory-discovery",

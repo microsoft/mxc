@@ -352,10 +352,13 @@ obstruction must allow the same process to capture templates and clone a later
 request. Child helpers receive private `LOCALAPPDATA` directories without
 changing the suite process's environment.
 
-The isolated-console scenario interrupts first capture, startup, and execution.
-Its helper clears inherited Ctrl-C ignoring before spawning the executor.
-Each interruption must terminate the OpenVMM processes owned by that executor
-and leave the state directory usable; it never relies on a whole-host VM count.
+The isolated-console scenario interrupts first capture, startup, and execution
+with Ctrl-C. Its helper clears inherited Ctrl-C ignoring before spawning the
+executor. The stdin-close scenario starts the executor with
+`--cancel-on-stdin-close` and interrupts startup and execution by closing its
+stdin. Each interruption must terminate the OpenVMM processes owned by that
+executor and leave the state directory usable; it never relies on a whole-host
+VM count.
 
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
