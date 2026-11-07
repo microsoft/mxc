@@ -110,6 +110,9 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 
 - Programs that don't use a proxy fail closed: the workload has no other route.
 
+- The controller always denies `169.254.0.0/16` and its own network subnets,
+  even when an allow rule or `egress.default: allow` covers them.
+
 - The DNS forwarder runs only when `egress.default` is `allow`, an allow rule
   exists or `networkProxy` is set. Otherwise the controller refuses DNS, since
   query names can carry data out even when every destination is denied.
@@ -239,7 +242,8 @@ These are rejected before the workload is created:
   error names the policy.
 - Any proxied config on WSL older than 3.0.5; the error names the required
   version.
-- Egress CIDRs that overlap the controller's network subnets.
+- Egress CIDRs entirely inside the controller's network subnets. CIDRs that
+  only overlap them are accepted; the overlapping part stays denied.
 
 ## Execution and container lifecycle support
 
@@ -258,7 +262,9 @@ These are rejected before the workload is created:
     `hostLoopback` value can share a session.
   - `provision`: creates the networks, controller and workload. Network
     posture is fixed here.
-  - `start`: starts the controller, then the workload.
+  - `start`: starts the controller, then the workload. On WSL 3.0.5,
+    starting a stopped container returns `E_ILLEGAL_METHOD_CALL` although it
+    starts, so MXC accepts that error only when the container is then running.
   - `exec` in a proxied container: the daemon keeps the workload's proxy URL
     from `provision` and sets the proxy variables on every exec with
     `apply_cooperative_proxy_env`. This also applies when the exec replaces
@@ -321,7 +327,8 @@ These are rejected before the workload is created:
 
 - **Workload:** alone on its own internal network with the controller.
   `resolv.conf` points at the controller, and so does `HTTP(S)_PROXY`, either
-  directly or through a custom proxy's name.
+  directly or through a custom proxy's name. The SDK has no DNS setting, so
+  `resolv.conf` is a read-only file volume, which works for non-root users.
 
 - **Controller:** on the workload's internal network and on its own normal
   network for outbound traffic.
@@ -454,6 +461,11 @@ probes used direct TCP connections, ignoring the proxy variables.
 - Port mappings also work on a workload with `hostLoopback: allow`. That
   workload reached its own mapped port through Windows loopback.
 
+- A second prototype used the embedded ~600 KB controller image and only the
+  WSLC .NET SDK. It passed every proxied, rejected and unchanged scenario in
+  this spec, including 22 configs at once in one session, stop and start, and
+  a controller exit that left the workload with no network access.
+
 ### Security
 
 - Isolation changes. Proxied workloads have no direct routes; the controller
@@ -467,7 +479,8 @@ probes used direct TCP connections, ignoring the proxy variables.
 - DNS is refused when nothing is allowed, so query names can't carry data out.
 
 - **Subnet overlap:** Docker's default subnets (`172.x`) can hide CIDR rules
-  for the same range. MXC sets subnets explicitly and rejects overlaps.
+  for the same range. MXC sets subnets explicitly, the controller always
+  denies them, and MXC rejects CIDRs entirely inside them.
 
 ### Components
 
@@ -482,11 +495,13 @@ probes used direct TCP connections, ignoring the proxy variables.
   `map_network_policy`.
 
 - New `wslc/common/egress_controller.rs`: controller settings and lifecycle,
-  including rendering the controller policy environment variable.
+  including loading the embedded image and rendering the controller policy
+  environment variable.
 
-- `wslc/common/container_steps.rs`: networks, environment, port mappings, the
-  session host loopback hostname, the controller's `NET_ADMIN`, and deleting
-  leftover workloads, controllers and networks when a session starts.
+- `wslc/common/container_steps.rs`: networks, environment, the workload's
+  `resolv.conf` volume, port mappings, the session host loopback hostname,
+  the controller's `NET_ADMIN`, and deleting leftover workloads, controllers
+  and networks when a session starts.
 
 - `bin/wslc_daemon/session_manager.rs`: track the controller, networks and
   the workload's proxy URL in `ContainerEntry`.
@@ -498,29 +513,36 @@ probes used direct TCP connections, ignoring the proxy variables.
   proxy URL that exec will inject, not only the exec request's own.
 
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
-  packaged as an image tar. No new crate. See [Controller image](#controller-image).
+  packaged as an image embedded in the executables. No new crate. See
+  [Controller image](#controller-image).
 
 - `mxc_engine/probe.rs`: report `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or
   later.
 
 ### Controller image
 
-- **Build:** the official pipeline builds one image tar per architecture
-  (`mxc-wslc-controller-{x64,arm64}.tar`) from an in-repo Dockerfile: the
-  controller binary and nftables on a minimal base pinned by digest.
+- **Image:** a single layer holding only the static controller binary, with
+  no base image. The controller writes its nftables rules over netlink, so it
+  needs no `nft` binary or libraries. The image is about 600 KB, and a build
+  step writes it with fixed timestamps and metadata, so the same binary always
+  gives the same image ID.
 
-- **Distribution:** each tar ships next to `wxc-exec.exe` and
-  `wxc-wslc-daemon.exe` in the same packages. MXC never pulls it: proxied
-  mode exists for restricted egress, and a registry pull runs on the host's
-  network outside any policy. The WSLC C SDK can't build images.
+- **Build:** the repository build cross-compiles the controller for Linux
+  musl, then writes the image tar and its ID. `wxc-exec.exe` and
+  `wxc-wslc-daemon.exe` embed both with `include_bytes!`.
 
-- **Integrity:** Authenticode doesn't apply to a tar, and WSLC doesn't verify
-  image signatures. The build embeds the image's SHA-256 ID in the signed
-  `wxc-exec.exe` and daemon. MXC loads the tar with
-  `WslcLoadSessionImageFromFile` unless the store already has that ID,
-  confirms the ID with `WslcListSessionImages`, and creates the controller
-  from the ID, not a tag, so an image placed under the tag isn't used. A
-  missing tar or a mismatched ID fails closed before the workload exists.
+- **Distribution:** no separate file ships. MXC never pulls the image:
+  proxied mode exists for restricted egress, and a registry pull runs on the
+  host's network outside any policy. The WSLC C SDK can't build images.
+
+- **Integrity:** WSLC doesn't verify image signatures; the image and its
+  SHA-256 ID are covered by the executable's Authenticode signature. When the
+  store doesn't have that ID, MXC writes the image to a temp file, loads it
+  with `WslcLoadSessionImageFromFile` and deletes the file. It then confirms
+  the ID with `WslcListSessionImages` and creates the controller from the ID,
+  not a tag, so an image placed under the tag isn't used. A mismatched ID,
+  including from a replaced temp file, fails closed before any container
+  exists.
 
 - **Signing:** the controller binary is ESRP-signed like `lxc-exec`.
 
@@ -538,6 +560,12 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **Create order:** networks, then controller, then workload. On failure, MXC
   deletes what it created in reverse order and returns the original error
   plus any cleanup error.
+
+- **One container operation at a time per session:** on WSL 3.0.5, creating
+  and starting containers with volumes concurrently in one session sometimes
+  fails with `E_UNEXPECTED`, and every proxied workload has a `resolv.conf`
+  volume. Create-and-run has its own session, and the daemon's worker thread
+  already runs create and start one at a time; keep it that way.
 
 - **Delete order:** workload, then controller, then networks. Deleting a
   network fails while containers are attached.
@@ -591,9 +619,9 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
 | Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
-| Controller image tar missing, or its ID doesn't match the embedded ID | Fails before the workload exists; no container created | Proposed test |
+| Loaded controller image ID doesn't match the embedded ID | Fails before any container exists | Proposed test |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
-| Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
+| Lifecycle provision → start → exec → stop → start → exec → stop → deprovision (proxied) | Policy enforced on each exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
 | Provision with a credential-bearing proxy URL, then exec with a replaced environment and no `networkProxy` | Rejected; the error doesn't contain the password | Extend `run_wslc_state_aware_tests.ps1` |
 | Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
@@ -613,9 +641,9 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 
 Delivery order:
 
-1. Controller binary and image: a Linux musl cross-build, per-architecture
-   image tars in the official pipeline, binary signing and the embedded image
-   ID. `build.bat` has none of these today.
+1. Controller binary and image: a Linux musl cross-build, the image
+   generator, embedding the image and its ID in `wxc-exec.exe` and the
+   daemon, and binary signing. `build.bat` has none of these today.
 2. Backend for create-and-run: policy classification, controller, networks,
    port mappings and leftover cleanup at session start.
 3. Backend for lifecycle operations: daemon tracking, proxy variables on
@@ -640,7 +668,7 @@ Delivery order:
     and rejected policy fields.
 
 - **Cost:** one extra container and two networks per container, plus startup
-  time, and one controller image tar per architecture in each package.
+  time, and about 600 KB in each executable that embeds the controller image.
 
 ## Open questions
 
