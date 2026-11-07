@@ -189,6 +189,12 @@ The IsolationSession command-line suite also checks that piped and file stdin
 reach the workload when stdout is a console. A workload reads one line and
 returns a distinct exit code only if the line matches.
 
+The suite also runs `isolation_session_post_exit_output.json`. A child waits
+for the workload to exit, then writes numbered lines to stdout and stderr
+for about 30 seconds. The test requires every line, both final markers, and
+workload exit code 42. The streaming smoke test, by contrast, checks output
+while the workload is still running.
+
 The `kata` case (Linux, run as root) needs the `lxc-exec` and `streaming_kata` artifacts. It runs
 `tests/scripts/run_kata_all_tests.sh` with `MXC_KATA_TESTS_REQUIRE_EXECUTION=1`, so a missing
 `/dev/kvm`, Kata install, or root filesystem fails the job instead of skipping. The suite runs

@@ -1,0 +1,16 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-target-os-windows-rejected",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo 'FAIL: unsupported target OS payload ran'"
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest",
+    "targetOs": "windows"
+  }
+}

@@ -85,11 +85,32 @@ pub fn spawn_runner(
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger, stdin),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
+        ContainmentBackend::MicroVm => spawn_microvm(request, logger, stdin),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
         ))),
     }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+fn spawn_microvm(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    crate::nvx_runner::spawn_streaming(request, logger, stdin)
+}
+
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+fn spawn_microvm(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+    _stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "the mxc engine does not yet support streaming for the 'microvm' backend",
+    ))
 }
 
 /// Spawn a caller-driven pseudo-terminal for `request`.

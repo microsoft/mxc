@@ -478,6 +478,7 @@ public class MxcContainerTests
     [InlineData("isolation_session", ContainmentBackend.IsolationSession)]
     [InlineData("bubblewrap", ContainmentBackend.Bubblewrap)]
     [InlineData("hyperlight", ContainmentBackend.Hyperlight)]
+    [InlineData("microvm", ContainmentBackend.MicroVm)]
     public void Discovery_MapsEveryNativeBackend(
         string wireName,
         ContainmentBackend expected)

@@ -486,6 +486,15 @@ pub mod __ffi {
             .map(MxcProcess::new)
     }
 
+    /// Execute with the backend's captured-output limits.
+    pub fn execute_lifecycle_capture_json(
+        request_json: &str,
+        experimental: bool,
+    ) -> Result<MxcProcess, Error> {
+        crate::mxc_engine::exec_state_aware_capture_json(request_json, experimental)
+            .map(MxcProcess::new)
+    }
+
     /// [`execute_lifecycle_json`] with a writable stdin, which
     /// [`MxcProcess::take_stdin`] returns.
     pub fn execute_lifecycle_with_stdin_json(

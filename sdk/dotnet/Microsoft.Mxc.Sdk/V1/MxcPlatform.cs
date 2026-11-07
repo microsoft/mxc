@@ -98,6 +98,7 @@ public static class MxcPlatform
             "isolation_session" => ContainmentBackend.IsolationSession,
             "bubblewrap" => ContainmentBackend.Bubblewrap,
             "hyperlight" => ContainmentBackend.Hyperlight,
+            "microvm" => ContainmentBackend.MicroVm,
             _ => ContainmentBackend.Unknown,
         };
 
