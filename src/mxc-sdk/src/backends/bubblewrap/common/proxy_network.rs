@@ -164,6 +164,7 @@ slirp4netns="$5"
 iptables_restore="$6"
 ip6tables_restore="$7"
 sleep="$8"
+sh="$9"
 
 # Inherited descriptors are remapped to fixed numbers by the parent (see
 # `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
@@ -255,6 +256,13 @@ for payload in "$state_dir"/rules.v6.*; do
     [ -e "$payload" ] || continue
     "$nsenter" --net="$ns" -- "$ip6tables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
+# Host-loopback ports the sandbox reaches as its own 127.0.0.1:<port>: the
+# nat payload redirects them to slirp's gateway, which needs a 127.0.0.0/8
+# source to be routable off `lo` in this namespace (route_localnet).
+if [ -e "$state_dir/nat.v4" ]; then
+    "$nsenter" --net="$ns" -- "$sh" -c 'echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet && echo 1 > /proc/sys/net/ipv4/conf/tap0/route_localnet' || { echo "mxc: could not let the sandbox's loopback reach the host's" >&2; exit 1; }
+    "$nsenter" --net="$ns" -- "$iptables_restore" -w "$lock_wait" -n "$state_dir/nat.v4" || { echo "mxc: could not install the sandbox's host-loopback ports. The nat table needs the nf_nat kernel module, which an unprivileged sandbox cannot load." >&2; exit 1; }
+fi
 
 # Signalled by path, not through a descriptor: this is a plain file the parent
 # polls, so it needs no shell redirection and cannot hit dash's fd limit.
@@ -789,6 +797,11 @@ pub(crate) struct ProxyNetworkNamespace {
     /// The request's `script_timeout` in ms, 0 when absent. Clamps the same
     /// budget, which is spent before the child's own timeout exists.
     script_timeout_ms: u32,
+    /// Where blocked connections are logged, if the plan asks.
+    blocked_log_path: Option<String>,
+    /// The reader of the namespace's blocked-connection log, from
+    /// [`Self::attach`] on.
+    blocked_log: Option<super::blocked_log::BlockedLog>,
 }
 
 impl ProxyNetworkNamespace {
@@ -834,6 +847,13 @@ impl ProxyNetworkNamespace {
                     format!("Bubblewrap: failed to write network rules to {path:?}: {error}")
                 })?;
             }
+        }
+        if let Some(payload) = plan.nat_payload() {
+            let path = state_dir.path().join("nat.v4");
+            std::fs::write(&path, payload).map_err(|error| {
+                format!("Bubblewrap: failed to write network rules to {path:?}: {error}")
+            })?;
+            transactions += 1;
         }
         let stderr_path = state_dir.path().join("supervisor.stderr");
         let stderr = File::create(&stderr_path).map_err(|error| {
@@ -939,6 +959,8 @@ impl ProxyNetworkNamespace {
             liveness_reader: Some(liveness_reader),
             transactions,
             script_timeout_ms,
+            blocked_log_path: plan.blocked_log().map(str::to_string),
+            blocked_log: None,
         })
     }
 
@@ -1052,6 +1074,16 @@ impl ProxyNetworkNamespace {
             "Bubblewrap: slirp4netns configured the private network namespace and the network \
              rules are in force",
         );
+        // Before the workload is released, so nothing it sends is missed. Best
+        // effort: the rules hold either way, only the report would be missing.
+        if let Some(path) = self.blocked_log_path.as_deref() {
+            match super::blocked_log::BlockedLog::start(child_pid, path) {
+                Ok(reader) => self.blocked_log = Some(reader),
+                Err(error) => logger.warning_line(&format!(
+                    "WARNING: {error}; blocked connections won't be reported"
+                )),
+            }
+        }
         Ok(())
     }
 
@@ -1101,6 +1133,9 @@ impl ProxyNetworkNamespace {
 
     /// Stop slirp and reap the namespace supervisor.
     pub(crate) fn stop(&mut self, logger: &mut Logger) {
+        // What's queued is read first; then the socket goes, so it no longer
+        // holds the namespace.
+        self.blocked_log.take();
         // Release the PID pipe too: a supervisor still waiting for the sandbox
         // PID sees EOF and exits rather than lingering.
         self.pid_writer.take();
@@ -2083,7 +2118,7 @@ impl NetworkTools {
     }
 
     /// The paths [`SUPERVISOR_SCRIPT`] reads from `$3` onward, in its order.
-    fn supervisor_arguments(&self) -> [&Path; 6] {
+    fn supervisor_arguments(&self) -> [&Path; 7] {
         [
             &self.nsenter,
             &self.ip,
@@ -2091,6 +2126,7 @@ impl NetworkTools {
             &self.iptables_restore,
             &self.ip6tables_restore,
             &self.sleep,
+            &self.sh,
         ]
     }
 }
@@ -2152,7 +2188,7 @@ pub(crate) fn probe_private_namespaces(
 /// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
 /// Bumping it acknowledges that the command list below was re-checked.
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xcbaa_8a75_caa4_2e8b;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xb69f_3f5e_fa06_d410;
 
 /// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
 /// pre-flight walk must check.
@@ -2164,6 +2200,7 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[&str] = &[
     "iptables-restore",
     "ip6tables-restore",
     "sleep",
+    "sh",
 ];
 
 /// How each dependency check's command is built.
@@ -4175,8 +4212,9 @@ mod tests {
             .collect();
         assert_eq!(
             restores.len(),
-            2,
-            "one restore call site per family; the per-family loop is what scales"
+            3,
+            "one restore call site per family, and one for the nat payload; the \
+             per-family loop is what scales"
         );
 
         for restore in &restores {
@@ -4273,6 +4311,7 @@ mod tests {
             default,
             allow: allowed.iter().map(rule).collect(),
             deny: denied.iter().map(rule).collect(),
+            ..Default::default()
         });
         EgressPlan::for_request(&request).expect("directional rules must build a plan")
     }
@@ -4575,9 +4614,10 @@ mod tests {
 
     #[test]
     fn every_supervisor_command_is_in_the_dependency_walk() {
-        // The walk's full set: the two checked directly, plus the probe list.
+        // The walk's full set: those checked directly (`sh` runs the
+        // namespace probe), plus the probe list.
         let tools = tools_in(Path::new("/mxc-test-tools"));
-        let mut probed: Vec<&str> = vec!["slirp4netns", "unshare"];
+        let mut probed: Vec<&str> = vec!["slirp4netns", "unshare", "sh"];
         probed.extend(tools.tool_probes().iter().map(|(name, ..)| *name));
 
         for name in SUPERVISOR_EXTERNAL_COMMANDS {
@@ -6475,6 +6515,8 @@ exec sleep 30
             liveness_reader: None,
             transactions: 0,
             script_timeout_ms: 0,
+            blocked_log_path: None,
+            blocked_log: None,
         }
     }
 
@@ -6542,6 +6584,8 @@ exec sleep 30
             liveness_reader: None,
             transactions: 0,
             script_timeout_ms: 0,
+            blocked_log_path: None,
+            blocked_log: None,
         };
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut startup = network

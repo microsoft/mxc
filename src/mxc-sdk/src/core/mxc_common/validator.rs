@@ -12,7 +12,7 @@ use std::collections::HashSet;
 /// rejects unsupported requests before backend-specific validation or process
 /// creation runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NetworkPolicySupport(u8);
+pub struct NetworkPolicySupport(u16);
 
 impl NetworkPolicySupport {
     /// Support for the outbound network default policy.
@@ -33,6 +33,18 @@ impl NetworkPolicySupport {
     /// Support for restricting a ProcessContainer proxy to a named peer.
     pub const PROXY_PEER_IDENTITY: Self = Self(1 << 5);
 
+    /// Support for outbound-only connections to listed host-loopback ports
+    /// (`network.egress.hostLoopbackPorts`).
+    pub const EGRESS_HOST_LOOPBACK_PORTS: Self = Self(1 << 6);
+
+    /// Support for refusing blocked outbound connections at once
+    /// (`network.egress.blocked: "reject"`).
+    pub const EGRESS_BLOCKED_REJECT: Self = Self(1 << 7);
+
+    /// Support for logging blocked outbound connections
+    /// (`network.egress.blockedLog`).
+    pub const EGRESS_BLOCKED_LOG: Self = Self(1 << 8);
+
     /// A backend that fully supports every optional network policy feature.
     pub const ALL: Self = Self(
         Self::EGRESS_DEFAULT.0
@@ -40,7 +52,10 @@ impl NetworkPolicySupport {
             | Self::INGRESS_DEFAULT.0
             | Self::HOST_LOOPBACK.0
             | Self::RUNTIME_PROXY.0
-            | Self::PROXY_PEER_IDENTITY.0,
+            | Self::PROXY_PEER_IDENTITY.0
+            | Self::EGRESS_HOST_LOOPBACK_PORTS.0
+            | Self::EGRESS_BLOCKED_REJECT.0
+            | Self::EGRESS_BLOCKED_LOG.0,
     );
 
     /// Returns whether all features in `required` are supported.
@@ -114,6 +129,28 @@ pub fn validate_network_policy_support(
     {
         return Err(ScriptResponse::rejected(
             "network.ingress.hostLoopback is not supported by the selected backend",
+        ));
+    }
+    let egress = request.policy.network_egress.as_ref();
+    if !support.contains(NetworkPolicySupport::EGRESS_HOST_LOOPBACK_PORTS)
+        && egress.is_some_and(|egress| !egress.host_loopback_ports.is_empty())
+    {
+        return Err(ScriptResponse::rejected(
+            "network.egress.hostLoopbackPorts is not supported by the selected backend",
+        ));
+    }
+    if !support.contains(NetworkPolicySupport::EGRESS_BLOCKED_REJECT)
+        && egress.is_some_and(|egress| egress.reject_blocked)
+    {
+        return Err(ScriptResponse::rejected(
+            "network.egress.blocked='reject' is not supported by the selected backend",
+        ));
+    }
+    if !support.contains(NetworkPolicySupport::EGRESS_BLOCKED_LOG)
+        && egress.is_some_and(|egress| egress.blocked_log.is_some())
+    {
+        return Err(ScriptResponse::rejected(
+            "network.egress.blockedLog is not supported by the selected backend",
         ));
     }
     if !support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY)
@@ -530,7 +567,10 @@ mod tests {
             | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
             | NetworkPolicySupport::RUNTIME_PROXY
-            | NetworkPolicySupport::PROXY_PEER_IDENTITY;
+            | NetworkPolicySupport::PROXY_PEER_IDENTITY
+            | NetworkPolicySupport::EGRESS_HOST_LOOPBACK_PORTS
+            | NetworkPolicySupport::EGRESS_BLOCKED_REJECT
+            | NetworkPolicySupport::EGRESS_BLOCKED_LOG;
 
         assert_eq!(support, NetworkPolicySupport::ALL);
     }

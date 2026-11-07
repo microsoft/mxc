@@ -303,7 +303,7 @@ pub struct Network {
 }
 
 /// Outbound network policy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkEgress {
     /// Action used when no explicit rule matches. Defaults to `deny`.
@@ -312,6 +312,15 @@ pub struct NetworkEgress {
     pub allow: Option<Vec<NetworkRule>>,
     /// Explicit deny rules. Deny rules take precedence over allow rules.
     pub deny: Option<Vec<NetworkRule>>,
+    /// TCP ports of the host's loopback the sandbox may dial, outbound only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_loopback_ports: Option<Vec<u16>>,
+    /// `true` to refuse blocked connections at once rather than drop them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reject_blocked: Option<bool>,
+    /// Where to append a JSON line per blocked outbound connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_log: Option<String>,
 }
 
 /// Inbound and host-loopback network policy.

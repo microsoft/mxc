@@ -16,6 +16,9 @@
 //! - `bwrap_runner` is gated to `target_os = "linux"` since it actually
 //!   spawns the `bwrap` binary.
 
+/// Reads the sandbox's blocked-connection log (`network.egress.blockedLog`).
+#[cfg(target_os = "linux")]
+pub(crate) mod blocked_log;
 pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;

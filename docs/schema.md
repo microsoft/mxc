@@ -226,7 +226,14 @@ that can be executed independently.
             "deny": [{
                 "to": [{ "cidr": "203.0.113.7/32" }],
                 "ports": [{ "protocol": "tcp", "port": 443 }]
-            }]
+            }],
+            "hostLoopbackPorts": [5432],   // 1.1.0-alpha, Bubblewrap and Seatbelt: TCP ports
+                                           // of the host's loopback the sandbox may connect to,
+                                           // outbound only (ingress is unchanged)
+            "blocked": "reject",           // 1.1.0-alpha, Bubblewrap and Seatbelt: refuse a
+                                           // blocked connection at once ("drop" by default)
+            "blockedLog": "/run/user/1000/blocked.jsonl" // 1.1.0-alpha, Bubblewrap: append
+                                           // one JSON line per blocked outbound connection
         },
         "ingress": {
             "default": "deny",

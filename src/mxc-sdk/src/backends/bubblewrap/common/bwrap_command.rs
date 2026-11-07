@@ -550,12 +550,16 @@ impl ResolvedNetworkMode {
         }
 
         // An absent egress section is the supported deny default. Only a
-        // ruleless deny can omit slirp and the namespace-local firewall.
+        // ruleless deny can omit slirp and the namespace-local firewall: host
+        // loopback ports need slirp's gateway, and a blocked-connection log
+        // needs the firewall that blocks them.
         let egress = request.policy.network_egress.as_ref();
         if egress.is_none_or(|egress| {
             egress.default == NetworkAction::Deny
                 && egress.allow.is_empty()
                 && egress.deny.is_empty()
+                && egress.host_loopback_ports.is_empty()
+                && egress.blocked_log.is_none()
         }) {
             Self::Isolated
         } else {
@@ -639,6 +643,8 @@ pub(crate) fn proxy_with_egress_rejection(request: &ExecutionRequest) -> Option<
             egress.default != NetworkAction::Deny
                 || !egress.allow.is_empty()
                 || !egress.deny.is_empty()
+                || !egress.host_loopback_ports.is_empty()
+                || egress.blocked_log.is_some()
         })
         .then_some(BWRAP_PROXY_DIRECTIONAL_EGRESS)
 }
@@ -1601,6 +1607,7 @@ mod tests {
                 Vec::new()
             },
             deny: Vec::new(),
+            ..Default::default()
         });
         request
     }

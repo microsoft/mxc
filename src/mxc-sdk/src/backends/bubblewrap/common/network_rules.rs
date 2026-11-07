@@ -89,6 +89,9 @@ fn decimal_width(value: usize) -> usize {
 pub(crate) enum RuleVerdict {
     Accept,
     Drop,
+    /// Refuse at once: an ICMP port-unreachable, which a TCP client reads as
+    /// "connection refused" instead of waiting out its own timeout.
+    Reject,
 }
 
 impl RuleVerdict {
@@ -97,6 +100,7 @@ impl RuleVerdict {
         match self {
             Self::Accept => "ACCEPT",
             Self::Drop => "DROP",
+            Self::Reject => "REJECT",
         }
     }
 }
@@ -650,6 +654,16 @@ impl EgressRule {
         )
     }
 
+    /// The `NFLOG` line that copies what this rule blocks to the blocked log,
+    /// placed right before it: `NFLOG` doesn't end the match, so the rule
+    /// itself still decides.
+    fn render_log(&self) -> String {
+        let line = self.render();
+        let verdict = format!(" -j {}", self.verdict.target());
+        let matches = line.strip_suffix(&verdict).unwrap_or(&line);
+        format!("{matches} {}", log_target())
+    }
+
     /// Whether this rule matches `protocol` to `destination:port`.
     ///
     /// An absent protocol or port range matches everything, which is how
@@ -672,6 +686,11 @@ impl EgressRule {
     }
 }
 
+/// The `NFLOG` target copying a blocked packet to [`BLOCKED_LOG_GROUP`].
+fn log_target() -> String {
+    format!("-j NFLOG --nflog-group {BLOCKED_LOG_GROUP} --nflog-size {BLOCKED_LOG_SNAPLEN}")
+}
+
 /// The complete filtering posture for one sandbox.
 ///
 /// Ordering is the contract: rules are appended to the chain in the order held
@@ -682,7 +701,22 @@ pub(crate) struct EgressPlan {
     rules: Vec<EgressRule>,
     v4_terminal: RuleVerdict,
     v6_terminal: RuleVerdict,
+    /// Host-loopback TCP ports the sandbox may dial, outbound only: accepted
+    /// at slirp's gateway, and reached as the sandbox's own `127.0.0.1:<port>`
+    /// through the `nat` table ([`EgressPlan::nat_payload`]).
+    host_loopback_ports: Vec<u16>,
+    /// Where blocked connections are logged, when the caller asked: each
+    /// blocking verdict is preceded by an `NFLOG` copy to [`BLOCKED_LOG_GROUP`].
+    blocked_log: Option<String>,
 }
+
+/// The `NFLOG` group blocked connections are copied to. Groups are per network
+/// namespace, so a fixed number cannot meet another sandbox's.
+pub(crate) const BLOCKED_LOG_GROUP: u16 = 0x4d58;
+
+/// How much of each blocked packet `NFLOG` copies: its IP and transport
+/// headers, and a DNS question's name.
+pub(crate) const BLOCKED_LOG_SNAPLEN: u32 = 512;
 
 /// Byte budget for one `iptables-restore` transaction.
 ///
@@ -717,6 +751,8 @@ impl EgressPlan {
             }],
             v4_terminal: RuleVerdict::Drop,
             v6_terminal: RuleVerdict::Drop,
+            host_loopback_ports: Vec::new(),
+            blocked_log: None,
         }
     }
 
@@ -765,17 +801,35 @@ impl EgressPlan {
         egress: &NetworkEgressPolicy,
         host_loopback: NetworkAction,
     ) -> Result<Self, String> {
+        let blocked = if egress.reject_blocked {
+            RuleVerdict::Reject
+        } else {
+            RuleVerdict::Drop
+        };
         let terminal = match egress.default {
             NetworkAction::Allow => RuleVerdict::Accept,
-            NetworkAction::Deny => RuleVerdict::Drop,
+            NetworkAction::Deny => blocked,
         };
 
         let mut rules = Vec::new();
+        // The host-loopback ports the caller opened, outbound only, ahead of
+        // the gateway's drop below: they are the only way past it.
+        for &port in &egress.host_loopback_ports {
+            rules.push(EgressRule {
+                verdict: RuleVerdict::Accept,
+                address: RuleAddress::from_block(
+                    RuleFamily::V4,
+                    IpAddr::V4(crate::bwrap_common::proxy_network::SLIRP_HOST_GATEWAY_IP),
+                    32,
+                ),
+                port: PortSpec::tcp_port(port),
+            });
+        }
         // Ahead of the caller's rules: first-match means anything later cannot
         // reopen it.
         if host_loopback == NetworkAction::Deny {
             rules.push(EgressRule {
-                verdict: RuleVerdict::Drop,
+                verdict: blocked,
                 address: RuleAddress::from_block(
                     RuleFamily::V4,
                     IpAddr::V4(crate::bwrap_common::proxy_network::SLIRP_HOST_GATEWAY_IP),
@@ -785,7 +839,7 @@ impl EgressPlan {
             });
         }
         for rule in &egress.deny {
-            lower_rule(rule, RuleVerdict::Drop, &mut rules)?;
+            lower_rule(rule, blocked, &mut rules)?;
         }
         for rule in &egress.allow {
             lower_rule(rule, RuleVerdict::Accept, &mut rules)?;
@@ -795,7 +849,39 @@ impl EgressPlan {
             rules,
             v4_terminal: terminal,
             v6_terminal: terminal,
+            host_loopback_ports: egress.host_loopback_ports.clone(),
+            blocked_log: egress.blocked_log.clone(),
         })
+    }
+
+    /// Where blocked connections are logged, if the caller asked.
+    pub(crate) fn blocked_log(&self) -> Option<&str> {
+        self.blocked_log.as_deref()
+    }
+
+    /// The `iptables-restore` transaction that makes the sandbox's own
+    /// `127.0.0.1:<port>` reach the host's loopback on each opened port: the
+    /// connection is redirected to slirp's gateway, which slirp connects to
+    /// the host's `127.0.0.1`, and its source rewritten to the sandbox's tap
+    /// address, since a `127.0.0.0/8` source may not leave `lo`. The
+    /// supervisor turns on `route_localnet` for the rerouted packet. Only the
+    /// opened ports: a server the sandbox starts on any other port of its own
+    /// loopback stays its own. `None` when no port is opened.
+    pub(crate) fn nat_payload(&self) -> Option<String> {
+        if self.host_loopback_ports.is_empty() {
+            return None;
+        }
+        let gateway = crate::bwrap_common::proxy_network::SLIRP_HOST_GATEWAY_IP;
+        let mut payload = String::from("*nat\n");
+        for port in &self.host_loopback_ports {
+            payload.push_str(&format!(
+                "-A OUTPUT -d 127.0.0.1/32 -p tcp --dport {port} -j DNAT --to-destination \
+                 {gateway}:{port}\n"
+            ));
+        }
+        payload.push_str("-A POSTROUTING -s 127.0.0.0/8 -o tap0 -j MASQUERADE\n");
+        payload.push_str(COMMIT);
+        Some(payload)
     }
 
     /// The chain body for one family: the loopback exemption, the family's
@@ -814,12 +900,19 @@ impl EgressPlan {
         };
 
         let mut lines = vec!["-o lo -j ACCEPT".to_string()];
-        lines.extend(
-            self.rules
-                .iter()
-                .filter(|rule| rule.address.family == family)
-                .map(EgressRule::render),
-        );
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| rule.address.family == family)
+        {
+            if self.blocked_log.is_some() && rule.verdict != RuleVerdict::Accept {
+                lines.push(rule.render_log());
+            }
+            lines.push(rule.render());
+        }
+        if self.blocked_log.is_some() && terminal != RuleVerdict::Accept {
+            lines.push(log_target());
+        }
         lines.push(format!("-j {terminal}"));
         lines
     }
@@ -1088,6 +1181,7 @@ mod tests {
                     default,
                     allow: allow.iter().map(to_rule).collect(),
                     deny: deny.iter().map(to_rule).collect(),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1236,6 +1330,85 @@ mod tests {
             directional_egress(&["-d 10.0.0.0/8 -j ACCEPT"], "DROP")
         );
         assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    fn local_services_config() -> String {
+        r#"{
+            "version": "1.1.0-alpha",
+            "containment": "process",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "egress": {
+                    "default": "deny",
+                    "allow": [{"to": [{"cidr": "172.17.0.0/16"}]}],
+                    "hostLoopbackPorts": [6379, 5432, 5432],
+                    "blocked": "reject",
+                    "blockedLog": "/run/user/1000/blocked.jsonl"
+                },
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
+            }
+        }"#
+        .to_string()
+    }
+
+    #[test]
+    fn host_loopback_ports_open_ahead_of_the_gateway_and_blocks_reject_and_log() {
+        let plan = plan_for_config(&local_services_config());
+        let log = "-j NFLOG --nflog-group 19800 --nflog-size 512";
+        assert_eq!(
+            v4(&plan),
+            vec![
+                "-o lo -j ACCEPT".to_string(),
+                "-p tcp -d 10.0.2.2/32 --dport 5432 -j ACCEPT".to_string(),
+                "-p tcp -d 10.0.2.2/32 --dport 6379 -j ACCEPT".to_string(),
+                format!("-d 10.0.2.2/32 {log}"),
+                "-d 10.0.2.2/32 -j REJECT".to_string(),
+                "-d 172.17.0.0/16 -j ACCEPT".to_string(),
+                log.to_string(),
+                "-j REJECT".to_string(),
+            ]
+        );
+        assert_eq!(plan.blocked_log(), Some("/run/user/1000/blocked.jsonl"));
+    }
+
+    #[test]
+    fn host_loopback_ports_reach_the_host_from_the_sandboxs_own_loopback() {
+        let plan = plan_for_config(&local_services_config());
+        assert_eq!(
+            plan.nat_payload().unwrap(),
+            "*nat\n\
+             -A OUTPUT -d 127.0.0.1/32 -p tcp --dport 5432 -j DNAT --to-destination 10.0.2.2:5432\n\
+             -A OUTPUT -d 127.0.0.1/32 -p tcp --dport 6379 -j DNAT --to-destination 10.0.2.2:6379\n\
+             -A POSTROUTING -s 127.0.0.0/8 -o tap0 -j MASQUERADE\n\
+             COMMIT\n"
+        );
+    }
+
+    #[test]
+    fn without_host_loopback_ports_there_is_no_nat_and_drops_stay_silent() {
+        let plan = plan_for_config(
+            r#"{
+                "version": "0.9.0-alpha",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo hi"},
+                "network": {
+                    "egress": {"default": "deny"},
+                    "ingress": {"default": "deny", "hostLoopback": "deny"}
+                }
+            }"#,
+        );
+        assert_eq!(plan.nat_payload(), None);
+        assert_eq!(v4(&plan), directional_egress(&[], "DROP"));
+    }
+
+    #[test]
+    fn a_relative_blocked_log_is_refused() {
+        let json = local_services_config().replace("/run/user/1000/blocked.jsonl", "blocked.jsonl");
+        let mut logger = Logger::new(Mode::Buffer);
+        assert!(
+            crate::mxc_common::config_parser::load_mxc_request_from_json(&json, &mut logger)
+                .is_err()
+        );
     }
 
     #[test]

@@ -134,10 +134,16 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // default mapped to a local-IP inbound rule, and the
         // loopback-scoped runtime proxy. It has no per-peer proxy identity
         // concept (`PROXY_PEER_IDENTITY` is a ProcessContainer-only feature).
+        //
+        // Host-loopback ports are `localhost:<port>` outbound rules. A denied
+        // connection already fails at once (`EPERM`), so `blocked: "reject"`
+        // asks for nothing more; there is no log of them here.
         NetworkPolicySupport::EGRESS_DEFAULT
             | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
             | NetworkPolicySupport::RUNTIME_PROXY
+            | NetworkPolicySupport::EGRESS_HOST_LOOPBACK_PORTS
+            | NetworkPolicySupport::EGRESS_BLOCKED_REJECT
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {

@@ -234,8 +234,8 @@ mod wslc;
 
 pub use experimental::{HyperlightRuntime, OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
 pub use network::{
-    Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
-    NetworkProtocol, NetworkRule,
+    Network, NetworkAction, NetworkBlockedAction, NetworkEgress, NetworkIngress, NetworkPeer,
+    NetworkPort, NetworkProtocol, NetworkRule,
 };
 pub use one_shot::{Containment as OneShotContainment, OneShotMicroVm, Request as OneShotRequest};
 pub use primitives::{ImageReference, NonEmptyString, NonEmptyVec, OptionalField, True};

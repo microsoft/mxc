@@ -335,6 +335,7 @@ fn write_network_rules(
     }
 
     write_host_loopback_rules(out, policy, allow_outbound);
+    write_host_loopback_port_rules(out, policy);
 
     // Emitted last on purpose: among rules whose filters both match, Seatbelt
     // takes the *last* one. Nothing here denies `localhost` today — the deny
@@ -386,6 +387,26 @@ fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_o
             out.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
         _ => {}
+    }
+}
+
+/// Open `network.egress.hostLoopbackPorts`, outbound only, after the
+/// host-loopback deny above (Seatbelt takes the last matching rule). As with
+/// the proxy, `localhost:<port>` matches this machine on any of its
+/// addresses, on that port alone: a literal address is a profile error.
+fn write_host_loopback_port_rules(out: &mut String, policy: &ContainerPolicy) {
+    let Some(egress) = policy.network_egress.as_ref() else {
+        return;
+    };
+    if egress.host_loopback_ports.is_empty() {
+        return;
+    }
+    out.push_str(";; --- network: egress.hostLoopbackPorts — this machine's services ---\n");
+    for port in &egress.host_loopback_ports {
+        let _ = writeln!(
+            out,
+            "(allow network-outbound (remote tcp \"localhost:{port}\"))"
+        );
     }
 }
 
@@ -728,6 +749,26 @@ mod tests {
             "deny rules must come after allow rules so they win on last-match"
         );
         assert!(p.contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn host_loopback_ports_open_after_the_host_loopback_deny() {
+        for default in [NetworkAction::Deny, NetworkAction::Allow] {
+            let mut r = req();
+            r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+                host_loopback_ports: vec![5432, 6379],
+                ..egress(default)
+            });
+            let p = build_profile(&r).unwrap();
+            let port = p
+                .find("(allow network-outbound (remote tcp \"localhost:5432\"))")
+                .expect("the port is opened");
+            assert!(p.contains("(allow network-outbound (remote tcp \"localhost:6379\"))"));
+            if let Some(deny) = p.find("(deny network-outbound (remote ip \"localhost:*\"))") {
+                assert!(port > deny, "the last match wins, so the ports come after");
+            }
+            assert!(!p.contains("(allow network-inbound"), "nothing comes in");
+        }
     }
 
     #[test]

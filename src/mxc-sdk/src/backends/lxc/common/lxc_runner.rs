@@ -2832,6 +2832,7 @@ mod tests {
             default: NetworkAction::Deny,
             allow: vec![NetworkRule::default()],
             deny: Vec::new(),
+            ..Default::default()
         });
 
         let response = runner
@@ -3135,6 +3136,7 @@ mod tests {
                 ports: Vec::new(),
             }],
             deny: Vec::new(),
+            ..Default::default()
         });
         request
     }

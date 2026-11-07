@@ -774,6 +774,24 @@
         }
       ]
     },
+    "NetworkBlockedAction": {
+      "oneOf": [
+        {
+          "description": "Drop",
+          "enum": [
+            "drop"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reject",
+          "enum": [
+            "reject"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "NetworkEgress": {
       "additionalProperties": false,
       "description": "Outbound network policy.",
@@ -785,6 +803,14 @@
           },
           "type": "array"
         },
+        "blocked": {
+          "$ref": "#/definitions/NetworkBlockedAction",
+          "description": "Optional answer to a blocked outbound connection. Defaults to `drop`."
+        },
+        "blockedLog": {
+          "description": "Optional absolute path of a file the backend appends one JSON line to for each outbound connection it blocked. Bubblewrap only.",
+          "type": "string"
+        },
         "default": {
           "$ref": "#/definitions/NetworkAction",
           "description": "Optional action applied when no explicit rule matches."
@@ -793,6 +819,15 @@
           "description": "Optional explicit deny rules. Deny takes precedence over allow.",
           "items": {
             "$ref": "#/definitions/NetworkRule"
+          },
+          "type": "array"
+        },
+        "hostLoopbackPorts": {
+          "description": "Optional TCP ports of the host's own loopback the sandbox may connect to, outbound only: connections in stay as `ingress` says. On Bubblewrap the sandbox reaches them at `127.0.0.1:<port>`, as on the host. Omission opens none.",
+          "items": {
+            "maximum": 65535,
+            "minimum": 1.0,
+            "type": "integer"
           },
           "type": "array"
         }
