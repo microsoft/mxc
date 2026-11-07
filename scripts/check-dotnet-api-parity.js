@@ -473,14 +473,19 @@ const rustStateAware = read(
   "mxc_engine",
   "state_aware.rs"
 ).split("#[cfg(test)]")[0];
-const runStateAwareBody = namedBody(rustStateAware, "fn", "run_state_aware");
-const rustBackends = [
-  ...runStateAwareBody.matchAll(/ContainmentBackend::(\w+)\s*=>/g),
-]
-  .map((match) => match[1])
-  .filter((backend) => backend !== "WindowsSandbox");
+const rustBackends = enumVariants(
+  read("src", "mxc-sdk", "src", "state_aware_sdk.rs"),
+  "ProvisionContainment",
+  "rust"
+);
+const typedDispatch = namedBody(rustStateAware, "fn", "run_state_aware_typed");
+for (const backend of rustBackends) {
+  if (!new RegExp(`ContainmentBackend::${backend}\\s*=>`).test(typedDispatch)) {
+    errors.push(`typed lifecycle backend ${backend} is missing native dispatch`);
+  }
+}
 if (rustBackends.length === 0) {
-  errors.push("state_aware.rs: could not find state-aware backend dispatch");
+  errors.push("state_aware_sdk.rs: could not find typed lifecycle backends");
 } else {
   const managedStateAware = read(
     "sdk",

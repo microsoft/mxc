@@ -114,6 +114,7 @@ pub fn available_backends() -> Vec<AvailableBackend> {
                 wslc: wslc_host_available(),
                 isolation_session: isolation_session_host_available(),
                 hyperlight: hyperlight_host_available(),
+                microvm: microvm_host_available(),
             },
         )
     }
@@ -234,6 +235,19 @@ struct WindowsHostAvailability {
     wslc: bool,
     isolation_session: bool,
     hyperlight: bool,
+    microvm: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn microvm_host_available() -> bool {
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+    {
+        crate::backend_modules::nvx::is_available()
+    }
+    #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
+    {
+        false
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -339,6 +353,12 @@ fn windows_backends(
         ));
     }
 
+    if hosts.microvm {
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::MicroVm.wire_name(),
+        ));
+    }
+
     backends
 }
 
@@ -363,6 +383,7 @@ mod tests {
                 wslc: true,
                 isolation_session: true,
                 hyperlight: true,
+                microvm: true,
             },
         )
     }
