@@ -131,8 +131,10 @@ expect_marker "ingress.default=allow leaves the egress deny intact" "EXTERNAL_BL
 for scenario in block:deny:EXTERNAL_BLOCKED:listed allow:deny:EXTERNAL_OK:listed block:allow:EXTERNAL_OK:absent; do
     IFS=: read -r mode egress expected listing <<<"$scenario"
     label="captureDenials mode=$mode with egress.default=$egress"
-    run_config "$(render seatbelt_capture_denials_external.json MODE "$mode" EGRESS "$egress" \
-        OUTPUT "$SEATBELT_TMP/external.json")"
+    config="$(render seatbelt_capture_denials_external.json OUTPUT "$SEATBELT_TMP/external.json")"
+    edit_config "$config" "config['seatbelt']['captureDenials']['mode'] = '$mode'
+config['network']['egress']['default'] = '$egress'"
+    run_config "$config"
     expect_ok "$label enforces the policy" "$expected"
     POINTER="$(grep -m1 '^{"type":"captureDenials"' <<<"$OUT")" || fail "$label (no report pointer)" "$OUT"
     /usr/bin/python3 - "$POINTER" "$listing" <<'PY' || fail "$label (external connection should be $listing)" "$OUT"

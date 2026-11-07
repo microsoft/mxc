@@ -65,19 +65,6 @@ pointer_field() {
     /usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$POINTER" "$1"
 }
 
-# Apply a Python statement to a rendered config's `config` dict, in place.
-edit_config() {
-    /usr/bin/python3 - "$1" "$2" <<'EOF' || fail "could not edit config $1"
-import json, sys
-path, edit = sys.argv[1:]
-with open(path) as source:
-    config = json.load(source)
-exec(edit)
-with open(path, "w") as output:
-    json.dump(config, output)
-EOF
-}
-
 # Render the sentinel workload to its own file so several can run at once.
 # It reads NAME.txt, waits for open_gate NAME, then reads NAME-after.txt.
 SENTINEL_CONFIG=""

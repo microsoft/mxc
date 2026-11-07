@@ -7,10 +7,10 @@
         "timeout": 30000
     },
     "filesystem": { "readonlyPaths": ["{{DEVDIR}}"] },
-    "network": { "egress": { "default": "{{EGRESS}}" } },
+    "network": { "egress": { "default": "deny" } },
     "seatbelt": {
         "captureDenials": {
-            "mode": "{{MODE}}",
+            "mode": "block",
             "outputPath": "{{OUTPUT}}"
         }
     }
