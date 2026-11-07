@@ -7,6 +7,7 @@ import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnJson } from '@microsoft/mxc-sdk/v1/dev';
 import {
   sdk,
   NETWORK_TEST_URL,
@@ -63,11 +64,13 @@ describe('macOS Seatbelt Container', {
     });
     const { support, backends } = JSON.parse(output) as {
       support: { isSupported: boolean; availableMethods: string[]; reason?: string };
-      backends: { backend: string }[];
+      backends: { backend: string; capabilities?: string[] }[];
     };
     assert.ok(support.isSupported, `seatbelt must be supported: ${output}`);
     assert.deepStrictEqual(support.availableMethods, ['seatbelt']);
-    assert.ok(backends.some((entry) => entry.backend === 'seatbelt'), output);
+    const seatbelt = backends.find((entry) => entry.backend === 'seatbelt');
+    assert.ok(seatbelt, output);
+    assert.ok(seatbelt.capabilities?.includes('captureDenials'), output);
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {
@@ -247,5 +250,26 @@ describe('macOS Seatbelt Container', {
     await outputEnded;
     assert.strictEqual(outcome.exitCode, 0, `Expected exit 0: ${stdout}`);
     assert.ok(stdout.includes('profile override works'));
+  });
+
+  it('should not write a denial report after dispose', { timeout: 30_000 }, async () => {
+    tempDir = createTempDir('mxc-dispose', '/private/tmp');
+    const proc = await spawnJson(JSON.stringify({
+      version: '1.1.0-alpha',
+      containment: 'seatbelt',
+      process: { commandLine: 'exec /bin/sleep 30' },
+      seatbelt: {
+        captureDenials: { outputPath: path.join(tempDir, 'denials.json'), retainEtl: true },
+      },
+    }));
+    assert.ok(fs.readdirSync(tempDir).some((name) => name.endsWith('.seatbelt.log')));
+
+    proc.dispose();
+
+    const deadline = Date.now() + 15_000;
+    while (fs.readdirSync(tempDir).length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepStrictEqual(fs.readdirSync(tempDir), []);
   });
 });

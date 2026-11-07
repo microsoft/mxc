@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::learning_mode_core::{
     capture_diagnostics::{
         parse_supported_verbose_document, CaptureVerboseLoggingDocument,
-        CaptureVerboseLoggingProvider,
+        CaptureVerboseLoggingProvider, SEATBELT_PROVIDER_ID,
     },
     verbose_logging_sibling_path,
 };
@@ -179,6 +179,7 @@ fn canonical_provider_guid(provider: CaptureVerboseLoggingProvider) -> &'static 
         CaptureVerboseLoggingProvider::LearningModeNetworkDecision => {
             "{301EC03D-2951-5EFB-6D99-59C64628BBFC}"
         }
+        CaptureVerboseLoggingProvider::Seatbelt => SEATBELT_PROVIDER_ID,
     }
 }
 
