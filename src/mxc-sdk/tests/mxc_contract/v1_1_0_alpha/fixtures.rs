@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 use mxc_sdk::mxc_contract::dev::{
-    parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest,
-    WslcProvisionRequest, WslcProvisionSessionRequest,
+    parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest,
+    KataProvisionRequest, Request, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
+    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
 };
 
 const VERSION: &str = "v1_1_0_alpha";
@@ -38,6 +38,7 @@ fn accepts_and_rejects_every_discovered_fixture() {
     assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
     assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
     assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
+    assert_root_fixtures::<KataProvisionRequest>("kata_provision");
     assert_root_fixtures::<StartRequest>("start");
     assert_root_fixtures::<ExecRequest>("exec");
     assert_root_fixtures::<StopRequest>("stop");

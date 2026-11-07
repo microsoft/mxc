@@ -73,7 +73,7 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks and the Kata modules, Bubblewrap SDK streaming/PTY tests, the Kata request-refusal tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>` (which includes the prebuilt `streaming_kata` live test). |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
@@ -141,7 +141,7 @@ Current platforms:
 | `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc | — |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc, kata | — |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `macos-27` | macos | — | runner `xcode-27` (public preview) | — | seatbelt |
@@ -194,6 +194,15 @@ for the workload to exit, then writes numbered lines to stdout and stderr
 for about 30 seconds. The test requires every line, both final markers, and
 workload exit code 42. The streaming smoke test, by contrast, checks output
 while the workload is still running.
+
+The `kata` case (Linux, run as root) needs the `lxc-exec` and `streaming_kata` artifacts. It runs
+`tests/scripts/run_kata_all_tests.sh` with `MXC_KATA_TESTS_REQUIRE_EXECUTION=1`, so a missing
+`/dev/kvm`, Kata install, or root filesystem fails the job instead of skipping. The suite runs
+create-and-run requests through `lxc-exec` on every hypervisor (QEMU, Cloud Hypervisor,
+Dragonball, Firecracker), then `streaming_kata`, which covers streaming, the guest kernel,
+filesystem and network policy, timeouts, kill, drop, and the container lifecycle. Each run checks
+that no sandbox directory, mount, process, or loop device is left behind. The nightly job needs a
+pool whose hosts expose `/dev/kvm`.
 
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
@@ -271,6 +280,7 @@ get fixed or wired.
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | Experimental | Windows 25H2 x64 nightly; see [MicroVM validation](#microvm-validation). |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+| Kata | New | Experimental. Runs only where the pool exposes `/dev/kvm`; downloads Kata 4.3.1 (about 1 GB, 2.4 GB installed) and an Alpine root filesystem on each run. Not yet observed on a hosted pool. |
 
 ### MicroVM validation
 
@@ -477,6 +487,10 @@ UDP/53 rules remains required.
   LXC after RHEL 7 and ships no replacement. Without the zone assignment the
   default zone rejects the container's IPv4 DHCP, and a container holding only
   an IPv6 address fails every network test.
+- `kata` — requires `/dev/kvm`, installs `zstd` and `e2fsprogs`, downloads and verifies the pinned Kata
+  static release into `/opt/kata` and Alpine's minirootfs, builds an ext4 image of it, and writes a
+  Firecracker configuration with a short `dial_timeout_ms`, because the shipped one fails the shim's
+  validation. The versions and checksums are variables at the top of `install_kata`.
 
 The historical Linux `microvm` preparation branch is not scheduled. The
 Phase 1 NVX runtime supports only Windows x64.

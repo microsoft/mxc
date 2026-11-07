@@ -158,6 +158,9 @@ pub use backend_modules::isolation_session::bindings as isolation_session_bindin
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use backend_modules::isolation_session::common as isolation_session_common;
 #[doc(hidden)]
+#[cfg(target_os = "linux")]
+pub use backend_modules::kata::common as kata_common;
+#[doc(hidden)]
 pub use backend_modules::lxc::common as lxc_common;
 #[doc(hidden)]
 #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]

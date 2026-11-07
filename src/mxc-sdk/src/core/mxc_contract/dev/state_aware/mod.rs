@@ -75,6 +75,7 @@ pub use provision::{
     IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
     MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
+pub use provision::{KataContainment, KataProvisionRequest};
 pub use provision::{ProvisionPhase, ProvisionRequest};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

@@ -7,9 +7,10 @@ use schemars::{gen::SchemaGenerator, JsonSchema};
 use serde_json::{json, Value};
 
 use super::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, MicroVmProvisionRequest,
-    OneShotRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
-    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
+    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, KataProvisionRequest,
+    MicroVmProvisionRequest, OneShotRequest, StartRequest, StopRequest,
+    WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest, WslcProvisionRequest,
+    WslcProvisionSessionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -40,6 +41,7 @@ fn provision_dispatch(
     isolation_session: Value,
     microvm: Value,
     wslc: Value,
+    kata: Value,
 ) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
@@ -53,7 +55,11 @@ fn provision_dispatch(
                 branch(
                     discriminator("containment", "wslc"),
                     wslc,
-                    Value::Bool(false),
+                    branch(
+                        discriminator("containment", "kata"),
+                        kata,
+                        Value::Bool(false),
+                    ),
                 ),
             ),
         ),
@@ -170,13 +176,14 @@ pub fn development_schema() -> Value {
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
     let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
+    let kata = subschema::<KataProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
     let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, microvm, wslc);
+    let provision = provision_dispatch(windows_sandbox, isolation_session, microvm, wslc, kata);
     let state_aware = phase_dispatch(
         session_dispatch(wslc_session),
         provision,
@@ -216,6 +223,7 @@ mod tests {
         "IsolationSessionProvisionRequest",
         "MicroVmProvisionRequest",
         "WslcProvisionRequest",
+        "KataProvisionRequest",
         "StartRequest",
         "ExecRequest",
         "StopRequest",
@@ -236,6 +244,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "provision"),
                 ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
+                ("KataProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
@@ -248,6 +257,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
+                ("KataProvisionRequest", "kata"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,

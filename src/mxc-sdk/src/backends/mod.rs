@@ -17,6 +17,11 @@ pub mod isolation_session {
     pub mod common;
 }
 
+#[cfg(target_os = "linux")]
+pub mod kata {
+    pub mod common;
+}
+
 pub mod lxc {
     pub mod common;
 }

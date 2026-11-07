@@ -43,7 +43,8 @@ impl CommandLineContext {
             | ContainmentBackend::Lxc
             | ContainmentBackend::Seatbelt
             | ContainmentBackend::Bubblewrap
-            | ContainmentBackend::MicroVm => Self::PosixShell,
+            | ContainmentBackend::MicroVm
+            | ContainmentBackend::Kata => Self::PosixShell,
             ContainmentBackend::ProcessContainer
             | ContainmentBackend::Vm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,

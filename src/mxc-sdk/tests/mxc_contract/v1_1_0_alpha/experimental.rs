@@ -3,6 +3,8 @@
 
 #[path = "experimental/hyperlight.rs"]
 mod hyperlight;
+#[path = "experimental/kata.rs"]
+mod kata;
 #[path = "experimental/root.rs"]
 mod root;
 #[path = "experimental/test_and_telemetry.rs"]
