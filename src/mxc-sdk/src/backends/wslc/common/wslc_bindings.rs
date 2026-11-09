@@ -43,6 +43,9 @@ pub const WSLC_E_IMAGE_NOT_FOUND: HRESULT = wslc_error(1);
 /// Administrative policy on this host forbids reaching the registry.
 pub const WSLC_E_REGISTRY_BLOCKED_BY_POLICY: HRESULT = wslc_error(13);
 
+/// The installed WSL runtime is older than a requested setting needs.
+pub const WSLC_E_RUNTIME_UPDATE_NEEDED: HRESULT = wslc_error(21);
+
 // ---------------------------------------------------------------------------
 // Raw function-pointer types used by the RAII guards.
 //
@@ -156,6 +159,7 @@ impl WslcSdk {
             WslcSetSessionSettingsMemory,
             WslcSetSessionSettingsTimeout,
             WslcSetSessionSettingsFeatureFlags,
+            WslcSetSessionSettingsHostLoopback,
             WslcTerminateSession,
             WslcReleaseSession,
             WslcInitContainerSettings,

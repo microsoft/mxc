@@ -1,0 +1,16 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-host-loopback-isolated",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "for TARGET in host.wslc.internal __HOST_LOOPBACK_ADDR__; do BODY=$(wget -q -T 5 -O - http://$TARGET:__HOST_LOOPBACK_PORT__/ 2>&1 || true); echo \"HOST_LOOPBACK_GOT $TARGET=[$BODY]\"; done; echo HOST_LOOPBACK_PROBE_DONE"
+  },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest"
+  }
+}

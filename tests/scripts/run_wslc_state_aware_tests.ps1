@@ -73,6 +73,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "wslc_loopback_token_server.ps1")
 
 # ---------------- Locate wxc-exec.exe + daemon ----------------
 
@@ -1179,6 +1180,7 @@ try {
 # proxy env reaches the container (the full functional proxy round-trip is
 # covered by the one-shot run_wslc_proxy_test.ps1).
 $script:netSandboxId = $null
+$script:hostLoopbackAddr = $null
 $netDeprovisionedOk = $false
 try {
     $netProvisionedOk = Run-StateAwareTest "C: provision (bridged network)" {
@@ -1203,6 +1205,30 @@ try {
                 "HTTP_PROXY injected into the container ($($r.Stdout.Trim()))"
             Assert-True ($r.Stdout -match 'https_proxy=\[http://127\.0\.0\.1:8888\]') `
                 "https_proxy injected into the container"
+        } | Out-Null
+
+        # The daemon's shared session enables host loopback, so a bridged
+        # container reaches a service bound only to Windows 127.0.0.1. The
+        # resolved address is kept for the isolated check in Lifecycle F.
+        Run-StateAwareTest "C: exec reaches Windows loopback through host.wslc.internal" {
+            $server = Start-LoopbackTokenServer
+            try {
+                $r = Invoke-StateAware -Request @{
+                    phase = 'exec'
+                    sandboxId = $script:netSandboxId
+                    process = @{
+                        commandLine = "sh -c 'set -- `$(getent hosts host.wslc.internal); echo HOST_LOOPBACK_ADDR=[`$1]; echo HOST_LOOPBACK_GOT=[`$(wget -q -T 10 -O - http://host.wslc.internal:$($server.Port)/ 2>&1)]'"
+                        timeout = 60000
+                    }
+                }
+            } finally {
+                Stop-LoopbackTokenServer $server
+            }
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout.Contains("HOST_LOOPBACK_GOT=[$($server.Token)]")) `
+                "container received the Windows listener's token ($($r.Stdout.Trim()))"
+            if ($r.Stdout -match 'HOST_LOOPBACK_ADDR=\[([0-9.]+)\]') { $script:hostLoopbackAddr = $Matches[1] }
+            Assert-True ([bool]$script:hostLoopbackAddr) "host.wslc.internal resolved to an address"
         } | Out-Null
     }
 
@@ -1722,6 +1748,29 @@ try {
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
             Assert-True ($r.Stdout -match '(^|\s)/tmp\s*$') "pwd reports the requested cwd (/tmp) ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
+    # The shared session has host loopback enabled, but an isolated container
+    # has no route to it by name or by the address Lifecycle C resolved.
+    if ($edgeStartedOk) {
+        Run-StateAwareTest "F: isolated exec cannot reach Windows loopback" {
+            Assert-True ([bool]$script:hostLoopbackAddr) "Lifecycle C resolved the host loopback address"
+            $server = Start-LoopbackTokenServer
+            try {
+                $r = Invoke-StateAware -Request @{
+                    phase = 'exec'
+                    sandboxId = $script:edgeSandboxId
+                    process = @{
+                        commandLine = "sh -c 'for T in host.wslc.internal $script:hostLoopbackAddr; do echo HOST_LOOPBACK_GOT `$T=[`$(wget -q -T 5 -O - http://`$T:$($server.Port)/ 2>&1)]; done; echo HOST_LOOPBACK_PROBE_DONE'"
+                        timeout = 60000
+                    }
+                }
+            } finally {
+                Stop-LoopbackTokenServer $server
+            }
+            Assert-True ($r.Stdout -match 'HOST_LOOPBACK_PROBE_DONE') "probe completed ($($r.Stdout.Trim()))"
+            Assert-True (-not $r.Stdout.Contains($server.Token)) "container did not receive the Windows listener's token"
         } | Out-Null
     }
 

@@ -640,7 +640,10 @@ Omitted directional values default to deny, so an egress-only allow request is
 rejected rather than claiming its implicit ingress/loopback denies are enforced.
 Mixed postures and per-host rules are rejected. Allowing ingress/host-loopback
 does not create host port forwarding or promise reachability across NAT; it
-acknowledges that WSLC cannot independently restrict those directions.
+acknowledges that WSLC cannot independently restrict those directions. On WSL
+3.0.5 or later, the daemon's sessions enable host loopback, so bridged
+containers reach Windows `127.0.0.1` services through `host.wslc.internal`; see
+[Host loopback](wsl-container-getting-started.md#host-loopback).
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|

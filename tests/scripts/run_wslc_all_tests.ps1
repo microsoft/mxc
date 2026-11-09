@@ -393,6 +393,18 @@ foreach ($proxyConfig in @("wslc_network_proxy.json", "wslc_network_proxy_inheri
         Reason  = $(if ($proxyPass) { "" } else { "cooperative proxy test failed" })
     })
 }
+# The listener runs on Windows with a per-run port and token, which a static
+# fixture cannot assert, so the owning script drives it.
+$hostLoopbackArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $hostLoopbackArgs.Debug = $true }
+& (Join-Path $PSScriptRoot "run_wslc_host_loopback_test.ps1") @hostLoopbackArgs
+$hostLoopbackPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_network_host_loopback{,_isolated}.json"
+    Pass    = $hostLoopbackPass
+    Skipped = $false
+    Reason  = $(if ($hostLoopbackPass) { "" } else { "host loopback test failed" })
+})
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_multiple.json" -OutputContains "PORT_MAPPING_MULTI_OK"))
 

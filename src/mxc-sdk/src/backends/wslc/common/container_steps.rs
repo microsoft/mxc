@@ -33,7 +33,7 @@
 //! move that happens *before* any `&raw` is taken), after which callers keep it
 //! as a stationary local.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CStr};
 use std::fmt::Write;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -845,15 +845,9 @@ pub unsafe fn create_daemon_session(
     }
     apply_session_sizing(sdk, &mut settings, sizing)?;
 
-    let mut session: WslcSession = ptr::null_mut();
-    let mut err_msg = CoTaskMemPWSTR::null();
     let started = Instant::now();
-    let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
+    let session = create_session(sdk, &mut settings, logger)?;
     let created_in = started.elapsed();
-    if hr != S_OK {
-        let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcCreateSession failed", hr, &msg).into());
-    }
 
     let guard = WslcSessionGuard::from_raw(
         session,
@@ -896,6 +890,61 @@ pub unsafe fn create_daemon_session(
     }
 
     Ok(guard)
+}
+
+/// Hostname that resolves to the Windows host loopback inside a session. WSL's
+/// own CLI uses the same default.
+pub(crate) const HOST_LOOPBACK_NAME: &CStr = c"host.wslc.internal";
+
+/// Create a session with host loopback enabled, or without it on a WSL runtime
+/// older than 3.0.5, which rejects the setting.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers, `settings` must be initialised and
+/// COM must be initialised on this thread.
+pub(crate) unsafe fn create_session(
+    sdk: &WslcSdk,
+    settings: &mut WslcSessionSettings,
+    logger: &mut Logger,
+) -> Result<WslcSession, ScriptResponse> {
+    set_host_loopback(sdk, settings, HOST_LOOPBACK_NAME.as_ptr())?;
+
+    let mut session: WslcSession = ptr::null_mut();
+    let mut err_msg = CoTaskMemPWSTR::null();
+    let mut hr = sdk.WslcCreateSession(settings, &mut session, err_msg.as_mut_ptr());
+    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED {
+        let _ = writeln!(
+            logger,
+            "[WSLC] WSL runtime predates host loopback (3.0.5); creating the session without it"
+        );
+        set_host_loopback(sdk, settings, ptr::null())?;
+        err_msg = CoTaskMemPWSTR::null();
+        hr = sdk.WslcCreateSession(settings, &mut session, err_msg.as_mut_ptr());
+    }
+    if hr != S_OK {
+        let msg = err_msg.to_string_lossy();
+        return Err(sdk_error("WslcCreateSession failed", hr, &msg));
+    }
+    Ok(session)
+}
+
+/// # Safety
+/// `sdk` must hold valid function pointers, `settings` must be initialised, and
+/// `host_name` must be null or stay valid until `WslcCreateSession` returns.
+unsafe fn set_host_loopback(
+    sdk: &WslcSdk,
+    settings: &mut WslcSessionSettings,
+    host_name: *const c_char,
+) -> Result<(), ScriptResponse> {
+    let hr = sdk.WslcSetSessionSettingsHostLoopback(settings, host_name);
+    if hr != S_OK {
+        return Err(sdk_error(
+            "WslcSetSessionSettingsHostLoopback failed",
+            hr,
+            "",
+        ));
+    }
+    Ok(())
 }
 
 /// Apply a session's sizing and its boot deadline to `settings`.

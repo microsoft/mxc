@@ -659,14 +659,7 @@ impl WSLContainerRunner {
             }
         }
 
-        // Create session while string data is still alive
-        let mut session: WslcSession = ptr::null_mut();
-        let mut err_msg = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
-        if hr != S_OK {
-            let msg = err_msg.to_string_lossy();
-            return Err(sdk_error("WslcCreateSession failed", hr, &msg));
-        }
+        let session = container_steps::create_session(sdk, &mut settings, logger)?;
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
 
         Ok(WslcSessionGuard::from_raw(
