@@ -1747,7 +1747,7 @@ fn normalize_state_aware(
     logger: &mut Logger,
     preserve_source_contract: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    let (common, operation) = input.into_parts()?;
+    let (common, operation) = input.into_parts();
     let mut request = normalize_state_aware_common(
         common,
         operation.phase(),

@@ -144,10 +144,9 @@ pub struct ExecSandboxProcess {
     native_stdio: Option<NativeStdio>,
     /// Whether the caller selected the individual-stream access mode.
     individual_stdio_taken: bool,
-    /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
-    /// the outcome rather than a code because a timeout has no code.
-    exit: Option<ExecOutcome>,
-    wait_error: Option<MxcError>,
+    /// The waiter's terminal result once joined, so repeat waits preserve both
+    /// successful outcomes and backend cleanup failures.
+    terminal: Option<Result<ExecOutcome, MxcError>>,
     /// Whether a termination request was **refused**. Recorded separately
     /// because `terminator` is consumed on both outcomes, so its absence alone
     /// cannot distinguish "killed" from "the kill was rejected" — and those
@@ -314,8 +313,7 @@ impl ExecSandboxProcess {
             terminator: Some(terminator),
             native_stdio: Some(native_stdio),
             individual_stdio_taken: false,
-            exit: None,
-            wait_error: None,
+            terminal: None,
             kill_refused: false,
         })
     }
@@ -325,11 +323,8 @@ impl ExecSandboxProcess {
     /// The outcome is cached rather than the exit code, because a timeout has
     /// no code to cache and repeat calls must still be idempotent.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome);
-        }
-        if let Some(error) = &self.wait_error {
-            return Err(std::io::Error::other(error.clone()));
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result);
         }
         let handle = self
             .waiter
@@ -338,15 +333,8 @@ impl ExecSandboxProcess {
         let result = handle
             .join()
             .unwrap_or_else(|_| Err(MxcError::backend_error("exec waiter thread panicked")));
-        let outcome = match result {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.wait_error = Some(error.clone());
-                return Err(std::io::Error::other(error));
-            }
-        };
-        self.exit = Some(outcome);
-        outcome_to_io(outcome)
+        self.terminal = Some(result);
+        terminal_to_io(self.terminal.as_ref().expect("terminal result was stored"))
     }
 
     /// Drain whatever output the caller did not take, concurrently with the
@@ -380,8 +368,8 @@ impl ExecSandboxProcess {
         self.native_stdio.take();
         self.stdin.take();
 
-        // Deliberately **not** gated on `self.exit`. A cached exit code means a
-        // previous `try_wait` observed the child finish; it says nothing about
+        // Deliberately **not** gated on `self.terminal`. A cached success means
+        // a previous `try_wait` observed the child finish; it says nothing about
         // whether anything drained. Returning early here would let
         // `try_wait()` then `wait()` skip the drain the contract promises.
         let drain_stdout = match spawn_discard_checked(self.stdout.take()) {
@@ -577,11 +565,8 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        if let Some(error) = &self.wait_error {
-            return Err(std::io::Error::other(error.clone()));
-        }
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome).map(Some);
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result).map(Some);
         }
         match &self.waiter {
             Some(handle) if handle.is_finished() => self.join_waiter().map(Some),
@@ -603,7 +588,7 @@ impl SandboxProcess for ExecSandboxProcess {
         // demonstrably dead. Running the terminator here would be equally
         // wrong: it would surface a failure to terminate something that has
         // already terminated.
-        if self.exit.is_some() {
+        if matches!(self.terminal, Some(Ok(_))) {
             self.terminator = None;
             self.kill_refused = false;
             return Ok(());
@@ -655,7 +640,7 @@ impl Drop for ExecSandboxProcess {
         let kill_accepted = match self.terminator.take() {
             // Nothing to terminate once the exit is known; running the
             // terminator over a dead process only invites a spurious failure.
-            _ if self.exit.is_some() => true,
+            _ if matches!(self.terminal, Some(Ok(_))) => true,
             Some(terminator) => terminator().is_ok(),
             // Already killed via `kill()`, whose result the caller has seen —
             // and whose refusal, if it was one, is precisely the case this
@@ -686,6 +671,13 @@ fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
             std::io::ErrorKind::TimedOut,
             "the exec timed out and the sandbox terminated it",
         )),
+    }
+}
+
+fn terminal_to_io(result: &Result<ExecOutcome, MxcError>) -> std::io::Result<i32> {
+    match result {
+        Ok(outcome) => outcome_to_io(*outcome),
+        Err(error) => Err(std::io::Error::other(error.clone())),
     }
 }
 

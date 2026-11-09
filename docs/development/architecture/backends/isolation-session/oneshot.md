@@ -171,6 +171,12 @@ termination, still reporting a timeout once the workload is confirmed stopped.
 A failed Windows thread wait is an error, unlike a wait whose time limit expires.
 The OS client must also close its input handle for the workload to receive EOF.
 
+After the workload exits, create-and-run execution uses the same
+[output draining rules as lifecycle `Relayed` execution](state-aware-rust.md#output-draining-after-relayed-execution):
+five seconds without output progress or a 60-second overall drain budget.
+A child process that keeps writing can keep the call in output cleanup for the
+full drain budget.
+
 ## Bindings Workflow
 
 **Why a private WinMD.** The OS-side API ships its WinMD as part of an

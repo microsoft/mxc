@@ -18,12 +18,13 @@ pub enum ProvisionRequest {
     /// A WSLC provision request.
     Wslc(WslcProvisionRequest),
     /// A development-only W365 Agents provision request.
-    W365Agents(super::W365AgentsProvisionRequest),
+    W365Agents(W365AgentsProvisionRequest),
 }
 
 mod containment;
 mod isolation_session;
 mod microvm;
+mod w365_agents;
 mod windows_sandbox;
 mod wslc;
 
@@ -35,6 +36,10 @@ pub use isolation_session::{
 };
 pub use microvm::{
     MicroVmContainment, MicroVmProvision, MicroVmProvisionRequest, StateAwareMicroVm,
+};
+pub use w365_agents::{
+    StateAwareW365AgentsProvision, W365AgentsContainment, W365AgentsGuid, W365AgentsProvision,
+    W365AgentsProvisionRequest, W365AgentsUserType,
 };
 pub use windows_sandbox::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use wslc::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};

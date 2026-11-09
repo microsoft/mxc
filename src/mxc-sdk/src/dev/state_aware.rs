@@ -50,10 +50,9 @@ fn run_phase(
 /// Capture an exec workload without taking ownership of its container.
 pub fn run_in_container_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Error> {
     require_phase(json, Phase::Exec, "run_in_container_json")?;
-    crate::wait_with_output(crate::__ffi::execute_lifecycle_json(
-        json,
-        options.experimental,
-    )?)
+    crate::wait_with_output(MxcProcess::new(
+        crate::mxc_engine::exec_state_aware_capture_json(json, options.experimental)?,
+    ))
 }
 
 /// Spawn an exec workload with live pipes; the caller owns the returned process.

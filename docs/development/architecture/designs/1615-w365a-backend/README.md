@@ -270,7 +270,7 @@ omission. Parsers preserve presence; backend code owns defaults.
 | Field | Allowed input and omitted/empty behavior |
 | --- | --- |
 | `w365Agents.provision.poolId` | Required string, 36-character hyphenated ASCII-hex GUID (`8-4-4-4-12`). No empty/blank value or automatic selection. |
-| Provision `userType` | `"Local"`, `"HumanUser"`, or `"Agentic"` when supplied; empty/other values fail. Omission sends no `user-type` header and does not infer an identity. |
+| Provision `userType` | `"Local"`, `"HumanUser"`, or `"Agentic"` when supplied; empty/other values fail. Omission sends no `user-type` header; MXC does not select an identity or session kind. |
 | Provision `userObjectId` | If supplied, a canonical GUID sent as `user-object-id`; empty/blank fails. Omission sends no header. |
 
 Service configuration belongs to the caller environment, not request JSON.
@@ -290,6 +290,17 @@ They use independent credentials, not control-plane fallback. Start has a
 Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.exec` with HTTP/1.1 `Upgrade: exec`. Additional
 protocol/port/capability overrides are outside the proposed initial scope.
+
+#### User types
+
+`userType` describes the account used for the Cloud PC session, not whether
+an agent or a human invokes MXC:
+
+| Value | Meaning |
+| --- | --- |
+| `Local` | Windows runs the session under a local account, not the selected owner's Microsoft Entra identity. `userObjectId` identifies the remote-control owner. No auxiliary token is allowed. |
+| `HumanUser` | A session for a human user's Microsoft Entra identity. An optional auxiliary token enables assertion-based startup and must represent that same human user. |
+| `Agentic` | A session for a Microsoft Entra Agent User identity. An auxiliary token is required and must represent the Agent User identified by `userObjectId`. |
 
 ### Process inputs and results
 

@@ -8,11 +8,9 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::state_aware_operation::StateAwareOperation;
 
 /// Only the operation owns routing and backend configuration.
-pub(crate) enum StateAwareInput {
-    Implemented {
-        common: CommonRequestIR,
-        operation: StateAwareOperation,
-    },
+pub(crate) struct StateAwareInput {
+    common: CommonRequestIR,
+    operation: StateAwareOperation,
 }
 
 impl StateAwareInput {
@@ -64,12 +62,10 @@ impl StateAwareInput {
             )));
         }
         operation.validate()?;
-        Ok(Self::Implemented { common, operation })
+        Ok(Self { common, operation })
     }
 
-    pub(crate) fn into_parts(self) -> Result<(CommonRequestIR, StateAwareOperation), WxcError> {
-        match self {
-            Self::Implemented { common, operation } => Ok((common, operation)),
-        }
+    pub(crate) fn into_parts(self) -> (CommonRequestIR, StateAwareOperation) {
+        (self.common, self.operation)
     }
 }

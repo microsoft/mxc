@@ -124,7 +124,6 @@ fn main() {
         if mode != "missing-executor-proxy-discovery" {
             println!("windows_x64::signed_executor_proxy_validation_withholds_credentials: test");
         }
-        println!("windows_x64::host_only_executor_request_matrix: test");
         println!("windows_x64::signed_bundle_executor_configs: test");
         println!("windows_x64::signed_bundle_executor_create_and_run: test");
         println!("windows_x64::signed_bundle_json_image_and_filesystem_policy: test");

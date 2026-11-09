@@ -38,7 +38,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::__ffi::{
-    execute_lifecycle_json, execute_lifecycle_with_stdin_json,
+    execute_lifecycle_capture_json, execute_lifecycle_json, execute_lifecycle_with_stdin_json,
     run_lifecycle_json as run_state_aware_json, spawn_in_container_with_pty_json,
 };
 use mxc_sdk::v1::MxcPtySize;
@@ -357,7 +357,7 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
             }
         };
         crate::execute_output(
-            execute_lifecycle_json(request_json, experimental != 0)
+            execute_lifecycle_capture_json(request_json, experimental != 0)
                 .and_then(|process| process.wait_with_output().map_err(capture_wait_error)),
         )
     })
@@ -430,23 +430,26 @@ pub unsafe extern "C" fn mxc_state_aware_exec_pty(
                 ))
             }
         };
-        spawn_in_container_with_pty_json(
-            request_json,
-            MxcPtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            },
-            experimental != 0,
-        )
-        .map(MxcSandbox::new_pty)
-        .map_err(|error| {
+        let size = MxcPtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        size.validate().map_err(|error| {
             (
                 status_from_error_code(error.code),
                 MxcErrorDetail::from_error(&error),
             )
-        })
+        })?;
+        spawn_in_container_with_pty_json(request_json, size, experimental != 0)
+            .map(MxcSandbox::new_pty)
+            .map_err(|error| {
+                (
+                    status_from_error_code(error.code),
+                    MxcErrorDetail::from_error(&error),
+                )
+            })
     }))
     .unwrap_or_else(|panic| {
         crate::report_panic("mxc_state_aware_exec_pty", &*panic);
@@ -684,6 +687,15 @@ mod tests {
                 }
                 if phase == "exec" {
                     value["process"] = serde_json::json!({"commandLine":"echo must-not-run"});
+                    let error = mxc_sdk::mxc_engine::exec_state_aware_capture_json(
+                        &value.to_string(),
+                        experimental,
+                    )
+                    .err()
+                    .expect("W365 SDK capture remains unavailable");
+                    assert!(error
+                        .to_string()
+                        .contains("W365 Dev SDK access is deferred"));
                 }
                 let mut out = call_opt(&value.to_string(), false, experimental);
                 assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
