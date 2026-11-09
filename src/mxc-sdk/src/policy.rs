@@ -1627,7 +1627,7 @@ mod tests {
     // The shared parser owns the wire contract and its `captureDenials` branch
     // is not Windows-gated, so drive it directly to pin the combination on
     // every platform. The only documented mutual exclusion is with the
-    // `--audit` CLI flag (docs/logging-access-denied.md), which
+    // `--audit` CLI flag (docs/learning-mode.md), which
     // `wxc-exec` enforces in `validate_audit_request`.
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
