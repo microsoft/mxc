@@ -454,6 +454,12 @@ Clear-ColdCacheStore
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
+Write-Host "`n--- Target OS Tests ---" -ForegroundColor Cyan
+$null = $results.Add((Run-WslcTest "wslc_target_os_windows_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains "wslc.targetOs" `
+    -OutputNotContains "unsupported target OS payload ran"))
+
 Write-Host "`n--- Lifecycle Tests ---" -ForegroundColor Cyan
 # `destroyOnExit: true` is a smoke test only: WSLC's session teardown reaps
 # session-scoped containers regardless of AutoRemove, so `true` has no

@@ -7,6 +7,7 @@
 //! against the local console.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
 use crate::mxc_common::logger::Logger;
@@ -37,7 +38,8 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, drain_output_relays_within,
+    duplicate_handle, OutputRelayDrain, PipeRelay, PipeRelayWithStopParams,
 };
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
@@ -76,7 +78,8 @@ unsafe fn create_stdin_relay(
     // Choose the relay from stdin itself; `interactive` describes stdout.
     if classify_stdin_handle(stdin) == StdinHandleKind::PipeOrFile {
         let (thread, canceller) = unsafe { create_relay_thread(stdin, destination) }
-            .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?;
+            .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?
+            .into_thread_and_canceller();
         return Ok((thread, Some(canceller)));
     }
 
@@ -561,28 +564,28 @@ impl IsolationSessionManager {
             }
 
             scope.stdout = if stdout_handle_val != 0 {
-                let (thread, canceller) = unsafe {
-                    create_relay_thread(
-                        HANDLE(stdout_handle_val as *mut core::ffi::c_void),
-                        wxc_stdout,
-                    )
-                }
-                .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?;
-                scope.output_cancellers.push(canceller);
-                Some(thread)
+                Some(
+                    unsafe {
+                        create_relay_thread(
+                            HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+                            wxc_stdout,
+                        )
+                    }
+                    .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
+                )
             } else {
                 None
             };
             scope.stderr = if stderr_handle_val != 0 {
-                let (thread, canceller) = unsafe {
-                    create_relay_thread(
-                        HANDLE(stderr_handle_val as *mut core::ffi::c_void),
-                        wxc_stderr,
-                    )
-                }
-                .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?;
-                scope.output_cancellers.push(canceller);
-                Some(thread)
+                Some(
+                    unsafe {
+                        create_relay_thread(
+                            HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+                            wxc_stderr,
+                        )
+                    }
+                    .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
+                )
             } else {
                 None
             };
@@ -611,7 +614,7 @@ impl IsolationSessionManager {
             }
 
             let outcome = started.wait(options.timeout_ms, || scope.stop_stdin())?;
-            scope.finish();
+            scope.finish()?;
 
             Ok(outcome)
         })
@@ -1049,19 +1052,14 @@ impl StartedProcess {
 /// Owns the relay threads and the workload for the span of `create_process`.
 ///
 /// [`finish`](Self::finish) tears down a workload that has already exited.
-/// Dropping without it abandons the run: the workload is terminated so the
-/// output relays reach EOF. Every join is bounded, so a relay whose read never
-/// returns cannot wedge the caller's thread.
+/// Dropping without it cancels output reads and terminates the workload.
+/// Every join is bounded; cancellation does not interrupt destination writes.
 struct RelayScope<'a> {
     process: &'a IsoSessionProcess,
     stop_event: HANDLE,
-    stdout: Option<OwnedHandle>,
-    stderr: Option<OwnedHandle>,
+    stdout: Option<PipeRelay>,
+    stderr: Option<PipeRelay>,
     stdin: Option<OwnedHandle>,
-    /// Ends the output relays' reads. A descendant that inherited the write
-    /// ends keeps them open past the workload's exit, so EOF alone is not a
-    /// bound.
-    output_cancellers: Vec<PipeReadCanceller>,
     /// Ends a pipe/file-backed stdin relay. Console stdin relays use the stop
     /// event instead because `CancelSynchronousIo` has console-handle edge
     /// cases.
@@ -1071,8 +1069,10 @@ struct RelayScope<'a> {
 
 impl<'a> RelayScope<'a> {
     const JOIN_MS: u32 = 1000;
-    /// Expiry cancels the read, dropping an in-flight chunk.
-    const DRAIN_MS: u32 = 5000;
+    /// Stop waiting only after all output relays are idle for this long.
+    const IDLE_MS: u64 = 5000;
+    /// Overall cap so a pathological one-byte-forever trickle still returns.
+    const ABSOLUTE_CAP_MS: u64 = 60_000;
 
     fn new(process: &'a IsoSessionProcess, stop_event: HANDLE) -> Self {
         Self {
@@ -1081,7 +1081,6 @@ impl<'a> RelayScope<'a> {
             stdout: None,
             stderr: None,
             stdin: None,
-            output_cancellers: Vec::new(),
             stdin_canceller: None,
             finished: false,
         }
@@ -1094,12 +1093,6 @@ impl<'a> RelayScope<'a> {
         }
     }
 
-    fn cancel_output_reads(&self) {
-        for canceller in &self.output_cancellers {
-            canceller.close();
-        }
-    }
-
     fn cancel_stdin_read(&self) {
         if let Some(canceller) = &self.stdin_canceller {
             canceller.close();
@@ -1107,11 +1100,23 @@ impl<'a> RelayScope<'a> {
     }
 
     /// Whether the relay exited. An absent relay was never spawned.
-    fn join(relay: &Option<OwnedHandle>, timeout_ms: u32) -> bool {
-        wait_for_relay(relay.as_ref(), timeout_ms).unwrap_or(false)
+    fn join(relay: Option<&OwnedHandle>, timeout_ms: u32) -> bool {
+        wait_for_relay(relay, timeout_ms).unwrap_or(false)
     }
 
-    /// A still-running relay owns its duplicates until it exits.
+    fn join_output(relay: &Option<PipeRelay>, timeout_ms: u32) -> bool {
+        Self::join(relay.as_ref().map(PipeRelay::thread), timeout_ms)
+    }
+
+    fn output_relays(&self) -> Vec<&PipeRelay> {
+        [&self.stdout, &self.stderr]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .collect()
+    }
+
+    /// Release the process's handles. A still-running relay owns its duplicates
+    /// until it exits.
     fn close_handles(&self) {
         let _ = self.process.Close();
     }
@@ -1128,19 +1133,24 @@ impl<'a> RelayScope<'a> {
     }
 
     /// Teardown for a workload that has already exited.
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), IsolationSessionError> {
         self.signal_stop();
         self.cancel_stdin_read();
-        let stdout_drained = Self::join(&self.stdout, Self::DRAIN_MS);
-        let stderr_drained = Self::join(&self.stderr, Self::DRAIN_MS);
-        if !(stdout_drained && stderr_drained) {
-            self.cancel_output_reads();
-            Self::join(&self.stdout, Self::JOIN_MS);
-            Self::join(&self.stderr, Self::JOIN_MS);
+        let output_relays = self.output_relays();
+        let output_drain = drain_output_relays_within(
+            &output_relays,
+            Duration::from_millis(Self::IDLE_MS),
+            Duration::from_millis(Self::ABSOLUTE_CAP_MS),
+        )
+        .map_err(|error| lifecycle_err(format!("drain output relays: {error}")))?;
+        if output_drain == OutputRelayDrain::GaveUp {
+            Self::join_output(&self.stdout, Self::JOIN_MS);
+            Self::join_output(&self.stderr, Self::JOIN_MS);
         }
-        Self::join(&self.stdin, Self::JOIN_MS);
+        Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
         self.finished = true;
+        Ok(())
     }
 }
 
@@ -1151,11 +1161,13 @@ impl Drop for RelayScope<'_> {
         }
         self.signal_stop();
         self.cancel_stdin_read();
-        self.cancel_output_reads();
+        for relay in self.output_relays() {
+            relay.cancel_read();
+        }
         let _ = self.process.Terminate();
-        Self::join(&self.stdout, Self::JOIN_MS);
-        Self::join(&self.stderr, Self::JOIN_MS);
-        Self::join(&self.stdin, Self::JOIN_MS);
+        Self::join_output(&self.stdout, Self::JOIN_MS);
+        Self::join_output(&self.stderr, Self::JOIN_MS);
+        Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
     }
 }

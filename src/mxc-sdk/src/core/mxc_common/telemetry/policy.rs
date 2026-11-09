@@ -110,14 +110,6 @@ pub fn get_policy() -> PolicyState {
     platform::read()
 }
 
-/// Whether administrative policy permits Required diagnostic collection.
-///
-/// Absent, `1` (required only) and `3` permit; `0`, unsupported values, wrong
-/// types and read failures block. Always false off Windows.
-pub fn required_collection_permitted() -> bool {
-    platform::required_collection_permitted()
-}
-
 /// Whether an administrator has denied MXC telemetry on this machine.
 ///
 /// Convenience over [`get_policy`]; the inverse of
@@ -208,19 +200,6 @@ mod platform {
 
     pub(super) fn read() -> PolicyState {
         policy_state_from_value(read_policy_value())
-    }
-
-    pub(super) fn required_collection_permitted() -> bool {
-        match read_policy_value() {
-            PolicyValue::Absent
-            | PolicyValue::Value(1)
-            | PolicyValue::Value(POLICY_VALUE_OPTIONAL) => true,
-            PolicyValue::Value(0) | PolicyValue::Unreadable => false,
-            PolicyValue::Value(value) => {
-                report_unrecognized_policy_value(value);
-                false
-            }
-        }
     }
 
     fn policy_state_from_value(value: PolicyValue) -> PolicyState {
@@ -510,10 +489,6 @@ mod platform {
     pub(super) fn read() -> PolicyState {
         PolicyState::NotApplicable
     }
-
-    pub(super) fn required_collection_permitted() -> bool {
-        false
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -666,18 +641,6 @@ mod tests {
 mod windows_tests {
     use super::test_support::PolicyKeyGuard;
     use super::*;
-
-    #[test]
-    fn required_collection_policy_matrix() {
-        let guard = PolicyKeyGuard::new();
-        assert!(required_collection_permitted());
-        for (value, permitted) in [(0u32, false), (1, true), (3, true), (2, false), (99, false)] {
-            guard.set_value(value);
-            assert_eq!(required_collection_permitted(), permitted, "value {value}");
-        }
-        guard.set_string_value("3");
-        assert!(!required_collection_permitted());
-    }
 
     #[test]
     fn absent_policy_is_unrestricted() {
