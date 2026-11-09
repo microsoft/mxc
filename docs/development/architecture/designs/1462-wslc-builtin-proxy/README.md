@@ -461,7 +461,7 @@ probes used direct TCP connections, ignoring the proxy variables.
 - Port mappings also work on a workload with `hostLoopback: allow`. That
   workload reached its own mapped port through Windows loopback.
 
-- A second prototype used the embedded ~600 KB controller image and only the
+- A second prototype used the ~600 KB controller image and only the
   WSLC .NET SDK. It passed every proxied, rejected and unchanged scenario in
   this spec, including 22 configs at once in one session, stop and start, and
   a controller exit that left the workload with no network access.
@@ -495,7 +495,7 @@ probes used direct TCP connections, ignoring the proxy variables.
   `map_network_policy`.
 
 - New `wslc/common/egress_controller.rs`: controller settings and lifecycle,
-  including loading the embedded image and rendering the controller policy
+  including loading the controller image and rendering the controller policy
   environment variable.
 
 - `wslc/common/container_steps.rs`: networks, environment, the workload's
@@ -513,7 +513,7 @@ probes used direct TCP connections, ignoring the proxy variables.
   proxy URL that exec will inject, not only the exec request's own.
 
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
-  packaged as an image embedded in the executables. No new crate. See
+  packaged as an image tar. No new crate. See
   [Controller image](#controller-image).
 
 - `mxc_engine/probe.rs`: report `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or
@@ -527,24 +527,41 @@ probes used direct TCP connections, ignoring the proxy variables.
   step writes it with fixed timestamps and metadata, so the same binary always
   gives the same image ID.
 
-- **Build:** the repository build cross-compiles the controller for Linux
-  musl, then writes the image tar and its ID. `wxc-exec.exe` and
-  `wxc-wslc-daemon.exe` embed both with `include_bytes!`.
+- **Build:** the x86_64 and aarch64 controller tars are committed under
+  `src/mxc-sdk/assets/`, so building `mxc-sdk` needs no musl toolchain or
+  download. A script cross-compiles the controller for Linux musl and
+  regenerates the tars when its source changes. `mxc-sdk`'s build script picks
+  the tar for the target architecture, compiles its image ID into the WSLC
+  backend, and copies the tar next to the final binary, as it does for
+  `wslcsdk.dll`. Building the controller in `build.rs` would need a nested
+  Cargo build.
 
-- **Distribution:** no separate file ships. MXC never pulls the image:
+- **CI check:** CI rebuilds the controller images with the pinned toolchain
+  and `--locked`, and fails if their IDs don't match the committed tars, so
+  the committed tars match the source. Rebuilding the prototype from another
+  directory gave identical IDs for both architectures.
+
+- **Distribution:** the tar ships beside each binary that runs the WSLC
+  backend: `wxc-exec.exe` and the daemon in releases, `mxc_ffi.dll` in the
+  .NET and Node packages, and a Rust app's own executable. MXC finds it beside
+  the loaded MXC module, like `wslcsdk.dll`. MXC never pulls the image:
   proxied mode exists for restricted egress, and a registry pull runs on the
   host's network outside any policy. The WSLC C SDK can't build images.
 
-- **Integrity:** WSLC doesn't verify image signatures; the image and its
-  SHA-256 ID are covered by the executable's Authenticode signature. When the
-  store doesn't have that ID, MXC writes the image to a temp file, loads it
-  with `WslcLoadSessionImageFromFile` and deletes the file. It then confirms
-  the ID with `WslcListSessionImages` and creates the controller from the ID,
-  not a tag, so an image placed under the tag isn't used. A mismatched ID,
-  including from a replaced temp file, fails closed before any container
-  exists.
+- **Integrity:** WSLC doesn't verify image signatures. The image ID is the
+  SHA-256 of the image config, which lists the SHA-256 of the controller's
+  layer, so changing the controller changes the ID. WSLC checks the layer
+  hash when it loads a tar. The expected ID is covered by the binary's
+  Authenticode signature. When the store doesn't have that ID, MXC loads the
+  tar with `WslcLoadSessionImageFromFile`, confirms the ID with
+  `WslcListSessionImages`, and creates the controller from the ID, not a tag,
+  so an image placed under the tag isn't used. A missing tar or a mismatched
+  ID fails closed before any container exists.
 
-- **Signing:** the controller binary is ESRP-signed like `lxc-exec`.
+- **Signing:** the controller binary isn't signed, like the Linux
+  `lxc-exec` (ESRP signing runs only on Windows binaries), and signing would
+  change the committed tars. The image ID in the signed Windows binaries
+  covers it.
 
 ### Alternatives
 
@@ -619,7 +636,8 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
 | Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
-| Loaded controller image ID doesn't match the embedded ID | Fails before any container exists | Proposed test |
+| Controller image tar missing, or its loaded ID doesn't match the expected ID | Fails before any container exists | Proposed test |
+| Committed controller tars rebuilt from source | Same image IDs | New CI check |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → start → exec → stop → deprovision (proxied) | Policy enforced on each exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
@@ -641,9 +659,10 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 
 Delivery order:
 
-1. Controller binary and image: a Linux musl cross-build, the image
-   generator, embedding the image and its ID in `wxc-exec.exe` and the
-   daemon, and binary signing. `build.bat` has none of these today.
+1. Controller binary and image: the Linux musl cross-build and image
+   generator script, the committed tars and their CI check, the expected
+   image ID and tar staging in `mxc-sdk`'s build script, the tar in every
+   package that ships `wxc-exec.exe`, the daemon or `mxc_ffi.dll`.
 2. Backend for create-and-run: policy classification, controller, networks,
    port mappings and leftover cleanup at session start.
 3. Backend for lifecycle operations: daemon tracking, proxy variables on
@@ -668,7 +687,8 @@ Delivery order:
     and rejected policy fields.
 
 - **Cost:** one extra container and two networks per container, plus startup
-  time, and about 600 KB in each executable that embeds the controller image.
+  time, a ~600 KB controller image tar per architecture in each package, and
+  ~1.2 MB of committed tars in the repository.
 
 ## Open questions
 

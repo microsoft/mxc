@@ -140,7 +140,7 @@ and cancellation are unchanged.
   | Non-TCP allow rule, `networkProxy` plus egress rules, `networkProxy` plus `egress.default: allow` in proxied mode, CIDR inside the controller's subnets | `PolicyValidation` / `policy_validation` |
   | WSL older than 3.0.5 for any proxied config | `BackendUnavailable` / `backend_unavailable` |
   | `AllowWSLContainerPrivileged=0` with proxied `hostLoopback: allow` | `BackendUnavailable` / `backend_unavailable` |
-  | Loaded controller image ID doesn't match the embedded ID | `BackendUnavailable` / `backend_unavailable` |
+  | Controller image tar missing, or its loaded ID doesn't match the expected ID | `BackendUnavailable` / `backend_unavailable` |
 
   Rust returns `v1::Error`, .NET throws `MxcException`, Node rejects with its
   error type; each carries the code and a message naming the WSL version or
