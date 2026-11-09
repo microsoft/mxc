@@ -81,7 +81,7 @@ function assertForcedWaitFailure(error: unknown): boolean {
   assert.equal(error.code, 'backend_error');
   assert.equal(
     error.message,
-    'WslcGetProcessExitCode failed: HRESULT 0x80004005',
+    'exec failed: WslcGetProcessExitCode failed: HRESULT 0x80004005',
   );
   assert.equal(error.operation, 'WslcGetProcessExitCode');
   assert.equal(error.nativeCode, '0x80004005');

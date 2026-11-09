@@ -350,7 +350,7 @@ public class MxcLifecycleWslcE2ETests
     {
         Assert.Equal(ErrorCode.BackendError, error.Code);
         Assert.Equal(
-            "WslcGetProcessExitCode failed: HRESULT 0x80004005",
+            "exec failed: WslcGetProcessExitCode failed: HRESULT 0x80004005",
             error.Message);
         Assert.Equal("WslcGetProcessExitCode", error.Operation);
         Assert.Equal("0x80004005", error.NativeCode);
