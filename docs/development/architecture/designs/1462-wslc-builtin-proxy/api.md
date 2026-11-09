@@ -165,8 +165,11 @@ and cancellation are unchanged.
   [runtime behavior changes](README.md#contracts-apis-and-compatibility):
   previously rejected requests now run, and `BRIDGED` containers may gain
   Windows loopback access. Code that matches every Node `BackendCapability`
-  value exhaustively must handle `'wslcProxiedNetworking'`.
-
+  value exhaustively must handle `'wslcProxiedNetworking'`. TypeScript can't
+  mark the union open, so this is a source break for that code; it's treated
+  as additive, like `'identitylessLoopbackProxy'` in v1.0.1
+  ([#1406](https://github.com/microsoft/mxc/pull/1406)).
+  
 - Request mapping is unchanged (contract `1.0.0`), apart from provision
   `runtimeConfig` in the development contract:
 
@@ -201,8 +204,9 @@ and cancellation are unchanged.
   - Node provision `runtimeConfig` maps to the provision request.
 
 - References: update `BackendCapability` in
-  `docs/api-reference/{rust,dotnet,node}/v1/types.md`, and Node's WSLC
-  provision `network` type. Update the WSLC notes in the Rust, .NET and Node
+  `docs/api-reference/{rust,dotnet,node}/v1/types.md`, and state in the Node
+  reference that `BackendCapability` may gain values in minor releases. Update
+  Node's WSLC provision `network` type. Update the WSLC notes in the Rust, .NET and Node
   SDK READMEs if they describe WSLC networking as all-or-nothing.
 
 ## Open questions
