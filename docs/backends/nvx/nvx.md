@@ -181,9 +181,9 @@ host or provisioning a container.
 
 ### Output, timeout, and cleanup
 
-Output up to the capture limit is returned unchanged, including non-UTF-8
-bytes. Exceeding the combined limit requests cancellation, tears down the
-container, and returns `BackendError` rather than truncated output. The
+For create-and-run capture, output up to the limit is returned unchanged,
+including non-UTF-8 bytes. Exceeding the combined limit requests cancellation,
+tears down the container, and returns `BackendError` rather than truncated output. The
 limit also applies when the workload timeout is zero. Stop and deprovision
 failures are reported alongside the original failure.
 Explicit host-close failures are reported. An execution-release failure replaces
@@ -204,10 +204,10 @@ until process exit. This protects background execution workers that can outlive
 an error return, including when cancellation and teardown fail. It does not
 mean that the workload has stopped.
 
-For lifecycle `run_in_container_json`, overflow
-cancels and releases only that execution; the caller-owned container remains
-provisioned and usable. The limit also applies when the workload timeout is
-zero. Cleanup failures are reported alongside the original failure.
+For lifecycle `run_in_container_json`, overflow cancels only that execution;
+the caller-owned container remains provisioned and usable. The limit also
+applies when the workload timeout is zero. Cleanup failures are reported
+alongside the original failure.
 
 Lifecycle envelope calls, including validation, explicitly close the native
 host. A close failure after successful work returns `BackendError`; a primary
@@ -282,6 +282,8 @@ image selection, filesystem enforcement, egress and proxy enforcement against
 controlled reachable host endpoints, host-loopback TCP and UDP allow and deny,
 binary stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
+The SDK JSON scenario also covers live output larger than pipe capacity,
+container provision/start, live and captured exec, reuse, stop and deprovision.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and run storage
 has been removed.
