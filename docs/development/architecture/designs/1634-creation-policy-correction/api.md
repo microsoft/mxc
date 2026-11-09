@@ -3,7 +3,7 @@
 > **Audience:** MXC developers
 
 - **Issue:** [#1634](https://github.com/microsoft/mxc/issues/1634)
-- **Feature design spec:** [README.md](README.md), status Proposed
+- **Feature design spec:** [README.md](README.md), status Accepted
 
 Use `mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev` and
 `@microsoft/mxc-sdk/v1/dev`. A new preparation operation takes complete MXC
@@ -586,7 +586,6 @@ change union. No V2 surface is required for this feature.
 Existing V1 options/functions, including V1.Dev creation, remain supported and
 strict. Error prose is not a structured control channel: policy specifics are
 exclusively structured, while useful high-level text and native status remain.
-Maintainer design/API approval is still required before shipping.
 
 Observations and preparation options are separate API arguments, not MXC
 request fields. The candidate uses the original contract's permanent fields.
@@ -603,7 +602,7 @@ No new request version or experimental flag is a compatibility workaround.
 ## Validation and documentation
 
 The shared [validation plan](README.md#acceptance-criteria-and-validation-plan)
-defines capable hosts, scheduled governed cases and cleanup oracles.
+defines capable hosts, public-SDK functional cases and cleanup oracles.
 SDK-specific coverage must include:
 
 - Rust existing Dev struct literals and lifetime-free options storage, new
@@ -626,7 +625,7 @@ No runtime tests are claimed for this documentation PR. Prototype references
 for review are the [Rust](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/rust/v1/dev.md),
 [.NET](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/dotnet/v1/dev.md)
 and [Node](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/node/v1/dev.md)
-Dev contracts. They illustrate the proposed API, not release approval.
+Dev contracts. They illustrate the accepted API; implementation delivery remains separate.
 
 Consumer updates belong in all three SDK READMEs and versioned V1.Dev
 signature/type references, the API index, and caller-owned storage/resubmission

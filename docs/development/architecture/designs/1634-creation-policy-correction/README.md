@@ -2,10 +2,10 @@
 
 > **Audience:** MXC developers
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Issue:** [#1634](https://github.com/microsoft/mxc/issues/1634)
 - **Contributor:** @rossnichols
-- **Implementation PRs:** None submitted; maintainer scope acceptance and spec approval remain pending.
+- **Implementation PRs:** None submitted.
 
 Return structured native creation-policy failures and provide a separate
 operation that prepares a candidate restricted request without creating a
@@ -15,7 +15,7 @@ owns storage, merging and retry limits; MXC owns interpreting supported
 observations and proving each proposed change restrictive.
 Public declarations and caller examples are in the [API proposal](api.md).
 An [exploratory implementation](https://github.com/microsoft/mxc/commit/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae)
-illustrates the contract; it is not API, release or implementation-PR approval.
+illustrates the accepted contract; implementation delivery remains separate.
 
 ## Problem and scope
 
@@ -211,11 +211,14 @@ This table concerns the feature, not whether a backend can otherwise run.
 
 ProcessContainer can be available while fresh refusal reporting is unavailable.
 An otherwise valid native creation still works without the optional getter.
+MXC can depend on the Windows policy-result API when runtime detection finds
+the getter and advertised reporting support. Runtime capability detection is
+the support requirement; no minimum Windows build is inferred from a request
+or SDK version.
 Preparation of supplied observations remains subject to request/serviceability
 and safety checks; it does not require obtaining a fresh refusal first.
-Creation errors cannot return history they were not given. Do not infer
-governance or a minimum Windows build from a schema version or export/support
-bit.
+Creation errors cannot return history they were not given. API availability
+does not establish that the current creator is subject to administrative policy.
 
 No new public feature probe, backend, or experimental-backend status change
 is proposed. Unsupported preparation fails explicitly, without creating a
@@ -245,8 +248,8 @@ container, selecting fallback or weakening permissions.
 - Native library and adapters are co-versioned. Change structured-error/
   preparation transport, generated C# bindings, Node layouts and freeing
   contracts together; do not promise arbitrary old/new FFI interoperability.
-  SDK release version and OS-contract shipping eligibility require maintainer
-  agreement under the [versioning policy](../../versioning.md).
+  SDK releases follow the [versioning policy](../../versioning.md); Windows
+  API availability is detected at runtime as described above.
 
 ## Design and security
 
@@ -338,8 +341,8 @@ of workload markers alone cannot prove that no transient environment was created
 
 | Scenario | Input/action and exact assertion |
 | --- | --- |
-| Strict governed refusal, proposed public-SDK test | Govern the actual creator and request a forbidden grant: one refusal, unchanged request, high-level policy guidance/status, fresh structured details and zero workload markers. |
-| Caller A -> prepare -> B -> merge -> prepare -> success, proposed governed test | Separate creation, preparation and acceptance calls. Assert zero preparation creation/trace/launch counts, at most one native attempt per creation, complete caller-owned merging, unchanged input and only the accepted workload launches. |
+| Strict policy refusal | Inject a native policy refusal with captured observations: one refusal, unchanged request, high-level policy guidance/status, fresh structured details and zero workload markers. |
+| Caller A -> prepare -> B -> merge -> prepare -> success | Inject successive native refusal/success outcomes through separate creation, preparation and acceptance calls. Assert zero preparation creation/trace/launch counts, at most one native attempt per creation, complete caller-owned merging, unchanged input and only the accepted workload launches. |
 | Preparation, rejection and explicit acceptance | Use nonempty restrictions; compare original/candidate JSON and every reported edit independently. Reject once with no execution, then accept and submit only the chosen JSON through strict run/spawn. A stale approval must not accept another changed candidate. |
 | Public SDK and changed-request reuse | Extend Rust `dev_json_processcontainer_policy_feedback_restricts_current_request`, .NET `DevJson_CapturesOutputAndStreamsInput`, and Node `V1.Dev prepares filesystem ceilings for caller-accepted strict creation`: cross real bindings, deny restricted writes, allow an unrelated writable control, preserve cwd/stdin/output and round-trip storage. |
 | Different creator and stale observations | Prepare a fresh request using stored observations from another creator/current policy: verify restrictive applicability, then reevaluate Windows during creation. No creator-cache key or approval reuse. |
@@ -350,35 +353,32 @@ of workload markers alone cannot prove that no transient environment was created
 | Unsupported surfaces and compatibility | Preparation rejects another backend or non-create-and-run phase, including empty observations. Existing Rust Dev literals/lifetime-free storage and all creation/stdin/PTY/lifecycle signatures remain usable. Strict old-host creation remains available. |
 | Cross-SDK storage/ABI/AOT | Public extraction/merging, required before/after JSON values, null-versus-absence operations, JSON Pointers and limits survive storage and owned native transport. Source-generated .NET net8.0/net10.0 and AOT roots must not fall back to reflection. |
 
-Use the existing scheduled `process` suite in
+Run the public preparation and strict-creation cases in the existing scheduled
+`process` suite in
 `scripts/ci/run_backend_validation_tests.ps1`, reached through
 `Validation.Tests.Scheduled.yml` and `Validation.Tests.Matrix.Job.yml`, with
 architecture-matched SDK bundles from
 `scripts/ci/build-windows-sdk-test-bundle.ps1`. Require discovered, positive,
 non-skipped native/public-SDK results on suitable Windows x64/ARM64 hosts.
 
-Synthetic-observation preparation coverage does not install administrative
-policy and does not prove fresh governed refusal capture. Required governed
-cases need a maintained fixture that verifies the creator is actually governed and
-restores exact policy/security state. Fixture ownership, matching host images
-and scheduled jobs remain prerequisites for functional acceptance. Manual
-prototype runs are not scheduled-CI coverage.
-
-No CI gate is removed or weakened. Use injected faults for ownership cases
-unsafe to induce on production hosts, with real-host positive controls.
+Use supplied observations for public preparation tests and injected native
+outcomes for refusal capture, getter failures and exact native-attempt counts.
+The public cases must still check actual filesystem enforcement, caller
+acceptance, cwd/stdin and unchanged input through the real SDK/native bindings.
+Existing CI gates remain unchanged.
 See the [validation runbook](../../../build-and-test/ci-validation-infrastructure.md).
 
 ## Delivery and documentation
 
-After maintainer acceptance and approval/merge of this feature/API spec:
+After this accepted feature/API spec is merged:
 
 1. Deliver native capture/ownership, structured error transport and owned
    observation storage, with refusal and unknown-data coverage.
 2. Deliver restrictive derivation and authoring JSON projection through the
    separate preparation API, then public Dev candidate/change storage and
    caller-controlled acceptance examples. Keep strict creation unchanged.
-3. Wire governed/public-SDK acceptance into the scheduled suite and document
-   supported host capabilities and release constraints before delivery.
+3. Wire public-SDK acceptance into the scheduled suite and document runtime
+   host-capability detection before delivery.
 
 Each implementation slice must preserve strict callers and be buildable.
 MXC request-contract publication and experimental-backend authorization do
@@ -389,21 +389,11 @@ implementation, validation and documentation.
 
 ## Open questions
 
-- **Scope acceptance:** maintainers must apply `feature-accepted` and approve
-  the design/API; those approvals have not been recorded.
-- **Additive API approval:** approve preparation/result naming, the separate
-  extensible options and the shared candidate/change storage contract. The
-  proposal preserves supported V1 APIs and does not request a compatibility
-  exception.
-- **Release eligibility:** decide supported SDK/experimental OS-contract
-  shipping criteria. A new request version or experimental-backend flag does
-  not substitute for that decision.
-- **Governed CI:** agree on maintained setup/restore, matching x64/ARM64 images
-  and required scheduled jobs before functional acceptance.
+None.
 
 ## Review checklist
 
-- [ ] The issue has maintainer-applied `feature-accepted`; scope and contributor are agreed.
+- [x] The issue has maintainer-applied `feature-accepted`; scope and contributor are agreed.
 - [x] One or two meaningful usage examples, non-goals, defaults, and failure behavior are clear.
 - [x] Every backend is considered, with explicit capability checks and probe/availability behavior.
 - [x] Execution modes and container lifecycle support are explicit; exclusions are explained.
@@ -411,6 +401,6 @@ implementation, validation and documentation.
 - [x] Security, contract/API compatibility, and any breaking changes are addressed.
 - [x] A separate API proposal is linked when public APIs change.
 - [x] Acceptance criteria and the CI plan cover observable behavior.
-- [ ] Delivery and documentation changes are scoped; material questions are resolved.
+- [x] Delivery and documentation changes are scoped; material questions are resolved.
 - [x] Answers are concise; diagrams explain the design without repeating the text.
-- [ ] Maintainers have approved the spec and its status is Accepted before merge.
+- [x] Maintainers have approved the spec and its status is Accepted before merge.
