@@ -52,7 +52,6 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($name in @(
     'windows_x64::signed_agent_proxy_validation_withholds_credentials',
     'windows_x64::guest_path_resolves_windows_case_alias',
-    'windows_x64::host_only_executor_request_matrix',
     'windows_x64::signed_executor_proxy_validation_withholds_credentials',
     'windows_x64::signed_bundle_executor_configs',
     'windows_x64::signed_bundle_executor_create_and_run',

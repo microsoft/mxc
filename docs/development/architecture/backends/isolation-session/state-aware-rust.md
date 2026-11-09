@@ -415,6 +415,23 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
+`Relayed` execution uses the same [timeout cleanup](oneshot.md#os-api-dependency)
+as create-and-run execution: stop input copying before closing stdin, or skip
+stdin-close if the thread has not exited within one second. SDK `Piped` and
+explicit PTY operations keep their existing shutdown behavior.
+
+### Output draining after relayed execution
+
+After the workload exits and stdin forwarding stops, create-and-run and
+lifecycle `Relayed` execution keep copying stdout and stderr until both finish,
+neither has a successful output write for five seconds, or 60 seconds pass,
+whichever comes first. Reaching a limit cancels reads and briefly waits for the
+copying threads to exit; it cannot interrupt blocked writes or flushes. Output
+can be lost without a warning or a change to the workload's exit code. A child
+process that keeps writing can use the full 60-second drain budget; this is not
+a limit on the total execution or cleanup time. These limits do not apply to
+SDK `Piped` execution.
+
 ### Deprovision and concurrent sandboxes
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).

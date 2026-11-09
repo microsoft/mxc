@@ -133,13 +133,6 @@ jobs:
           & $destination --ignored filesystem_probe::launch_tests::
           if ($LASTEXITCODE -ne 0) { throw 'Filesystem probe request regression failed.' }
 
-      - name: Test NVX host-only executor matrix
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             -p mxc-sdk --no-default-features --features microvm
-             --test nvx_e2e windows_x64::host_only_executor_request_matrix
-             -- --ignored --exact
-
       - name: Test MicroVM validation infrastructure
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: ${{ github.workspace }}
@@ -167,7 +160,7 @@ jobs:
 
       - name: Build debug executor for isolated telemetry smoke tests
         env:
-          MXC_TELEMETRY_PROVIDER_GROUP_GUID: ''
+          MXC_TELEMETRY_COMPONENT_PATH: ''
           MXC_TELEMETRY_TEST_KEYWORDS: '1'
         run: cargo build --locked -p wxc --features "test-support isolation_session"
 
@@ -224,3 +217,39 @@ jobs:
             src/target/${{ matrix.target }}/release/aci-edge-sandboxes/
           if-no-files-found: error
           retention-days: 1
+
+  telemetry-component-check:
+    name: Telemetry component (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: pwsh
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target/telemetry-component-check
+          key: telemetry-component-${{ matrix.arch }}
+          cache-on-failure: false
+
+      - name: Verify telemetry component build checks
+        shell: pwsh
+        run: .\scripts\ci\check-telemetry-component.ps1

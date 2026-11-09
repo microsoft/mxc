@@ -3,6 +3,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,8 +15,44 @@ use aci_edge_sandboxes::agent::{
 };
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Backend, Capabilities, Error, ErrorCode, ExecIo, ExecOutcome, ExecRequest,
-    ImageSource, OutputSink, ProvisionRequest, SandboxId, SandboxSpec,
+    ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SandboxId(aci_edge_sandboxes::SandboxId);
+
+impl SandboxId {
+    pub fn from_token(token: &str) -> aci_edge_sandboxes::Result<Self> {
+        aci_edge_sandboxes::SandboxId::from_token(token).map(Self)
+    }
+
+    pub fn from_mxc(value: &str) -> Result<Self, MxcError> {
+        let token = value.strip_prefix("microvm:").ok_or_else(|| {
+            MxcError::malformed_id("MicroVM sandbox ID must start with 'microvm:'")
+        })?;
+        Self::from_token(token).map_err(|_| {
+            MxcError::malformed_id(
+                "MicroVM sandbox ID must contain 32 lowercase hexadecimal digits",
+            )
+        })
+    }
+
+    pub fn to_mxc_string(&self) -> String {
+        format!("microvm:{}", self.0.token())
+    }
+}
+
+impl std::fmt::Display for SandboxId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProvisionOutput {
+    pub sandbox_id: SandboxId,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
 
 pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
@@ -47,7 +84,7 @@ pub(super) trait SandboxClient {
     fn validate_provision(&self, input: &PreparedProvision) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
-    fn provision(&self, input: &PreparedProvision) -> Result<SandboxId, MxcError>;
+    fn provision(&self, input: &PreparedProvision) -> Result<ProvisionOutput, MxcError>;
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
@@ -132,6 +169,7 @@ struct ClientInner {
     backend: Arc<AgentBackend>,
     client: AciEdgeSandbox,
     _signatures: super::signature_verification::VerifiedBundle,
+    _state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 }
 
 pub(super) struct NvxClient(Option<ClientInner>);
@@ -141,6 +179,20 @@ fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
 }
 
 pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
+    create_client_with_guard(state_root, None)
+}
+
+pub(super) fn create_persistent_client(
+    guard: crate::mxc_common::filesystem_security::LockedDirectoryPath,
+) -> Result<NvxClient, MxcError> {
+    let path = guard.path().to_path_buf();
+    create_client_with_guard(&path, Some(guard))
+}
+
+fn create_client_with_guard(
+    state_root: &Path,
+    guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
+) -> Result<NvxClient, MxcError> {
     let bundle = BundledAgent::discover().map_err(map_error)?;
     let directory = bundle.directory().canonicalize().map_err(|error| {
         MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
@@ -158,6 +210,7 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
         backend,
         client,
         _signatures: signatures,
+        _state_root_guard: guard,
     })))
 }
 
@@ -166,6 +219,252 @@ impl NvxClient {
         self.0
             .as_ref()
             .ok_or_else(|| MxcError::backend_error("NVX client is closed"))
+    }
+}
+
+pub(super) fn agent_bundle_available() -> bool {
+    BundledAgent::discover().is_ok_and(|bundle| bundle.library().is_file())
+}
+
+pub(super) fn require_agent_bundle_present() -> Result<(), MxcError> {
+    let bundle = BundledAgent::discover().map_err(map_error)?;
+    if bundle.library().is_file() {
+        Ok(())
+    } else {
+        Err(MxcError::backend_unavailable(format!(
+            "NVX bundle is missing {}",
+            bundle.library().display()
+        )))
+    }
+}
+
+pub(super) fn lifecycle_state_root(
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+        MxcError::backend_unavailable(
+            "cannot resolve LOCALAPPDATA for the persistent NVX lifecycle state",
+        )
+    })?;
+    let local_app_data = std::path::PathBuf::from(local_app_data);
+    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        &local_app_data,
+        [
+            std::ffi::OsStr::new("Microsoft"),
+            std::ffi::OsStr::new("MXC"),
+            std::ffi::OsStr::new("nvx"),
+        ]
+        .as_slice(),
+        2,
+    )
+    .map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "cannot admit persistent NVX lifecycle state below '{}': {error}",
+            local_app_data.display()
+        ))
+    })
+}
+
+pub(super) enum Event {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(Result<ExecOutcome, MxcError>),
+}
+
+struct EventSink {
+    sender: mpsc::SyncSender<Event>,
+    closed: Arc<AtomicBool>,
+    stderr: bool,
+}
+
+impl OutputSink for EventSink {
+    fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        // Bound buffering even when the caller holds its output without reading.
+        for bytes in data.chunks(64 * 1024) {
+            let mut event = if self.stderr {
+                Event::Stderr(bytes.to_vec())
+            } else {
+                Event::Stdout(bytes.to_vec())
+            };
+            loop {
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+                match self.sender.try_send(event) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(pending)) => {
+                        event = pending;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        return Err(io::ErrorKind::BrokenPipe.into())
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn close_handle(&self) -> Option<OutputCloser> {
+        let closed = self.closed.clone();
+        Some(OutputCloser::new(move || {
+            closed.store(true, Ordering::Release)
+        }))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct StreamingExecution(Arc<StreamingExecutionInner>);
+
+struct StreamingExecutionInner {
+    control: Arc<dyn aci_edge_sandboxes::ExecControl>,
+    receiver: Mutex<Option<mpsc::Receiver<Event>>>,
+    closed: Arc<AtomicBool>,
+    cancellation: Mutex<Option<Instant>>,
+}
+
+impl NvxClient {
+    pub(super) fn start_execution(
+        &self,
+        sandbox_id: &SandboxId,
+        request: &ExecRequest,
+    ) -> Result<StreamingExecution, MxcError> {
+        let inner = self.inner()?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let closed = Arc::new(AtomicBool::new(false));
+        let io = ExecIo {
+            stdout: Box::new(EventSink {
+                sender: sender.clone(),
+                closed: closed.clone(),
+                stderr: false,
+            }),
+            stderr: Box::new(EventSink {
+                sender: sender.clone(),
+                closed: closed.clone(),
+                stderr: true,
+            }),
+            stdin: None,
+        };
+        let control: Arc<dyn aci_edge_sandboxes::ExecControl> = Arc::from(
+            inner
+                .backend
+                .exec(&sandbox_id.0, request, io)
+                .map_err(map_error)?,
+        );
+        StreamingExecution::observe(control, sender, receiver, closed)
+    }
+}
+
+impl StreamingExecution {
+    fn observe(
+        control: Arc<dyn aci_edge_sandboxes::ExecControl>,
+        sender: mpsc::SyncSender<Event>,
+        receiver: mpsc::Receiver<Event>,
+        closed: Arc<AtomicBool>,
+    ) -> Result<Self, MxcError> {
+        let waiting = control.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("mxc-nvx-stream".to_owned())
+            .spawn(move || {
+                let _ = sender.send(Event::Exit(waiting.wait().map_err(map_error)));
+            })
+        {
+            closed.store(true, Ordering::Release);
+            return Err(MxcError::backend_error(format!(
+                "cannot start NVX stream observer: {error}; execution outcome is unknown"
+            )));
+        }
+        Ok(Self(Arc::new(StreamingExecutionInner {
+            control,
+            receiver: Mutex::new(Some(receiver)),
+            closed,
+            cancellation: Mutex::new(None),
+        })))
+    }
+    pub(super) fn next<T>(
+        &self,
+        timeout_ms: Option<u64>,
+        deliver: impl FnOnce(Event) -> T,
+    ) -> Result<Option<T>, MxcError> {
+        let deadline = timeout_ms
+            .and_then(|timeout| Instant::now().checked_add(Duration::from_millis(timeout)));
+        let receiver = self
+            .0
+            .receiver
+            .lock()
+            .map_err(|_| MxcError::backend_error("NVX stream receiver lock poisoned"))?;
+        let receiver = receiver
+            .as_ref()
+            .ok_or_else(|| MxcError::backend_error("NVX execution was released"))?;
+        loop {
+            let cancelled = *self
+                .0
+                .cancellation
+                .lock()
+                .map_err(|_| MxcError::backend_error("NVX cancellation lock poisoned"))?;
+            if cancelled.is_some_and(|start| start.elapsed() >= CANCEL_GRACE) {
+                return Err(MxcError::backend_error(UNKNOWN_OUTCOME));
+            }
+            let pause = deadline.map_or(POLL, |end| {
+                POLL.min(end.saturating_duration_since(Instant::now()))
+            });
+            match receiver.recv_timeout(pause) {
+                Ok(event) => return Ok(Some(deliver(event))),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(MxcError::backend_error(
+                        "NVX stream ended without an outcome",
+                    ))
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if deadline.is_some_and(|end| Instant::now() >= end) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn cancel(&self) -> Result<(), MxcError> {
+        {
+            let mut cancelled = self
+                .0
+                .cancellation
+                .lock()
+                .map_err(|_| MxcError::backend_error("NVX cancellation lock poisoned"))?;
+            if cancelled.is_some() {
+                return Ok(());
+            }
+            *cancelled = Some(Instant::now());
+        }
+        self.0.closed.store(true, Ordering::Release);
+        let control = self.0.control.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("mxc-nvx-stream-cancel".to_owned())
+            .spawn(move || {
+                let _ = sender.send(control.cancel().map_err(map_error));
+            })
+            .map_err(|error| {
+                MxcError::backend_error(format!("cannot start NVX cancellation worker: {error}"))
+            })?;
+        receiver
+            .recv_timeout(CANCEL_GRACE)
+            .map_err(|_| MxcError::backend_error(CANCEL_UNFINISHED))?
+    }
+
+    pub(super) fn release(&self) -> Result<(), MxcError> {
+        self.0.closed.store(true, Ordering::Release);
+        self.0
+            .receiver
+            .lock()
+            .map_err(|_| MxcError::backend_error("NVX stream receiver lock poisoned"))?
+            .take();
+        Ok(())
+    }
+}
+
+impl Drop for StreamingExecutionInner {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
     }
 }
 
@@ -388,7 +687,7 @@ impl SandboxClient for NvxClient {
     fn probe(&self) -> Result<(), MxcError> {
         self.inner()?.client.probe().map_err(map_error)
     }
-    fn provision(&self, input: &PreparedProvision) -> Result<SandboxId, MxcError> {
+    fn provision(&self, input: &PreparedProvision) -> Result<ProvisionOutput, MxcError> {
         let inner = self.inner()?;
         if let Some(ImageSource::Reference(reference)) = &input.spec.image {
             inner
@@ -399,20 +698,23 @@ impl SandboxClient for NvxClient {
         inner
             .client
             .provision_with(&input.request, &input.spec)
-            .map(|result| result.sandbox_id)
+            .map(|result| ProvisionOutput {
+                sandbox_id: SandboxId(result.sandbox_id),
+                metadata: result.metadata,
+            })
             .map_err(map_error)
     }
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
         self.inner()?
             .client
-            .start(sandbox_id)
+            .start(&sandbox_id.0)
             .map(|_| ())
             .map_err(map_error)
     }
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError> {
         self.inner()?
             .backend
-            .diagnostics(sandbox_id)
+            .diagnostics(&sandbox_id.0)
             .map_err(map_error)
     }
     fn exec_and_wait(
@@ -444,7 +746,7 @@ impl SandboxClient for NvxClient {
         let control: Arc<dyn aci_edge_sandboxes::ExecControl> = Arc::from(
             inner
                 .backend
-                .exec(sandbox_id, request, io)
+                .exec(&sandbox_id.0, request, io)
                 .map_err(map_error)?,
         );
         logger.log_diagnostic_line("NVX execution started");
@@ -468,14 +770,14 @@ impl SandboxClient for NvxClient {
     fn stop(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
         self.inner()?
             .client
-            .stop(sandbox_id)
+            .stop(&sandbox_id.0)
             .map(|_| ())
             .map_err(map_error)
     }
     fn deprovision(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
         self.inner()?
             .client
-            .deprovision(sandbox_id)
+            .deprovision(&sandbox_id.0)
             .map(|_| ())
             .map_err(map_error)
     }
@@ -484,6 +786,7 @@ impl SandboxClient for NvxClient {
             backend,
             client,
             _signatures,
+            _state_root_guard,
         }) = self.0.take()
         else {
             return Ok(());
@@ -501,6 +804,130 @@ mod tests {
     use super::*;
     use aci_edge_sandboxes::ExecControl;
     use std::sync::Condvar;
+
+    #[test]
+    fn lifecycle_ids_preserve_native_tokens_and_reject_malformed_ids() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let native = SandboxId::from_token(token).unwrap();
+        let text = format!("microvm:{token}");
+        assert_eq!(native.to_mxc_string(), text);
+        assert_eq!(SandboxId::from_mxc(&text).unwrap(), native);
+        for invalid in [
+            "microvm:",
+            "microvm:bad",
+            "microvm:ABCDEF0123456789abcdef0123456789",
+            "other:0123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(
+                SandboxId::from_mxc(invalid).unwrap_err().code,
+                MxcErrorCode::MalformedId
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_queue_bounds_output_and_closing_releases_backpressure() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut sink = EventSink {
+            sender,
+            closed,
+            stderr: true,
+        };
+        let closer = sink.close_handle().unwrap();
+        let bytes = vec![0xff; 192 * 1024];
+        let (done_sender, done_receiver) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let result = sink.write(&bytes);
+            done_sender
+                .send(result.map_err(|error| error.kind()))
+                .unwrap();
+        });
+        match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+            Event::Stderr(data) => assert_eq!(data, vec![0xff; 64 * 1024]),
+            _ => panic!("stderr must retain its stream and bytes"),
+        }
+        // Fill the single buffered slot, then ensure another write is interrupted.
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(matches!(
+            done_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        closer.close();
+        assert_eq!(
+            done_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(io::ErrorKind::BrokenPipe)
+        );
+        writer.join().unwrap();
+        // Closing does not discard already accepted output.
+        match receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+            Event::Stderr(data) => assert_eq!(data, vec![0xff; 64 * 1024]),
+            _ => panic!("buffered bytes must remain readable"),
+        }
+    }
+
+    #[test]
+    fn streaming_cancel_returns_unknown_when_no_terminal_event_arrives() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let execution = StreamingExecution(Arc::new(StreamingExecutionInner {
+            control: Arc::new(FakeControl::new(false, ExecOutcome::Cancelled)),
+            receiver: Mutex::new(Some(receiver)),
+            closed: Arc::new(AtomicBool::new(false)),
+            cancellation: Mutex::new(None),
+        }));
+        execution.cancel().unwrap();
+        let error = execution.next(None, |_| ()).unwrap_err();
+        assert_eq!(error.message, UNKNOWN_OUTCOME);
+        execution.release().unwrap();
+        drop(sender);
+    }
+
+    #[test]
+    fn streaming_observer_delivers_binary_streams_before_the_exit_result() {
+        let control = Arc::new(FakeControl::new(false, ExecOutcome::Exited(42)));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut stdout = EventSink {
+            sender: sender.clone(),
+            closed: closed.clone(),
+            stderr: false,
+        };
+        let mut stderr = EventSink {
+            sender: sender.clone(),
+            closed: closed.clone(),
+            stderr: true,
+        };
+        let execution =
+            StreamingExecution::observe(control.clone(), sender, receiver, closed).unwrap();
+        let writer = std::thread::spawn(move || {
+            let result = stdout
+                .write(&vec![0xff; 128 * 1024])
+                .and_then(|()| stderr.write(&vec![0x80; 128 * 1024]));
+            *control.state.lock().unwrap() = true;
+            control.wake.notify_all();
+            result
+        });
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        loop {
+            match execution
+                .next(Some(5000), |event| event)
+                .unwrap()
+                .expect("stream progress")
+            {
+                Event::Stdout(bytes) => output.extend(bytes),
+                Event::Stderr(bytes) => error.extend(bytes),
+                Event::Exit(result) => {
+                    assert_eq!(result.unwrap(), ExecOutcome::Exited(42));
+                    break;
+                }
+            }
+        }
+        writer.join().unwrap().unwrap();
+        assert_eq!(output, vec![0xff; 128 * 1024]);
+        assert_eq!(error, vec![0x80; 128 * 1024]);
+        execution.release().unwrap();
+    }
 
     #[test]
     fn agent_setup_selects_host_cpu_profile() {

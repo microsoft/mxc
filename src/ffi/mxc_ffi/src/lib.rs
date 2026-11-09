@@ -20,6 +20,9 @@
 //!   [`mxc_exec_state_aware_json`] runs the exec phase as a live streaming handle
 //!   (reusing the streaming externs).
 //!
+//! MicroVM JSON streaming and lifecycle operations use the shared engine.
+//! They require the MicroVM build feature, host support, and experimental opt-in.
+//!
 //! ## Ingress rule
 //!
 //! Policy and configuration cross this boundary **only** as exact

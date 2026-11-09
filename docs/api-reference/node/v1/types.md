@@ -1032,6 +1032,8 @@ export interface WslcConfig {
 }
 ```
 
+`targetOs` may be omitted or set to `"linux"`; other values are rejected.
+
 ## `@microsoft/mxc-sdk/v1::LifecycleResult`
 
 Warnings returned by starting, stopping, or deprovisioning a container.
