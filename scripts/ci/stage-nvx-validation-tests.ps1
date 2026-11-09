@@ -22,7 +22,7 @@ Push-Location $srcRoot
 try {
     $messages = @(cargo test --locked --release --target x86_64-pc-windows-msvc `
         -p mxc-sdk --no-default-features --features $Features `
-        --test nvx_e2e --no-run --message-format=json)
+        --test nvx_e2e --test nvx_bundle_integrity --no-run --message-format=json)
     if ($LASTEXITCODE -ne 0) {
         $messages | ForEach-Object { Write-Host $_ }
         throw "cargo test --no-run failed with exit code $LASTEXITCODE."
@@ -69,5 +69,31 @@ foreach ($name in @(
 }
 if (-not (Test-Path -LiteralPath (Join-Path $binaryDirectoryPath 'aci-edge-sandboxes\bundle-manifest.json') -PathType Leaf)) {
     throw 'The Windows x64 artifact is missing the signed NVX bundle.'
+}
+$signatureTests = @($messages |
+    Where-Object { $_.StartsWith('{') } |
+    ConvertFrom-Json |
+    Where-Object {
+        $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'nvx_bundle_integrity' -and
+        $_.profile.test -and $_.executable
+    })
+if ($signatureTests.Count -ne 1) {
+    throw "Expected one NVX bundle verification executable; found $($signatureTests.Count)."
+}
+$previousBundle = $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR
+try {
+    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
+    $signatureOutput = @(& $signatureTests[0].executable --exact crate_staged_bundle_opens_and_rejects_an_unverified_library --nocapture 2>&1)
+    $signatureExit = $LASTEXITCODE
+    $signatureOutput | ForEach-Object { Write-Host $_ }
+    if ($signatureExit -ne 0) {
+        throw "The staged NVX artifact failed signature and integrity validation with exit code $signatureExit."
+    }
+    if (($signatureOutput -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') {
+        throw 'The staged NVX signature verification did not execute its required test.'
+    }
+}
+finally {
+    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = $previousBundle
 }
 Write-Host "Staged SDK MicroVM tests: $destination"
