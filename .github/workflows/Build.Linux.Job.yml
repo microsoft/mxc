@@ -203,7 +203,7 @@ jobs:
           destination="target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
           cp "$payload" "$destination"
           for case in bubblewrap_launch_rejects_stalled_paths lxc_launch_rejects_stalled_paths \
-            bubblewrap_denied_paths_reject_stalls lxc_mount_paths_reject_stalls; do
+            bubblewrap_mount_paths_reject_stalls lxc_mount_paths_reject_stalls; do
             test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
             "$destination" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
           done

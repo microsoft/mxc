@@ -33,6 +33,8 @@
       - isolation_session_stdin_line.json --pipe/file line delivery with console stdout
       - isolation_session_streaming_smoke.json --output arrives incrementally
         rather than as a burst at exit
+      - isolation_session_post_exit_output.json --stdout/stderr keep arriving
+        after the workload exits
 
     Manual smoke configs (NOT asserted --observe the output yourself):
       - isolation_session_powershell_interactive.json --launches
@@ -889,6 +891,128 @@ if (-not (Test-Path $streamingConfig)) {
     $null = $results.Add(@{ Name = 'streaming (incremental delivery)'; Pass = $streamingPass; Skipped = $false; Reason = $streamingReason })
 }
 
+
+function Run-PostExitOutputTest {
+    $name = 'post-exit stdout/stderr draining'
+    $root = 'C:\mxc_post_exit_output'
+    $process = $null
+    $pass = $false
+    $reason = ''
+    Write-Host "  $name ... " -NoNewline
+    try {
+        # A fixed public path lets the sandbox read the script without access to
+        # the caller's profile.
+        if (Test-Path -LiteralPath $root) {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+        }
+        New-Item -Path $root -ItemType Directory -ErrorAction Stop | Out-Null
+        $aclOutput = & icacls.exe $root /grant '*S-1-5-11:(OI)(CI)RX' 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not grant script read access: $aclOutput"
+        }
+        Set-Content -LiteralPath "$root\producer.ps1" -Encoding Ascii -Value @'
+param([int]$WaitForParent)
+$ErrorActionPreference = 'Stop'
+if ($WaitForParent) {
+    $parent = $null
+    try {
+        $parent = [Diagnostics.Process]::GetProcessById($WaitForParent)
+    } catch [ArgumentException] {
+        # The workload already exited before this child started.
+    }
+    if ($null -ne $parent) {
+        try {
+            if (-not $parent.WaitForExit(30000)) {
+                throw 'Workload did not exit before child output.'
+            }
+        } finally {
+            $parent.Dispose()
+        }
+    }
+    [Console]::Out.WriteLine('STDOUT-AFTER-PARENT-EXIT')
+    [Console]::Error.WriteLine('STDERR-AFTER-PARENT-EXIT')
+    1..60 | ForEach-Object {
+        [Console]::Out.WriteLine(('STDOUT-LINE {0:D3}' -f $_))
+        [Console]::Out.Flush()
+        [Console]::Error.WriteLine(('STDERR-LINE {0:D3}' -f $_))
+        [Console]::Error.Flush()
+        Start-Sleep -Milliseconds 500
+    }
+    [Console]::Out.WriteLine('STDOUT-END')
+    [Console]::Error.WriteLine('STDERR-END')
+    exit 0
+}
+# The backend wraps this PowerShell process in cmd.exe. Wait for that workload
+# process, not just this script, before the child starts its output sequence.
+$workloadId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+if (-not $workloadId) { throw 'Could not identify the workload process.' }
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -WaitForParent {1}' -f $PSCommandPath, $workloadId
+$start.UseShellExecute = $false
+$child = [Diagnostics.Process]::Start($start)
+$child.Dispose()
+exit 42
+'@
+        $config = Join-Path $ConfigDir 'isolation_session_post_exit_output.json'
+        if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
+            throw "Required config missing: $config"
+        }
+        $stdout = Join-Path $root 'stdout.txt'
+        $stderr = Join-Path $root 'stderr.txt'
+        $command = '/d /s /c ""{0}" "{1}" 1>"{2}" 2>"{3}""' -f $WxcExec, $config, $stdout, $stderr
+        $process = Start-Process -FilePath $env:ComSpec -ArgumentList $command `
+            -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(120000)) {
+            throw 'Executor did not finish within 120 seconds.'
+        }
+        if ($process.ExitCode -ne 42) {
+            throw "Expected workload exit 42, got $($process.ExitCode)."
+        }
+        foreach ($stream in @(
+                @{ Prefix = 'STDOUT'; Path = $stdout },
+                @{ Prefix = 'STDERR'; Path = $stderr }
+            )) {
+            $expected = @("$($stream.Prefix)-AFTER-PARENT-EXIT")
+            $expected += 1..60 | ForEach-Object { '{0}-LINE {1:D3}' -f $stream.Prefix, $_ }
+            $expected += "$($stream.Prefix)-END"
+            $actual = @(Get-Content -LiteralPath $stream.Path)
+            if (($actual -join "`n") -cne ($expected -join "`n")) {
+                throw "$($stream.Prefix) incomplete or unexpected: expected 62 lines, got $($actual.Count). See $($stream.Path)."
+            }
+        }
+        $pass = $true
+    } catch {
+        $reason = $_.Exception.Message
+    } finally {
+        try {
+            if ($null -ne $process -and -not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(10000)) {
+                    throw "Could not stop output-drain launcher $($process.Id)."
+                }
+            }
+            if ($pass) {
+                Remove-Item -LiteralPath $root -Recurse -Force
+            }
+        } catch {
+            $pass = $false
+            $reason = "$reason Cleanup failed: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+        }
+    }
+    if ($pass) {
+        Write-Host 'PASS' -ForegroundColor Green
+    } else {
+        Write-Host 'FAIL' -ForegroundColor Red
+        Write-Host "    Reason: $reason" -ForegroundColor Red
+        Write-Host "    Diagnostics: $root (preserved until the next run)" -ForegroundColor Gray
+    }
+    return @{ Name = $name; Pass = $pass; Skipped = $false; Reason = $reason }
+}
+
+$null = $results.Add((Run-PostExitOutputTest))
 
 # Summary -- wrap each filtered pipeline in @(...) to force array context.
 # Without @(), a Where-Object that returns a single hashtable is unwrapped

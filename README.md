@@ -141,16 +141,17 @@ Official Microsoft builds send Required diagnostic data to Microsoft for the
 development `1.1.0-alpha` request contract. MXC is moving to Required telemetry
 to keep MXC secure, reliable, and up to date: four events describe execution
 start and end, categorized failures, and process exits. They need no user
-consent or per-request opt-in, and an administrator can block them with
-machine-wide policy.
+consent or per-request opt-in, and administrative policy does not block them.
 
 Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
 unless the run opts in, the Windows user has consented, and administrative
 policy permits collection. An administrator can block that telemetry but cannot
 grant consent for the user.
 
-Local open-source builds are not configured to route telemetry to Microsoft,
-and telemetry is a no-op on non-Windows platforms. See
+Local open-source debug builds are not configured to route telemetry to
+Microsoft. Windows release builds from source use the bundled signed telemetry
+component and are routed; set an empty `MXC_TELEMETRY_COMPONENT_PATH` to build
+without routing. Telemetry is a no-op on non-Windows platforms. See
 [telemetry policy and consent](docs/telemetry.md) for controls and privacy
 details.
 

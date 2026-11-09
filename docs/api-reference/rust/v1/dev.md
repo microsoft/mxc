@@ -44,14 +44,17 @@ pub fn validate_deprovision_json(json: &str, options: JsonOptions) -> Result<Str
 pub fn validate_process_json(json: &str, options: JsonOptions) -> Result<String, Error>;
 ```
 
-`run_json` uses pipe-backed execution or backend-owned capture. MicroVM
-provides captured output without live pipes; it requires Windows x64, a build
-with the `microvm` Cargo feature, experimental authorization, and the signed
-NVX bundle and host prerequisites described in the
-[MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md). Missing platform or build
-support returns `BackendUnavailable`.
+`run_json` uses pipe-backed execution or backend-owned capture. MicroVM supports
+captured and live stdout/stderr and the JSON lifecycle functions above, but
+not writable stdin or PTY. It requires Windows x64, the `microvm` Cargo feature,
+experimental authorization, and the signed NVX bundle. Without platform/build
+support, `run_json` returns `BackendUnavailable`, `spawn_json` returns
+`UnsupportedContainment`, and lifecycle functions return `UnsupportedPhase`.
+Missing runtime prerequisites on a supported build return `BackendUnavailable`.
+See the [MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for the 64 MiB capture limit, caller-owned streams, and sensitive
+`Error.details.nvxRecovery` information when provision succeeds but cleanup fails.
 
 Pipe and PTY spawns and existing-container capture require the selected
-backend's corresponding I/O and lifecycle support. MicroVM does not support
-these operations. Unsupported modes fail rather than switching to another
-I/O mode.
+backend's corresponding I/O and lifecycle support. Unsupported modes fail
+rather than switching to another I/O mode.

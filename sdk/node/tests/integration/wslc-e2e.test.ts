@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'os';
+import { MxcError } from '@microsoft/mxc-sdk/v1';
 import { sdk } from './test-helpers.js';
 
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
@@ -340,5 +341,23 @@ srv.handle_request()
       () => sdk.spawn(request),
       /WSLC port mappings support only protocol 'tcp'/,
     );
+  });
+
+  it('should reject an unsupported targetOs before starting a container', { timeout: 120_000 }, async () => {
+    const request = {
+      command: 'echo unreachable',
+      network: { egress: { default: 'deny' as const } },
+      containment: {
+        type: 'wslc' as const,
+        config: { image: 'alpine:latest', targetOs: 'windows' },
+      },
+    };
+    const isTargetOsRejection = (error: unknown) =>
+      error instanceof MxcError &&
+      error.code === 'policy_validation' &&
+      error.message.includes('wslc.targetOs');
+
+    await assert.rejects(() => sdk.run(request), isTargetOsRejection);
+    await assert.rejects(() => sdk.spawn(request), isTargetOsRejection);
   });
 });

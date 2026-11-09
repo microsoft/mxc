@@ -34,6 +34,9 @@ public enum ContainmentBackend
 
     /// <summary>Hyperlight micro-VM.</summary>
     Hyperlight,
+
+    /// <summary>Experimental NVX micro-VM, reported by native host discovery.</summary>
+    MicroVm,
 }
 
 /// <summary>The effective Windows ProcessContainer isolation tier.</summary>
