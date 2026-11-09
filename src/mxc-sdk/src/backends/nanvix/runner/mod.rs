@@ -966,6 +966,7 @@ mod tests {
                     default: egress,
                     allow: Vec::new(),
                     deny: Vec::new(),
+                    ..Default::default()
                 }),
                 network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
                     default: ingress,

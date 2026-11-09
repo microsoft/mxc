@@ -106,6 +106,7 @@ fn convert_network_egress(value: contract::NetworkEgress) -> wire::NetworkEgress
         default: default.into_option().map(convert_network_action),
         allow: allow.into_option().map(convert_network_rules),
         deny: deny.into_option().map(convert_network_rules),
+        ..Default::default()
     }
 }
 

@@ -14,6 +14,7 @@ fn directional_policy(
             default,
             allow,
             deny,
+            ..Default::default()
         }),
         ..Default::default()
     }

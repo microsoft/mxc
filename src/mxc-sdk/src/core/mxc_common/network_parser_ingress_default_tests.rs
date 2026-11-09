@@ -20,6 +20,7 @@ fn sections(ingress: Option<wire::NetworkIngress>, network_present: bool) -> Net
                 default: Some(wire::NetworkAction::Allow),
                 allow: None,
                 deny: None,
+                ..Default::default()
             }),
             ingress,
         }),

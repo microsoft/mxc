@@ -378,6 +378,18 @@ pub struct NetworkEgressPolicy {
     pub default: NetworkAction,
     pub allow: Vec<NetworkRule>,
     pub deny: Vec<NetworkRule>,
+    /// TCP ports of the host's own loopback the sandbox may connect to,
+    /// outbound only. Empty opens none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_loopback_ports: Vec<u16>,
+    /// Refuse a blocked outbound connection at once (`REJECT`) rather than
+    /// drop it, so a client fails fast instead of waiting out its timeout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reject_blocked: bool,
+    /// Absolute path of a file to append one JSON line to per blocked
+    /// outbound connection. Bubblewrap only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_log: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

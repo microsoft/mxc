@@ -320,6 +320,7 @@ mod tests {
                     default: NetworkAction::Allow,
                     allow: vec![Default::default()],
                     deny: Vec::new(),
+                    ..Default::default()
                 }),
                 ..directional_allow_policy()
             },

@@ -91,6 +91,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
             | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
             | NetworkPolicySupport::RUNTIME_PROXY
+            | NetworkPolicySupport::EGRESS_HOST_LOOPBACK_PORTS
+            | NetworkPolicySupport::EGRESS_BLOCKED_REJECT
+            | NetworkPolicySupport::EGRESS_BLOCKED_LOG
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
@@ -2039,13 +2042,94 @@ mod tests {
             )
         };
 
+        let host_loopback_ports: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_egress = Some(NetworkEgressPolicy {
+                host_loopback_ports: Vec::new(),
+                ..request.policy.network_egress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "egress.hostLoopbackPorts",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let blocked_reject: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_egress = Some(NetworkEgressPolicy {
+                reject_blocked: false,
+                ..request.policy.network_egress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "egress.blocked",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let blocked_log: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_egress = Some(NetworkEgressPolicy {
+                blocked_log: None,
+                ..request.policy.network_egress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "egress.blockedLog",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
         let decisions: [(
             NetworkPolicySupport,
             bool,
             ExecutionRequest,
             &str,
             Option<Probe>,
-        ); 6] = [
+        ); 9] = [
+            (
+                NetworkPolicySupport::EGRESS_HOST_LOOPBACK_PORTS,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        host_loopback_ports: vec![5432],
+                        ..Default::default()
+                    });
+                    request
+                },
+                "network.egress.hostLoopbackPorts",
+                Some(host_loopback_ports),
+            ),
+            (
+                NetworkPolicySupport::EGRESS_BLOCKED_REJECT,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        reject_blocked: true,
+                        ..Default::default()
+                    });
+                    request
+                },
+                "network.egress.blocked",
+                Some(blocked_reject),
+            ),
+            (
+                NetworkPolicySupport::EGRESS_BLOCKED_LOG,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        blocked_log: Some("/run/blocked.jsonl".to_string()),
+                        ..Default::default()
+                    });
+                    request
+                },
+                "network.egress.blockedLog",
+                Some(blocked_log),
+            ),
             (
                 NetworkPolicySupport::EGRESS_DEFAULT,
                 true,

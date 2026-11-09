@@ -227,6 +227,7 @@ fn map_network(network: SdkNetworkInput) -> wire::Network {
             default: egress.default.map(map_action),
             allow: egress.allow.map(map_rules),
             deny: egress.deny.map(map_rules),
+            ..Default::default()
         }),
         ingress: network.ingress.map(|ingress| wire::NetworkIngress {
             default: ingress.default.map(map_action),

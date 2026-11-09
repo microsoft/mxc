@@ -31,6 +31,17 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// What a blocked outbound connection meets.
+    #[derive(Debug)]
+    pub enum NetworkBlockedAction {
+        /// Discard it silently: the client waits for its own timeout.
+        Drop => ["drop"],
+        /// Refuse it at once: the client sees the connection refused.
+        Reject => ["reject"],
+    }
+}
+
 /// A CIDR destination, optionally excluding narrower ranges within it.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -86,6 +97,19 @@ pub struct NetworkEgress {
     /// Optional explicit deny rules. Deny takes precedence over allow.
     #[serde(default)]
     pub deny: OptionalField<Vec<NetworkRule>>,
+    /// Optional TCP ports of the host's own loopback the sandbox may connect
+    /// to, outbound only: connections in stay as `ingress` says. On
+    /// Bubblewrap the sandbox reaches them at `127.0.0.1:<port>`, as on the
+    /// host. Omission opens none.
+    #[serde(default)]
+    pub host_loopback_ports: OptionalField<Vec<NonZeroU16>>,
+    /// Optional answer to a blocked outbound connection. Defaults to `drop`.
+    #[serde(default)]
+    pub blocked: OptionalField<NetworkBlockedAction>,
+    /// Optional absolute path of a file the backend appends one JSON line
+    /// to for each outbound connection it blocked. Bubblewrap only.
+    #[serde(default)]
+    pub blocked_log: OptionalField<String>,
 }
 
 /// Inbound and host-loopback network policy.

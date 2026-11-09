@@ -609,6 +609,47 @@ host-loopback denial also blocks container-to-host traffic at `10.0.2.2`,
 ahead of any outbound allow rule. The only exception is the configured
 runtime proxy endpoint, which proxy-only egress opens on that gateway.
 
+#### Host-loopback ports, outbound only (1.1.0-alpha)
+
+`network.egress.hostLoopbackPorts` lists TCP ports of the host's own loopback
+the sandbox may connect to, without opening anything inbound. Each port is
+accepted at slirp's gateway (`10.0.2.2`) ahead of the host-loopback drop, and
+the sandbox also reaches it as its own `127.0.0.1:<port>`: a `nat` table in the
+sandbox's namespace redirects that address to the gateway and masquerades the
+source to the tap address, with `route_localnet` set in that namespace for the
+rerouted packet. Only the listed ports are redirected, so a server the
+workload starts on any other port of its own loopback stays its own. The `nat`
+table needs the `nf_nat` kernel module, which an unprivileged sandbox cannot
+load; without it the sandbox fails to start and says so.
+
+#### Refusing and logging blocked connections (1.1.0-alpha)
+
+`network.egress.blocked: "reject"` makes every blocking verdict (deny rules,
+the host-loopback drop and a deny default) `REJECT` instead of `DROP`, so a
+client fails at once ("Connection refused") rather than waiting out its own
+timeout.
+
+`network.egress.blockedLog` is an absolute path on the host. Each blocking
+verdict is then preceded by an `NFLOG` copy of the packet, and MXC appends one
+JSON line per distinct blocked destination (at most 256) to that file:
+
+```json
+{"protocol":"tcp","host":"203.0.113.7","port":443}
+{"protocol":"udp","host":"10.0.2.3","port":53,"name":"example.com"}
+```
+
+`name` is the question of a blocked DNS query. The listening netlink socket is
+created inside the sandbox's network namespace by a short-lived child (joining
+it needs `setns` into the owning user namespace, which a multithreaded process
+cannot do), handed back over a socket pair, and read by MXC from its own
+process. It is bound after the rules are installed and before the workload is
+released, so nothing the workload sends is missed. Logging is best effort: if
+the socket cannot be made, the run continues with its rules and a warning.
+
+Either field, or `hostLoopbackPorts`, selects the firewall-enforced private
+namespace even with a deny default and no rules. They cannot be combined with a
+runtime proxy.
+
 #### Inbound is closed by the namespace, and by a chain
 
 The v0.9+ proxy and firewall-enforced modes also install an `MXC_INGRESS` chain

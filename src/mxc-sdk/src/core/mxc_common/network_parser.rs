@@ -71,7 +71,34 @@ fn convert_egress(egress: wire::NetworkEgress) -> Result<NetworkEgressPolicy, Wx
         default: egress.default.map(convert_action).unwrap_or_default(),
         allow: convert_rules(egress.allow.unwrap_or_default(), "network.egress.allow")?,
         deny: convert_rules(egress.deny.unwrap_or_default(), "network.egress.deny")?,
+        host_loopback_ports: convert_host_loopback_ports(egress.host_loopback_ports)?,
+        reject_blocked: egress.reject_blocked.unwrap_or(false),
+        blocked_log: convert_blocked_log(egress.blocked_log)?,
     })
+}
+
+/// Host-loopback ports, deduplicated and in order. Port 0 names no service.
+fn convert_host_loopback_ports(ports: Option<Vec<u16>>) -> Result<Vec<u16>, WxcError> {
+    let mut ports = ports.unwrap_or_default();
+    if ports.contains(&0) {
+        return Err(WxcError::ConfigParse(
+            "network.egress.hostLoopbackPorts must name ports from 1 to 65535".to_string(),
+        ));
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
+}
+
+/// The blocked-connection log must be an absolute path: it is opened by the
+/// host side, never inside the sandbox.
+fn convert_blocked_log(path: Option<String>) -> Result<Option<String>, WxcError> {
+    match path {
+        Some(path) if !std::path::Path::new(&path).is_absolute() || path.contains('\0') => Err(
+            WxcError::ConfigParse("network.egress.blockedLog must be an absolute path".to_string()),
+        ),
+        other => Ok(other),
+    }
 }
 
 /// Resolves the ingress posture.
@@ -407,6 +434,7 @@ mod proxy_policy_tests {
                     default: Some(wire::NetworkAction::Allow),
                     allow: None,
                     deny: None,
+                    ..Default::default()
                 }),
                 ingress: Some(wire::NetworkIngress {
                     default: Some(wire::NetworkAction::Allow),

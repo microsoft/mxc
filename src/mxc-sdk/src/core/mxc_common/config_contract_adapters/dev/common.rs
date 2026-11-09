@@ -101,11 +101,21 @@ fn convert_network_egress(value: contract::NetworkEgress) -> wire::NetworkEgress
         default,
         allow,
         deny,
+        host_loopback_ports,
+        blocked,
+        blocked_log,
     } = value;
     wire::NetworkEgress {
         default: default.into_option().map(convert_network_action),
         allow: allow.into_option().map(convert_network_rules),
         deny: deny.into_option().map(convert_network_rules),
+        host_loopback_ports: host_loopback_ports
+            .into_option()
+            .map(|ports| ports.into_iter().map(u16::from).collect()),
+        reject_blocked: blocked
+            .into_option()
+            .map(|action| matches!(action, contract::NetworkBlockedAction::Reject)),
+        blocked_log: blocked_log.into_option(),
     }
 }
 

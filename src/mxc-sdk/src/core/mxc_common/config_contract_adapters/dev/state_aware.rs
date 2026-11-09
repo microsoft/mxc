@@ -46,6 +46,7 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
             default: Some(wire::NetworkAction::Allow),
             allow: None,
             deny: None,
+            ..Default::default()
         }),
         ingress: Some(wire::NetworkIngress {
             default: Some(wire::NetworkAction::Allow),
