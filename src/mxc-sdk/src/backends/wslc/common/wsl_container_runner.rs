@@ -478,14 +478,24 @@ impl WSLContainerRunner {
             gpu: self.config.gpu,
         }
     }
+
+    fn validate_target_os(&self) -> Result<(), ScriptResponse> {
+        if self.config.target_os == "linux" {
+            return Ok(());
+        }
+
+        Err(WslcError::Rejected(format!(
+            "WSLc: wslc.targetOs={:?} is not supported. WSLc runs Linux containers only; \
+             omit the field or set it to \"linux\".",
+            self.config.target_os
+        ))
+        .into_response())
+    }
 }
 
 impl ScriptRunner for WSLContainerRunner {
-    /// Reject policies WSLc cannot enforce, before any container is created.
-    /// Mirrors the config parser so requests reaching the engine directly
-    /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
-    /// instead of late in `execute` on the broken in-container iptables path.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.validate_target_os()?;
         reject_unsupported_lifecycle(request)?;
 
         container_steps::check_sizing_against_host(self.session_sizing())?;
@@ -916,6 +926,7 @@ impl WSLContainerRunner {
         output: OutputMode,
         stdin: InitStdin,
     ) -> Result<StartedContainer, ScriptResponse> {
+        self.validate_target_os()?;
         let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
         // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -2247,6 +2258,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_rejects_unsupported_target_os_before_sdk_load() {
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+        let config = WslcConfig {
+            target_os: "windows".to_string(),
+            ..WslcConfig::default()
+        };
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&config);
+
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(response.error_message.contains("wslc.targetOs"));
+        assert!(!logger.get_buffer().contains(START_CONTAINER_BANNER));
+    }
+
+    #[test]
     fn run_rejects_denied_path_overlap_before_sdk_load() {
         // Wiring guard: a deniedPaths entry nested under a mounted parent must be
         // rejected at the pre-flight overlap check (run_internal, before SDK
@@ -2523,6 +2558,49 @@ mod tests {
             };
             let runner = WSLContainerRunner::new(&WslcConfig::default());
             assert!(runner.validate_runner(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_runner_accepts_linux_target_os() {
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig {
+            target_os: "linux".to_string(),
+            ..WslcConfig::default()
+        });
+
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_unsupported_target_os() {
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+
+        for target_os in ["windows", "", "Linux", "linx"] {
+            let runner = WSLContainerRunner::new(&WslcConfig {
+                target_os: target_os.to_string(),
+                ..WslcConfig::default()
+            });
+            let response = runner
+                .validate_runner(&request)
+                .expect_err("non-Linux target OS must be rejected");
+
+            assert_eq!(
+                response.failure_phase,
+                crate::mxc_common::models::FailurePhase::Rejected
+            );
+            assert!(response.error_message.contains("wslc.targetOs"));
+            assert!(
+                response.error_message.contains(&format!("{target_os:?}")),
+                "the rejection must name {target_os:?}: {}",
+                response.error_message
+            );
         }
     }
 

@@ -349,7 +349,7 @@ function Invoke-WslcSuites {
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
         'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
         'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
     })
 }
