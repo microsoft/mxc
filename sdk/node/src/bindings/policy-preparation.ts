@@ -23,35 +23,60 @@ type PrepareFunction = (
 type StringFreeFunction = (value: unknown) => void;
 type ErrorFreeFunction = (error: AbiErrorDetail) => void;
 
+function nativeSetupError(action: 'load' | 'bind', error: unknown): MxcError {
+  const diagnostic = error instanceof Error && error.message.length > 0
+    ? error.message
+    : 'Unknown native library setup error.';
+  const operation = action === 'load' ? 'load' : 'bind';
+  return new MxcError({
+    code: 'backend_error',
+    message: `Unable to ${operation} the MXC native library for policy preparation: ${diagnostic}`,
+    remediation: 'Install or rebuild the MXC native library for this SDK version, operating system, '
+      + 'and architecture, and ensure its runtime dependencies are available.',
+  });
+}
+
 async function prepareBindingPolicyJsonAsyncNative(
   requestJson: string,
   policyFailuresJson: string,
   experimental: boolean,
 ): Promise<string> {
-  const native = loadMxcFfi();
+  let native: ReturnType<typeof loadMxcFfi>;
   try {
-    const freeString = bindNativeFunction<StringFreeFunction>(native.handle, {
-      symbol: 'mxc_string_free',
-      result: 'void',
-      parameters: ['void *'],
-    });
-    const freeError = bindNativeFunction<ErrorFreeFunction>(native.handle, {
-      symbol: 'mxc_error_detail_free',
-      result: 'void',
-      parameters: [koffi.pointer(AbiErrorDetailType)],
-    });
-    const prepare = bindNativeFunction<PrepareFunction>(native.handle, {
-      symbol: 'mxc_prepare_policy_json',
-      result: 'int32_t',
-      parameters: [
-        'const char *',
-        'const char *',
-        'int32_t',
-        // Keep the owned char* opaque for mxc_string_free.
-        koffi.out(koffi.pointer('void *')),
-        koffi.out(koffi.pointer(AbiErrorDetailType)),
-      ],
-    });
+    native = loadMxcFfi();
+  } catch (error) {
+    throw nativeSetupError('load', error);
+  }
+  try {
+    let freeString: ReturnType<typeof bindNativeFunction<StringFreeFunction>>;
+    let freeError: ReturnType<typeof bindNativeFunction<ErrorFreeFunction>>;
+    let prepare: ReturnType<typeof bindNativeFunction<PrepareFunction>>;
+    try {
+      freeString = bindNativeFunction<StringFreeFunction>(native.handle, {
+        symbol: 'mxc_string_free',
+        result: 'void',
+        parameters: ['void *'],
+      });
+      freeError = bindNativeFunction<ErrorFreeFunction>(native.handle, {
+        symbol: 'mxc_error_detail_free',
+        result: 'void',
+        parameters: [koffi.pointer(AbiErrorDetailType)],
+      });
+      prepare = bindNativeFunction<PrepareFunction>(native.handle, {
+        symbol: 'mxc_prepare_policy_json',
+        result: 'int32_t',
+        parameters: [
+          'const char *',
+          'const char *',
+          'int32_t',
+          // Keep the owned char* opaque for mxc_string_free.
+          koffi.out(koffi.pointer('void *')),
+          koffi.out(koffi.pointer(AbiErrorDetailType)),
+        ],
+      });
+    } catch (error) {
+      throw nativeSetupError('bind', error);
+    }
     const out: unknown[] = [null];
     const error = createAbiErrorDetail();
     try {

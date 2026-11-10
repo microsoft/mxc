@@ -25,6 +25,7 @@ import type { CaptureDenialsResult, CaptureDenialsError, ExecutionMetadata } fro
 function mockNativeLibrary(
   t: TestContext,
   bind: (symbol: string, result: unknown, parameters?: unknown[]) => unknown,
+  loadFailure?: Error,
 ) {
   const directory = mkdtempSync('.mxc-node-binding-');
   const filename = process.platform === 'win32' ? 'mxc_ffi.dll'
@@ -33,13 +34,16 @@ function mockNativeLibrary(
   writeFileSync(path.join(directory, filename), '');
   process.env.MXC_FFI_DIR = path.resolve(directory);
   let unloadCount = 0;
-  const load = t.mock.method(koffi, 'load', () => ({
-    func(symbol: string, result: unknown, parameters?: unknown[]) {
-      if (symbol === 'const char *mxc_version(void)') return () => 'unit-fixture';
-      return bind(symbol, result, parameters);
-    },
-    unload() { unloadCount += 1; },
-  }));
+  const load = t.mock.method(koffi, 'load', () => {
+    if (loadFailure !== undefined) throw loadFailure;
+    return {
+      func(symbol: string, result: unknown, parameters?: unknown[]) {
+        if (symbol === 'const char *mxc_version(void)') return () => 'unit-fixture';
+        return bind(symbol, result, parameters);
+      },
+      unload() { unloadCount += 1; },
+    };
+  });
   return {
     get unloadCount() { return unloadCount; },
     dispose() {
@@ -311,7 +315,7 @@ describe('native run binding', () => {
         };
       }
       assert.strictEqual(symbol, 'mxc_prepare_policy_json');
-      if (mode === 'missing-symbol') throw new Error(`missing symbol: ${marker}`);
+      if (mode === 'missing-symbol') throw new Error('missing symbol: mxc_prepare_policy_json');
       return Object.assign(() => assert.fail('synchronous preparation must not run'), {
         async(
           _request: string, _policyFailures: string, experimental: number, out: unknown[],
@@ -347,7 +351,12 @@ describe('native run binding', () => {
         await assert.rejects(preparePolicyJson('{}', failures), (error: unknown) => {
           assert.ok(error instanceof MxcError);
           assert.strictEqual(error.code, mode === 'native' ? 'policy_validation' : 'backend_error');
-          assert.strictEqual([error.message, error.stack, String(error)].join('\n').includes(marker), false);
+          if (mode === 'missing-symbol') {
+            assert.match(error.message, /mxc_prepare_policy_json/);
+            assert.match(error.remediation ?? '', /SDK version, operating system, and architecture/);
+          } else {
+            assert.strictEqual([error.message, error.stack, String(error)].join('\n').includes(marker), false);
+          }
           if (mode === 'native') {
             assert.strictEqual(error.operation, 'prepare_policy_json');
             assert.strictEqual(error.nativeCode, '0x800704EC');
@@ -361,6 +370,31 @@ describe('native run binding', () => {
           : mode === 'no-output' ? ['error'] : ['string', 'error']);
         assert.strictEqual(fixture.unloadCount, priorUnloads + 1);
       }
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it('preserves native library load diagnostics with actionable remediation', async (t) => {
+    const diagnostic = 'incompatible native binary';
+    const fixture = mockNativeLibrary(
+      t,
+      () => assert.fail('native functions must not be bound after a load failure'),
+      new Error(diagnostic),
+    );
+    try {
+      await assert.rejects(preparePolicyJson('{}', { formatVersion: 1, results: [] }),
+        (error: unknown) => {
+          assert.ok(error instanceof MxcError);
+          assert.strictEqual(error.code, 'backend_error');
+          assert.match(error.message, new RegExp(diagnostic));
+          assert.match(error.remediation ?? '', /SDK version, operating system, and architecture/);
+          assert.strictEqual(error.operation, undefined);
+          assert.strictEqual(error.nativeCode, undefined);
+          assert.strictEqual(error.details, undefined);
+          return true;
+        });
+      assert.strictEqual(fixture.unloadCount, 0);
     } finally {
       fixture.dispose();
     }
