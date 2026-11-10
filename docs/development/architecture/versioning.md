@@ -367,10 +367,9 @@ In every contract version, explicit Seatbelt settings now take precedence over
 - `readonlyPaths` and `deniedPaths` entries inside `/private/tmp` and
   `/private/var/folders` apply.
 
-The Seatbelt backend also rejects, with `policy_validation`, an
-`extraMachLookups` entry that names only a service an explicit setting denies,
-such as `com.apple.SecurityServer` without `keychainAccess: true`. Change that
-setting instead.
+The Seatbelt backend also rejects an `extraMachLookups` entry that names only
+a service an explicit setting denies, such as `com.apple.SecurityServer`
+without `keychainAccess: true`. Change that setting instead.
 
 This exception applies within V1 and does not require a new versioned API
 surface.

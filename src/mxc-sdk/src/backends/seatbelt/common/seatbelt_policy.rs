@@ -334,7 +334,9 @@ pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), 
         return Ok(());
     };
     let sets = custom_rule_sets(config);
-    let has_custom = !sets.is_empty() || config.custom_posix_shm.is_some();
+    let has_custom = !sets.is_empty()
+        || config.custom_mach_registers.is_some()
+        || config.custom_posix_shm.is_some();
     if has_custom && config.profile_override.is_some() {
         return Err(
             "Seatbelt: seatbelt.profileOverride replaces the generated profile, so \
@@ -815,6 +817,13 @@ mod tests {
         let msg = custom_error(SeatbeltConfig {
             profile_override: Some("(version 1)".into()),
             custom_posix_shm: Some(SeatbeltCustomPosixShm::default()),
+            ..Default::default()
+        });
+        assert!(msg.contains("profileOverride"), "{msg}");
+
+        let msg = custom_error(SeatbeltConfig {
+            profile_override: Some("(version 1)".into()),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters::default()),
             ..Default::default()
         });
         assert!(msg.contains("profileOverride"), "{msg}");
