@@ -19,6 +19,9 @@ if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
+# shellcheck source=lib/lxc_static_network.sh
+. "$SCRIPT_DIR/lib/lxc_static_network.sh"
+
 SKIP_EXIT=77
 skip() {
     echo "SKIP: $1"
@@ -78,7 +81,7 @@ run_config() {
     local label="$1" config="$2" status=0
     echo "--- $label ---"
     set +e
-    CASE_OUTPUT=$("$LXC_EXEC" --debug "$config" 2>&1)
+    CASE_OUTPUT=$("${@:3}" "$config" 2>&1)
     status=$?
     set -e
     echo "$CASE_OUTPUT"
@@ -107,10 +110,10 @@ assert_blocked() {
 
 echo "Running LXC omitted-network-section test..."
 
-run_config "positive control: request with explicit egress allow to $PROBE_ADDRESS" "$ALLOW_CONFIG"
+run_config "positive control: request with explicit egress allow to $PROBE_ADDRESS" "$ALLOW_CONFIG" run_with_static_guest_ipv4
 assert_allowed "an explicitly allowed destination was unreachable on the positive control.  The second run's blocked result would prove nothing, so this test fails rather than proceeding."
 
-run_config "case under test: request with network section omitted entirely" "$OMIT_CONFIG"
+run_config "case under test: request with network section omitted entirely" "$OMIT_CONFIG" "$LXC_EXEC" --debug
 assert_blocked "the workload reached $PROBE_ADDRESS under a request with no network section.  The supported contract (docs/schema.md) states that omitted network policy selects directional deny defaults."
 
 echo "PASS: a request with the network section omitted cannot reach the network."

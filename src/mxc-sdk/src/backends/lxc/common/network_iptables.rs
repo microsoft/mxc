@@ -49,6 +49,7 @@ pub(crate) fn plan_network(policy: &ContainerPolicy) -> NetworkPlan {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
     !plan_network(policy).omits_interface()
 }
@@ -452,6 +453,111 @@ impl NetworkIptablesManager {
     /// Lower the egress policy for its refusals alone, discarding the rules.
     pub(crate) fn validate_egress_lowering(policy: &ContainerPolicy) -> Result<(), String> {
         Self::lower_egress(policy).map(|_| ())
+    }
+
+    pub(crate) fn host_egress_rules(
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<String, String> {
+        let lowered = Self::build_policy_rules_logged("egress", policy, logger)?;
+        let mut output = String::new();
+        for (family, rules) in [("ip", lowered.ipv4), ("ip6", lowered.ipv6)] {
+            for args in rules {
+                let mut expression = format!("{family} daddr {}", args[3]);
+                let mut protocol = "";
+                for pair in args[4..].chunks_exact(2) {
+                    match pair[0].as_str() {
+                        "-p" => {
+                            protocol = match pair[1].as_str() {
+                                "icmpv6" => "ipv6-icmp",
+                                other => other,
+                            };
+                            expression.push_str(&format!(" meta l4proto {protocol}"));
+                        }
+                        "--dport" => expression
+                            .push_str(&format!(" {protocol} dport {}", pair[1].replace(':', "-"))),
+                        "-j" => {
+                            if pair[1] == "ACCEPT" {
+                                output.push_str(&Self::dhcp_request_tracking_rule(
+                                    &expression,
+                                    family,
+                                    protocol,
+                                ));
+                                expression.push_str(" accept");
+                            } else {
+                                expression.push_str(" drop");
+                            }
+                        }
+                        other => {
+                            return Err(format!("Unsupported lowered firewall argument {other}"))
+                        }
+                    }
+                }
+                output.push_str(&expression);
+                output.push('\n');
+            }
+        }
+        if Self::effective_default_policy(policy) == NetworkAction::Allow {
+            for family in ["ip", "ip6"] {
+                output.push_str(&Self::dhcp_request_tracking_rule(
+                    &format!("ether type {family}"),
+                    family,
+                    "",
+                ));
+            }
+            output.push_str("accept\n");
+        } else {
+            output.push_str("drop\n");
+        }
+        Ok(output)
+    }
+
+    fn dhcp_request_tracking_rule(expression: &str, family: &str, protocol: &str) -> String {
+        if !protocol.is_empty() && protocol != "udp" {
+            return String::new();
+        }
+
+        // The transaction IDs follow four payload bytes in RFC 2131 §2 and one in RFC 8415 §8.
+        let (version, client, server, offset, width) = if family == "ip" {
+            (4, 68, 67, 96, 32)
+        } else {
+            (6, 546, 547, 72, 24)
+        };
+        format!(
+            "{expression} udp sport {client} udp dport {server} update @dhcp{version}_transactions {{ @th,{offset},{width} timeout 30s }}\n"
+        )
+    }
+
+    pub(crate) fn permits_ipv4_dhcp(policy: &ContainerPolicy) -> bool {
+        let Ok(entries) = Self::lower_egress(policy) else {
+            return false;
+        };
+        for entry in entries {
+            let Some((IpFamily::V4, block)) = network_blocks::resolve(&entry.destination) else {
+                continue;
+            };
+            let std::net::IpAddr::V4(address) = block.address(IpFamily::V4) else {
+                continue;
+            };
+            let mask = u32::MAX
+                .checked_shl(32 - u32::from(block.prefix()))
+                .unwrap_or(0);
+            if u32::from(address) & mask != mask {
+                continue;
+            }
+            let matches = match entry.matching {
+                RuleMatch::AnyTraffic => true,
+                RuleMatch::Transport {
+                    protocol: TransportProtocol::Udp,
+                    ports,
+                } => ports.is_none_or(|range| range.start <= 67 && range.end >= 67),
+                _ => false,
+            };
+            if matches {
+                return entry.action == RuleAction::Allow;
+            }
+        }
+        Self::effective_default_policy(policy) == NetworkAction::Allow
     }
 
     fn lower_egress(policy: &ContainerPolicy) -> Result<Vec<EgressEntry>, String> {
@@ -1183,6 +1289,7 @@ impl NetworkIptablesManager {
     // The ownership record keeps signal-time cleanup from flushing a later
     // run's chain under the same container name.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn force_cleanup(
         container_name: &str,
         hook_point: EgressHookPoint,
@@ -1288,7 +1395,7 @@ pub(crate) mod test_firewall {
         }
     }
 
-    pub(super) fn intercept(command: &str, args: &[&str]) -> Option<Result<(), String>> {
+    pub(crate) fn intercept(command: &str, args: &[&str]) -> Option<Result<(), String>> {
         STATE.with(|slot| {
             let mut slot = slot.borrow_mut();
             let state = slot.as_mut()?;
@@ -1337,6 +1444,148 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn host_rules_preserve_deny_precedence_exclusions_ports_and_both_families() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                deny: vec![NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: "192.0.2.0/24".parse().unwrap(),
+                        except: Vec::new(),
+                    }],
+                    ports: vec![NetworkPort {
+                        protocol: NetworkProtocol::Tcp,
+                        port: Some(80),
+                        end_port: Some(90),
+                    }],
+                }],
+                allow: vec![NetworkRule {
+                    to: vec![
+                        NetworkPeer {
+                            cidr: "192.0.2.0/24".parse().unwrap(),
+                            except: vec!["192.0.2.128/25".parse().unwrap()],
+                        },
+                        NetworkPeer {
+                            cidr: "2001:db8::/64".parse().unwrap(),
+                            except: Vec::new(),
+                        },
+                    ],
+                    ports: Vec::new(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let rules =
+            NetworkIptablesManager::host_egress_rules(&policy, &mut Logger::new(Mode::Buffer))
+                .unwrap();
+        assert_eq!(
+            rules
+                .lines()
+                .filter(|rule| !rule.contains(" update @dhcp"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "ip daddr 192.0.2.0/24 meta l4proto tcp tcp dport 80-90 drop\n\
+             ip daddr 192.0.2.0/25 accept\n\
+             ip6 daddr 2001:db8::/64 accept\n\
+             drop"
+        );
+    }
+
+    #[test]
+    fn host_rules_use_the_configured_allow_default() {
+        let rules = NetworkIptablesManager::host_egress_rules(
+            &filtered_policy(),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+        assert!(rules.ends_with("accept\n"));
+    }
+
+    #[test]
+    fn permitted_dhcp_requests_are_tracked_after_the_configured_deny_rules() {
+        let mut policy = filtered_policy();
+        policy
+            .network_egress
+            .as_mut()
+            .unwrap()
+            .deny
+            .push(NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: "255.255.255.255/32".parse().unwrap(),
+                    except: Vec::new(),
+                }],
+                ports: vec![NetworkPort {
+                    protocol: NetworkProtocol::Udp,
+                    port: Some(67),
+                    end_port: None,
+                }],
+            });
+        let rules =
+            NetworkIptablesManager::host_egress_rules(&policy, &mut Logger::new(Mode::Buffer))
+                .unwrap();
+        let deny = rules.find("udp dport 67 drop").unwrap();
+        let tracking = rules
+            .find("udp sport 68 udp dport 67 update @dhcp4_transactions")
+            .expect("an allowed request must register its DHCP response transaction");
+        assert!(deny < tracking, "{rules}");
+        assert!(
+            rules.contains("udp sport 546 udp dport 547 update @dhcp6_transactions"),
+            "{rules}"
+        );
+        assert!(rules.ends_with("accept\n"));
+    }
+
+    #[test]
+    fn explicit_dhcp_deny_suppresses_the_lease_wait() {
+        let mut policy = filtered_policy();
+        assert!(NetworkIptablesManager::permits_ipv4_dhcp(&policy));
+        policy
+            .network_egress
+            .as_mut()
+            .unwrap()
+            .deny
+            .push(NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: "255.255.255.255/32".parse().unwrap(),
+                    except: Vec::new(),
+                }],
+                ports: vec![NetworkPort {
+                    protocol: NetworkProtocol::Udp,
+                    port: Some(67),
+                    end_port: None,
+                }],
+            });
+        assert!(!NetworkIptablesManager::permits_ipv4_dhcp(&policy));
+    }
+
+    #[test]
+    fn a_dhcp_allow_waits_only_if_its_destination_is_not_excluded() {
+        let mut policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: "0.0.0.0/0".parse().unwrap(),
+                        except: Vec::new(),
+                    }],
+                    ports: vec![NetworkPort {
+                        protocol: NetworkProtocol::Any,
+                        port: Some(67),
+                        end_port: Some(68),
+                    }],
+                }],
+                deny: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        assert!(NetworkIptablesManager::permits_ipv4_dhcp(&policy));
+        policy.network_egress.as_mut().unwrap().allow[0].to[0]
+            .except
+            .push("255.255.255.255/32".parse().unwrap());
+        assert!(!NetworkIptablesManager::permits_ipv4_dhcp(&policy));
     }
 
     #[test]

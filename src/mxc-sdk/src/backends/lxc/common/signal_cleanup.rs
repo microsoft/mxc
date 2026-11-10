@@ -4,8 +4,8 @@
 //! Process-level cleanup for fatal signals.
 //!
 //! SIGHUP, SIGTERM, and SIGINT can interrupt the runner before normal cleanup
-//! runs.  The watchdog waits for them through `sigwait`, destroys the active
-//! container, and exits with the signal-style status code.
+//! runs.  The watchdog applies the active lifecycle and exits with the
+//! signal-style status code.
 //!
 //! Only the executor binary installs it: one slot cannot describe the several
 //! sandboxes a library host can hold, and a library may not exit its caller's
@@ -20,21 +20,19 @@ use std::thread;
 #[cfg(target_os = "linux")]
 use nix::sys::signal::{SigSet, Signal};
 
+use crate::lxc_common::host_network::HostNetwork;
 #[cfg(target_os = "linux")]
 use crate::lxc_common::lxc_bindings::LxcContainer;
-#[cfg(target_os = "linux")]
-use crate::lxc_common::network_ingress::IngressManager;
 use crate::lxc_common::network_iptables::CreatedResources;
-#[cfg(target_os = "linux")]
-use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
-#[cfg(target_os = "linux")]
-use crate::mxc_common::logger::{Logger, Mode};
 
 #[derive(Default)]
 struct ActiveSandbox {
     name: Option<String>,
     created: CreatedResources,
     netns_pid: Option<u32>,
+    host_network: Option<HostNetwork>,
+    destroy_on_exit: bool,
+    cleanup_policy: bool,
 }
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
@@ -64,6 +62,10 @@ fn watchdog_installed() -> bool {
 
 /// Registers the container the watchdog destroys.
 pub fn set_active(name: &str) {
+    set_active_lifecycle(name, true, true);
+}
+
+pub(crate) fn set_active_lifecycle(name: &str, destroy_on_exit: bool, cleanup_policy: bool) {
     if !watchdog_installed() {
         return;
     }
@@ -71,6 +73,26 @@ pub fn set_active(name: &str) {
     slot.name = Some(name.to_owned());
     slot.created = CreatedResources::default();
     slot.netns_pid = None;
+    slot.host_network = None;
+    slot.destroy_on_exit = destroy_on_exit;
+    slot.cleanup_policy = cleanup_policy;
+}
+
+pub(crate) fn set_active_host_network(network: HostNetwork) {
+    if !watchdog_installed() {
+        return;
+    }
+    let mut slot = lock_slot();
+    if slot.name.is_some() {
+        slot.host_network = Some(network);
+    }
+}
+
+pub(crate) fn clear_active_registration(name: &str) {
+    let mut slot = lock_slot();
+    if slot.name.as_deref() == Some(name) {
+        *slot = ActiveSandbox::default();
+    }
 }
 
 pub fn set_active_pid(pid: u32) {
@@ -148,17 +170,25 @@ fn run_watchdog(mask: SigSet) -> ! {
         let Ok(sig) = mask.wait() else { continue };
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
-            let mut buf_logger = Logger::new(Mode::Buffer);
-            if let Some(pid) = active.netns_pid {
-                NetworkIptablesManager::force_cleanup(
-                    &name,
-                    EgressHookPoint::ContainerNetns(pid),
-                    active.created,
-                    &mut buf_logger,
-                );
-                IngressManager::force_cleanup(&name, pid, &mut buf_logger);
+            let result = if active.destroy_on_exit {
+                LxcContainer::new(&name, None).destroy_owned()
+            } else {
+                Ok(())
+            };
+            match result {
+                Ok(()) => {
+                    if active.destroy_on_exit || active.cleanup_policy {
+                        if let Some(mut network) = active.host_network {
+                            if let Err(error) = network.remove() {
+                                eprintln!("LXC signal cleanup: {error}");
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("LXC signal cleanup: {error}; host filtering retained");
+                }
             }
-            let _ = LxcContainer::new(&name, None).destroy();
         }
         std::process::exit(128 + sig as i32);
     }

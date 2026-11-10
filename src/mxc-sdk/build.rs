@@ -3,8 +3,6 @@
 
 #[path = "build/build_isolation_session_bindings.rs"]
 mod build_isolation_session_bindings;
-#[path = "build/build_lxc_capability_helper.rs"]
-mod build_lxc_capability_helper;
 #[allow(dead_code)]
 #[path = "build/build_mxc_build_common.rs"]
 mod build_mxc_build_common;
@@ -20,7 +18,6 @@ mod build_wslc_common;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_isolation_session_bindings::run();
-    build_lxc_capability_helper::run()?;
     build_mxc_telemetry::run();
     build_nvx_bundled::run();
     #[cfg(feature = "link-wslcsdk")]

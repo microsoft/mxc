@@ -50,7 +50,7 @@ const ICMPV6_NEIGHBOR_ADVERTISEMENT: &str = "136";
 const ICMPV6_MULTICAST_LISTENER_REPORT_V2: &str = "143";
 
 /// RFC 4890 permits dropping echo request, echo reply, and redirect at a firewall.
-const ICMPV6_ALLOW_TYPES: [&str; 12] = [
+pub(crate) const ICMPV6_ALLOW_TYPES: [&str; 12] = [
     ICMPV6_ROUTER_SOLICITATION,
     ICMPV6_ROUTER_ADVERTISEMENT,
     ICMPV6_NEIGHBOR_SOLICITATION,
@@ -301,7 +301,7 @@ impl IngressManager {
         }
     }
 
-    fn permissive_inbound_field(policy: &ContainerPolicy) -> Option<&'static str> {
+    pub(crate) fn permissive_inbound_field(policy: &ContainerPolicy) -> Option<&'static str> {
         if let Some(ingress) = policy.network_ingress.as_ref() {
             if ingress.default == NetworkAction::Allow {
                 return Some("network.ingress.default");

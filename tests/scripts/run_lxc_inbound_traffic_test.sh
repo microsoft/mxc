@@ -1,228 +1,134 @@
 #!/bin/bash
-# LXC inbound default-deny: traffic-level test
-#
-# Requires that an unsolicited inbound connection to the container fails and
-# that the chain's DROP counters move. The other inbound test asserts that the
-# chain is programmed correctly; nothing puts a packet in front of it, so a
-# chain that drops nothing passes today.
-#
-# Covers the container once the policy is installed. The unfiltered interval
-# before installation is a separate open defect, and the exposure there arrives
-# over lxcbr0 in a sub-second window this shape cannot sample deterministically.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
-
-if [ ! -f "$LXC_EXEC" ]; then
+LXC_EXEC="${LXC_EXEC:-$REPO_DIR/src/target/release/lxc-exec}"
+if [ "$LXC_EXEC" = "$REPO_DIR/src/target/release/lxc-exec" ] && [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
-
-# Exit 77 marks a missing prerequisite, which the suite runner counts as
-# SKIPPED rather than PASS.
-SKIP_EXIT=77
-skip() {
-    echo "SKIP: $1"
-    exit "$SKIP_EXIT"
-}
 
 fail() {
     echo "FAIL: $1"
     exit 1
 }
 
-[ "$(id -u)" -eq 0 ] || skip "requires root for iptables/ip6tables, LXC, and moving an interface between namespaces."
-command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
-command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
-command -v nsenter >/dev/null 2>&1 || skip "nsenter is not installed."
-command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
-command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
-[ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 
-# A host without kernel IPv6 has the binary installed and fails every
-# invocation, so probe it rather than trusting `command -v`. The whole test
-# skips rather than its IPv6 half alone, because the in-container probe runs
-# the same binary and fails the same way.
-ip6tables -S >/dev/null 2>&1 || skip "ip6tables is installed but not usable on this host (no kernel IPv6?)."
-
-CONFIG="$REPO_DIR/tests/configs/lxc_inbound_traffic_deny.json"
-[ -f "$CONFIG" ] || skip "missing config $CONFIG."
-
-# Must match `containerId` in the config: the runner uses that value verbatim as
-# the LXC container name.
-CONTAINER="CLI-LXC-Inbound-Traffic"
-
-VETH_HOST="mxcprobe0"
-VETH_PEER="mxcprobe1"
-PROBE_HOST_V4="10.77.78.1"
-PROBE_NS_V4="10.77.78.2"
-PROBE_HOST_V6="fd00:77:78::1"
-PROBE_NS_V6="fd00:77:78::2"
-PROBE_PORT=7777
-
-RUN_LOG="$(mktemp)"
+CONTAINER="mxc-inbound-traffic-$$"
+CONFIG="$REPO_DIR/tests/configs/.lxc-inbound-$$.json"
+RUN_LOG="$REPO_DIR/tests/configs/.lxc-inbound-$$.log"
+LISTENER_V4_LOG="$REPO_DIR/tests/configs/.lxc-inbound-v4-$$.log"
+LISTENER_V6_LOG="$REPO_DIR/tests/configs/.lxc-inbound-v6-$$.log"
+HOST_V6="fd00:77:78::1"
+GUEST_V6="fd00:77:78::2"
+PORT=$((30000 + $$ % 10000))
 RUN_PID=""
-VETH_CREATED=0
-
+LISTENER_V4_PID=""
+LISTENER_V6_PID=""
+HOST_V6_ADDED=false
 cleanup() {
-    if [ -n "$RUN_PID" ] && kill -0 "$RUN_PID" 2>/dev/null; then
-
-        # SIGTERM rather than SIGKILL: the runner's signal handler is what tears
-        # down the chains and the container, and SIGKILL would strand both.
+    local status=$?
+    if [ -n "$RUN_PID" ]; then
         kill -TERM "$RUN_PID" 2>/dev/null || true
         wait "$RUN_PID" 2>/dev/null || true
     fi
-    if [ "$VETH_CREATED" = 1 ]; then
-        ip link del "$VETH_HOST" >/dev/null 2>&1 || true
+    for pid in "$LISTENER_V4_PID" "$LISTENER_V6_PID"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    if lxc-info -n "$CONTAINER" >/dev/null 2>&1; then
+        python3 - "$CONFIG" <<'PY'
+import json, sys
+path = sys.argv[1]
+config = json.load(open(path))
+config["process"]["commandLine"] = "true"
+config["lifecycle"] = {"destroyOnExit": True, "preservePolicy": False}
+with open(path, "w") as stream:
+    json.dump(config, stream)
+PY
+        "$LXC_EXEC" "$CONFIG" >/dev/null 2>&1 || { echo "FAIL: MXC could not clean up the ingress fixture."; status=1; }
     fi
-    lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
-    rm -f "$RUN_LOG"
+    if [ "$HOST_V6_ADDED" = true ]; then
+        ip -6 address del "$HOST_V6/64" dev lxcbr0
+    fi
+    rm -f "$CONFIG" "$RUN_LOG" "$LISTENER_V4_LOG" "$LISTENER_V6_LOG"
+    exit "$status"
 }
 trap cleanup EXIT
 
-# Leftovers from an interrupted earlier run would make the setup below fail for
-# a reason that has nothing to do with the code under test.
-ip link del "$VETH_HOST" >/dev/null 2>&1 || true
-lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
-
-# List the inbound chains a tool holds *on the host*. The MXCI- prefix is the
-# ingress chain's, distinct from the MXC- egress chain, so egress state cannot
-# be mistaken for a leak here.
-mxci_chains() {
-    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXCI-.*\)$/\1/p' | sort
-}
-
-MXCI_BEFORE_V4="$(mxci_chains iptables)"
-MXCI_BEFORE_V6="$(mxci_chains ip6tables)"
-
-echo "Running LXC inbound traffic test..."
-
-"$LXC_EXEC" --debug "$CONFIG" >"$RUN_LOG" 2>&1 &
+# Address the existing managed interface rather than add an unfiltered one.
+read -r GUEST_V4 PREFIX < <(
+    ip -j -4 address show dev lxcbr0 | python3 -c '
+import ipaddress, json, sys
+address = json.load(sys.stdin)[0]["addr_info"][0]
+network = ipaddress.ip_network(f"{address['\''local'\'']}/{address['\''prefixlen'\'']}", strict=False)
+print(network.broadcast_address - 2, network.prefixlen)
+')
+[ -n "$GUEST_V4" ] && [ -n "$PREFIX" ] || fail "could not address the test guest."
+ip -6 address add "$HOST_V6/64" dev lxcbr0 nodad
+HOST_V6_ADDED=true
+python3 - "$CONTAINER" >"$CONFIG" <<'PY'
+import json, sys
+print(json.dumps({
+    "version": "1.0.0",
+    "containerId": sys.argv[1],
+    "containment": "lxc",
+    "process": {"commandLine": "sh -c 'echo MXC_INBOUND_READY; while [ ! -f /mxc-inbound-finish ]; do sleep 1; done'"},
+    "lifecycle": {"destroyOnExit": False, "preservePolicy": False},
+    "lxc": {"distribution": "alpine", "release": "3.23"},
+    "network": {"egress": {"default": "allow"}, "ingress": {"default": "deny", "hostLoopback": "deny"}}
+}))
+PY
+: >"$RUN_LOG"
+"$LXC_EXEC" "$CONFIG" >"$RUN_LOG" 2>&1 &
 RUN_PID=$!
-
-# The workload is attached only after the chains are hooked, so its marker is
-# what says the container is both live and filtered.
-#
-# The bound is generous because a cold host downloads the Alpine image first.
-WAITED=0
-until grep -Fq "MXC_INBOUND_PROBE_READY" "$RUN_LOG" 2>/dev/null; do
-    if ! kill -0 "$RUN_PID" 2>/dev/null; then
-        echo "--- lxc-exec output ---"
-        cat "$RUN_LOG"
-        fail "lxc-exec exited before the workload ran; the container never reached the filtered state."
-    fi
-    if [ "$WAITED" -ge 600 ]; then
-        echo "--- lxc-exec output ---"
-        cat "$RUN_LOG"
-        fail "the workload marker never appeared within 300s."
-    fi
+for ((attempt = 0; attempt < 600; attempt++)); do
+    grep -Fq MXC_INBOUND_READY "$RUN_LOG" && break
+    kill -0 "$RUN_PID" 2>/dev/null || { cat "$RUN_LOG"; fail "the ingress workload exited before readiness."; }
     sleep 0.5
-    WAITED=$((WAITED + 1))
 done
+grep -Fq MXC_INBOUND_READY "$RUN_LOG" || fail "the ingress workload never became ready."
+INIT_PID="$(lxc-info -n "$CONTAINER" -p -H)"
+nsenter -t "$INIT_PID" -n ip address replace "$GUEST_V4/$PREFIX" dev eth0
+nsenter -t "$INIT_PID" -n ip -6 address add "$GUEST_V6/64" dev eth0 nodad
+nsenter -t "$INIT_PID" -n ip link set eth0 up
+nsenter -t "$INIT_PID" -n iptables -F
+nsenter -t "$INIT_PID" -n iptables -X
+nsenter -t "$INIT_PID" -n iptables -P INPUT ACCEPT
+nsenter -t "$INIT_PID" -n ip6tables -F
+nsenter -t "$INIT_PID" -n ip6tables -X
+nsenter -t "$INIT_PID" -n ip6tables -P INPUT ACCEPT
 
-INBOUND_CHAIN="$(sed -n 's/^.*Creating inbound iptables chain: \([^ ]*\).*$/\1/p' "$RUN_LOG" | head -n 1)"
-[ -n "$INBOUND_CHAIN" ] || fail "no inbound chain was created; there is no default-deny to probe."
-
-NETNS_PID="$(sed -n 's/^.*Container init PID: \([0-9]*\).*$/\1/p' "$RUN_LOG" | head -n 1)"
-[ -n "$NETNS_PID" ] || fail "no container init PID was logged; the container namespace cannot be entered."
-
-in_container_net() {
-    nsenter -t "$NETNS_PID" -n "$@"
-}
-
-# Put the probe's own interface into the container's namespace. Addressing both
-# ends by hand is what removes the dependency on lxcbr0 and on the container's
-# DHCP lease.
-ip link add "$VETH_HOST" type veth peer name "$VETH_PEER" \
-    || fail "could not create the probe veth pair."
-VETH_CREATED=1
-ip link set "$VETH_PEER" netns "$NETNS_PID" \
-    || fail "could not move the probe interface into the container namespace."
-
-ip addr add "$PROBE_HOST_V4/24" dev "$VETH_HOST"
-ip -6 addr add "$PROBE_HOST_V6/64" dev "$VETH_HOST" nodad
-ip link set "$VETH_HOST" up
-
-in_container_net ip addr add "$PROBE_NS_V4/24" dev "$VETH_PEER"
-in_container_net ip -6 addr add "$PROBE_NS_V6/64" dev "$VETH_PEER" nodad
-in_container_net ip link set "$VETH_PEER" up
-
-# The first probe has to resolve the peer's address before it can send, and
-# without a moment here that resolution eats into its four-second timeout.
-sleep 2
-
-# Total packets dropped by the chain, across every DROP rule in it. -x because a
-# truncated '1K' would not compare.
-#
-# Summing rather than reading the NEW-state rule alone: where IPv6 conntrack is
-# not loaded an inbound SYN is not classified NEW and falls through to the
-# chain's terminal DROP instead.
-drop_packets() {
-    in_container_net "$1" -L "$INBOUND_CHAIN" -n -v -x 2>/dev/null \
-        | awk '$3 == "DROP" { total += $1 } END { print total + 0 }'
-}
-
-assert_inbound_dropped() {
-    local tool="$1" target="$2" family="$3" before="" after="" rc=0
-
-    before="$(drop_packets "$tool")"
-    [ -n "$before" ] || fail "$family: could not read the DROP counters on $INBOUND_CHAIN."
-
-    # Nothing listens on this port. INPUT is traversed before the socket lookup,
-    # so the verdict is the chain's either way.
-    timeout 4 bash -c "exec 3<>/dev/tcp/$target/$PROBE_PORT" >/dev/null 2>&1 && rc=0 || rc=$?
-    if [ "$rc" = 0 ]; then
-        fail "$family: an unsolicited inbound connection to the container succeeded; inbound default-deny is not enforcing."
+nsenter -t "$INIT_PID" -n python3 -m http.server "$PORT" --bind "$GUEST_V4" >"$LISTENER_V4_LOG" 2>&1 &
+LISTENER_V4_PID=$!
+nsenter -t "$INIT_PID" -n python3 -m http.server "$PORT" --bind "$GUEST_V6" >"$LISTENER_V6_LOG" 2>&1 &
+LISTENER_V6_PID=$!
+for target in "$GUEST_V4" "$GUEST_V6"; do
+    nsenter -t "$INIT_PID" -n timeout 5 bash -c \
+        "until (exec 3<>/dev/tcp/$target/$PORT) 2>/dev/null; do sleep 0.1; done" \
+        || fail "the guest listener at $target:$PORT never became reachable locally."
+    if timeout 3 bash -c "exec 3<>/dev/tcp/$target/$PORT"; then
+        fail "unsolicited ingress to $target succeeded after the guest firewall was flushed."
     fi
+done
+peer_listener_running "$LISTENER_V4_PID" && peer_listener_running "$LISTENER_V6_PID" \
+    || fail "a guest listener exited."
 
-    after="$(drop_packets "$tool")"
-    [ -n "$after" ] || fail "$family: could not re-read the DROP counters on $INBOUND_CHAIN."
-    if [ "$after" -le "$before" ]; then
-        fail "$family: the chain's DROP counters did not move ($before -> $after); the probe packets never reached the chain, so the connection failure proves nothing."
-    fi
-
-    echo "  $family inbound dropped by the chain: $before -> $after"
-}
-
-# The address is passed bare, not bracketed: bash resolves the /dev/tcp host
-# field with getaddrinfo, which rejects '[...]' as a name.
-assert_inbound_dropped iptables "$PROBE_NS_V4" IPv4
-assert_inbound_dropped ip6tables "$PROBE_NS_V6" IPv6
-
-echo "PASS: unsolicited inbound is dropped inside the container namespace."
-
-if ! in_container_net ip link show "$VETH_PEER" >/dev/null 2>&1; then
-    fail "the probe interface vanished from the container namespace."
-fi
-
-# Let the workload's sleep finish so destroyOnExit tears the container down the
-# way a normal run would, rather than leaving the signal path to do it.
-ip link del "$VETH_HOST" >/dev/null 2>&1 || true
-VETH_CREATED=0
+lxc-attach -n "$CONTAINER" -- touch /mxc-inbound-finish
 if ! wait "$RUN_PID"; then
-    echo "--- lxc-exec output ---"
     cat "$RUN_LOG"
-    fail "lxc-exec exited non-zero."
+    fail "the ingress workload failed."
 fi
 RUN_PID=""
+[ "$(lxc-info -n "$CONTAINER" -s -H)" = RUNNING ] || fail "the ingress test container did not survive."
 
-# The chain belongs in the container's namespace, so one on the host means the
-# rules were programmed against the wrong namespace.
-leaked_chains() {
-    local tool="$1" before="$2" after="" leaked="" chain
-    if ! after="$(mxci_chains "$tool")"; then
-        fail "could not enumerate $tool chains, so the host was not verified clean."
-    fi
-    while IFS= read -r chain; do
-        [ -n "$chain" ] || continue
-        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
-    done <<<"$after"
-    [ -z "$leaked" ] || fail "$tool: inbound chain(s) left on the host:$leaked"
-}
-
-leaked_chains iptables "$MXCI_BEFORE_V4"
-leaked_chains ip6tables "$MXCI_BEFORE_V6"
-
-echo "PASS: LXC inbound traffic test."
+# The same listeners must be reachable over the managed interface after teardown.
+for target in "$GUEST_V4" "$GUEST_V6"; do
+    timeout 5 bash -c "until (exec 3<>/dev/tcp/$target/$PORT) 2>/dev/null; do sleep 0.1; done" \
+        || fail "ingress to $target did not recover when preservePolicy=false removed the policy."
+done
+echo "PASS: IPv4 and IPv6 ingress survived guest firewall flushing and ended with policy teardown."

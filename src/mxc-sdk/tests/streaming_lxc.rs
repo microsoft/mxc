@@ -643,8 +643,6 @@ fn streaming_lxc_tears_down_a_networked_container() {
     let _guard = exclusive();
     let name = container_name("network");
 
-    // Outbound access puts the container on the bridge and installs egress
-    // chains, so this is the case whose teardown has firewall rules to remove.
     let network = NetworkPolicy {
         egress: Some(NetworkEgressPolicy {
             default: Some(NetworkAction::Allow),
@@ -663,7 +661,5 @@ fn streaming_lxc_tears_down_a_networked_container() {
     assert!(out.contains("NETWORKED"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
-    // The chains live in the container's own network namespace, so destroying
-    // the container is what proves they are gone.
     assert_container_released(&name);
 }

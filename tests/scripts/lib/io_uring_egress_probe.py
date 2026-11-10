@@ -27,6 +27,9 @@ def io_uring_socket(family, kind, protocol):
     if ring < 0:
         error = ctypes.get_errno()
         print(next((line.strip() for line in open("/proc/self/status") if line.startswith("Seccomp:")), "Seccomp: unknown"), flush=True)
+        if error == 1:
+            print("MXC_IO_URING_SETUP_FAILED errno=1")
+            raise SystemExit(0)
         raise SystemExit("MXC_IO_URING_SETUP_FAILED errno=%d" % error)
     _, sq_tail, _, _, _, _, sq_array = struct.unpack_from("7I", params, 40)
     sq = mmap.mmap(ring, sq_array + 4, offset=0)
@@ -45,26 +48,23 @@ def io_uring_socket(family, kind, protocol):
     except OSError:
         return None
 
-# A socket ping proves the peer answers and fills the neighbor entry the packet frame needs.
-ping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
-ping.settimeout(3)
-ping.sendto(echo(1), (PEER, 0))
-try:
-    ping.recv(64)
-except OSError:
-    raise SystemExit("MXC_PEER_UNREACHABLE")
+for create_socket in (socket.socket, io_uring_socket):
+    replies = []
 
-escaped = False
-
-raw = io_uring_socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-if raw:
+    raw = create_socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    if raw is None:
+        raise SystemExit("MXC_RAW_SOCKET_FAILED")
     raw.sendto(echo(2), (PEER, 0))
-    escaped |= replied(raw, 0)
+    replies.append(replied(raw, 0))
 
-packet = io_uring_socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
-if packet:
+    packet = create_socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+    if packet is None:
+        raise SystemExit("MXC_PACKET_SOCKET_FAILED")
     route = next(line.split() for line in open("/proc/net/route") if line.split()[1] == "00000000")
     gateway = socket.inet_ntoa(struct.pack("<I", int(route[2], 16)))
+
+    # Refresh the gateway's neighbor entry before reading its Ethernet address.
+    socket.create_connection((PEER, 443), timeout=3).close()
     gateway_mac = next(line.split()[3] for line in open("/proc/net/arp") if line.split()[0] == gateway)
     own_mac = open("/sys/class/net/" + route[0] + "/address").read().strip()
     source = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -74,6 +74,8 @@ if packet:
     ip = ip[:10] + struct.pack("!H", checksum(ip)) + ip[12:]
     ethernet = bytes.fromhex(gateway_mac.replace(":", "") + own_mac.replace(":", "") + "0800")
     packet.sendto(ethernet + ip + payload, (route[0], 0x0800))
-    escaped |= replied(packet, 14)
+    replies.append(replied(packet, 14))
 
-print("MXC_NET_ALLOWED" if escaped else "MXC_NET_BLOCKED")
+    if any(replies) != all(replies):
+        raise SystemExit("MXC_RAW_PACKET_PARTIAL_REPLY raw=%s packet=%s" % tuple(replies))
+    print("MXC_NET_ALLOWED" if all(replies) else "MXC_NET_BLOCKED")

@@ -128,56 +128,6 @@ fn build_attach_args_with_env_control(
     args
 }
 
-/// Whether MXC put firewall chains in the container's network namespace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerFirewall {
-    Installed,
-    Absent,
-}
-
-#[cfg(target_os = "linux")]
-fn create_capability_helper_memfd() -> Result<std::fs::File, String> {
-    use nix::fcntl::{fcntl, FcntlArg, SealFlag};
-    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
-    use std::fs::{File, Permissions};
-    use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::fs::PermissionsExt;
-
-    const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lxc-capability-helper"));
-
-    let descriptor = memfd_create(
-        c"mxc-lxc-capabilities",
-        MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING,
-    )
-    .map_err(|error| format!("Failed to create LXC capability helper: {error}"))?;
-    let mut helper = File::from(descriptor);
-    if helper.as_raw_fd() < 3 {
-        let descriptor = fcntl(helper.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(3))
-            .map_err(|error| format!("Failed to move LXC capability helper descriptor: {error}"))?;
-
-        // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor owned by this file.
-        helper = unsafe { File::from_raw_fd(descriptor) };
-    }
-    helper
-        .write_all(HELPER)
-        .map_err(|error| format!("Failed to write LXC capability helper: {error}"))?;
-    helper
-        .set_permissions(Permissions::from_mode(0o555))
-        .map_err(|error| format!("Failed to make LXC capability helper executable: {error}"))?;
-    fcntl(
-        helper.as_raw_fd(),
-        FcntlArg::F_ADD_SEALS(
-            SealFlag::F_SEAL_WRITE
-                | SealFlag::F_SEAL_GROW
-                | SealFlag::F_SEAL_SHRINK
-                | SealFlag::F_SEAL_SEAL,
-        ),
-    )
-    .map_err(|error| format!("Failed to seal LXC capability helper: {error}"))?;
-    Ok(helper)
-}
-
 #[cfg(target_os = "linux")]
 const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
 
@@ -262,21 +212,22 @@ pub enum StartNetwork {
 }
 
 impl StartNetwork {
-    fn to_start_args(self, configured_interfaces: usize) -> Vec<String> {
+    fn to_start_args(self) -> Vec<String> {
         match self {
             StartNetwork::FromContainerConfig => Vec::new(),
             StartNetwork::NoInterface => {
-                // Index 0 is emitted even for a container that configures no
-                // interface at all: without an `lxc.net` entry LXC leaves the
-                // container in the host's network namespace.
-                let mut args = Vec::new();
-                for index in 0..configured_interfaces.max(1) {
-                    args.push("-s".to_string());
-                    args.push(format!("lxc.net.{index}.type=empty"));
-                    args.push("-s".to_string());
-                    args.push(format!("lxc.net.{index}.flags=up"));
-                }
-                args
+                // Reset included interfaces before creating an isolated loopback namespace.
+                [
+                    "-s",
+                    "lxc.net=",
+                    "-s",
+                    "lxc.net.0.type=empty",
+                    "-s",
+                    "lxc.net.0.flags=up",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
             }
         }
     }
@@ -410,6 +361,21 @@ impl LxcContainer {
         }
     }
 
+    pub(crate) fn is_stopped(&self) -> Result<bool, String> {
+        let output = self
+            .lxc_command("lxc-info")
+            .args(["-s", "-H"])
+            .output()
+            .map_err(|error| format!("Cannot inspect container state: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Cannot inspect container state: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim() == "STOPPED")
+    }
+
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -539,7 +505,7 @@ impl LxcContainer {
         })();
 
         if let Err(error) = validation {
-            return match self.stop() {
+            return match self.stop_owned() {
                 Ok(()) => Err(error),
                 Err(stop_error) => Err(format!(
                     "{error}; failed to stop rejected container: {stop_error}"
@@ -551,28 +517,9 @@ impl LxcContainer {
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
-        cmd.args(network.to_start_args(self.configured_interface_count()));
+        cmd.args(network.to_start_args());
         Self::run_tool(cmd)?;
         self.validate_unprivileged()
-    }
-
-    /// How many `lxc.net.N` interfaces the container's config declares.
-    fn configured_interface_count(&self) -> usize {
-        let Ok(config) = std::fs::read_to_string(self.config_file_path()) else {
-            return 0;
-        };
-        Self::highest_interface_index(&config).map_or(0, |index| index + 1)
-    }
-
-    fn highest_interface_index(config: &str) -> Option<usize> {
-        config
-            .lines()
-            .filter_map(|line| {
-                let key = line.split('=').next()?.trim();
-                let index = key.strip_prefix("lxc.net.")?.split('.').next()?;
-                index.parse::<usize>().ok()
-            })
-            .max()
     }
 
     pub fn exec(
@@ -617,7 +564,6 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         timeout: Option<std::time::Duration>,
-        firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
@@ -625,8 +571,7 @@ impl LxcContainer {
         // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
-        let cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+        let cmd = self.attach_command(command, working_directory, env, force_clear_env)?;
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -655,7 +600,6 @@ impl LxcContainer {
         _env: &[String],
         _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
-        _firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
@@ -670,14 +614,12 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         timeout: Option<std::time::Duration>,
-        firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         use crate::mxc_common::interruptible_reader::wrap_pipe;
         use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
-        let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+        let mut cmd = self.attach_command(command, working_directory, env, force_clear_env)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -743,7 +685,6 @@ impl LxcContainer {
         _env: &[String],
         _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
-        _firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_capture is only supported on Linux".to_string())
     }
@@ -760,12 +701,10 @@ impl LxcContainer {
         working_directory: &str,
         env: &[String],
         force_clear_env: bool,
-        firewall: ContainerFirewall,
     ) -> Result<std::process::Child, String> {
         use std::process::Stdio;
 
-        let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+        let mut cmd = self.attach_command(command, working_directory, env, force_clear_env)?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -782,15 +721,13 @@ impl LxcContainer {
         working_directory: &str,
         env: &[String],
         force_clear_env: bool,
-        firewall: ContainerFirewall,
         size: crate::mxc_pty::PtySize,
     ) -> Result<(std::process::Child, crate::mxc_pty::LivePty), String> {
         use crate::mxc_pty::Signal;
 
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
-        let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+        let mut cmd = self.attach_command(command, working_directory, env, force_clear_env)?;
         let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
@@ -846,40 +783,10 @@ impl LxcContainer {
         working_directory: &str,
         env: &[String],
         force_clear_env: bool,
-        firewall: ContainerFirewall,
     ) -> Result<std::process::Command, String> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::process::CommandExt;
-
         let mut cmd = self.lxc_command("lxc-attach");
-        let mut args =
+        let args =
             build_attach_args_with_env_control(env, working_directory, command, force_clear_env);
-        if firewall == ContainerFirewall::Installed {
-            let helper = create_capability_helper_memfd()?;
-            let descriptor = helper.as_raw_fd();
-            let workload = args
-                .iter()
-                .position(|argument| argument == "--")
-                .ok_or("Missing LXC attach workload separator")?
-                + 1;
-            args.splice(
-                workload..workload,
-                [
-                    format!("/proc/self/fd/{descriptor}"),
-                    descriptor.to_string(),
-                ],
-            );
-
-            // SAFETY: The child only clears CLOEXEC on its owned helper descriptor.
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::fcntl(helper.as_raw_fd(), libc::F_SETFD, 0) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
         cmd.args(args);
         Ok(cmd)
     }
@@ -892,13 +799,18 @@ impl LxcContainer {
         _working_directory: &str,
         _env: &[String],
         _force_clear_env: bool,
-        _firewall: ContainerFirewall,
     ) -> Result<std::process::Child, String> {
         Err("LxcContainer::attach_spawn is only supported on Linux".to_string())
     }
 
     /// Stop the container by killing it, not by asking it to exit.
     pub fn stop(&self) -> Result<(), String> {
+        let mut network = super::host_network::HostNetwork::claim(self)?;
+        self.stop_owned()?;
+        network.remove()
+    }
+
+    pub(crate) fn stop_owned(&self) -> Result<(), String> {
         Self::run_release_tool(self.stop_command())
     }
 
@@ -913,6 +825,12 @@ impl LxcContainer {
     }
 
     pub fn destroy(&self) -> Result<(), String> {
+        let mut network = super::host_network::HostNetwork::claim(self)?;
+        self.destroy_owned()?;
+        network.remove()
+    }
+
+    pub(crate) fn destroy_owned(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
 
         cmd.arg("-f");
@@ -970,71 +888,24 @@ mod tests {
     #[test]
     fn a_run_with_no_interface_states_that_to_lxc_start() {
         assert_eq!(
-            StartNetwork::NoInterface.to_start_args(1),
-            ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
+            StartNetwork::NoInterface.to_start_args(),
+            [
+                "-s",
+                "lxc.net=",
+                "-s",
+                "lxc.net.0.type=empty",
+                "-s",
+                "lxc.net.0.flags=up"
+            ],
             "lxc-start reads each config item from the -s that precedes it, \
              and loopback stays up for a workload that binds 127.0.0.1"
         );
     }
 
     #[test]
-    fn every_configured_interface_is_emptied_not_just_the_first() {
-        assert_eq!(
-            StartNetwork::NoInterface.to_start_args(3),
-            [
-                "-s",
-                "lxc.net.0.type=empty",
-                "-s",
-                "lxc.net.0.flags=up",
-                "-s",
-                "lxc.net.1.type=empty",
-                "-s",
-                "lxc.net.1.flags=up",
-                "-s",
-                "lxc.net.2.type=empty",
-                "-s",
-                "lxc.net.2.flags=up",
-            ],
-            "an interface nobody names keeps its link, and a policy that permits \
-             no network installs no chain to filter it"
-        );
-    }
-
-    #[test]
-    fn a_container_configuring_no_interface_still_gets_one_emptied() {
-        assert_eq!(
-            StartNetwork::NoInterface.to_start_args(0),
-            ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
-            "LXC leaves a container with no lxc.net entry in the host's network namespace"
-        );
-    }
-
-    #[test]
-    fn the_interface_count_comes_from_the_highest_index_the_config_names() {
-        for (config, expected) in [
-            ("", None),
-            ("lxc.net.0.type = veth\n", Some(0)),
-            ("lxc.net.0.type = veth\nlxc.net.1.type = veth\n", Some(1)),
-            ("lxc.net.4.type = veth\nlxc.net.1.type = veth\n", Some(4)),
-            ("  lxc.net.2.link = lxcbr0\n", Some(2)),
-            // Keys that only look like an interface entry.
-            ("lxc.network.0.type = veth\n", None),
-            ("lxc.net.x.type = veth\n", None),
-        ] {
-            assert_eq!(
-                LxcContainer::highest_interface_index(config),
-                expected,
-                "config {config:?}"
-            );
-        }
-    }
-
-    #[test]
     fn a_run_that_keeps_the_container_config_states_nothing() {
         assert!(
-            StartNetwork::FromContainerConfig
-                .to_start_args(2)
-                .is_empty(),
+            StartNetwork::FromContainerConfig.to_start_args().is_empty(),
             "the container's own config must be left to decide its interfaces"
         );
     }

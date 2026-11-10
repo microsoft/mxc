@@ -36,6 +36,9 @@ OMIT_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_all_loopback_omit.json"
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 [ -x "$LXC_EXEC" ] || LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 
+# shellcheck source=lib/lxc_static_network.sh
+. "$SCRIPT_DIR/lib/lxc_static_network.sh"
+
 SKIP_EXIT=77
 
 skip() {
@@ -124,7 +127,7 @@ run_config() {
     local label="$1" config="$2" status=0
     echo "--- $label ---"
     set +e
-    CASE_OUTPUT=$("$LXC_EXEC" --debug "$config" 2>&1)
+    CASE_OUTPUT=$("${@:3}" "$config" 2>&1)
     status=$?
     set -e
     echo "$CASE_OUTPUT"
@@ -150,7 +153,7 @@ assert_reported() {
     fi
 }
 
-run_config "positive control: request permitting one destination" "$CTRL_CONFIG"
+run_config "positive control: request permitting one destination" "$CTRL_CONFIG" run_with_static_guest_ipv4
 assert_reported "loopback" "$LOOPBACK_OK" "$LOOPBACK_DEAD"
 assert_reported "egress" "$NET_ALLOWED" "$NET_BLOCKED"
 
@@ -164,7 +167,7 @@ fi
 
 echo "Control reached the network and its own loopback."
 
-run_config "case under test: request permitting nothing and naming no proxy" "$OMIT_CONFIG"
+run_config "case under test: request permitting nothing and naming no proxy" "$OMIT_CONFIG" "$LXC_EXEC" --debug
 assert_reported "loopback" "$LOOPBACK_OK" "$LOOPBACK_DEAD"
 assert_reported "egress" "$NET_ALLOWED" "$NET_BLOCKED"
 

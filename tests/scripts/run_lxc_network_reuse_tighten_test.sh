@@ -27,6 +27,9 @@ if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
+# shellcheck source=lib/lxc_static_network.sh
+. "$SCRIPT_DIR/lib/lxc_static_network.sh"
+
 # Exit 77 is what run_lxc_all_tests.sh records as SKIPPED rather than PASS.
 SKIP_EXIT=77
 skip() {
@@ -104,7 +107,7 @@ run_config() {
     local label="$1" config="$2" status=0
     echo "--- $label ---"
     set +e
-    CASE_OUTPUT=$("$LXC_EXEC" --debug "$config" 2>&1)
+    CASE_OUTPUT=$("${@:3}" "$config" 2>&1)
     status=$?
     set -e
     echo "$CASE_OUTPUT"
@@ -133,7 +136,7 @@ assert_blocked() {
 
 echo "Running LXC reuse policy-tightening test..."
 
-run_config "first run: policy allows tcp/443 to $PROBE_ADDRESS, container survives" "$ALLOW_CONFIG"
+run_config "first run: policy allows tcp/443 to $PROBE_ADDRESS, container survives" "$ALLOW_CONFIG" run_with_static_guest_ipv4
 assert_allowed "an explicitly allowed destination was unreachable on the first run. The container never had the access this test is about taking away, so the second run below proves nothing."
 
 if ! lxc-info -n "$CONTAINER" >/dev/null 2>&1; then
@@ -150,7 +153,7 @@ if [ -z "$INIT_PID" ] || [ "$INIT_PID" = "-1" ]; then
 fi
 echo "--- container survived the first run and is still running as PID $INIT_PID ---"
 
-run_config "second run: same container, policy permits no network" "$DENY_CONFIG"
+run_config "second run: same container, policy permits no network" "$DENY_CONFIG" "$LXC_EXEC" --debug
 assert_blocked "a surviving container reused under a policy that permits no network still reached $PROBE_ADDRESS. It is still on the first run's topology, so tightening the policy on a reused container does nothing and the workload keeps access the current policy never granted."
 
 # Reapplying policy means restarting the container, so the init PID must have

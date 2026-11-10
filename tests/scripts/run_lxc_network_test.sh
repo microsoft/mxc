@@ -32,6 +32,9 @@ fail() {
 # shellcheck source=lib/lxc_peer_listener.sh
 . "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 
+# shellcheck source=lib/lxc_static_network.sh
+. "$SCRIPT_DIR/lib/lxc_static_network.sh"
+
 [ "$(id -u)" -eq 0 ] || skip "requires root for iptables and LXC."
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
@@ -134,7 +137,7 @@ assert any({"cidr": sys.argv[2]} in rule["to"] for rule in egress["allow"])
 assert any({"cidr": sys.argv[3]} in rule["to"] for rule in egress["deny"])
 PY
 
-OUTPUT=$("$LXC_EXEC" "$CONFIG" 2>&1) || fail "lxc-exec failed: $OUTPUT"
+OUTPUT=$(run_with_static_guest_ipv4 "$CONFIG" 2>&1) || fail "lxc-exec failed: $OUTPUT"
 echo "$OUTPUT"
 grep -Fq "MXC_NET_ALLOWED" <<<"$OUTPUT" \
     || fail "the explicitly allowed peer was unreachable or the workload never ran."
