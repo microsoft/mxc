@@ -3,6 +3,32 @@
 
 use serde::{de, Deserialize, Deserializer};
 
+/// Deserialize a present optional settings object without accepting Serde's
+/// positional-array representation of structs.
+pub(crate) fn deserialize_optional_object<'de, D, T>(
+    deserializer: D,
+) -> Result<OptionalField<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = OptionalField<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a settings object")
+        }
+
+        fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            T::deserialize(de::value::MapAccessDeserializer::new(map)).map(OptionalField::present)
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+}
+
 /// A marker that deserializes only from the JSON value `true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct True;

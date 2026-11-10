@@ -807,6 +807,16 @@ export interface StateAwareMicroVm {
 }
 
 /**
+ * A closed W365 settings object containing only checkout settings.
+ */
+export interface StateAwareW365AgentsProvision {
+  /**
+   * Optional provision settings; an empty wrapper remains distinct from omission.
+   */
+  provision?: W365AgentsProvision;
+}
+
+/**
  * State-aware WSLC settings.
  */
 export interface StateAwareWslc {
@@ -898,6 +908,64 @@ export interface Ui {
 export type UiClipboard = "none" | "read" | "write" | "all";
 
 export type Version = "1.1.0-alpha";
+
+export type W365AgentsContainment = "w365_agents";
+
+export type W365AgentsGuid = string;
+
+/**
+ * W365 checkout settings. Defaults and resolved service validation belong to the backend.
+ */
+export interface W365AgentsProvision {
+  /**
+   * Required pool identifier; no automatic pool selection.
+   */
+  poolId: W365AgentsGuid;
+  /**
+   * Optional user object identifier.
+   */
+  userObjectId?: W365AgentsGuid;
+  /**
+   * Optional user type.
+   */
+  userType?: W365AgentsUserType;
+}
+
+/**
+ * The complete development W365 provision request, excluding unenforceable local policy.
+ */
+export interface W365AgentsProvisionRequest {
+  /**
+   * Optional editor schema reference.
+   */
+  $schema?: string;
+  /**
+   * Optional annotation.
+   */
+  _comment?: unknown;
+  /**
+   * W365 containment marker.
+   */
+  containment: W365AgentsContainment;
+  /**
+   * Provision phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry settings.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Development contract version.
+   */
+  version: Version;
+  /**
+   * Optional provision settings; missing configuration is not defaulted by parsing.
+   */
+  w365Agents?: StateAwareW365AgentsProvision;
+}
+
+export type W365AgentsUserType = "Local" | "HumanUser" | "Agentic";
 
 export type WindowsSandboxContainment = "windows_sandbox";
 
@@ -1063,4 +1131,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | MicroVmProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | W365AgentsProvisionRequest | WslcProvisionRequest | MicroVmProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
