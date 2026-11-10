@@ -204,3 +204,23 @@ fn rejects_seatbelt_capture_denials() {
 
     assert_invalid(json);
 }
+
+#[test]
+fn rejects_seatbelt_custom_rules() {
+    for field in [
+        "customIoKits",
+        "customMachLookups",
+        "customMachRegisters",
+        "customPosixShm",
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "1.0.0",
+                "seatbelt": {{"{field}": {{}}}},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_invalid(&json);
+    }
+}

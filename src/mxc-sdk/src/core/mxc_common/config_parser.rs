@@ -10,8 +10,8 @@ use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
     SeatbeltCustomDefault, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
-    SeatbeltCustomRules, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
-    WslcConfig,
+    SeatbeltCustomRules, TelemetryConfig, TestFeatureConfig, UiFieldsSpecified, UiPolicy,
+    WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -1300,6 +1300,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         gui_access: gui_access.unwrap_or(false),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
+        keychain_access_specified: keychain_access.is_some(),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
         custom_io_kits: custom_io_kits.map(make_seatbelt_custom_rules),
         custom_mach_registers: custom_mach_registers.map(
@@ -1730,6 +1731,11 @@ fn normalize_common_request_ir(
     // "caller said nothing". Twin of `network_specified`.
     policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
+        policy.ui_fields_specified = UiFieldsSpecified {
+            disable: raw_ui.disable.is_some(),
+            clipboard: raw_ui.clipboard.is_some(),
+            injection: raw_ui.injection.is_some(),
+        };
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
             disable: raw_ui.disable.unwrap_or(true),
@@ -2028,6 +2034,8 @@ mod tests {
         network_mode_specified: bool,
         runtime_network_proxy_specified: bool,
         ui_specified: bool,
+        ui_fields_specified: UiFieldsSpecified,
+        keychain_access_specified: Option<bool>,
         requested_sandbox_kind: Option<&'static str>,
     }
 
@@ -2048,6 +2056,11 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
+                ui_fields_specified: request.policy.ui_fields_specified,
+                keychain_access_specified: request
+                    .seatbelt
+                    .as_ref()
+                    .map(|seatbelt| seatbelt.keychain_access_specified),
                 requested_sandbox_kind: request
                     .telemetry
                     .as_ref()
@@ -2441,10 +2454,10 @@ mod tests {
             "version": "1.1.0-alpha",
             "containment": "seatbelt",
             "seatbelt": {
-                "customIoKits": {"allow": ["AGXDeviceUserClient"]},
+                "customIoKits": {"default": "deny", "allow": ["AGXDeviceUserClient"]},
                 "customMachLookups": {"default": "allow", "deny": ["com.example.*"]},
                 "customMachRegisters": {"local": {}},
-                "customPosixShm": {"readWrite": ["/myapp.*"], "own": ["/myapp.tmp"]}
+                "customPosixShm": {"default": "allow", "readWrite": ["/myapp.*"], "own": ["/myapp.tmp"]}
             },
             "process": {"commandLine": "echo dev"}
         }"#;
@@ -2466,11 +2479,59 @@ mod tests {
             SeatbeltCustomDefault::Deny
         );
         let shm = seatbelt.custom_posix_shm.unwrap();
-        assert_eq!(shm.default, SeatbeltCustomDefault::Deny);
+        assert_eq!(shm.default, SeatbeltCustomDefault::Allow);
         assert!(shm.read.is_empty());
         assert_eq!(shm.read_write, ["/myapp.*"]);
         assert_eq!(shm.own, ["/myapp.tmp"]);
         assert!(shm.deny.is_empty());
+
+        // Empty blocks are kept: they replace guiAccess's grant with nothing.
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "seatbelt": {"customMachRegisters": {}, "customPosixShm": {}},
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let seatbelt = request.seatbelt.unwrap();
+        let registers = seatbelt.custom_mach_registers.unwrap();
+        assert!(registers.global.is_none() && registers.local.is_none());
+        assert_eq!(seatbelt.custom_posix_shm.unwrap(), Default::default());
+        assert!(seatbelt.custom_io_kits.is_none() && seatbelt.custom_mach_lookups.is_none());
+    }
+
+    #[test]
+    fn development_parser_records_which_lockdown_settings_were_written() {
+        let parse = |fields: &str| {
+            let json = format!(
+                r#"{{"version": "1.1.0-alpha", "containment": "seatbelt", {fields}
+                    "process": {{"commandLine": "echo dev"}}}}"#
+            );
+            match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::OneShot(request) => request,
+                MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+            }
+        };
+
+        let written =
+            parse(r#""ui": {"clipboard": "none"}, "seatbelt": {"keychainAccess": false},"#);
+        assert_eq!(
+            written.policy.ui_fields_specified,
+            UiFieldsSpecified {
+                disable: false,
+                clipboard: true,
+                injection: false,
+            }
+        );
+        assert!(written.seatbelt.unwrap().keychain_access_specified);
+
+        let omitted = parse(r#""seatbelt": {},"#);
+        assert_eq!(
+            omitted.policy.ui_fields_specified,
+            UiFieldsSpecified::default()
+        );
+        assert!(!omitted.seatbelt.unwrap().keychain_access_specified);
     }
 
     #[test]

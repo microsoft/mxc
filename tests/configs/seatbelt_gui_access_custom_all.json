@@ -1,0 +1,85 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 {{TESTDIR}}/all_probe.py {{SHM}} {{UNLISTED_IOKIT}} </dev/null",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{DEVDIR}}",
+            "{{TESTDIR}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true,
+        "customIoKits": {
+            "allow": [
+                "IOSurfaceRootUserClient",
+                "RootDomain*",
+                "AppleAPFS*"
+            ],
+            "deny": [
+                "AppleAPFSUserClient",
+                "AppleUSB*"
+            ]
+        },
+        "customMachLookups": {
+            "allow": [
+                "com.example.mxc.lookup.one",
+                "com.example.mxc.lookup.two",
+                "com.example.mxc.lookup.app.*"
+            ],
+            "deny": [
+                "com.example.mxc.lookup.app.no",
+                "com.example.mxc.lookup.app.secret.*"
+            ]
+        },
+        "customMachRegisters": {
+            "global": {
+                "allow": [
+                    "com.example.mxc.global.one",
+                    "com.example.mxc.global.two",
+                    "com.example.mxc.global.app.*"
+                ],
+                "deny": [
+                    "com.example.mxc.global.app.no",
+                    "com.example.mxc.global.app.secret.*"
+                ]
+            },
+            "local": {
+                "allow": [
+                    "com.example.mxc.local.one",
+                    "com.example.mxc.local.two",
+                    "com.example.mxc.local.app.*"
+                ],
+                "deny": [
+                    "com.example.mxc.local.app.no",
+                    "com.example.mxc.local.app.secret.*"
+                ]
+            }
+        },
+        "customPosixShm": {
+            "read": [
+                "{{SHM}}.r1",
+                "{{SHM}}.r2"
+            ],
+            "readWrite": [
+                "{{SHM}}.w1",
+                "{{SHM}}.wp.*"
+            ],
+            "own": [
+                "{{SHM}}.o1",
+                "{{SHM}}.op.*"
+            ],
+            "deny": [
+                "{{SHM}}.wp.no",
+                "{{SHM}}.op.no"
+            ]
+        }
+    }
+}

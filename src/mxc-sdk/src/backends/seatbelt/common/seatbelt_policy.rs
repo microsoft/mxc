@@ -514,7 +514,8 @@ pub fn validate_seatbelt_capture_denials(request: &ExecutionRequest) -> Result<(
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ProxyAddress, ProxyConfig, SeatbeltConfig, SeatbeltCustomPosixShm,
+        ProxyAddress, ProxyConfig, SeatbeltConfig, SeatbeltCustomMachRegisters,
+        SeatbeltCustomPosixShm,
     };
 
     #[test]
@@ -714,21 +715,66 @@ mod tests {
             assert!(msg.contains("customIoKits.deny"), "{entry}: {msg}");
             assert!(msg.contains("IOKit user-client class"), "{entry}: {msg}");
         }
-        let shm = |own: &str| SeatbeltConfig {
-            custom_posix_shm: Some(SeatbeltCustomPosixShm {
-                own: vec![own.into()],
+        for (scope, entry) in [("global", "*"), ("local", "com.*.x")] {
+            let rules = Some(SeatbeltCustomRules {
+                allow: vec![entry.into()],
                 ..Default::default()
-            }),
-            ..Default::default()
+            });
+            let registers = if scope == "global" {
+                SeatbeltCustomMachRegisters {
+                    global: rules,
+                    local: None,
+                }
+            } else {
+                SeatbeltCustomMachRegisters {
+                    global: None,
+                    local: rules,
+                }
+            };
+            let msg = custom_error(SeatbeltConfig {
+                custom_mach_registers: Some(registers),
+                ..Default::default()
+            });
+            let list = format!("customMachRegisters.{scope}.allow");
+            assert!(msg.contains(&list), "{entry}: {msg}");
+        }
+
+        let shm = |list: &str, entry: &str| {
+            let mut shm = SeatbeltCustomPosixShm::default();
+            let target = match list {
+                "read" => &mut shm.read,
+                "readWrite" => &mut shm.read_write,
+                "own" => &mut shm.own,
+                _ => &mut shm.deny,
+            };
+            target.push(entry.into());
+            seatbelt_request(SeatbeltConfig {
+                custom_posix_shm: Some(shm),
+                ..Default::default()
+            })
         };
+        // The limit counts bytes, not characters; a trailing '*' is not part
+        // of the name.
         let longest = format!("/{}", "a".repeat(30));
-        assert!(validate_seatbelt_custom_rules(&seatbelt_request(shm(&longest))).is_ok());
-        for (entry, expected) in [
-            (format!("{longest}b"), "longer than 31 bytes"),
-            ("*".to_string(), "bare '*'"),
+        let multibyte = format!("/{}", "\u{e9}".repeat(15));
+        for entry in [longest.clone(), format!("{longest}*"), multibyte.clone()] {
+            validate_seatbelt_custom_rules(&shm("own", &entry)).unwrap();
+        }
+        for (list, entry, expected) in [
+            ("read", format!("{longest}b"), "longer than 31 bytes"),
+            (
+                "readWrite",
+                format!("{multibyte}\u{e9}"),
+                "longer than 31 bytes",
+            ),
+            ("own", "*".to_string(), "bare '*'"),
+            ("deny", "/app*.x".to_string(), "not at the end"),
         ] {
-            let msg = custom_error(shm(&entry));
-            assert!(msg.contains("customPosixShm.own"), "{entry}: {msg}");
+            let msg = validate_seatbelt_custom_rules(&shm(list, &entry)).unwrap_err();
+            assert!(
+                msg.contains(&format!("customPosixShm.{list}")),
+                "{entry}: {msg}"
+            );
             assert!(msg.contains(expected), "{entry}: {msg}");
         }
     }

@@ -502,7 +502,9 @@ expect_collector_gone "the orphaned log stream was stopped" "$COLLECTOR"
 
 # ui.clipboard=none must survive the guiAccess blanket Mach grant, and the
 # report must attribute the blocked pasteboard to UI rather than "other".
-for scenario in allow:all block:none allow:none; do
+# Allow mode enforces only a written setting: an omitted ui.clipboard lets the
+# pasteboard through and still reports it, despite guiAccess's grant.
+for scenario in allow:all block:none allow:none allow:omitted; do
     mode="${scenario%:*}"
     clipboard="${scenario#*:}"
     config="$(render seatbelt_capture_denials_gui_clipboard_none.json OUTPUT "$TESTDIR/out/clipboard.json")"
@@ -512,25 +514,56 @@ path, mode, clipboard = sys.argv[1:]
 with open(path) as source:
     config = json.load(source)
 config["seatbelt"]["captureDenials"]["mode"] = mode
-config["ui"]["clipboard"] = clipboard
+if clipboard == "omitted":
+    del config["ui"]["clipboard"]
+else:
+    config["ui"]["clipboard"] = clipboard
 with open(path, "w") as output:
     json.dump(config, output)
 EOF
     run_config "$config"
-    if [ "$clipboard" = all ]; then
-        expect_ok "allow mode permits the pasteboard when granted under guiAccess" "CLIPBOARD_OK"
-        read_pointer "the allowed pasteboard control writes a report"
-        continue
-    fi
-    expect_ok "$mode mode keeps the pasteboard blocked under guiAccess" "CLIPBOARD_BLOCKED"
-    read_pointer "$mode mode with guiAccess writes a report"
-    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "$mode mode pasteboard denial is not reported as ui" "$(cat "$REPORT")"
+    case "$clipboard" in
+        all)
+            expect_ok "allow mode permits the pasteboard when granted under guiAccess" "CLIPBOARD_OK"
+            read_pointer "the allowed pasteboard control writes a report"
+            continue
+            ;;
+        omitted)
+            expect_ok "allow mode permits the pasteboard when ui.clipboard is omitted" "CLIPBOARD_OK"
+            ;;
+        *)
+            expect_ok "$mode mode keeps the pasteboard blocked under guiAccess" "CLIPBOARD_BLOCKED"
+            ;;
+    esac
+    read_pointer "$mode mode with clipboard $clipboard writes a report"
+    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "$mode mode with clipboard $clipboard: pasteboard is not reported as ui" "$(cat "$REPORT")"
 import json, sys
 doc = json.load(open(sys.argv[1]))
 assert any(d["resourceType"] == "ui" and "com.apple.pasteboard" in d["resource"]
            for d in doc["denials"])
 EOF
-    pass "$mode mode pasteboard denial is reported as ui"
+    pass "$mode mode with clipboard $clipboard reports the pasteboard as ui"
+done
+
+# Same for keychainAccess. HOME must be set or Security.framework fails for an
+# unrelated reason.
+for keychain in omitted false; do
+    config="$(render seatbelt_capture_denials_gui_keychain.json HOME "$HOME" OUTPUT "$TESTDIR/out/keychain.json")"
+    [ "$keychain" = false ] && edit_config "$config" 'config["seatbelt"]["keychainAccess"] = False'
+    run_config "$config"
+    if [ "$keychain" = omitted ]; then
+        expect_ok "allow mode permits the Keychain when keychainAccess is omitted" "KEYCHAIN_OK"
+    else
+        expect_ok "allow mode keeps the Keychain blocked with keychainAccess=false" "KEYCHAIN_BLOCKED"
+    fi
+    read_pointer "allow mode with keychainAccess $keychain writes a report"
+    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "allow mode with keychainAccess $keychain does not report the Keychain" "$(cat "$REPORT")"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert any(d["resource"].startswith(("mach-lookup:com.apple.securityd", "mach-lookup:com.apple.SecurityServer"))
+           for d in doc["denials"])
+EOF
+    pass "allow mode with keychainAccess $keychain reports the Keychain"
 done
 
 # --- a real GUI app: which Mach services and IOKit drivers it needs ----------

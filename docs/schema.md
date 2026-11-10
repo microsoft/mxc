@@ -315,8 +315,9 @@ that can be executed independently.
         },
         "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
                                            // Not combinable with profileOverride.
-            "mode": "block",               // "block" (default) or "allow" (default-denied access is
-                                           // allowed and recorded; explicit denies still apply)
+            "mode": "block",               // "block" (default) or "allow" (default-denied access and
+                                           // omitted settings are allowed and recorded; deniedPaths,
+                                           // deny lists, and written settings still apply)
             "outputPath": "~/denials.json",// Absolute or ~/ path; parent dir must exist. Omit for a
                                            // temp file. Actual path is printed on stderr.
             "retainEtl": false             // Keep the raw log as a .seatbelt.log and report its

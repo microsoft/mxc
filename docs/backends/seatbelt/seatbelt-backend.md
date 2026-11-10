@@ -419,7 +419,7 @@ the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
 
 | Field | Default | Meaning |
 |---|---|---|
-| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Settings left out of the config, such as `keychainAccess` or `ui.clipboard`, also don't block. `deniedPaths`, custom `deny` entries, and settings written in the config are still enforced. |
 | `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
 | `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
 
@@ -609,7 +609,7 @@ MXC rejects a config when:
 To find the names an app needs, run it once with
 [`captureDenials`](#learning-mode-capturedenials) in `"allow"` mode. In that
 mode every custom list acts as `default: "allow"`, so the app isn't blocked,
-while `deny` entries and setting denies still apply. The report lists each
+while `deny` entries and settings written in the config still apply. The report lists each
 name the lists don't grant, such as `mach-lookup:com.apple.CARenderServer` or
 `ipc-posix-shm-read-data:apple.shm.notification_center`. Add those names to the
 matching list.

@@ -168,6 +168,11 @@ pub struct SeatbeltConfig {
     #[serde(rename = "keychainAccess", default)]
     pub keychain_access: bool,
 
+    /// Whether the request supplied `keychainAccess`. captureDenials
+    /// `"allow"` mode keeps the Keychain deny only when it was supplied.
+    #[serde(skip)]
+    pub keychain_access_specified: bool,
+
     /// Additional Mach service global-names to allow `mach-lookup` for.
     /// Escape hatch for callers that need to talk to a system service
     /// the baseline doesn't cover (e.g. opt-in agent integrations).
@@ -220,6 +225,7 @@ impl Default for SeatbeltConfig {
             gui_access: false,
             nested_pty: true,
             keychain_access: false,
+            keychain_access_specified: false,
             extra_mach_lookups: Vec::new(),
             custom_io_kits: None,
             custom_mach_registers: None,
@@ -698,6 +704,14 @@ impl Default for UiPolicy {
     }
 }
 
+/// Which fields of the `ui` section were present in the request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiFieldsSpecified {
+    pub disable: bool,
+    pub clipboard: bool,
+    pub injection: bool,
+}
+
 /// BaseProcessContainer-specific UI configuration (Windows only).
 /// Parsed from `processContainer.ui` in the JSON config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -800,6 +814,11 @@ pub struct ContainerPolicy {
     /// was honored anywhere; it means only that the caller supplied one.
     #[serde(skip)]
     pub ui_specified: bool,
+    /// Which `ui` fields the caller supplied. Seatbelt's captureDenials
+    /// `"allow"` mode enforces only the UI denies the caller wrote.
+    /// Parse-derived, never on the wire.
+    #[serde(skip)]
+    pub ui_fields_specified: UiFieldsSpecified,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
     /// Windows denial capture (from `processContainer.captureDenials`). When
