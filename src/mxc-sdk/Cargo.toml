@@ -35,8 +35,7 @@ test-support = []
 microvm = ["dep:libloading", "dep:zip"]
 hyperlight = [
     "dep:hyperlight-unikraft",
-    "ureq/native-tls",
-    "ureq/gzip",
+    "dep:ureq",
     "dep:flate2",
     "dep:tar",
 ]
@@ -94,6 +93,7 @@ serial_test.workspace = true
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 flate2 = { version = "1", optional = true }
 hyperlight-unikraft = { version = "=0.21.0", default-features = false, optional = true }
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tracelogging.workspace = true
