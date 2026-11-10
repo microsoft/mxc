@@ -12,6 +12,25 @@ const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
+fn with_transport_stack<T: Send>(
+    operation: impl FnOnce() -> Result<T, MxcError> + Send,
+) -> Result<T, MxcError> {
+    // TLS must not run on a foreign FFI caller's small stack. Join before returning.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("mxc-w365-control-plane".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn_scoped(scope, operation)
+            .map_err(|error| {
+                MxcError::backend_error(format!(
+                    "could not start W365 control-plane transport: {error}"
+                ))
+            })?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 fn guid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
@@ -137,7 +156,7 @@ impl Client {
         &self,
         config: &W365AgentsProvisionConfig,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
-        self.checkout_once(config).map_err(|mut error| {
+        with_transport_stack(|| self.checkout_once(config)).map_err(|mut error| {
             if let Some(details) = error.details.as_mut() {
                 details["poolId"] = json!(config.pool_id.to_ascii_lowercase());
             }
@@ -271,6 +290,10 @@ impl Client {
     }
 
     pub(super) fn release(&self, identity: &Identity) -> Result<(), MxcError> {
+        with_transport_stack(|| self.release_once(identity))
+    }
+
+    fn release_once(&self, identity: &Identity) -> Result<(), MxcError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (agent, base) = self.agent(RELEASE_TIMEOUT)?;
         let url = format!(

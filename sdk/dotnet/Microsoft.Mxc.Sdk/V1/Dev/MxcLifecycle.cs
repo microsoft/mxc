@@ -182,13 +182,13 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = request)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_run_state_aware_json(
+                var status = NativeMethods.mxc_run_state_aware_json_with_details(
                     requestPtr, dryRun ? 1 : 0, options?.Experimental == true ? 1 : 0, &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)
                     {
-                        throw NativeError.ToException(status, result.error, "exact JSON lifecycle failed");
+                        throw NativeError.LifecycleException(status, result, "exact JSON lifecycle failed");
                     }
                     var responseJson = result.response_json_utf8 is null
                         ? null : Marshal.PtrToStringUTF8((IntPtr)result.response_json_utf8);

@@ -62,6 +62,16 @@ canceling `RunInContainerJsonAsync` disposes its owned process. Async
 lifecycle management and validation calls run off the caller's thread
 without cancellation tokens.
 
+W365 supports only `ProvisionContainerJson`, `StopContainerJson`,
+`DeprovisionContainerJson` and their async/validation variants with the
+`1.1.0-alpha` contract and `Experimental = true`. Start and all execution
+methods remain gated. Provision returns `result.sandboxId`; retain it for
+terminal release. Backend failure/cleanup context is preserved in
+`MxcException.Details` (`System.Text.Json.JsonElement?`), independently of
+native result disposal. Inspect it explicitly; `ToString()` omits it.
+See the [W365 guide](../../../backends/w365agents/w365agents-backend.md)
+for caller-owned environment authentication, uncertainty and release rules.
+
 Captured output is lossy UTF-8 text. Callers own and dispose live handles;
 existing-container execution leaves the container caller-owned.
 A descendant holding an output pipe open can delay captured execution

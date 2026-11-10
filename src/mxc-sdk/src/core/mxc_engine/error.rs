@@ -93,8 +93,9 @@ impl From<MxcErrorCode> for ErrorCode {
 ///
 /// `operation`, `native_code`, and `remediation` are top-level fields also
 /// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
-/// in Rust errors and executor JSON error envelopes. The C error structure
-/// does not expose them.
+/// in Rust errors and executor JSON error envelopes. Lifecycle bindings use
+/// the additive structured-error C entry point; the original C error structure
+/// remains unchanged.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.

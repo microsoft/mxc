@@ -1,4 +1,4 @@
-# Windows 365 for Agents: native lifecycle and execution
+# Windows 365 for Agents: lifecycle and native execution
 
 > **Audience:** MXC consumers and developers
 
@@ -6,17 +6,58 @@ This experimental backend implements checkout through `provision`, bounded
 readiness polling through `start`, native pipe-backed or executor-relayed
 `exec`, and terminal release through `stop` or `deprovision`. It is
 included in normal Windows, Linux and macOS builds. Every operation requires
-executor `--experimental` authorization. Local probes do not report W365
+executor `--experimental` or SDK experimental authorization. Local probes do not report W365
 availability and never authenticate, discover a pool or check out a Cloud PC.
 The Unix executors forward the same explicit lifecycle routing controls to the
 engine; their existing create-and-run paths and platform checks are unchanged.
 
 PTY, create-and-run execution and placement sessions remain unavailable.
 They fail explicitly without service work. Typed W365 SDK authoring APIs do not
-exist. Rust, .NET and Node Dev SDK
-JSON lifecycle access is also deliberately unavailable until cross-SDK
-structured error metadata and public SDK validation are complete.
-Native executor responses retain structured errors and cleanup identities.
+exist. Rust, .NET and Node Dev SDK JSON supports **provision, stop and
+deprovision only**, including their validation methods. SDK start, exec,
+live/captured execution and PTY remain unavailable, even with experimental
+authorization. Native executor start/exec support does not establish service
+compatibility or enable these SDK operations.
+
+### Dev SDK lifecycle
+
+Author the complete development request JSON with an explicit `phase`.
+Rust uses `mxc_sdk::v1::dev::{provision_container_json, stop_container_json,
+deprovision_container_json}` with `JsonOptions { experimental: true }`.
+.NET uses `Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle` methods
+`ProvisionContainerJson`, `StopContainerJson` and `DeprovisionContainerJson`
+(or their `Async` variants), with `new JsonOptions { Experimental = true }`.
+Node exports the corresponding `provisionContainerJson`, `stopContainerJson`
+and `deprovisionContainerJson` from `@microsoft/mxc-sdk/v1/dev`, with
+`{ experimental: true }`. All return the complete response JSON string.
+
+Provision returns `result.sandboxId` and
+`result.metadata.{poolId,sessionId,computerId}`. Retain the ID before any later
+operation. Stop/deprovision requests contain `version`, `phase` and
+`sandboxId`, not provision settings. Both are terminal release alternatives:
+`result.metadata.releaseRequested: true` and `restartable: false` mean
+accepted release, not verified reset or permission to restart.
+
+Failures throw/return the normal versioned SDK error. Structured context is
+available in Rust `Error.details` (`Option<Box<serde_json::Value>>`),
+.NET `MxcException.Details` (`System.Text.Json.JsonElement?`) and Node
+`MxcError.details` (`Record<string, unknown> | undefined`). Inspect
+`sandboxId`, `possiblySucceeded`, `code`, `operation`, `clientRequestId`
+and, when supplied, `requestId` and `httpStatus`. These backend fields are
+inside details; the error's top-level code remains the SDK error category.
+The cleanup and uncertainty rules below apply equally to SDK calls.
+Do not log details wholesale. .NET details remain valid after native result
+disposal, and `ToString()` does not include them.
+
+Supply caller-owned control-plane endpoint/token environment variables before
+each call. Separate callers can release the same retained ID with renewed
+credentials; no SDK-owned reservation registry or credential cache is required.
+Async lifecycle wrappers do not add cancellation or retry/replay.
+.NET/Node must use the matching managed/package and native library build.
+For local .NET applications set `MXC_FFI_DIR` to the directory containing the
+paired `mxc_ffi.dll` before the first SDK call and verify that file exists;
+the resolver tries that directory first, but falls through if loading fails.
+Production binaries ignore fixture trust variables.
 
 ## Configuration and contract
 
@@ -467,8 +508,28 @@ From `src\` on Windows:
 ```powershell
 cargo build --locked -p wxc --features test-support
 $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
-cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored
+cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored --skip sdk_fresh_caller_fixture
 ```
+
+The ordinary Rust suite also runs `public_rust_sdk_lifecycle_fixture` through
+the public Dev SDK. For actual .NET and Node SDK calls through FFI, run from
+the repository root on Windows with .NET 10 and Node 24 or later:
+
+```powershell
+.\tests\scripts\run_w365_sdk_fixtures.ps1
+```
+
+This selector builds a separate test-support FFI and the real SDKs, then runs
+fresh .NET/Node callers against the existing trusted-TLS fixture. It checks
+Local/bodyless checkout, omitted identity, retained IDs, refreshed caller
+credentials, terminal release metadata, uncertain release and explicit retry,
+rejected checkout cleanup, unknown/no-ID outcomes, experimental/policy refusal,
+and the remaining execution gates. Exact request counts reject automatic
+replay, and completion markers reject empty/skipped caller suites.
+The Windows x64 build job runs it in both regular and scheduled validation;
+Rust public SDK coverage runs on all three platforms. These fixtures never
+allocate a live Cloud PC and do not prove authenticated service compatibility.
+Do not use the test-support FFI for a live test.
 
 CI uses a separate target directory so fixture executors cannot replace
 shipping artifacts. Linux builds `lxc` and macOS builds `mxc_darwin` with

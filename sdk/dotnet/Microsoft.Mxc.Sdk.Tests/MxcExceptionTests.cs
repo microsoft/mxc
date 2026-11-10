@@ -3,6 +3,7 @@
 
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Xunit;
@@ -21,6 +22,22 @@ namespace Microsoft.Mxc.Sdk.Tests;
 /// </remarks>
 public class MxcExceptionTests
 {
+    [Fact]
+    public void DetailsSurviveJsonDisposalWithoutAppearingInToString()
+    {
+        MxcException error;
+        using (var document = JsonDocument.Parse(
+            """{"sandboxId":"sensitive-fixture-id","possiblySucceeded":true}"""))
+        {
+            error = new MxcException(ErrorCode.BackendError, "cleanup failed",
+                null, null, null, document.RootElement);
+        }
+        Assert.Equal("sensitive-fixture-id", error.Details!.Value.GetProperty("sandboxId").GetString());
+        Assert.True(error.Details.Value.GetProperty("possiblySucceeded").GetBoolean());
+        Assert.DoesNotContain("sensitive-fixture-id", error.ToString());
+        Assert.Null(new MxcException(ErrorCode.BackendError, "absent").Details);
+    }
+
     [Fact]
     public void OnlyTheCodeAndMessageConstructorIsPublic()
     {

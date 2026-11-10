@@ -49,3 +49,12 @@ combined terminal output and the exit code. Structured warnings and output
 metadata are unavailable on this route. The executor enforces
 `process.timeout`, but `wait().timedOut` is `false`: the terminal channel
 reports only an exit code.
+
+W365 supports only `provisionContainerJson`, `stopContainerJson`,
+`deprovisionContainerJson` and their validation counterparts with
+`1.1.0-alpha` and `experimental: true`. Start and all execution methods
+remain gated. Retain `result.sandboxId` for terminal release; failures
+preserve backend uncertainty and cleanup context in `MxcError.details`,
+including through the native binding. See the
+[W365 guide](../../../backends/w365agents/w365agents-backend.md)
+for caller-owned environment authentication and release rules.

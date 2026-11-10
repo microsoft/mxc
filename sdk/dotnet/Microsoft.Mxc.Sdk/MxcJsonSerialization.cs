@@ -7,6 +7,7 @@ using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.V1.Dev;
+using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
 
@@ -95,6 +96,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(LifecycleResult))]
 [JsonSerializable(typeof(ProvisionResult))]
 [JsonSerializable(typeof(ContainerId))]
+[JsonSerializable(typeof(NativeLifecycleErrorEnvelope))]
+[JsonSerializable(typeof(NativeLifecycleError))]
 // Primitive and collection shapes resolved by the custom converters and helpers.
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(List<string>))]

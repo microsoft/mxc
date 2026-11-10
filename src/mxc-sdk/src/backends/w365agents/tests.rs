@@ -20,6 +20,7 @@ const B: &str = "33333333-3333-3333-3333-333333333333";
 static ENV: Mutex<()> = Mutex::new(());
 
 mod execution;
+mod sdk_lifecycle;
 
 #[test]
 fn readiness_contract_fixture() {

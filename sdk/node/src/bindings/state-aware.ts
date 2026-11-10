@@ -4,7 +4,7 @@
 // Async native binding for state-aware lifecycle phases that run to completion.
 
 import koffi from 'koffi';
-import { MxcError } from '../v1/errors.js';
+import { MxcError, mxcErrorFromEnvelope, type WireError } from '../v1/errors.js';
 import { loadMxcFfi } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
@@ -56,7 +56,7 @@ function bindStateAwareNativeFacade(
   native: ReturnType<typeof loadMxcFfi>,
 ): StateAwareNativeFacade {
   const run = bindNativeFunction<StateAwareFunction>(native.handle, {
-    symbol: 'mxc_run_state_aware_json',
+    symbol: 'mxc_run_state_aware_json_with_details',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -91,11 +91,31 @@ function createStateAwareResult(): StateAwareNativeResult {
   };
 }
 
+function isWireError(value: unknown): value is WireError {
+  if (value === null || typeof value !== 'object') return false;
+  return 'code' in value && typeof value.code === 'string'
+    && 'message' in value && typeof value.message === 'string'
+    && (!('operation' in value) || typeof value.operation === 'string')
+    && (!('nativeCode' in value) || typeof value.nativeCode === 'string')
+    && (!('remediation' in value) || typeof value.remediation === 'string')
+    && (!('details' in value) || (value.details !== null
+      && typeof value.details === 'object' && !Array.isArray(value.details)));
+}
+
 function decodeStateAwareResult(
   nativeStatus: number,
   result: StateAwareNativeResult,
 ): string {
   if (nativeStatus !== 0 || result.status !== 0) {
+    const json = decodeString(result.responseJsonUtf8);
+    if (json !== undefined) {
+      const envelope: unknown = JSON.parse(json);
+      if (envelope === null || typeof envelope !== 'object'
+        || !('error' in envelope) || !isWireError(envelope.error)) {
+        throw new MxcError('backend_error', 'native lifecycle error envelope is malformed');
+      }
+      throw mxcErrorFromEnvelope(envelope.error);
+    }
     throw nativeStatusError(
       result.status || nativeStatus,
       result.error,

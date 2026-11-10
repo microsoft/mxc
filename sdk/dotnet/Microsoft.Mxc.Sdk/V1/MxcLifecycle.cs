@@ -786,7 +786,7 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_run_state_aware_json(
+                var status = NativeMethods.mxc_run_state_aware_json_with_details(
                     requestPtr,
                     dryRun ? 1 : 0,
                     experimental ? ExperimentalOptIn : NoExperimentalOptIn,
@@ -795,7 +795,7 @@ public static class MxcLifecycle
                 {
                     if (status != (int)ErrorCode.Success)
                     {
-                        throw NativeError.ToException(status, result.error, "unknown error");
+                        throw NativeError.LifecycleException(status, result, "unknown error");
                     }
 
                     var responseJson = PtrToString(result.response_json_utf8) ?? "{}";

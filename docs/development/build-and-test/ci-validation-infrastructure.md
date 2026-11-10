@@ -26,6 +26,21 @@ No OS/architecture matrix entry is removed. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md) for local
 commands, service-contract differences and the explicitly unrun live validation.
 
+The public Rust Dev SDK checkout/release fixture runs in those build jobs.
+Windows x64 additionally runs `tests\scripts\run_w365_sdk_fixtures.ps1` for the
+public .NET and Node Dev SDKs through FFI. It builds isolated test-support
+artifacts, requires the named Rust orchestrator and caller completion markers,
+and uses fresh caller processes with synthetic renewed credentials. Coverage
+includes lifecycle-only gates, pre-network policy/experimental refusal,
+terminal release, uncertainty/cleanup IDs and no replay. The general native
+fixture invocation skips `sdk_fresh_caller_fixture`; only this SDK selector
+supplies its required caller command. No tenant credentials are used.
+
+The Node fixture must use the normal Koffi async configuration. Its native
+worker stack is small, so W365 control-plane TLS runs on a scoped native thread
+with a 2 MiB stack, joined before the SDK call returns. Do not mask regressions
+by increasing Koffi's global stack configuration in the fixture.
+
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
   `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the

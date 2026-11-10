@@ -1168,9 +1168,16 @@ pub fn exec_state_aware_pty_json(
 }
 
 fn require_sdk_lifecycle_ready(parsed: &ParsedStateAwareRequest) -> Result<(), Error> {
-    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents {
+    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents
+        && !matches!(
+            parsed.phase(),
+            crate::mxc_common::state_aware_request::Phase::Provision
+                | crate::mxc_common::state_aware_request::Phase::Stop
+                | crate::mxc_common::state_aware_request::Phase::Deprovision
+        )
+    {
         return Err(MxcError::backend_unavailable(
-            "W365 Dev SDK access is deferred until cross-SDK error details and SDK validation are ready; use the experimental native executor",
+            "W365 Dev SDK supports only provision, stop and deprovision; start and execution remain unavailable",
         ).into());
     }
     Ok(())

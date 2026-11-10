@@ -12,6 +12,12 @@ Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/a
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
 
+W365 Dev JSON supports experimental provision, stop and deprovision only;
+start and execution remain gated. Failures retain cleanup/uncertainty context
+in `V1.MxcException.Details` (`System.Text.Json.JsonElement?`). See the
+[W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md)
+for caller-supplied environment credentials and terminal release semantics.
+
 ## Requirements
 
 The SDK targets `net8.0` and `net10.0`. Applications targeting .NET 8 or .NET 9

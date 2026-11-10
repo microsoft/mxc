@@ -19,6 +19,12 @@ together and settle important design questions before you invest in implementati
 
 ## 1. Start with a GitHub issue
 
+Experimental native backend support does not automatically enable Dev SDK
+access. Before opening an SDK lifecycle phase, preserve structured recovery
+errors across Rust, .NET and Node and add public SDK functional coverage.
+W365 currently exposes only Dev JSON provision, stop and deprovision; see its
+[backend guide](../../backends/w365agents/w365agents-backend.md).
+
 Find or open an issue describing the problem and desired behavior. Share your
 use case and, if you would like to contribute, say so. Maintainers will help
 discuss scope, related work, and whether a spec is needed before you write one.

@@ -71,6 +71,7 @@ jobs:
           export MXC_W365_TEST_EXECUTOR="$PWD/target/w365-fixture/aarch64-apple-darwin/debug/mxc-exec-mac"
           names="$(cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin -- --list)"
           for case in lifecycle_contract_and_recovery_fixture lifecycle_fresh_executor_fixture \
+            sdk_lifecycle::public_rust_sdk_lifecycle_fixture \
             readiness_contract_fixture execution::native_execution_streams_fixture \
             execution::native_execution_backpressure_fixture \
             execution::native_execution_failure_and_disposal_fixture \
@@ -78,7 +79,7 @@ jobs:
             execution::execution_fresh_executor_fixture; do
             grep -Fq "backend_modules::w365agents::tests::$case: test" <<< "$names"
           done
-          cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin w365 -- --include-ignored
+          cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin w365 -- --include-ignored --skip sdk_fresh_caller_fixture
 
       - name: Test Seatbelt streaming and PTY
         run: cargo test --locked --release --target aarch64-apple-darwin

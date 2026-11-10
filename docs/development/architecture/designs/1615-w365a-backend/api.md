@@ -19,9 +19,10 @@ Typed W365 configuration and contract publication remain out of scope.
 
 **Implementation boundary:** Phase 3 implements native checkout, readiness,
 executor relay, internal native pipe/capture adapters and terminal release.
-All Dev SDK W365 JSON calls remain explicitly unavailable
-until cross-SDK structured error metadata and SDK fixtures are ready.
-The examples in this proposal are not runnable SDK examples in this stage.
+Dev SDK JSON provision, stop and deprovision are implemented with cross-SDK
+structured error metadata and offline SDK fixtures. Start, execution and
+pipe-backed spawn remain explicitly unavailable. The complete-workflow examples
+below still describe the proposed later stage, not runnable SDK execution.
 No typed SDK authoring APIs or C ABI layout changes are introduced. See the
 [backend guide](../../../../backends/w365agents/w365agents-backend.md).
 

@@ -58,3 +58,11 @@ for the 64 MiB capture limit, caller-owned streams, and sensitive
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail
 rather than switching to another I/O mode.
+
+W365 supports only `provision_container_json`, `stop_container_json`,
+`deprovision_container_json` and their validation counterparts with
+`1.1.0-alpha` and `experimental: true`. Start and all execution methods
+remain gated. Retain `result.sandboxId` for terminal release; failures
+preserve backend uncertainty and cleanup context in `Error.details`.
+See the [W365 guide](../../../backends/w365agents/w365agents-backend.md)
+for caller-owned environment authentication and release rules.

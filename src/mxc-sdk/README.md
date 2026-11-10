@@ -21,6 +21,12 @@ Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-refer
 for caller-authored MXC request JSON. It supports execution, container
 lifecycle operations, and validation through the in-process engine.
 
+W365 Dev JSON supports experimental provision, stop and deprovision only;
+start and execution remain gated. Failures retain cleanup/uncertainty context
+in `v1::Error.details`. See the
+[W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md)
+for caller-supplied environment credentials and terminal release semantics.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

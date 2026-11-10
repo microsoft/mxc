@@ -97,6 +97,13 @@ impl MxcStateAwareResult {
         }
     }
 
+    fn from_sdk_error_with_details(error: mxc_sdk::v1::Error) -> Self {
+        let mut result = Self::from_sdk_error(&error);
+        let envelope = serde_json::json!({"error": error.into_mxc_error().to_envelope()});
+        result.response_json_utf8 = alloc_cstring(envelope.to_string().as_bytes());
+        result
+    }
+
     fn free_strings(&mut self) {
         free_cstr(&mut self.response_json_utf8);
         self.error.free_strings();
@@ -141,6 +148,47 @@ fn state_aware_inner(
     dry_run: bool,
     experimental: bool,
 ) -> MxcStateAwareResult {
+    state_aware_inner_with_details(request_json_utf8, dry_run, experimental, false)
+}
+
+/// Run lifecycle JSON, retaining structured SDK errors in `response_json_utf8`.
+///
+/// The status and `error` fields retain their existing meanings. On SDK failure,
+/// `response_json_utf8` additionally owns `{"error": {...}}`, including backend
+/// recovery details. Argument failures and contained panics may leave it null.
+/// The original entry point and all C structure layouts remain unchanged.
+///
+/// # Safety
+/// The pointer and ownership requirements are those of [`mxc_run_state_aware_json`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_state_aware_json_with_details(
+    request_json_utf8: *const c_char,
+    dry_run: i32,
+    experimental: i32,
+    out: *mut MxcStateAwareResult,
+) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        state_aware_inner_with_details(request_json_utf8, dry_run != 0, experimental != 0, true)
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_run_state_aware_json_with_details", &*panic);
+        MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
+    let status = result.status;
+    // SAFETY: caller guarantees writable storage; owned strings transfer to out.
+    unsafe { ptr::write(out, result) };
+    status
+}
+
+fn state_aware_inner_with_details(
+    request_json_utf8: *const c_char,
+    dry_run: bool,
+    experimental: bool,
+    include_details: bool,
+) -> MxcStateAwareResult {
     // SAFETY: caller contract on `mxc_run_state_aware_json`; borrowed only
     // within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -162,7 +210,13 @@ fn state_aware_inner(
             response_json_utf8: alloc_cstring(response_json.as_bytes()),
             error: MxcErrorDetail::none(),
         },
-        Err(e) => MxcStateAwareResult::from_sdk_error(&e),
+        Err(e) => {
+            if include_details {
+                MxcStateAwareResult::from_sdk_error_with_details(e)
+            } else {
+                MxcStateAwareResult::from_sdk_error(&e)
+            }
+        }
     }
 }
 
@@ -669,9 +723,9 @@ mod tests {
     }
 
     #[test]
-    fn w365_sdk_lifecycle_access_remains_staged_off() {
+    fn w365_sdk_start_and_execution_remain_staged_off() {
         for experimental in [false, true] {
-            for phase in ["provision", "start", "exec", "stop", "deprovision"] {
+            for phase in ["start", "exec"] {
                 let mut value = serde_json::json!({
                     "version":"1.1.0-alpha", "phase":phase,
                 });
@@ -695,7 +749,7 @@ mod tests {
                     .expect("W365 SDK capture remains unavailable");
                     assert!(error
                         .to_string()
-                        .contains("W365 Dev SDK access is deferred"));
+                        .contains("start and execution remain unavailable"));
                 }
                 let mut out = call_opt(&value.to_string(), false, experimental);
                 assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
@@ -705,10 +759,60 @@ mod tests {
                 assert!(message
                     .to_str()
                     .unwrap()
-                    .contains("W365 Dev SDK access is deferred"));
+                    .contains("start and execution remain unavailable"));
                 // SAFETY: all result strings were allocated by the native call.
                 unsafe { mxc_state_aware_result_free(&mut out) };
             }
+        }
+    }
+
+    #[test]
+    fn additive_lifecycle_errors_preserve_details_and_legacy_layout_behavior() {
+        let mut error = mxc_sdk::v1::Error::new(crate::ErrorCode::BackendError, "checkout failed");
+        error.operation = Some("Fixture.Checkout".into());
+        error.native_code = Some("fixture-status".into());
+        error.remediation = Some("Retain the cleanup identity.".into());
+        error.details = Some(Box::new(serde_json::json!({
+            "sandboxId":"w365:fixture", "possiblySucceeded":true,
+            "nested":{"unknown":null}, "requestId":"fixture-request",
+        })));
+        let mut legacy = MxcStateAwareResult::from_sdk_error(&error);
+        assert!(legacy.response_json_utf8.is_null());
+        let mut result = MxcStateAwareResult::from_sdk_error_with_details(error);
+        assert_eq!(result.status, crate::MXC_STATUS_BACKEND_ERROR);
+        // SAFETY: the result owns a NUL-terminated JSON string.
+        let json = unsafe { std::ffi::CStr::from_ptr(result.response_json_utf8) };
+        let value: serde_json::Value = serde_json::from_slice(json.to_bytes()).unwrap();
+        assert_eq!(value["error"]["details"]["sandboxId"], "w365:fixture");
+        assert_eq!(value["error"]["details"]["possiblySucceeded"], true);
+        assert_eq!(value["error"]["operation"], "Fixture.Checkout");
+        assert_eq!(value["error"]["nativeCode"], "fixture-status");
+        assert_eq!(
+            value["error"]["remediation"],
+            "Retain the cleanup identity."
+        );
+        // SAFETY: both results own native strings; the destructor resets pointers.
+        unsafe {
+            mxc_state_aware_result_free(&mut legacy);
+            mxc_state_aware_result_free(&mut result);
+            mxc_state_aware_result_free(&mut result);
+        }
+        assert!(result.response_json_utf8.is_null());
+        assert!(result.error.message_utf8.is_null());
+
+        let mut result = MxcStateAwareResult::empty();
+        // SAFETY: null input is supported and result points to writable storage.
+        unsafe {
+            assert_eq!(
+                mxc_run_state_aware_json_with_details(ptr::null(), 0, 0, &mut result),
+                MXC_STATUS_NULL_ARGUMENT
+            );
+            assert!(result.response_json_utf8.is_null());
+            mxc_state_aware_result_free(&mut result);
+            assert_eq!(
+                mxc_run_state_aware_json_with_details(ptr::null(), 0, 0, ptr::null_mut()),
+                MXC_STATUS_NULL_ARGUMENT
+            );
         }
     }
 

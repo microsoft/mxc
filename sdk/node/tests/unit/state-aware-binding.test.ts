@@ -22,6 +22,7 @@ class FakeStateAwareNative implements StateAwareNativeFacade {
   nativeStatus = 0;
   resultStatus = 0;
   freeCount = 0;
+  responseJson: string | undefined;
 
   run(
     request: string,
@@ -32,6 +33,9 @@ class FakeStateAwareNative implements StateAwareNativeFacade {
   ): void {
     this.calls.push({ request, dryRun, experimental });
     result.status = this.resultStatus;
+    if (this.responseJson !== undefined) {
+      result.responseJsonUtf8 = Buffer.from(this.responseJson + '\0');
+    }
     queueMicrotask(() => completion(this.callbackError, this.nativeStatus));
   }
 
@@ -47,6 +51,29 @@ const REQUEST: BindingStateAwareRequest = {
 };
 
 describe('state-aware native binding ownership', () => {
+  it('preserves structured recovery details before freeing the native error result', async () => {
+    const native = new FakeStateAwareNative();
+    native.nativeStatus = native.resultStatus = 12;
+    native.responseJson = JSON.stringify({ error: {
+      code: 'backend_error', message: 'checkout failed',
+      operation: 'Fixture.Checkout', nativeCode: 'fixture-status',
+      remediation: 'Retain the cleanup identity.',
+      details: { sandboxId: 'w365:fixture', possiblySucceeded: true, nested: { unknown: null } },
+    } });
+    await assert.rejects(runBindingStateAwareRequestWithNative(REQUEST, native),
+      (error: unknown) => {
+        assert.ok(error instanceof MxcError);
+        assert.deepStrictEqual(error.details, {
+          sandboxId: 'w365:fixture', possiblySucceeded: true, nested: { unknown: null },
+        });
+        assert.strictEqual(error.operation, 'Fixture.Checkout');
+        assert.strictEqual(error.nativeCode, 'fixture-status');
+        assert.strictEqual(error.remediation, 'Retain the cleanup identity.');
+        return true;
+      });
+    assert.strictEqual(native.freeCount, 1);
+  });
+
   it('forwards flags and rejects a missing response while freeing the result', async () => {
     const native = new FakeStateAwareNative();
 

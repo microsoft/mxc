@@ -346,11 +346,12 @@ human user; `Agentic` requires one representing the selected Agent User.
 This lifecycle slice does not provide auxiliary-token settings, so Agentic
 session authentication is not supported.
 
-With executor experimental opt-in, provision checks out a session and stop or
+With experimental opt-in, provision checks out a session and stop or
 deprovision requests terminal release using its retained `w365:` ID.
-Start/readiness and exec remain unavailable, and later phases reject
-`w365Agents` settings. Service configuration currently comes from the caller
-environment. Typed W365 SDK APIs do not exist, and Dev SDK JSON lifecycle
-access remains unavailable. See the
+Dev SDK JSON supports only these three operations and their validation methods;
+SDK start/readiness and exec remain unavailable. Native executors additionally
+support start/readiness and exec, without establishing live execution compatibility.
+Later phases reject `w365Agents` settings. Service configuration comes from the caller
+environment. Typed W365 SDK APIs do not exist. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md) for
 configuration, cleanup and service-validation limits.

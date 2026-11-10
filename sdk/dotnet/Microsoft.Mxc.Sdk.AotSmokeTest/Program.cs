@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.Native;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 
 static void Check(bool condition, string what)
@@ -27,6 +28,16 @@ static void Check(bool condition, string what)
 
 // Reflection-free serialization must be in force, or this test proves nothing.
 Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disabled");
+
+var lifecycleError = MxcJson.Deserialize<NativeLifecycleErrorEnvelope>(
+    """{"error":{"code":"backend_error","message":"checkout failed","details":{"sandboxId":"w365:fixture","possiblySucceeded":true}}}""")!;
+var lifecycleRoundTrip = MxcJson.Deserialize<NativeLifecycleErrorEnvelope>(
+    MxcJson.Serialize(lifecycleError, MxcJson.Options))!;
+Check(lifecycleRoundTrip.Error.Details!.Value.GetProperty("possiblySucceeded").GetBoolean(),
+    "lifecycle structured error envelope roundtrip");
+CheckRoundTrip(lifecycleError.Error,
+    x => x.Details!.Value.GetProperty("sandboxId").GetString() == "w365:fixture",
+    "lifecycle error JSON root");
 
 static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 {

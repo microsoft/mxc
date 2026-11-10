@@ -587,6 +587,7 @@ public sealed class MxcException : Exception
     public string? Operation { get; }
     public string? NativeCode { get; }
     public string? Remediation { get; }
+    public System.Text.Json.JsonElement? Details { get; }
 
     public MxcException(ErrorCode code, string message)
     : this(code, message, null, null, null);
@@ -595,6 +596,9 @@ public sealed class MxcException : Exception
 }
 ```
 
+`Details` preserves backend-specific lifecycle failure and cleanup information.
+It is null when absent and remains valid after native result disposal.
+Inspect it explicitly rather than logging it wholesale; `ToString()` omits it.
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle`
 

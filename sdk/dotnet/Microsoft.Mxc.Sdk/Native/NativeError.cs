@@ -2,10 +2,26 @@
 // Licensed under the MIT License.
 
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 using Microsoft.Mxc.Sdk.V1;
 
 namespace Microsoft.Mxc.Sdk.Native;
+
+internal sealed class NativeLifecycleErrorEnvelope
+{
+    public required NativeLifecycleError Error { get; init; }
+}
+
+internal sealed class NativeLifecycleError
+{
+    public required string Code { get; init; }
+    public required string Message { get; init; }
+    public string? Operation { get; init; }
+    public string? NativeCode { get; init; }
+    public string? Remediation { get; init; }
+    public JsonElement? Details { get; init; }
+}
 
 /// <summary>
 /// Turns the native failure detail into an <see cref="MxcException"/>.
@@ -19,6 +35,20 @@ namespace Microsoft.Mxc.Sdk.Native;
 /// </remarks>
 internal static unsafe class NativeError
 {
+    internal static MxcException LifecycleException(
+        int status, MxcStateAwareResult result, string fallbackMessage)
+    {
+        var json = ToStringOrNull(result.response_json_utf8);
+        if (json is null)
+            return ToException(status, result.error, fallbackMessage);
+        var envelope = MxcJson.Deserialize<NativeLifecycleErrorEnvelope>(json)
+            ?? throw new JsonException("Native lifecycle error envelope is null.");
+        var error = envelope.Error;
+        return new MxcException(
+            (ErrorCode)status, error.Message, error.Operation, error.NativeCode,
+            error.Remediation, error.Details);
+    }
+
     /// <summary>
     /// Build an exception from a native detail.
     /// </summary>
