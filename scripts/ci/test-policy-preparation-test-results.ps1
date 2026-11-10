@@ -49,27 +49,40 @@ try {
     $methods = @('PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching',
         'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
         'PolicyPreparationStoragePreservesDuplicateCommentMembers')
-    foreach ($case in 'complete', 'missing-class', 'missing-method', 'skipped-native') {
+    $requiredNativeRows = @(
+        'Ns.DevEntryPointTests.PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(nativePreparation: True)',
+        'Ns.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)'
+    )
+    foreach ($case in 'complete', 'missing-class', 'missing-method', 'skipped-native',
+        'missing-native-large', 'missing-native-duplicate') {
         $rows = @("<test type='Ns.MxcProcessTests' method='DevJson_CapturesOutputAndStreamsInput' result='Pass'/>")
         if ($case -ne 'missing-class') {
             if ($case -ne 'missing-method') {
                 $rows += "<test type='Ns.DevEntryPointTests' method='$($methods[0])' result='Pass'/>"
             }
-            foreach ($method in $methods[1..2]) {
-                $result = if ($case -eq 'skipped-native') { 'Skip' } else { 'Pass' }
-                $rows += "<test type='Ns.DevEntryPointTests' method='$method' name='nativePreparation: True' result='$result'/>"
-                $rows += "<test type='Ns.DevEntryPointTests' method='$method' name='nativePreparation: False' result='Pass'/>"
+            for ($index = 1; $index -le 2; $index++) {
+                $method = $methods[$index]
+                $rowName = $requiredNativeRows[$index - 1]
+                $missingNativeRow = ($index -eq 1 -and $case -eq 'missing-native-large') -or
+                    ($index -eq 2 -and $case -eq 'missing-native-duplicate')
+                if (-not $missingNativeRow) {
+                    $result = if ($case -eq 'skipped-native') { 'Skip' } else { 'Pass' }
+                    $rows += "<test type='Ns.DevEntryPointTests' method='$method' name='$rowName' result='$result'/>"
+                }
+                $pureStorageName = $rowName -replace 'nativePreparation: True', 'nativePreparation: False'
+                $rows += "<test type='Ns.DevEntryPointTests' method='$method' name='$pureStorageName' result='Pass'/>"
             }
         }
         Set-Content -LiteralPath $xunit -Value (
             '<assemblies><assembly><collection>' + ($rows -join '') + '</collection></assembly></assemblies>')
         $failure = Get-XunitSuiteFailure -ResultXml $xunit -Classes 'MxcProcessTests', 'DevEntryPointTests' `
-            -RejectSkipped -RequiredMethods (@('DevJson_CapturesOutputAndStreamsInput') + $methods)
+            -RejectSkipped -RequiredMethods (@('DevJson_CapturesOutputAndStreamsInput') + $methods) `
+            -RequiredTestNames $requiredNativeRows
         if (($case -eq 'complete') -ne [string]::IsNullOrEmpty($failure)) {
             throw "Unexpected .NET native preparation gate for ${case}: $failure"
         }
     }
-    Write-Host 'Policy preparation result gates passed (14 cases).'
+    Write-Host 'Policy preparation result gates passed (16 cases).'
 }
 finally {
     Remove-Item -LiteralPath $directory -Recurse -Force

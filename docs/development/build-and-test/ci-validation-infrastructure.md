@@ -330,6 +330,9 @@ launching and lossless storage of native results. Their native-success rows
 require Windows and this host opt-in; pure storage rows run without it. Bundle
 discovery requires the native preparation fact and both native storage theory
 rows, and scheduled validation rejects skipped tests in either class.
+Scheduled validation also requires the passing `nativePreparation: True`
+result row for each storage theory; its pure-storage `False` row cannot satisfy
+the native execution gate.
 The tool-discovery case uses a private fixture alongside the packaged Node
 tests rather than under the host temporary directory. It uses a fake
 `pwsh.exe`, applies the discovered policy through public `run`, and checks that

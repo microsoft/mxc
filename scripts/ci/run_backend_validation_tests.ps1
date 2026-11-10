@@ -221,6 +221,9 @@ function Invoke-ProcessContainerStreamingTests {
                 'DevJson_CapturesOutputAndStreamsInput', 'PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching',
                 'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
                 'PolicyPreparationStoragePreservesDuplicateCommentMembers') `
+            -RequiredTestNames @(
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(nativePreparation: True)',
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)') `
             -RequiredOutputText @('MXC_PREPARED_FILESYSTEM_BASELINE_RW_OK',
                 'MXC_PREPARED_FILESYSTEM_ACCEPTED:',
                 'MXC_PREPARED_FILESYSTEM_STRICT_RUN_SPAWN_OK:1.1.0-alpha:seed=unchanged:permitted=written')

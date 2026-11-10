@@ -58,6 +58,7 @@ function Get-XunitSuiteFailure {
         [Parameter(Mandatory)][string]$ResultXml,
         [Parameter(Mandatory)][string[]]$Classes,
         [string[]]$RequiredMethods = @(),
+        [string[]]$RequiredTestNames = @(),
         [string[]]$RequiredOutputText = @(),
         [switch]$RejectSkipped
     )
@@ -77,6 +78,11 @@ function Get-XunitSuiteFailure {
     foreach ($method in $RequiredMethods) {
         if (@($selected | Where-Object { $_.method -eq $method -and $_.result -eq 'Pass' }).Count -eq 0) {
             $failures += "'$method' did not pass"
+        }
+    }
+    foreach ($name in $RequiredTestNames) {
+        if (@($selected | Where-Object { $_.name -eq $name -and $_.result -eq 'Pass' }).Count -eq 0) {
+            $failures += "'$name' did not pass"
         }
     }
     # Pins a specific theory row: its passing output must contain each marker.
