@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
+use crate::mxc_common::filesystem_canonical::{canonicalize_path, PathCanonical};
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
 use crate::process_container_common::base_container_runner::BaseContainerRunner;
@@ -65,7 +66,12 @@ fn policy_preparation_preserves_contract_metadata_presence_and_inferred_cwd_in_s
     api.version_support = Some(version);
     let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
+    // TEMP may contain an 8.3 alias; this scenario requires literal grants.
+    let PathCanonical::Canonical(root) = canonicalize_path(directory.path().to_str().unwrap())
+    else {
+        panic!("resolve the fixture's temporary directory");
+    };
+    let root = std::path::Path::new(&root);
     let work = root.join("work");
     let unrelated = root.join("unrelated");
     let denied = root.join("denied");

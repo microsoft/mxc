@@ -344,21 +344,27 @@ impl SecurityEnvironmentStartupInfo {
         })?;
 
         let environment_value = Box::new(environment);
-        // SAFETY: the attribute list is initialized, and the boxed HANDLE has
-        // a stable address that outlives every use of the list.
-        if unsafe {
-            UpdateProcThreadAttribute(
-                attribute_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
-                Some((&raw const *environment_value).cast()),
-                std::mem::size_of::<HANDLE>(),
-                None,
-                None,
-            )
-        }
-        .is_err()
-        {
+        let update_environment = || {
+            #[cfg(test)]
+            if policy_diagnostics_tests::injected_api().is_some() {
+                // The injected launcher consumes the fake PSEC handle, not Windows.
+                return Ok(());
+            }
+            // SAFETY: the attribute list is initialized, and the boxed HANDLE has
+            // a stable address that outlives every use of the list.
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
+                    Some((&raw const *environment_value).cast()),
+                    std::mem::size_of::<HANDLE>(),
+                    None,
+                    None,
+                )
+            }
+        };
+        if update_environment().is_err() {
             let code = last_error();
             // SAFETY: balances the successful initialization above.
             unsafe { DeleteProcThreadAttributeList(attribute_list) };

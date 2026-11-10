@@ -62,6 +62,7 @@ impl<'de> Deserialize<'de> for RawObject<'de> {
 /// Serializes the `updated` object, copying the source text of each top-level
 /// member of `source` whose value is unchanged. Re-serializing those values
 /// would round numbers and collapse duplicate keys in caller annotations.
+#[cfg(windows)]
 pub(crate) fn serialize_preserving_unchanged_members(
     source: &str,
     original: &serde_json::Map<String, serde_json::Value>,
