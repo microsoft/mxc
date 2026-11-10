@@ -155,6 +155,32 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
 
+      - script: |
+          set -euo pipefail
+          tests="$(cargo test --locked --release --target $(triplet) -p mxc-sdk --lib w365 -- --list)"
+          grep -q 'lifecycle_contract_and_recovery_fixture: test' <<< "$tests"
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --lib w365 -- --include-ignored
+        displayName: Test W365 checkout and release fixtures
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
+
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $fixtureTarget = Join-Path '$(Agent.TempDirectory)' 'w365-fixture'
+          cargo build --locked --release --target $(triplet) -p wxc --features test-support --target-dir $fixtureTarget
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path (Join-Path $fixtureTarget '$(triplet)\release\wxc-exec.exe')).Path
+          $tests = cargo test --locked --release --target $(triplet) -p mxc-sdk --lib w365 -- --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in @('lifecycle_contract_and_recovery_fixture', 'lifecycle_fresh_executor_fixture')) {
+            if (-not ($tests -match "${name}: test")) { throw "Missing W365 fixture: $name" }
+          }
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --lib w365 -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        displayName: Test W365 checkout and fresh-executor release fixtures
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+
       - task: EsrpCodeSigning@6
         displayName: Code Sign
         condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))

@@ -6,7 +6,8 @@ How MXC runs its backend end-to-end suites across real operating systems, what
 each job covers today, and what to change when you need to add, remove, or
 retire something.
 
-This document describes the GitHub Actions validation matrix only. PR-time
+This document describes the GitHub Actions validation matrix, with Azure build
+coverage noted for W365 below. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
@@ -14,8 +15,8 @@ the individual local test scripts are documented in
 ## At a glance
 
 W365 checkout/release uses offline trusted-TLS functional fixtures in the
-existing Windows, Linux and macOS **build jobs**, not the scheduled live-service
-matrix. Each job checks discovery of `lifecycle_contract_and_recovery_fixture`
+existing GitHub Actions and Azure Windows, Linux and macOS **build jobs**, not
+the scheduled live-service matrix. Each job checks discovery of `lifecycle_contract_and_recovery_fixture`
 and runs it through the normal parser/engine/backend paths. Windows additionally
 builds a separate `test-support` executor, checks discovery of
 `lifecycle_fresh_executor_fixture` and runs it in fresh processes. Linux and macOS
@@ -24,6 +25,12 @@ include W365 without a Cargo opt-in; test trust never enters shipping artifacts.
 No OS/architecture matrix entry is removed. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md) for local
 commands, service-contract differences and the explicitly unrun live validation.
+
+Azure's `Rust.Build.Job.yml` explicitly discovers and runs the engine fixture
+on Linux x64 and both fixtures on Windows x64, using an isolated executor target
+directory outside shipping artifacts. `Mac.Build.Job.yml` checks engine fixture
+discovery before its existing package suite runs it on macOS arm64. Azure's
+cross-compiled Windows/Linux arm64 jobs remain build-only.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /

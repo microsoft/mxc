@@ -69,8 +69,11 @@ tokens or ticket-bearing metadata.
 
 Rejected successful checkout retains a valid cleanup identity as
 `error.details.sandboxId`, `poolId` and `sessionId`, with
-`possiblySucceeded: true`. No ID is fabricated for an absent or invalid
-session ID. Unparseable, dropped and ambiguous checkout replies report
+`possiblySucceeded: true`. HTTP error replies also retain a valid session ID
+from a parseable response body within the 1 MiB limit, preserving the HTTP
+error code and uncertainty classification even when the body cannot be read
+or parsed. No ID is fabricated for an absent or invalid session ID.
+Unparseable, dropped and ambiguous checkout replies report
 uncertainty and request context. Never automatically repeat that POST.
 HTTP authorization, missing-pool, throttling and server failures have
 operation-specific `details.code` values.
@@ -168,9 +171,11 @@ $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
 cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored
 ```
 
-Windows CI uses a separate target directory so fixture executors cannot replace
-shipping artifacts. Linux and macOS run the engine fixture without a fixture
-executor.
+GitHub Actions and Azure Windows CI use a separate target directory so fixture
+executors cannot replace shipping artifacts. Both CI systems run the engine
+fixture on Linux and macOS without a fixture executor. Azure runs fixtures
+only on native hosts: Windows/Linux x64 and macOS arm64; cross-compiled arm64
+Windows/Linux jobs do not execute them.
 Only test builds honor `MXC_W365_TEST_CA` and `MXC_W365_TEST_PORT`; they add a
 trusted fixture certificate, never disable certificate or hostname validation.
 Shipping builds ignore these variables. Fixtures use only loopback services,

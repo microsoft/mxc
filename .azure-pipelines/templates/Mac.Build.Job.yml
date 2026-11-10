@@ -83,6 +83,8 @@ jobs:
     # retaining the rest of the package tests.
     - script: |
         set -euo pipefail
+        tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --lib w365 -- --list)"
+        grep -q 'lifecycle_contract_and_recovery_fixture: test' <<< "$tests"
         cargo test --locked --release --target $(targetTriple) \
           -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi -- \
           --skip 'core_modules::mxc_pty::tests::'
