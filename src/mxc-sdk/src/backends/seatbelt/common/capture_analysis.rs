@@ -18,6 +18,7 @@ use crate::learning_mode_core::{
     MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use crate::seatbelt_common::profile_builder::GRANT_TAG_SUFFIX;
+use crate::seatbelt_common::seatbelt_policy::PASTEBOARD_SERVICE_PREFIX;
 
 /// Same bound as the Windows decoder.
 const MAX_UNIQUE_DENIALS: usize = 10_000;
@@ -205,7 +206,7 @@ fn is_ui_resource(operation: &str, target: &str) -> bool {
     match operation {
         "hid-control" => true,
         "mach-lookup" => {
-            target.starts_with("com.apple.pasteboard.")
+            target.starts_with(PASTEBOARD_SERVICE_PREFIX)
                 || target.starts_with("com.apple.windowserver.")
                 || target == "com.apple.coreservices.launchservicesd"
         }

@@ -308,8 +308,9 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision, Seatbelt `captureDenials`, and the `vm`, `microvm`, and `hyperlight`
-one-shot surfaces, are not accepted by v1.0.
+provision, Seatbelt `captureDenials`, `customMachLookups`,
+`customMachRegisters`, `customIoKits`, and `customPosixShm`, and the `vm`,
+`microvm`, and `hyperlight` one-shot surfaces, are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -355,6 +356,24 @@ field or set it to `"linux"`.
 
 This fail-closed exception applies within V1 and does not require a new
 versioned API surface.
+
+### Servicing exception: Seatbelt settings take precedence over `guiAccess`
+
+In every contract version, explicit Seatbelt settings now take precedence over
+`seatbelt.guiAccess`:
+
+- `nestedPty: false` blocks PTY creation.
+- `keychainAccess: false` blocks the Keychain servers.
+- `readonlyPaths` and `deniedPaths` entries inside `/private/tmp` and
+  `/private/var/folders` apply.
+
+The Seatbelt backend also rejects, with `policy_validation`, an
+`extraMachLookups` entry that names only a service an explicit setting denies,
+such as `com.apple.SecurityServer` without `keychainAccess: true`. Change that
+setting instead.
+
+This exception applies within V1 and does not require a new versioned API
+surface.
 
 ### Shipped vs Experimental
 

@@ -9,7 +9,9 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    SeatbeltCustomDefault, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
+    SeatbeltCustomRules, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -1272,6 +1274,10 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        custom_io_kits,
+        custom_mach_registers,
+        custom_mach_lookups,
+        custom_posix_shm,
         capture_denials,
     } = sb;
     // outputPath may start with `~`; the backend expands and validates it.
@@ -1295,7 +1301,52 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
+        custom_io_kits: custom_io_kits.map(make_seatbelt_custom_rules),
+        custom_mach_registers: custom_mach_registers.map(
+            |wire::SeatbeltCustomMachRegisters { global, local }| SeatbeltCustomMachRegisters {
+                global: global.map(make_seatbelt_custom_rules),
+                local: local.map(make_seatbelt_custom_rules),
+            },
+        ),
+        custom_mach_lookups: custom_mach_lookups.map(make_seatbelt_custom_rules),
+        custom_posix_shm: custom_posix_shm.map(
+            |wire::SeatbeltCustomPosixShm {
+                 default,
+                 read,
+                 read_write,
+                 own,
+                 deny,
+             }| SeatbeltCustomPosixShm {
+                default: make_seatbelt_custom_default(default),
+                read: read.unwrap_or_default(),
+                read_write: read_write.unwrap_or_default(),
+                own: own.unwrap_or_default(),
+                deny: deny.unwrap_or_default(),
+            },
+        ),
         capture_denials,
+    }
+}
+
+fn make_seatbelt_custom_default(
+    default: Option<wire::SeatbeltCustomDefault>,
+) -> SeatbeltCustomDefault {
+    match default {
+        Some(wire::SeatbeltCustomDefault::Allow) => SeatbeltCustomDefault::Allow,
+        Some(wire::SeatbeltCustomDefault::Deny) | None => SeatbeltCustomDefault::Deny,
+    }
+}
+
+fn make_seatbelt_custom_rules(rules: wire::SeatbeltCustomRules) -> SeatbeltCustomRules {
+    let wire::SeatbeltCustomRules {
+        default,
+        allow,
+        deny,
+    } = rules;
+    SeatbeltCustomRules {
+        default: make_seatbelt_custom_default(default),
+        allow: allow.unwrap_or_default(),
+        deny: deny.unwrap_or_default(),
     }
 }
 
@@ -2382,6 +2433,44 @@ mod tests {
         };
         let capture = request.seatbelt.unwrap().capture_denials.unwrap();
         assert_eq!(capture.output_path.as_deref(), Some("~/denials.json"));
+    }
+
+    #[test]
+    fn development_seatbelt_custom_rules_map_to_config() {
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "seatbelt",
+            "seatbelt": {
+                "customIoKits": {"allow": ["AGXDeviceUserClient"]},
+                "customMachLookups": {"default": "allow", "deny": ["com.example.*"]},
+                "customMachRegisters": {"local": {}},
+                "customPosixShm": {"readWrite": ["/myapp.*"], "own": ["/myapp.tmp"]}
+            },
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let seatbelt = request.seatbelt.unwrap();
+        let io_kits = seatbelt.custom_io_kits.unwrap();
+        assert_eq!(io_kits.default, SeatbeltCustomDefault::Deny);
+        assert_eq!(io_kits.allow, ["AGXDeviceUserClient"]);
+        assert!(io_kits.deny.is_empty());
+        let lookups = seatbelt.custom_mach_lookups.unwrap();
+        assert_eq!(lookups.default, SeatbeltCustomDefault::Allow);
+        assert_eq!(lookups.deny, ["com.example.*"]);
+        let registers = seatbelt.custom_mach_registers.unwrap();
+        assert!(registers.global.is_none());
+        assert_eq!(
+            registers.local.unwrap().default,
+            SeatbeltCustomDefault::Deny
+        );
+        let shm = seatbelt.custom_posix_shm.unwrap();
+        assert_eq!(shm.default, SeatbeltCustomDefault::Deny);
+        assert!(shm.read.is_empty());
+        assert_eq!(shm.read_write, ["/myapp.*"]);
+        assert_eq!(shm.own, ["/myapp.tmp"]);
+        assert!(shm.deny.is_empty());
     }
 
     #[test]

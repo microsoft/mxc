@@ -274,10 +274,45 @@ that can be executed independently.
 
     "seatbelt": {                          // macOS Seatbelt settings (macOS only)
         "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
-        "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
+        "guiAccess": false,                // Allow GUI Mach services / IOKit for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve.
+                                           // Deprecated in 1.1.0-alpha: use customMachLookups.allow
+        "customMachLookups": {             // 1.1.0-alpha: Mach services the process may look up.
+                                           // Replaces guiAccess's lookup grant when present.
+            "default": "deny",             // "deny" (default) or "allow" (grant all except deny)
+            "allow": ["com.apple.fonts*"], // Exact names; a trailing * matches a prefix
+            "deny": []                     // Always blocked, even with default "allow"
+        },
+        "customMachRegisters": {           // 1.1.0-alpha: Mach services the process may register.
+                                           // Replaces guiAccess's register grant per block present.
+            "global": {                    // Names published through launchd
+                "default": "deny",         // "deny" (default) or "allow" (grant all except deny)
+                "allow": ["com.example.MyApp.*"], // Exact names; a trailing * matches a prefix
+                "deny": []                 // Always blocked, even with default "allow"
+            },
+            "local": {                     // Names visible only inside the process
+                "default": "deny",
+                "allow": [],
+                "deny": []
+            }
+        },
+        "customIoKits": {                  // 1.1.0-alpha: IOKit user-client classes the process may open.
+                                           // Replaces guiAccess's IOKit grant when present.
+            "default": "deny",             // "deny" (default) or "allow" (grant all except deny)
+            "allow": ["IOSurfaceRootUserClient"], // Class names; a trailing * matches a prefix
+            "deny": []                     // Always blocked, even with default "allow"
+        },
+        "customPosixShm": {                // 1.1.0-alpha: POSIX shared memory names (max 31 bytes).
+                                           // Replaces guiAccess's shared memory grant when present.
+            "default": "deny",             // "deny" (default) or "allow" (read, write, and create
+                                           // all except deny; never delete)
+            "read": [],                    // Open read-only. A trailing * matches a prefix
+            "readWrite": [],               // Open read-write
+            "own": ["/com.example.MyApp.*"], // Read, write, create, and delete
+            "deny": []                     // Always blocked, even with default "allow"
+        },
         "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
                                            // Not combinable with profileOverride.
             "mode": "block",               // "block" (default) or "allow" (default-denied access is

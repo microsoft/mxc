@@ -592,6 +592,16 @@ for resource in "$GUI_MACH" "$GUI_IOKIT"; do
 done
 pass "granted requests are not listed as denials"
 
+# In allow mode, empty custom lists don't block the app; the report names what
+# the lists need to grant.
+run_config "$(render seatbelt_capture_denials_gui_app_custom_allow.json TESTDIR "$TESTDIR" OUTPUT "$TESTDIR/out/gui_custom.json")"
+expect_ok "allow mode runs the GUI app despite empty custom lists" "GUI_WINDOW_OK"
+read_pointer "the allow-mode custom-list run writes a report"
+expect_listed "allow mode lists the Core Animation lookup to grant" other "$GUI_MACH" unknown
+expect_listed "allow mode lists the IOSurface driver to grant" other "$GUI_IOKIT" unknown
+expect_listed "allow mode lists the shared memory to grant" other \
+    "ipc-posix-shm-read-data:apple.shm.notification_center" read
+
 # --- rejections --------------------------------------------------------------
 
 expect_rejected "captureDenials cannot be combined with profileOverride" \

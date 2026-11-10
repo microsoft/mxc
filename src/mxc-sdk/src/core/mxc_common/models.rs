@@ -180,6 +180,29 @@ pub struct SeatbeltConfig {
     )]
     pub extra_mach_lookups: Vec<String>,
 
+    /// IOKit user-client class rules. When present, they replace guiAccess's
+    /// IOKit grant.
+    #[serde(rename = "customIoKits", skip_serializing_if = "Option::is_none")]
+    pub custom_io_kits: Option<SeatbeltCustomRules>,
+
+    /// Mach registration rules. Each present scope replaces guiAccess's
+    /// registration grant for that scope.
+    #[serde(
+        rename = "customMachRegisters",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub custom_mach_registers: Option<SeatbeltCustomMachRegisters>,
+
+    /// Mach lookup rules. When present, they replace guiAccess's Mach lookup
+    /// grant.
+    #[serde(rename = "customMachLookups", skip_serializing_if = "Option::is_none")]
+    pub custom_mach_lookups: Option<SeatbeltCustomRules>,
+
+    /// POSIX shared memory rules. When present, they replace guiAccess's
+    /// shared memory grant.
+    #[serde(rename = "customPosixShm", skip_serializing_if = "Option::is_none")]
+    pub custom_posix_shm: Option<SeatbeltCustomPosixShm>,
+
     /// Records sandbox denials through the unified log while the workload
     /// runs. On macOS, `retain_etl` keeps the raw log as `.seatbelt.log`.
     #[serde(rename = "captureDenials", skip_serializing_if = "Option::is_none")]
@@ -198,9 +221,55 @@ impl Default for SeatbeltConfig {
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
+            custom_io_kits: None,
+            custom_mach_registers: None,
+            custom_mach_lookups: None,
+            custom_posix_shm: None,
             capture_denials: None,
         }
     }
+}
+
+/// Access for names that no Seatbelt custom rule entry matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SeatbeltCustomDefault {
+    /// Every name not denied is allowed.
+    Allow,
+    /// Only listed names are allowed.
+    #[default]
+    Deny,
+}
+
+/// Seatbelt allow and deny lists for one kind of name. An entry ending in
+/// `*` matches every name with that prefix; `deny` entries win.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeatbeltCustomRules {
+    pub default: SeatbeltCustomDefault,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+/// Seatbelt Mach registration rules for global and per-process names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeatbeltCustomMachRegisters {
+    pub global: Option<SeatbeltCustomRules>,
+    pub local: Option<SeatbeltCustomRules>,
+}
+
+/// Seatbelt POSIX shared memory rules. Each list grants more than the one
+/// before it; `deny` entries win.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SeatbeltCustomPosixShm {
+    /// `Allow` grants read, write, and create, but not delete.
+    pub default: SeatbeltCustomDefault,
+    pub read: Vec<String>,
+    pub read_write: Vec<String>,
+    /// Also grants delete.
+    pub own: Vec<String>,
+    pub deny: Vec<String>,
 }
 
 /// Configuration specific to the Windows Sandbox backend.
