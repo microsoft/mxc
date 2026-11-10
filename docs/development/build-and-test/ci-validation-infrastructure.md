@@ -79,6 +79,12 @@ test jobs only ever `download-artifact`.
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
 
+Bubblewrap startup coverage injects network-rule installation failure in both
+proxy-only and firewall-enforced modes. The scheduled CLI suite requires that
+the workload never starts and the supervisor is reaped. The Linux build's
+`streaming_bubblewrap` suite checks the setup diagnostic and absence of workload
+file writes through SDK `run`, `spawn`, and `spawn_with_pty`.
+
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
 The standalone bundle builder publishes the .NET tests for `net10.0`.
