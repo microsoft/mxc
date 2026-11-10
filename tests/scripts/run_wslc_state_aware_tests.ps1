@@ -1225,6 +1225,98 @@ try {
     }
 }
 
+# ---------------- Lifecycle CR: proxy set at provision ----------------
+
+# A 1.1.0-alpha provision fixes runtimeConfig.networkProxy for the container; the
+# daemon injects it into every exec, and an exec naming a different proxy is
+# rejected.
+$script:crSandboxId = $null
+$script:crStarted = $false
+$crDeprovisionedOk = $false
+$crProxy = 'http://proxy.example:8080'
+try {
+    $crProvisionedOk = Run-StateAwareTest "CR: provision (bridged network + proxy)" {
+        $r = Invoke-StateAware -Request @{
+            version = '1.1.0-alpha'
+            phase = 'provision'
+            containment = 'wslc'
+            network = @{
+                egress = @{ default = 'allow' }
+                ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+            }
+            runtimeConfig = @{ networkProxy = $crProxy }
+            wslc = @{ provision = @{ image = 'alpine:latest' } }
+        }
+        $envObj = Assert-ResultEnvelope $r "proxied provision"
+        if ($envObj) { $script:crSandboxId = [string]$envObj.result.sandboxId }
+    }
+
+    $crStartedOk = $false
+    if ($crProvisionedOk) {
+        $crStartedOk = Run-StateAwareTest "CR: start" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:crSandboxId
+            $null = Assert-ResultEnvelope $r "proxied start"
+            $script:crStarted = $true
+        }
+    }
+
+    if ($crStartedOk) {
+        Run-StateAwareTest "CR: exec without runtimeConfig gets the provisioned proxy" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:crSandboxId
+                process = @{
+                    commandLine = "sh -c 'echo HTTP_PROXY=[`$HTTP_PROXY] NO_PROXY=[`$NO_PROXY]'"
+                    env = @('HTTP_PROXY=http://caller.invalid:1', 'NO_PROXY=*')
+                    inheritDefaultEnv = $true
+                    timeout = 30000
+                }
+            }
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout.Contains("HTTP_PROXY=[$crProxy] NO_PROXY=[]")) `
+                "provisioned proxy replaced the caller's proxy variables ($($r.Stdout.Trim()))"
+        } | Out-Null
+
+        Run-StateAwareTest "CR: exec naming a different proxy is rejected" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:crSandboxId
+                runtimeConfig = @{ networkProxy = 'http://other.example:8080' }
+                process = @{ commandLine = 'true'; timeout = 30000 }
+            }
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (mismatched exec proxy rejected)"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'must match the proxy set at provision') `
+                "error.message names the provisioned proxy rule (got '$msg')"
+        } | Out-Null
+    }
+
+    if ($crProvisionedOk) {
+        Run-StateAwareTest "CR: stop" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:crSandboxId
+            $null = Assert-ResultEnvelope $r "proxied stop"
+            $script:crStarted = $false
+        } | Out-Null
+        $crDeprovPassed = Run-StateAwareTest "CR: deprovision" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:crSandboxId
+            $null = Assert-ResultEnvelope $r "proxied deprovision"
+        }
+        if ($crDeprovPassed) { $crDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:crSandboxId -and -not $crDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:crSandboxId" -ForegroundColor DarkGray
+        if ($script:crStarted) {
+            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:crSandboxId } catch { }
+        }
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:crSandboxId } catch { }
+    }
+}
+
 # ---------------- Lifecycle CP: provision-time port mappings ----------------
 
 # `wslc.provision.portMappings` is container-scoped, so the daemon applies it to

@@ -15,7 +15,7 @@
 //! | `ui`                        | rejected (no UI primitive)   | rejected                   | rejected                   |
 //! | `network.egress.default`    | honoured (None / Bridged)    | rejected (immutable)       | rejected (immutable)       |
 //! | `network.ingress.*`         | must match egress (deny all / allow all) | rejected         | rejected                   |
-//! | `runtimeConfig.networkProxy` | rejected (applies at exec) | rejected                   | honoured (cooperative env) |
+//! | `runtimeConfig.networkProxy` | honoured (applied to every exec) | rejected             | honoured (must match provision's) |
 //!
 //! [^1]: a standalone `denied_path` is honoured by container isolation (unlisted
 //! host paths are simply never mounted); only a denied path nested under a
@@ -41,10 +41,11 @@ const ERR_ENUMERATE_PATHS: &str =
 const ERR_NETWORK_IMMUTABLE: &str =
     "network mode is bound to the provision phase and cannot be changed by the WSLc backend after \
      provisioning";
-const ERR_PROXY_AT_PROVISION: &str =
-    "runtimeConfig.networkProxy is applied per-exec by the WSLc backend; set it on the exec phase, not provision";
 const ERR_PROXY_AT_PHASE: &str =
-    "runtimeConfig.networkProxy is only honoured on the exec phase by the WSLc backend";
+    "runtimeConfig.networkProxy is only honoured on the provision and exec phases by the WSLc backend";
+const ERR_PROXY_MISMATCH: &str =
+    "WSLc: runtimeConfig.networkProxy on exec must match the proxy set at provision; omit it to \
+     use the provisioned proxy";
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: runtimeConfig.networkProxy requires a proxy url reachable from inside the container; \
      a host-loopback proxy is not reachable from the container's own network namespace";
@@ -137,9 +138,9 @@ pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result
 }
 
 /// Validate the request for the provision phase. `rw` / `ro` paths become
-/// volume mounts and `network.egress.default` selects the container network
-/// mode; both are honoured here. Everything else in the module table is
-/// rejected.
+/// volume mounts, `network.egress.default` selects the container network
+/// mode and a `url`-form proxy is stored for every exec; all are honoured
+/// here. Everything else in the module table is rejected.
 pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if !request.policy.enumerate_paths.is_empty() {
         return Err(MxcError::policy_validation(ERR_ENUMERATE_PATHS));
@@ -151,16 +152,14 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
     )
     .map_err(MxcError::policy_validation)?;
     reject_ui_policy(request)?;
-    if request.policy.network_proxy.is_enabled() {
-        return Err(MxcError::policy_validation(ERR_PROXY_AT_PROVISION));
-    }
+    reject_non_url_proxy(request)?;
     validate_directional_network(request)?;
     Ok(())
 }
 
 /// Validate the request for start / stop / deprovision. These phases carry no
-/// applicable policy: filesystem and network mode are fixed at provision and
-/// the proxy is an exec-time concern. A UI policy is never supported.
+/// applicable policy: filesystem, network mode and the proxy are fixed at
+/// provision. A UI policy is never supported.
 pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
@@ -178,10 +177,16 @@ pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), Mxc
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
     reject_post_provision_network_mode(request)?;
+    reject_non_url_proxy(request)?;
+    reject_proxy_credentials_in_argv(request)?;
+    Ok(())
+}
+
+/// The proxy must be a URL so a routable value reaches the container.
+fn reject_non_url_proxy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.network_proxy.is_enabled() && exec_proxy_url(request).is_none() {
         return Err(MxcError::policy_validation(ERR_PROXY_URL_FORM));
     }
-    reject_proxy_credentials_in_argv(request)?;
     Ok(())
 }
 
@@ -194,16 +199,34 @@ pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), Mxc
 /// runs. The other scopes leave the entries with the SDK's environment setter,
 /// which argv never sees.
 pub(crate) fn reject_proxy_credentials_in_argv(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if EnvScope::of(request) != EnvScope::Replace {
-        return Ok(());
-    }
-
     match exec_proxy_url(request) {
-        Some(url) if crate::mxc_common::proxy_env::proxy_url_has_credentials(url) => {
+        Some(url) if exposes_proxy_credentials(EnvScope::of(request), url) => {
             Err(MxcError::policy_validation(ERR_PROXY_CREDENTIALS_IN_ARGV))
         }
         _ => Ok(()),
     }
+}
+
+fn exposes_proxy_credentials(scope: EnvScope, url: &str) -> bool {
+    scope == EnvScope::Replace && crate::mxc_common::proxy_env::proxy_url_has_credentials(url)
+}
+
+/// The proxy URL an exec runs under: its own, or the one set at provision when
+/// it names none. The daemon calls this because only it holds the provisioned
+/// URL; the error is a rejection message that never repeats either URL.
+pub fn resolve_exec_proxy<'a>(
+    provisioned: Option<&'a str>,
+    requested: Option<&'a str>,
+    scope: EnvScope,
+) -> Result<Option<&'a str>, &'static str> {
+    if provisioned.is_some() && requested.is_some() && provisioned != requested {
+        return Err(ERR_PROXY_MISMATCH);
+    }
+    let url = requested.or(provisioned);
+    if url.is_some_and(|url| exposes_proxy_credentials(scope, url)) {
+        return Err(ERR_PROXY_CREDENTIALS_IN_ARGV);
+    }
+    Ok(url)
 }
 
 /// The routable proxy URL to inject at exec, or `None` when the proxy is
@@ -473,17 +496,62 @@ mod tests {
     }
 
     #[test]
-    fn provision_rejects_proxy() {
+    fn provision_accepts_only_a_url_proxy() {
+        let req = parsed(
+            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        );
+        validate_provision_policy(&req).unwrap();
+        assert_eq!(exec_proxy_url(&req), Some("http://proxy.example:8080"));
+
         let req = request_with_policy(ContainerPolicy {
-            network_proxy: url_proxy(),
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                host_loopback: NetworkAction::Allow,
+            }),
+            network_proxy: non_url_proxy(),
             ..Default::default()
         });
-        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "exec phase");
+        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "url");
+    }
 
-        let req = parsed(
-            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc","runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+    #[test]
+    fn an_exec_runs_under_its_own_or_the_provisioned_proxy_but_not_a_different_one() {
+        let provisioned = Some("http://proxy.example:8080");
+        for requested in [None, provisioned] {
+            assert_eq!(
+                resolve_exec_proxy(provisioned, requested, EnvScope::Merge),
+                Ok(provisioned)
+            );
+        }
+        assert_eq!(
+            resolve_exec_proxy(None, provisioned, EnvScope::Merge),
+            Ok(provisioned)
         );
-        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "exec phase");
+        assert_eq!(
+            resolve_exec_proxy(
+                provisioned,
+                Some("http://other.example:8080"),
+                EnvScope::Merge
+            ),
+            Err(ERR_PROXY_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn a_replaced_environment_refuses_a_credential_bearing_provisioned_proxy() {
+        let url = credential_proxy().address.unwrap().original_url.unwrap();
+        assert_eq!(
+            resolve_exec_proxy(Some(&url), None, EnvScope::Replace),
+            Err(ERR_PROXY_CREDENTIALS_IN_ARGV)
+        );
+        assert_eq!(
+            resolve_exec_proxy(Some(&url), None, EnvScope::Merge),
+            Ok(Some(url.as_str()))
+        );
     }
 
     // ---- post-provision (start / stop / deprovision) ----

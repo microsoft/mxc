@@ -538,13 +538,13 @@ variables that well-behaved clients honor.
 
 **How it works**
 
-1. When `runtimeConfig.networkProxy` is set, the runner translates it into the
+1. When `runtimeConfig.networkProxy` is set, MXC translates it into the
    `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` environment
    variables inside the container (via `WslcSetProcessSettingsEnvVariables`).
    Any caller-supplied values for these keys — including `NO_PROXY` /
    `no_proxy` — are **stripped** from the *initial* process environment first.
    Because WSLC merges the process environment onto the image's baked-in
-   `ENV`, the runner also sets `NO_PROXY` / `no_proxy` to the **empty string**,
+   `ENV`, MXC also sets `NO_PROXY` / `no_proxy` to the **empty string**,
    so an image-baked exemption (e.g. `ENV NO_PROXY=*`) cannot silently disable
    the proxy. This sanitizes the process's *starting* environment only; see the
    cooperative-model caveat below.
@@ -571,11 +571,19 @@ proxy must have an address routable from the container:
 }
 ```
 
+**Where to set it**
+
+- **Create-and-run execution:** on the request, with the unrestricted bridged
+  posture shown above. A proxy cannot make isolated networking reach an
+  external listener.
+
+- **Container lifecycle operations:** on a `1.1.0-alpha` `provision` request,
+  the proxy applies to every `exec` in the container. An `exec` request can
+  also set `runtimeConfig.networkProxy`, but it must name the same URL. An `exec` always
+  inherits the provisioned network posture.
+
 The removed `network.proxy` object and its `localhost`/`builtinTestServer`
-forms are rejected by schema `0.9.0-alpha`. Create-and-run proxy use requires the unrestricted
-bridged posture shown above; a proxy cannot make isolated networking reach an
-external listener. Execution in an existing container (`exec`) instead supplies only `runtimeConfig` and
-inherits its provisioned network posture.
+forms are rejected by schema `0.9.0-alpha`.
 
 ### Per-host filtering is not supported
 

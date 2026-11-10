@@ -591,35 +591,25 @@ fn exec_piped(
     ))
 }
 
-/// The daemon's inputs for one exec, with the cooperative proxy applied.
+/// The daemon's inputs for one exec. The daemon applies the cooperative proxy,
+/// because it also holds the one set at provision.
 fn exec_config(
     sandbox_id: &str,
     request: &ExecutionRequest,
     exec_id: String,
     run_token: String,
 ) -> ExecConfig {
-    // `exec_proxy_url` yields the routable URL only when the proxy is enabled
-    // *and* in the required `url` form — `validate_exec` has already rejected
-    // the non-`url` form before we get here, so a `None` here means the proxy
-    // is disabled, not malformed.
-    let env = match exec_proxy_url(request) {
-        Some(proxy_url) => split_env(&crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
-            request.env_entries(),
-            proxy_url,
-        )),
-        None => split_env(request.env_entries()),
-    };
-
     ExecConfig {
         exec_id,
         run_token,
         sandbox_id: sandbox_id.to_string(),
         script_code: request.script_code.clone(),
         working_directory: request.working_directory.clone(),
-        env,
+        env: split_env(request.env_entries()),
         env_scope: EnvScope::of(request),
         timeout_ms: request.script_timeout,
         stdin: false,
+        network_proxy: exec_proxy_url(request).map(str::to_string),
     }
 }
 
@@ -879,6 +869,7 @@ fn build_provision_config(
         network,
         port_mappings,
         session_ref: session_id,
+        network_proxy: exec_proxy_url(request).map(str::to_string),
     })
 }
 
@@ -966,6 +957,7 @@ mod stdin_relay_tests {
             env_scope: EnvScope::Merge,
             timeout_ms: 0,
             stdin: false,
+            network_proxy: None,
         }
     }
 
@@ -1701,6 +1693,25 @@ mod tests {
     }
 
     #[test]
+    fn provision_forwards_the_proxy_url_to_the_daemon() {
+        let mut request = bridged_request();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                "http://proxy.example:8080",
+                "proxy.example".to_string(),
+                8080,
+            )),
+        };
+
+        let cfg = build_provision_config(&request, None).unwrap();
+
+        assert_eq!(
+            cfg.network_proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+    }
+
+    #[test]
     fn isolated_networking_rejects_port_mappings_before_the_daemon_sees_them() {
         let phase = WslcProvisionConfig {
             port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
@@ -2010,12 +2021,9 @@ mod tests {
     }
 
     #[test]
-    fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
+    fn the_exec_config_leaves_the_cooperative_proxy_to_the_daemon() {
         let request = ExecutionRequest {
-            env: Some(vec![
-                "FOO=bar".to_string(),
-                "HTTP_PROXY=http://attacker.invalid:1".to_string(),
-            ]),
+            env: Some(vec!["HTTP_PROXY=http://attacker.invalid:1".to_string()]),
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
                     address: Some(ProxyAddress::from_url(
@@ -2036,23 +2044,17 @@ mod tests {
             "run-1".to_string(),
         );
 
-        // Replacement still applies, so the proxy variables must survive into
-        // the entries argv carries rather than being left to the SDK's setter.
-        assert_eq!(config.env_scope, EnvScope::Replace);
-        let value = |name: &str| {
-            config
-                .env
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.clone())
-        };
-        assert_eq!(value("FOO").as_deref(), Some("bar"));
         assert_eq!(
-            value("HTTP_PROXY").as_deref(),
+            config.network_proxy.as_deref(),
             Some("http://127.0.0.1:8888")
         );
-        assert_eq!(value("NO_PROXY").as_deref(), Some(""));
-        assert!(!config.env.iter().any(|(_, v)| v.contains("attacker")));
+        assert_eq!(
+            config.env,
+            vec![(
+                "HTTP_PROXY".to_string(),
+                "http://attacker.invalid:1".to_string()
+            )]
+        );
     }
 
     #[test]
