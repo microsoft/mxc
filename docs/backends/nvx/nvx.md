@@ -249,7 +249,8 @@ still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
 VM shutdown and deprovisioning before exit code 130 is returned. A request
-received during startup is observed when the native startup call returns.
+received during startup, including a [platform snapshot](#platform-snapshots)
+template capture, is observed when the native call returns.
 Closing the console or forcibly terminating the process does not provide this
 cooperative-cleanup guarantee. Embedding the SDK does not install a
 process-wide console handler.
@@ -330,9 +331,10 @@ binary stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 The SDK JSON scenario also covers live output larger than pipe capacity,
 container provision/start, live and captured exec, reuse, stop and deprovision.
-An isolated-console scenario interrupts both startup and running execution,
-then verifies that the owned OpenVMM process has terminated and that a later
-request succeeds with the same agent state directory. Another scenario checks
+An isolated-console scenario interrupts a first request's template capture,
+startup, and running execution, then verifies that the OpenVMM processes that
+the executor started have terminated and that a later request succeeds with
+the same agent state directory. Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
 later concurrent requests boot it while its registry is unreachable. A third
 checks that create-and-run sandboxes, with and without a network device,
