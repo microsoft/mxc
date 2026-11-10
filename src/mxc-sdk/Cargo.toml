@@ -96,7 +96,7 @@ hyperlight-unikraft = { version = "=0.21.0", default-features = false, optional 
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"], optional = true }
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
-aci_edge_sandboxes = { version = "=0.1.1", default-features = false, features = ["agent-bundled"], optional = true }
+aci_edge_sandboxes = { version = "=0.1.2", default-features = false, features = ["agent-bundled"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tracelogging.workspace = true

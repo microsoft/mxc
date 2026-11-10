@@ -33,10 +33,10 @@ const FILE_SHARE_WRITE: u32 = 2;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-// SHA256SUMS from the independently approved v0.1.0-build188642429 archive.
-// Its archive SHA-256 is cad4db7c574a73aaa1c5a07e7a740cd2b01d5b83c62c81b2196d63bad9ecc126.
+// SHA256SUMS from the independently approved v0.2.0-build189870623 archive.
+// Its archive SHA-256 is 35de02f4d7decf840f336111b19dc04d36522629b965615bddf5865ea374f704.
 const APPROVED_CHECKSUMS_SHA256: &str =
-    "24d6fcbd2fc22b7618045680c6313db74de3129872c170c25316c12c20145c29";
+    "3df1cd2384764d428902d49c7fa6ad505629298387efae36dab8fe42b954b552";
 
 /// Keeps the checked files from being overwritten or deleted while the runtime uses them.
 #[derive(Debug)]
