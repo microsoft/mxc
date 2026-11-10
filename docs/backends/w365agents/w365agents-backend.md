@@ -156,6 +156,190 @@ contract. A supplied readiness read reached Ready, but exec upgrade returned
 HTTP 403 before a command frame. Authenticated live exec has not succeeded;
 trusted-TLS fixtures do not establish pool Exec permission or interoperability.
 
+## Manual PowerShell command runner (Windows)
+
+`tests\scripts\run_w365_command_manual.ps1` is an explicit, **manual-only**
+backend/CLI validation tool. Neither it nor its offline regression scripts
+are registered in CI or aggregate runners. It uses `wxc-exec.exe` for all
+service operations, not public SDK lifecycle APIs or a PowerShell implementation
+of the service protocol. It does not change the SDK availability described above.
+
+Prerequisites: Windows, PowerShell 7+, Python 3, a compatible normal executor,
+and an approved public client application configured for system-browser
+interactive authentication in the requested tenant. Install the auth libraries:
+
+```powershell
+python -m pip install "msal>=1.31,<2" "msal-extensions>=1.3,<2"
+```
+
+Build the executor from `src\` with `cargo build -p wxc`, or pass a known
+compatible binary. The default discovery checks host-architecture release,
+unqualified release, host-architecture debug, then unqualified debug under
+`src\target`. Before authentication, the runner uses credential-free synthetic
+tokens and `--dry-run --experimental` to validate all four operations against
+the `1.1.0-alpha` contract. Dry-runs do not contact the service.
+
+| Argument | Meaning |
+| --- | --- |
+| `-PoolId`, `-TenantId`, `-ClientId` | Required nonempty GUIDs for the pool, authentication tenant, and approved public browser client app. No deployment/account defaults. |
+| `-CommandLine` | Required full Windows executable command line, passed unchanged. There is no implicit shell. |
+| `-ControlPlaneHost` | Bare DNS host. If supplied, overrides only the executor child's `W365A_CONTROLPLANE_URL`; otherwise inherits the caller's value. |
+| `-DataPlaneSuffix` | Bare DNS suffix, with the same precedence over the executor child's `W365A_DP_SUFFIX`. No region is inferred. |
+| `-WxcExePath` | Explicit executor path instead of repository discovery. |
+| `-LoginHint` | Optional browser/account-selection hint, never proof of identity. |
+| `-ExpectedUserObjectId` | Optional actual token `oid` that must match before checkout. |
+| `-WorkingDirectory` | Existing guest path, not a host path. Omission uses the service default; the runner does not create it. |
+| `-TimeoutMs` | Command timeout, default `30000`. Explicit `0` uses the service default described above, not unlimited execution. |
+| `-ReceiptPath` | New journal file in an existing directory. Default is a freshly named `mxc-w365-manual-<random>.json` in the current user's temporary directory, printed before sign-in. |
+| `-ForceSignIn` | Force system-browser authentication even if the protected cache has a valid token. |
+
+Both effective endpoints must be present and valid before any sign-in,
+allocation or service request. URLs, ports, paths, credentials, whitespace,
+non-ASCII names and an overlong pool-prefixed data-plane host are rejected.
+The runner does not change the parent/global environment.
+
+Example from the repository root, with **synthetic configuration that must
+be replaced** with approved values:
+
+```powershell
+.\tests\scripts\run_w365_command_manual.ps1 `
+    -PoolId '11111111-1111-1111-1111-111111111111' `
+    -TenantId '22222222-2222-2222-2222-222222222222' `
+    -ClientId '33333333-3333-3333-3333-333333333333' `
+    -ControlPlaneHost 'control.example.invalid' `
+    -DataPlaneSuffix 'data.example.invalid' `
+    -CommandLine 'cmd.exe /c echo hello'
+```
+
+### Browser authentication and cache
+
+The only requested scope is the fixed tested ARI INT resource
+`274133f7-12bb-4bfb-ae3b-bd446b7e8a75/.default`. There are no scope override
+arguments. Tenant, client, pool and endpoints are configurable, but this is
+**not universal production/sovereign-cloud authentication support**. One
+delegated Computer token is supplied to both control and data plane, as
+validated for this service.
+
+The helper checks audience (the resource GUID or exactly `api://` plus that
+GUID), actual tenant `tid`, user `oid`, caller app `azp`/`appid`, at least five
+minutes of remaining lifetime, and delegated `Computer.Get`, `Computer.See`,
+`Computer.Do`, and `Computer.Control` scopes. These decoded-claim sanity
+checks do not validate the JWT signature or replace service authentication.
+The verified `oid`, not a UPN/login-hint inference, becomes `userObjectId`;
+checkout always explicitly requests `userType: "Local"`.
+
+MSAL first attempts silent acquisition, including refresh, for a unique matching
+tenant/account. Separate tenant/client cache files and the fixed resource scope
+prevent selecting another app/resource. An expected object ID and/or login hint
+narrows account selection; multiple matches never silently pick the first.
+No applicable account/token, or required interaction, opens the normal system
+browser. Existing MFA and consent prompts apply. Missing `.default` consent or
+permissions is an auth failure to resolve with the app/service owner: the helper
+never changes scopes, app registrations or permissions programmatically.
+There is no device-code, password, client-secret, pasted-token or
+`-NoTokenCache` mode.
+
+The printed cache path is:
+
+```text
+%LOCALAPPDATA%\Microsoft\MXC\w365-manual-auth\<tenant-guid>_<client-guid>.bin
+```
+
+`msal-extensions` encrypts it with current-user Windows DPAPI. An operation lock
+coordinates account selection/refresh and MSAL's own persistence lock protects
+writes. Encryption, decryption, locking and persistence failures stop explicitly;
+there is no plaintext or empty-cache fallback. A busy/stale lock fails after
+the library's bounded wait, rather than starting an independent sign-in/cache.
+Wait for another runner to finish and retry authentication only after resolving
+any recorded allocation. Do not remove locks while another invocation is active.
+
+To clear cached credentials intentionally, close active runners and remove only
+the exact printed `.bin` file; remove its `.operation.lock`/`.lockfile` only if
+confirmed stale. The next invocation requires browser sign-in. DPAPI caches
+deliberately contain encrypted secrets; never upload them. `-ForceSignIn`
+does not disable caching or revoke existing credentials.
+
+### One reservation, one command, terminal cleanup
+
+The runner atomically journals the attempt **before submitting one provision**,
+saves a valid success or error cleanup ID, calls native `start` (only `Ready`
+permits execution), submits one `exec`, then invokes terminal `deprovision`
+in `finally` using the same ID in a fresh executor process. It never retries
+checkout, replaces a reservation, replays a command, keeps/reuses a reservation,
+or scans prior receipts. Calling the script is the intentional authorization
+to run this sequence; there is no additional confirmation switch.
+
+Only the executor's private child environment receives `W365A_CP_TOKEN` and
+`W365A_DP_TOKEN`. Inherited W365 test hooks are removed. Tokens never enter
+argv, request JSON/base64, guest environment, receipts or console diagnostics.
+The Python helper's stdout is private redirected transport, not a user-facing
+command; do not invoke it directly to print a token. Authentication/service
+errors suppress response bodies and preserve safe native categories/status and
+request IDs when supplied by the executor.
+
+Command output streams as bytes on stdout/stderr with concurrent draining,
+without lifecycle-JSON interpretation, including guest output that looks like
+an error envelope. Unused stdin is closed immediately to deliver EOF; this
+runner is not an interactive-input tool. The native exec exit status is
+preserved when cleanup succeeds; any cleanup failure fails the
+runner too. A nonzero exec may be a program result **or** a native adapter
+failure: inspect streamed native stderr, not guest-output JSON, for the cause.
+The journal retains the native exit status without pretending it independently
+proved a remote process exit. Negative native exit statuses are also preserved.
+
+Wrapper budgets leave room for the native limits: 60 seconds for checkout,
+135 for readiness (native budget 120), command/service timeout plus 45 seconds
+for exec, and 45 for release. Output drain and local worker cleanup waits are
+bounded separately. Local timeout/disconnect has an unknown remote outcome;
+it never proves the remote process was killed.
+
+If needed, cleanup silently renews from the same protected cache, bound to the
+already verified object ID; it never opens a browser in `finally`. A renewal or
+release failure retains the reservation ID for intentional later release.
+Primary and cleanup failures are separate. A receipt-write failure after a
+valid ID is known still attempts native release and makes the runner fail.
+
+The token-free journal records pool/session identity, deployment/account
+context, local run ID, per-operation results and safe returned request IDs,
+not commands, guest output, raw service bodies or credentials. Native successful
+responses do not expose HTTP request IDs; the local run ID is not a service
+correlation ID. Existing receipt paths always refuse, even if the old attempt
+was uncertain or release was accepted. All old temporary receipts are retained.
+
+On missing/invalid checkout identity, keep the receipt, stop allocation, and
+ask the authorized service operator to reconcile the pool/user and any returned
+request IDs. Never invent an ID or delete the journal to retry blindly.
+After a crash, the last submitted phase may have an unknown outcome.
+For a known saved `sandboxId`, use the credential-free release request and
+explicit native `deprovision --container-id` procedure below, in a fresh process
+with approved renewed credentials. Do not run this command runner again to
+recover an existing reservation. Release acceptance means accepted/already
+absent, **not completed remote reset or sanitization**.
+
+### Offline runner validation and live gap
+
+Run these explicitly from the repository root:
+
+```powershell
+pwsh -NoProfile -File .\tests\scripts\test_w365_command_manual.ps1
+python -B -m unittest discover -s tests\scripts -p test_w365_auth.py -v
+```
+
+The PowerShell suite invokes the actual entrypoint with owned, staged fake auth
+and executor fixtures (Windows .NET Framework compiler required). It covers
+pre-auth refusal, unchanged command quoting, private child environments, a
+pre-submission journal, same-ID lifecycle/cleanup failures, missing-ID uncertainty,
+release acceptance versus reset, large/live output, EOF, and readiness beyond
+45 seconds. Python tests inject fake MSAL/cache failures and exercise real DPAPI
+and lock persistence in isolated temporary directories using nonsecret fixtures.
+They do not read user credential stores, open a browser, allocate or release.
+
+**No authenticated live calls were run for this runner.** The API 2.0 Local
+checkout/release evidence above does not establish Exec success. Authenticated
+Exec remains unverified after the reported pre-command HTTP 403, including a
+separate header-only WebSocket experiment; this runner does not change native
+transport or accept `Live` as `Ready` to work around that service issue.
+
 ## Optional live validation: explicit invocation only
 
 **No live calls were run during Phase 3 implementation.** Do not use another caller's

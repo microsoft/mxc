@@ -46,6 +46,9 @@ Linux / macOS (`.sh`):
 | `run_processcontainer_contract_tests.ps1` | Focused minimum/stable/development contract launches, capabilities and registry access, lifecycle/telemetry options, malformed network policies, capture-output path rejection before execution, and unsupported versions | Native PSEC; Windows PowerShell 5.1 |
 | `run_processcontainer_workload_tests.ps1` | **Manual only, not wired into CI:** 19 native runtime scenarios covering PowerShell 7, Git, Node, Python, file I/O, child processes, and runtime directory changes | Native PSEC; missing optional interpreters are reported as skips |
 | `test_processcontainer_workload_environment.ps1` | **Manual host-only regression:** Git fixture setup preserves absent, empty, and existing caller environment variables, including failure paths | Git and PowerShell 7; no sandbox backend |
+| `run_w365_command_manual.ps1` | **Manual only, no CI/aggregate registration:** one W365 Local checkout, native readiness, one executable command, then terminal deprovision | Windows, PowerShell 7+, compatible `wxc-exec.exe`, Python with `msal` and `msal-extensions`, approved tenant/public browser client/pool/endpoints |
+| `test_w365_command_manual.ps1` | **Manual offline regression:** actual runner entrypoint with staged auth/fake executor; no browser, user cache, or service calls | Windows .NET Framework compiler, Python, PowerShell 7+ |
+| `test_w365_auth.py` | **Manual offline regression:** isolated MSAL mocks and synthetic DPAPI persistence/locking across processes; no real user cache | Windows, Python with `msal` and `msal-extensions` |
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
@@ -131,6 +134,48 @@ Git preparation and contained Git commands use fixture-owned global/system
 configuration and XDG files; they do not read the operator's private Git
 configuration or require a grant to the operator's profile. Configuration
 overrides are assigned only to child processes, never to the invoking shell.
+
+### Manual W365 command
+
+This is a backend/CLI validation script, not a .NET SDK application. It is
+intentionally absent from CI and aggregate runners. Install its Python
+prerequisites, then supply approved configuration explicitly:
+
+```powershell
+python -m pip install "msal>=1.31,<2" "msal-extensions>=1.3,<2"
+.\tests\scripts\run_w365_command_manual.ps1 `
+    -PoolId '11111111-1111-1111-1111-111111111111' `
+    -TenantId '22222222-2222-2222-2222-222222222222' `
+    -ClientId '33333333-3333-3333-3333-333333333333' `
+    -ControlPlaneHost 'control.example.invalid' `
+    -DataPlaneSuffix 'data.example.invalid' `
+    -CommandLine 'cmd.exe /c echo hello'
+```
+
+The GUIDs and DNS names above are placeholders. `PoolId`, `TenantId`,
+`ClientId`, and `CommandLine` are required; endpoint arguments override only
+the executor child's `W365A_CONTROLPLANE_URL` and `W365A_DP_SUFFIX`. Otherwise
+the existing caller variables apply. Missing/invalid effective endpoints and
+incompatible native dry-runs fail before sign-in or allocation.
+
+Authentication always requests the fixed **ARI INT** Computer resource
+`274133f7-12bb-4bfb-ae3b-bd446b7e8a75/.default`, not configurable scopes.
+The DPAPI-encrypted current-user cache supports silent reuse/refresh across
+invocations; `-ForceSignIn` requests the system browser instead.
+See the [W365 backend guide](../../docs/backends/w365agents/w365agents-backend.md#manual-powershell-command-runner-windows)
+for all arguments, identity checks, cache clearing, cleanup and uncertainty
+handling, and the unresolved authenticated Exec limitation.
+
+Run the runner's regression coverage explicitly, without tenant access:
+
+```powershell
+pwsh -NoProfile -File .\tests\scripts\test_w365_command_manual.ps1
+python -B -m unittest discover -s tests\scripts -p test_w365_auth.py -v
+```
+
+These are also manual-only. The first stages controlled replacements in an
+owned temporary directory; the second uses fake MSAL clients and a synthetic,
+nonsecret DPAPI fixture. Neither reads the operator's auth cache or signs in.
 
 ### Unix suites
 
