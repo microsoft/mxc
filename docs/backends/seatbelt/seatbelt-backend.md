@@ -604,7 +604,9 @@ MXC rejects a config when:
   `IOHIDLibUserClient` with `ui.injection: false`). Change that setting instead.
   This check also applies to `extraMachLookups`;
 - a `deny` entry would block something an explicit setting grants (for example
-  the pasteboard with `ui.clipboard` enabled).
+  the pasteboard with `ui.clipboard` enabled, `IOHIDLibUserClient` with
+  `ui.injection: true`, or a Keychain helper such as `com.apple.trustd` with
+  `keychainAccess: true`).
 
 To find the names an app needs, run it once with
 [`captureDenials`](#learning-mode-capturedenials) in `"allow"` mode. In that

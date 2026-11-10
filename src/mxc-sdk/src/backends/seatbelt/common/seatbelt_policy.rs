@@ -53,8 +53,21 @@ pub const RUN_MARKER_NAME_PREFIX: &str = "com.microsoft.mxc.run.";
 /// data-protection keychain.
 pub const KEYCHAIN_SERVER_NAMES: &[&str] = &["com.apple.SecurityServer"];
 pub const KEYCHAIN_SERVER_PREFIXES: &[&str] = &["com.apple.securityd"];
-/// Keychain servers that `keychainAccess: true` grants by name.
-pub const KEYCHAIN_GRANTED_NAMES: &[&str] = &["com.apple.SecurityServer", "com.apple.securityd"];
+/// Mach services that `keychainAccess: true` grants by name. `trustd` copies
+/// system trust settings; without it every TLS handshake logs a failure per
+/// root certificate.
+pub const KEYCHAIN_GRANTED_NAMES: &[&str] = &[
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    "com.apple.ocspd",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+    "com.apple.xpcd",
+];
+/// Mach service prefixes that `keychainAccess: true` grants (LaunchServices).
+pub const KEYCHAIN_GRANTED_PREFIXES: &[&str] = &["com.apple.lsd."];
 /// Mach services controlled by `ui.disable`.
 pub const UI_SERVICE_NAMES: &[&str] = &[
     "com.apple.windowserver.active",
@@ -172,6 +185,11 @@ fn setting_names(
                     KEYCHAIN_GRANTED_NAMES
                         .iter()
                         .map(|n| NamePattern::Exact(n))
+                        .chain(
+                            KEYCHAIN_GRANTED_PREFIXES
+                                .iter()
+                                .map(|p| NamePattern::Prefix(p)),
+                        )
                         .collect(),
                 )
             } else {
@@ -217,12 +235,19 @@ fn setting_names(
                 setting: "ui.disable",
             });
         }
-        CustomNameKind::IoKit if !ui.injection => denied.push(SettingNames {
-            patterns: vec![NamePattern::Exact(HID_USER_CLIENT_CLASS)],
-            description: "the HID input client",
-            setting: "ui.injection",
-        }),
-        CustomNameKind::IoKit | CustomNameKind::MachRegister | CustomNameKind::PosixShm => {}
+        CustomNameKind::IoKit => {
+            let target = if ui.injection {
+                &mut granted
+            } else {
+                &mut denied
+            };
+            target.push(SettingNames {
+                patterns: vec![NamePattern::Exact(HID_USER_CLIENT_CLASS)],
+                description: "the HID input client",
+                setting: "ui.injection",
+            });
+        }
+        CustomNameKind::MachRegister | CustomNameKind::PosixShm => {}
     }
     (denied, granted)
 }
@@ -883,6 +908,34 @@ mod tests {
         request.policy.ui.clipboard = ClipboardPolicy::All;
         let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
         assert!(msg.contains("ui.clipboard"), "{msg}");
+
+        // Every name keychainAccess grants, not only the Keychain servers.
+        for entry in [
+            "com.apple.trustd",
+            "com.apple.xpcd",
+            "com.apple.cfprefsd.*",
+            "com.apple.lsd.mapdb",
+            "com.apple.lsd.*",
+        ] {
+            let msg = custom_error(SeatbeltConfig {
+                keychain_access: true,
+                ..lookups(&[], &[entry])
+            });
+            assert!(msg.contains("customMachLookups.deny"), "{entry}: {msg}");
+            assert!(msg.contains("keychainAccess"), "{entry}: {msg}");
+        }
+
+        let mut request = seatbelt_request(SeatbeltConfig {
+            custom_io_kits: Some(SeatbeltCustomRules {
+                deny: vec!["IOHID*".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        request.policy.ui.injection = true;
+        let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
+        assert!(msg.contains("customIoKits.deny"), "{msg}");
+        assert!(msg.contains("ui.injection"), "{msg}");
     }
 
     #[test]

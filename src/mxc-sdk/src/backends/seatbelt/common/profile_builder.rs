@@ -200,6 +200,7 @@ pub(crate) fn build_profile_with_terminals(
     // Setting denies follow every allow so no grant reopens them.
     write_ui_policy_denies(&mut out, request, capture.as_ref());
     write_keychain_denies(&mut out, request, capture.as_ref());
+    write_nested_pty_denies(&mut out, request);
     write_custom_denies(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
@@ -705,8 +706,7 @@ fn write_ui_policy_denies(
 /// Emit rules so the inner process can call `posix_openpt()` and allocate
 /// its own pty.
 fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
-    let enabled = request.seatbelt.as_ref().is_none_or(|c| c.nested_pty);
-    if !enabled {
+    if !nested_pty_enabled(request) {
         return;
     }
     out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
@@ -714,6 +714,21 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     // TTY_ALLOW restricts secondary-device access to the kernel's PTY extension.
     out.push_str("(allow file-read* file-write* file-ioctl\n");
     out.push_str("    (literal \"/dev/ptmx\"))\n");
+}
+
+fn nested_pty_enabled(request: &ExecutionRequest) -> bool {
+    request.seatbelt.as_ref().is_none_or(|c| c.nested_pty)
+}
+
+/// `nestedPty` defaults to true, so `false` is always written in the config
+/// and stays denied even under captureDenials allow mode.
+fn write_nested_pty_denies(out: &mut String, request: &ExecutionRequest) {
+    if nested_pty_enabled(request) {
+        return;
+    }
+    out.push_str(";; --- nestedPty=false: deny pty allocation ---\n");
+    out.push_str("(deny pseudo-tty)\n");
+    out.push_str("(deny file-read* file-write* file-ioctl (literal \"/dev/ptmx\"))\n");
 }
 
 /// Emit rules so `Security.framework` / `keytar` can reach `securityd`
@@ -755,23 +770,18 @@ fn write_keychain_rules(
     })?;
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
-    out.push_str("(allow mach-lookup\n");
+    out.push_str("(allow mach-lookup");
     for name in seatbelt_policy::KEYCHAIN_GRANTED_NAMES {
-        let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
+        let _ = write!(out, "\n    (global-name {})", quote_scheme(name));
     }
-    // trustd handles SecTrustSettingsCopyTrustSettings; without it Security
-    // logs "failed to copy trust settings of system certificate-N" for every
-    // cert in the system root store on every TLS handshake.
-    out.push_str("    (global-name \"com.apple.trustd\")\n");
-    out.push_str("    (global-name \"com.apple.trustd.agent\")\n");
-    out.push_str("    (global-name \"com.apple.ocspd\")\n");
-    out.push_str("    (global-name \"com.apple.cfprefsd.daemon\")\n");
-    out.push_str("    (global-name \"com.apple.cfprefsd.agent\")\n");
-    out.push_str("    (global-name \"com.apple.xpcd\")\n");
-    // Seatbelt has no glob in (global-name); use regex for the lsd.* family
-    // (lsd.modifydb, lsd.mapdb, lsd.openurl, …). Anchored to
-    // `com.apple.lsd.` so we don't accidentally match unrelated services.
-    out.push_str("    (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n");
+    for prefix in seatbelt_policy::KEYCHAIN_GRANTED_PREFIXES {
+        let _ = write!(
+            out,
+            "\n    (global-name-regex #\"^{}\")",
+            prefix.replace('.', "\\.")
+        );
+    }
+    out.push_str(")\n");
 
     out.push_str(";; --- keychainAccess: MDS keychain metadata + trustd protected store ---\n");
     out.push_str("(allow file-read*\n");
@@ -1946,17 +1956,32 @@ mod tests {
     }
 
     #[test]
-    fn nested_pty_false_omits_pty_rules() {
+    fn nested_pty_false_denies_pty_allocation_in_every_mode() {
         let mut r = req();
         r.seatbelt = Some(SeatbeltConfig {
             nested_pty: false,
             ..Default::default()
         });
         let p = build_profile(&r).unwrap();
-        assert!(!p.contains("nestedPty"));
-        assert!(!p.contains("/dev/ptmx"));
-        // pseudo-tty allow should also not be present.
-        assert!(!p.contains("(allow pseudo-tty)"));
+        assert!(!p.contains("(allow pseudo-tty)"), "{p}");
+        assert!(p.contains("(deny pseudo-tty)"), "{p}");
+
+        // Allow mode's (allow default) must not reopen a written nestedPty=false.
+        let mut r = capture_request(CaptureDenialsMode::Allow, false);
+        r.seatbelt.as_mut().unwrap().nested_pty = false;
+        let p = capture_profile(&r);
+        assert!(!p.contains("(allow pseudo-tty)"), "{p}");
+        assert!(
+            p.contains("(deny pseudo-tty (with message \"mxc-capture-test\"))\n"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "(deny file-read* file-write* file-ioctl (with message \"mxc-capture-test\") \
+                 (literal \"/dev/ptmx\"))\n"
+            ),
+            "{p}"
+        );
     }
 
     #[test]
@@ -1976,7 +2001,7 @@ mod tests {
             let p = build_profile(&r).unwrap();
             assert!(p.contains("(allow iokit-open)"));
             assert_eq!(p.contains("(allow pseudo-tty)"), nested_pty, "{p}");
-            assert_eq!(p.contains("/dev/ptmx"), nested_pty, "{p}");
+            assert_eq!(p.contains("(deny pseudo-tty)"), !nested_pty, "{p}");
         }
     }
 

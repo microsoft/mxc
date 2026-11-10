@@ -566,6 +566,19 @@ EOF
     pass "allow mode with keychainAccess $keychain reports the Keychain"
 done
 
+# nestedPty defaults to true, so false is always written and stays enforced.
+run_config "$(render seatbelt_opt_nested_pty_off.json)" --audit
+expect_ok "allow mode keeps pty allocation blocked with nestedPty=false" "PTY_BLOCKED"
+read_pointer "allow mode with nestedPty=false writes a report"
+/usr/bin/python3 - "$REPORT" <<'EOF' || fail "allow mode with nestedPty=false does not report the pty" "$(cat "$REPORT")"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert any("pseudo-tty" in d["resource"] or d["resource"] == "/dev/ptmx"
+           for d in doc["denials"])
+EOF
+pass "allow mode with nestedPty=false reports the pty"
+rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+
 # --- a real GUI app: which Mach services and IOKit drivers it needs ----------
 
 # A minimal AppKit app (JavaScript for Automation) that opens a window. Only
