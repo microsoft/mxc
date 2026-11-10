@@ -985,7 +985,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
 
         const CHILD_ENV: &str = "MXC_NVX_CONSOLE_CHILD";
         if std::env::var_os(CHILD_ENV).is_none() {
-            for phase in ["startup", "execution"] {
+            for phase in ["capture", "startup", "execution"] {
                 // A separate console prevents Ctrl-C from reaching the suite or other sessions.
                 let output = Command::new(std::env::current_exe().expect("test executable"))
                     .args([
@@ -1006,7 +1006,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 );
             }
             println!(
-                "VM_EXECUTED executor console interruption startup/execution/owned-vmm/cleanup"
+                "VM_EXECUTED executor console interruption capture/startup/execution/owned-vmm/cleanup"
             );
             return;
         }
@@ -1047,7 +1047,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             }
         }
 
-        fn owned_vmm(pid: u32) -> Option<OwnedHandle> {
+        fn owned_vmms(pid: u32) -> Vec<OwnedHandle> {
             let snapshot = OwnedHandle::new(
                 unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
                     .expect("process snapshot"),
@@ -1056,11 +1056,12 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
             };
+            let mut vmms = Vec::new();
             let mut next = unsafe { Process32FirstW(snapshot.get(), &mut entry) };
             loop {
                 match next {
                     Ok(()) => {}
-                    Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => return None,
+                    Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => return vmms,
                     Err(error) => panic!("process enumeration failed: {error}"),
                 }
                 let end = entry
@@ -1070,15 +1071,16 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                     .unwrap_or(entry.szExeFile.len());
                 let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
                 if entry.th32ParentProcessID == pid && name.eq_ignore_ascii_case("openvmm.exe") {
-                    let handle = unsafe {
+                    // A template capture's VM can exit before it is opened.
+                    if let Ok(handle) = unsafe {
                         OpenProcess(
                             PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
                             false,
                             entry.th32ProcessID,
                         )
+                    } {
+                        vmms.push(OwnedHandle::new(handle));
                     }
-                    .expect("owned OpenVMM handle");
-                    return Some(OwnedHandle::new(handle));
                 }
                 next = unsafe { Process32NextW(snapshot.get(), &mut entry) };
             }
@@ -1087,20 +1089,23 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let directory = tempfile::tempdir().expect("interruption test directory");
         let state = directory.path().join("state");
         std::fs::create_dir(&state).expect("isolated state directory");
-        // Capture the platform snapshot templates and register the image first, so the first VM
-        // of the interrupted request is its own sandbox rather than a template capture.
-        let warm = executor_output_with_env(
-            &process_only_request("printf warm"),
-            false,
-            false,
-            &[("LOCALAPPDATA", state.as_os_str())],
-        );
-        assert_eq!(
-            warm.status.code(),
-            Some(0),
-            "{}",
-            String::from_utf8_lossy(&warm.stderr)
-        );
+        let phase = std::env::var(CHILD_ENV).expect("interruption phase");
+        if phase != "capture" {
+            // Capture the platform snapshot templates and register the image first, so the first
+            // VM of the interrupted request is its own sandbox rather than a template capture.
+            let warm = executor_output_with_env(
+                &process_only_request("printf warm"),
+                false,
+                false,
+                &[("LOCALAPPDATA", state.as_os_str())],
+            );
+            assert_eq!(
+                warm.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&warm.stderr)
+            );
+        }
         let request_path = directory.path().join("request.json");
         let log_path = directory.path().join("executor.log");
         let stdout_path = directory.path().join("stdout");
@@ -1123,7 +1128,6 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .expect("interruptible executor"),
             vmm: None,
         };
-        let phase = std::env::var(CHILD_ENV).expect("interruption phase");
         let ready_deadline = Instant::now() + Duration::from_secs(180);
         loop {
             assert!(
@@ -1132,17 +1136,25 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 std::fs::read_to_string(&stderr_path).expect("executor stderr")
             );
             if guard.vmm.is_none() {
-                guard.vmm = owned_vmm(guard.child.id());
+                guard.vmm = owned_vmms(guard.child.id()).into_iter().next();
             }
-            let executing = match std::fs::read_to_string(&log_path) {
-                Ok(log) => log.contains("NVX execution started"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            let log = match std::fs::read_to_string(&log_path) {
+                Ok(log) => log,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(error) => panic!("executor log read failed: {error}"),
             };
-            if guard.vmm.is_some() && (phase == "startup" || executing) {
+            // The request logs its sandbox's identity before starting it, so a VM that runs
+            // before then captures a template.
+            let provisioned = log.contains("mxc.SandboxIdentity");
+            let executing = log.contains("NVX execution started");
+            if guard.vmm.is_some() && (phase != "execution" || executing) {
                 assert!(
-                    phase != "startup" || !executing,
-                    "missed the startup interruption window"
+                    match phase.as_str() {
+                        "capture" => !provisioned,
+                        "startup" => !executing,
+                        _ => true,
+                    },
+                    "missed the {phase} interruption window"
                 );
                 break;
             }
@@ -1174,6 +1186,13 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             WAIT_OBJECT_0,
             "owned OpenVMM is still running",
         );
+        for vmm in owned_vmms(guard.child.id()) {
+            assert_eq!(
+                unsafe { WaitForSingleObject(vmm.get(), 0) },
+                WAIT_OBJECT_0,
+                "an OpenVMM that the executor started is still running",
+            );
+        }
         // The cancelled request must leave the shared agent state directory usable.
         let after = executor_output_with_env(
             &process_only_request("printf after-interrupt"),
@@ -1194,9 +1213,13 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let stderr = std::fs::read_to_string(&stderr_path).expect("cancellation stderr");
         assert!(stderr.contains("execution cancelled"), "{stderr}");
         assert!(!stderr.contains("timed out"), "{stderr}");
-        assert!(std::fs::read_to_string(&log_path)
-            .expect("teardown log")
-            .contains("mxc.SandboxTornDown"));
+        let log = std::fs::read_to_string(&log_path).expect("teardown log");
+        if phase == "capture" {
+            // Cancellation during the capture ends the request before it provisions a sandbox.
+            assert!(!log.contains("mxc.SandboxIdentity"), "{log}");
+        } else {
+            assert!(log.contains("mxc.SandboxTornDown"), "{log}");
+        }
         unsafe { SetConsoleCtrlHandler(Some(helper_handler), false) }
             .expect("remove helper handler");
     }
