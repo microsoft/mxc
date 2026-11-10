@@ -26,6 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Expose OpenSSL for Windows TLS fixtures
+        shell: pwsh
+        run: |
+          $opensslDirectory = Join-Path $env:ProgramFiles 'Git\usr\bin'
+          if (-not (Test-Path (Join-Path $opensslDirectory 'openssl.exe'))) {
+            throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
+          }
+          $opensslDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Test loopback command quoting
         shell: pwsh
         run: ..\tests\scripts\test_loopback_anchor_command.ps1

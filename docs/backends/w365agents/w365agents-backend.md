@@ -91,7 +91,14 @@ environment again. MXC does not acquire, cache or renew tokens. The caller
 renews credentials before a later cleanup call. Checkout uses the design's
 45-second client budget; release uses its separate 30-second budget. These
 are transport budgets, not promises about service reset or resource lifetime.
-Production uses validated rustls TLS, no redirects and no ambient HTTP proxy.
+Production uses `native-tls` with the platform's certificate trust store:
+SChannel on Windows, Secure Transport on macOS and OpenSSL on Linux.
+Certificate and hostname validation remain enabled, with no redirects or
+ambient HTTP proxy. Linux builds require OpenSSL development headers and
+`pkg-config` (`libssl-dev pkg-config` on Debian/Ubuntu, `openssl-devel pkgconf-pkg-config`
+on Fedora); deployed Linux hosts require the matching OpenSSL shared libraries
+and CA certificates. ARM64 cross-builds need target-architecture OpenSSL headers
+and libraries, not just the host development package.
 
 ### Readiness and process execution
 
@@ -509,6 +516,7 @@ also scheduled native backend scenarios, not orphan test files.
 From `src\` on Windows:
 
 ```powershell
+# Requires openssl on PATH (included with Git for Windows).
 cargo build --locked -p wxc --features test-support
 $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
 cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored --skip sdk_fresh_caller_fixture
@@ -544,3 +552,12 @@ Only test builds honor `MXC_W365_TEST_CA` and `MXC_W365_TEST_PORT`; they add a
 trusted fixture certificate, never disable certificate or hostname validation.
 Shipping builds ignore these variables. Fixtures use only loopback services,
 synthetic credentials and generated certificates; no live tenant is needed.
+`rcgen` generates fixture certificates. The loopback server uses SChannel on
+Windows and `native-tls` elsewhere; the production client uses `native-tls`
+on all platforms. Windows fixtures require
+the OpenSSL command-line tool to package generated EC keys as PKCS#12 for
+SChannel through the existing `schannel` bindings. The imported Windows test key
+is explicitly deleted after the fixture server stops. CI uses the OpenSSL copy
+included with Git for Windows. These certificate
+and key files exist only in a temporary directory, removed after identity
+loading; no certificates or private keys are checked in.

@@ -6,7 +6,7 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig;
 use serde_json::{json, Value};
 use std::time::Duration;
-use ureq::tls::{TlsConfig, TlsProvider};
+use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -130,7 +130,9 @@ impl Client {
     }
 
     pub(super) fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
-        let tls = TlsConfig::builder().provider(TlsProvider::Rustls);
+        let tls = TlsConfig::builder()
+            .provider(TlsProvider::NativeTls)
+            .root_certs(RootCerts::PlatformVerifier);
         #[cfg(any(test, feature = "test-support"))]
         let (tls, port) = test_tls(tls)?;
         #[cfg(any(test, feature = "test-support"))]
@@ -387,7 +389,7 @@ pub(super) fn failure(
 fn test_tls(
     builder: ureq::tls::TlsConfigBuilder,
 ) -> Result<(ureq::tls::TlsConfigBuilder, u16), MxcError> {
-    use ureq::tls::{Certificate, RootCerts};
+    use ureq::tls::Certificate;
     let ca = std::env::var("MXC_W365_TEST_CA").ok();
     let port = std::env::var("MXC_W365_TEST_PORT").ok();
     match (ca, port) {

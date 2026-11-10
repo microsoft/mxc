@@ -104,6 +104,80 @@ fn readiness_contract_fixture() {
         .all(|request| request.starts_with("GET ")));
 }
 
+#[cfg(target_os = "windows")]
+struct FixtureKey(Option<schannel::ncrypt_key::NcryptKey>);
+
+#[cfg(target_os = "windows")]
+impl Drop for FixtureKey {
+    fn drop(&mut self) {
+        use schannel::RawPointer;
+        use windows::Win32::Security::Cryptography::{NCryptDeleteKey, NCRYPT_KEY_HANDLE};
+
+        let key = self.0.take().unwrap();
+        // Delete only this fixture's imported key; success also frees its handle.
+        match unsafe { NCryptDeleteKey(NCRYPT_KEY_HANDLE(key.as_ptr() as usize), 0) } {
+            Ok(()) => std::mem::forget(key),
+            Err(error) => {
+                eprintln!("cannot delete W365 fixture key: {error}");
+                assert!(std::thread::panicking(), "fixture key cleanup failed");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn fixture_tls(
+    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
+) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
+    let directory = tempfile::tempdir().unwrap();
+    let certificate = directory.path().join("certificate.pem");
+    let key = directory.path().join("key.pem");
+    let archive = directory.path().join("identity.p12");
+    std::fs::write(&certificate, cert.cert.pem()).unwrap();
+    std::fs::write(&key, cert.signing_key.serialize_pem()).unwrap();
+    // SChannel's PEM loader only supports RSA; PKCS#12 also supports rcgen's EC keys.
+    let output = std::process::Command::new("openssl")
+        .args(["pkcs12", "-export", "-out"])
+        .arg(&archive)
+        .arg("-inkey")
+        .arg(&key)
+        .arg("-in")
+        .arg(&certificate)
+        .args(["-passout", "pass:"])
+        .output()
+        .expect("Windows W365 TLS fixtures require openssl on PATH");
+    assert!(
+        output.status.success(),
+        "fixture PKCS#12 conversion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // SChannel needs a persisted server key; retain its exact handle for cleanup.
+    let store = schannel::cert_store::PfxImportOptions::new()
+        .password("")
+        .import(&std::fs::read(archive).unwrap())
+        .unwrap();
+    let certificate = store.certs().next().expect("fixture certificate required");
+    let key = match certificate.private_key().silent(true).acquire().unwrap() {
+        schannel::cert_context::PrivateKey::NcryptKey(key) => FixtureKey(Some(key)),
+        _ => panic!("fixture EC key must use CNG"),
+    };
+    let tls = schannel::schannel_cred::SchannelCred::builder()
+        .cert(certificate)
+        .acquire(schannel::schannel_cred::Direction::Inbound)
+        .unwrap();
+    (tls, key)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn fixture_tls(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> native_tls::TlsAcceptor {
+    let identity = native_tls::Identity::from_pkcs8(
+        cert.cert.pem().as_bytes(),
+        cert.signing_key.serialize_pem().as_bytes(),
+    )
+    .unwrap();
+    native_tls::TlsAcceptor::new(identity).unwrap()
+}
+
 struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Environment {
     fn new() -> Self {
@@ -143,19 +217,21 @@ struct Fixture {
     replies: Arc<Mutex<std::collections::VecDeque<Option<String>>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "windows")]
+    _key: Option<FixtureKey>,
 }
 impl Fixture {
     fn new() -> Self {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        Self::with_hostname("localhost")
+    }
+    fn with_hostname(hostname: &str) -> Self {
+        let cert = rcgen::generate_simple_self_signed(vec![hostname.into()]).unwrap();
         let mut ca = tempfile::NamedTempFile::new().unwrap();
         ca.write_all(cert.cert.pem().as_bytes()).unwrap();
-        let key =
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into();
-        let tls = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.cert.der().clone()], key)
-            .unwrap();
-        let tls = Arc::new(tls);
+        #[cfg(target_os = "windows")]
+        let (tls, key) = fixture_tls(&cert);
+        #[cfg(not(target_os = "windows"))]
+        let tls = fixture_tls(&cert);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -182,8 +258,15 @@ impl Fixture {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let session = rustls::ServerConnection::new(tls.clone()).unwrap();
-                let mut stream = rustls::StreamOwned::new(session, socket);
+                #[cfg(target_os = "windows")]
+                let handshake = schannel::tls_stream::Builder::new().accept(tls.clone(), socket);
+                #[cfg(not(target_os = "windows"))]
+                let handshake = tls.accept(socket);
+                let mut stream = match handshake {
+                    Ok(stream) => stream,
+                    // Trust and hostname rejection probes deliberately fail the handshake.
+                    Err(_) => continue,
+                };
                 let mut data = Vec::new();
                 let mut buf = [0; 1024];
                 while !data.windows(4).any(|v| v == b"\r\n\r\n") {
@@ -211,6 +294,8 @@ impl Fixture {
             replies,
             stop,
             worker: Some(worker),
+            #[cfg(target_os = "windows")]
+            _key: Some(key),
         }
     }
     fn configure(&self, env: &Environment) {
@@ -378,6 +463,14 @@ fn lifecycle_contract_and_recovery_fixture() {
         fixture.count(),
         before,
         "invalid TLS cannot transmit credentials or checkout"
+    );
+    let wrong_hostname = Fixture::with_hostname("not-localhost.invalid");
+    wrong_hostname.configure(&env);
+    assert!(invoke(&provision(), true).is_err());
+    assert_eq!(
+        wrong_hostname.count(),
+        0,
+        "a trusted certificate for another hostname must not receive credentials or checkout"
     );
     fixture.configure(&env);
     assert!(crate::mxc_engine::available_backends()

@@ -53,6 +53,9 @@ jobs:
           key: ${{ matrix.target }}-v2
           cache-on-failure: false
 
+      - name: Install Linux TLS build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
       - name: Install ARM64 cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu

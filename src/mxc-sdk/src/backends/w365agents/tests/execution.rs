@@ -100,6 +100,8 @@ impl ExecFixture {
             stop,
             worker: None,
             replies: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(target_os = "windows")]
+            _key: None,
         };
         fixture.configure(env);
         env.set("W365A_DP_SUFFIX", "localhost");
