@@ -442,9 +442,10 @@ with these macOS differences:
 
 - Verbose signatures use `providerGuid` `com.apple.security.sandbox`, event
   ID `0`, and the Seatbelt operation (for example `file-read-data`) as
-  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, other
-  values are kept, and values over 256 characters are cut short. There is no
-  account-name replacement or digest.
+  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, except
+  shared memory names, which are kept so you can use them in
+  `customPosixShm`. Other values are kept, and values over 256 characters are
+  cut short. There is no account-name replacement or digest.
 
 `deniedResourcesTruncated: true` means some denials may be missing. Delete the
 report, its `.verbose.json` file, and any `.seatbelt.log` when you're done.

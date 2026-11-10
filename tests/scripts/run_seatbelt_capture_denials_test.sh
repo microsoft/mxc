@@ -601,7 +601,7 @@ chmod -R a+rX "$TESTDIR/app"
 GUI_MACH="mach-lookup:com.apple.CARenderServer"
 GUI_IOKIT="iokit-open-user-client:IOSurfaceRootUserClient"
 
-# Assert the verbose report shows guiAccess's blanket grant serving OP TARGET.
+# Assert the verbose report shows a broad grant serving OP TARGET.
 expect_granted() {
     local label="$1" op="$2" target="$3"
     /usr/bin/python3 - "${REPORT%.json}.verbose.json" "$op" "$target" <<'EOF' ||
@@ -647,6 +647,26 @@ expect_listed "allow mode lists the Core Animation lookup to grant" other "$GUI_
 expect_listed "allow mode lists the IOSurface driver to grant" other "$GUI_IOKIT" unknown
 expect_listed "allow mode lists the shared memory to grant" other \
     "ipc-posix-shm-read-data:apple.shm.notification_center" read
+
+# Shared memory names start with "/" but are not paths, so the verbose report
+# keeps them for customPosixShm. `own` lets the workload delete its region.
+SHM="mxc-capture-shm.$$"
+cat >"$TESTDIR/app/shm.py" <<'EOF'
+import sys
+from multiprocessing import shared_memory
+owner = shared_memory.SharedMemory(name=sys.argv[1], create=True, size=16)
+owner.buf[0] = 7
+reader = shared_memory.SharedMemory(name=sys.argv[1])
+print("SHM_OK" if reader.buf[0] == 7 else "SHM_FAILED")
+reader.close()
+owner.close()
+owner.unlink()
+EOF
+chmod a+r "$TESTDIR/app/shm.py"
+run_config "$(render seatbelt_capture_denials_shm_grant.json TESTDIR "$TESTDIR" SHM "$SHM" OUTPUT "$TESTDIR/out/shm.json")"
+expect_ok "the shared memory workload ran" "SHM_OK"
+read_pointer "the shared memory run writes a report"
+expect_granted "the verbose report names the shared memory it granted" ipc-posix-shm-write-create "/$SHM"
 
 # --- rejections --------------------------------------------------------------
 
