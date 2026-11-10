@@ -172,6 +172,15 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
+      - name: Test W365 checkout and release with trusted TLS fixtures
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          names="$(cargo test --locked -p mxc-sdk --lib --target "${{ matrix.target }}" -- --list)"
+          grep -Fq "backend_modules::w365agents::tests::lifecycle_contract_and_recovery_fixture: test" <<< "$names"
+          cargo test --locked -p mxc-sdk --lib --target "${{ matrix.target }}" w365 -- --include-ignored
+
       - name: Test native module lifetime
         working-directory: src
         run: |

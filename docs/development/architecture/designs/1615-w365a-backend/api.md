@@ -17,6 +17,16 @@ additions are optional Rust/.NET error details; Node's existing member is
 preserved. These are proposed capabilities, not working W365 examples.
 Typed W365 configuration and contract publication remain out of scope.
 
+**Implementation boundary:** Phase 2 implements checkout and terminal release
+through the Windows executor's existing lifecycle interface. The backend is
+included and tested through the engine on Windows, Linux and macOS; lifecycle
+CLI support for Linux and macOS is deferred to separate work.
+All Dev SDK W365 JSON calls remain explicitly unavailable
+until cross-SDK structured error metadata and SDK fixtures are ready.
+Start/readiness and exec are also deferred. The examples in this proposal are
+not runnable Phase 2 SDK examples. See the
+[backend guide](../../../../backends/w365agents/w365agents-backend.md).
+
 ## Caller scenario
 
 All examples implement the same [internal Windows build scenario](README.md#usage-scenario).

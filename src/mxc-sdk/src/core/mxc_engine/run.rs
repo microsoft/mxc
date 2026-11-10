@@ -188,6 +188,9 @@ fn resolve_runner_inner_windows(
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
     match request.containment {
+        ContainmentBackend::W365Agents => Err(MxcError::unsupported_phase(
+            "w365_agents supports container lifecycle operations only",
+        )),
         ContainmentBackend::ProcessContainer => {
             use crate::mxc_common::sandbox_process::Runner;
             use crate::process_container_common::base_container_runner::BaseContainerRunner;

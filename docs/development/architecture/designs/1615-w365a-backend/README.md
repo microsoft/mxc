@@ -95,6 +95,11 @@ not separate reasons to choose W365A.
 
 ## Proposed behavior
 
+**Current implementation:** [Phase 2 checkout/release](../../../../backends/w365agents/w365agents-backend.md)
+implements the approved environment-only provision contract and terminal release.
+Start/readiness, exec and public Dev SDK access remain deferred. The full
+lifecycle and SDK behavior below describe later stages, not current capabilities.
+
 The proposal adds experimental containment `w365_agents` and the
 `w365Agents` phase settings.
 Callers use MXC request JSON through the executor or the existing
@@ -213,10 +218,8 @@ Existing host checks and experimental classifications are retained.
 | --- | --- | --- | --- |
 | `w365_agents` (new) | Yes; lifecycle-only remote backend. | An MXC-supported client OS and architecture, DNS/TLS access, valid W365 service credentials and an assigned pool with compatible DesktopControl.Exec. No W365-specific client OS or architecture restriction. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
 
-As with WSLc, a Cargo feature gates the backend implementation and backend-only
-optional dependencies, not request contracts or generated schemas. Standard
-executor and SDK native release builds enable the feature; builds without it
-return `backend_unavailable` before backend execution.
+The backend implementation is included in normal builds on supported client
+platforms; it has no opt-in Cargo feature.
 Every phase still requires runtime
 experimental authorization: `--experimental` for the executor or the Dev SDK's
 `JsonOptions` experimental flag, even when its request contract parses.
@@ -253,27 +256,30 @@ MXC request JSON has `version: "1.1.0-alpha"` and one of `phase: "provision"`,
 Direct executor calls use existing `--operation` and `--container-id` controls
 for those routing values. No new CLI operation or SDK entrypoint is proposed.
 
-Only the selected phase's `w365Agents.<phase>` object is accepted; unknown
-fields and other phase payloads are rejected, not ignored. Provision requires
+Only provision accepts `w365Agents.provision`; start, exec, stop and deprovision
+use the ordinary `sandboxId` and process contracts and reject `w365Agents`,
+including an empty object. Unknown fields are rejected, not ignored. Provision requires
 `w365Agents.provision.poolId`: absent `w365Agents`, `{}`, or a missing phase
 object fails backend validation; a supplied empty provision object lacks the
-required field and fails contract parsing. For other phases, absent settings
-use backend defaults/environment; a present `{}` stays present through parsing
-and binding, then resolves the same defaults in the backend. Null is not an
-alternative to omission. Parsers preserve presence; backend code owns defaults.
+required field and fails contract parsing. Null is not an alternative to
+omission. Parsers preserve presence; backend code owns defaults.
 
 | Field | Allowed input and omitted/empty behavior |
 | --- | --- |
 | `w365Agents.provision.poolId` | Required string, 36-character hyphenated ASCII-hex GUID (`8-4-4-4-12`). No empty/blank value or automatic selection. |
 | Provision `userType` | `"Local"`, `"HumanUser"`, or `"Agentic"` when supplied; empty/other values fail. Omission sends no `user-type` header; MXC does not select an identity or session kind. |
 | Provision `userObjectId` | If supplied, a canonical GUID sent as `user-object-id`; empty/blank fails. Omission sends no header. |
-| Provision/stop/deprovision `cpBaseUrl` | Bare W365 service hostname for checkout and release, no scheme, credentials, query or path; otherwise use `W365A_CONTROLPLANE_URL`. Blank counts as absent. Missing/invalid resolved host fails before a service request. |
-| Provision/stop/deprovision `cpBearerToken` | Nonblank resource-specific token or `W365A_CP_TOKEN`; blank counts as absent. Missing resolved token fails. Explicit nonblank host requires its own explicit nonblank token. |
-| Start/exec `dpSuffix` | DNS suffix used to construct `{poolId}.{suffix}`, not a URL; otherwise `W365A_DP_SUFFIX`. Blank counts as absent. Same explicit-host/token pairing rule. |
-| Start `dpBearerToken`; exec `bearerToken` | Nonblank resource-specific token for readiness/execution or `W365A_DP_TOKEN`; blank counts as absent. Missing resolved token fails; no borrowing an ambient token for an explicit host override. |
-| Provision `provisionTimeoutMs` | Optional unsigned 64-bit milliseconds; default 45000. Zero is passed to transport, not treated as infinite. |
-| Start `readyTimeoutMs` | Optional unsigned 64-bit milliseconds; default 120000. Zero performs one status poll. Timeout reports `attach_timeout` with last observed state; no implicit release. |
-| Start `pollIntervalMs` | Optional unsigned 64-bit milliseconds; default 2000. Zero adds no sleep. No automatic retry of a failed HTTP status request. |
+
+Service configuration belongs to the caller environment, not request JSON.
+Checkout and release require `W365A_CONTROLPLANE_URL` (a bare ASCII DNS
+hostname without scheme, port, path, query, credentials or whitespace) and
+`W365A_CP_TOKEN` (a nonempty resource-specific bearer token without whitespace
+or control characters). Missing, blank, invalid or non-Unicode configuration
+fails locally; MXC does not acquire or renew tokens. Read configuration again
+for each invocation, including release in a fresh process with renewed credentials.
+The existing design budgets are 45000 ms for checkout and 30000 ms for release;
+there are no per-request timeout overrides or new renewal mechanism.
+Readiness and exec environment settings remain deferred with their implementation.
 
 Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional
@@ -499,13 +505,13 @@ the shared scenarios below.
 | `mxc_contract_v1_1_0_alpha` W365 fixtures | All five phase requests, missing/empty/null/wrong-phase fields; published 1.0 requests. | Development fields parse only in their phase/version; preserve optional presence, reject unknowns/nulls; published fixtures and schemas unchanged. |
 | Engine authorization/binding tests | Invoke every phase through normal executor and Dev SDK builds, without experimental opt-in, then authorized. Repeat with the backend omitted. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Contract parsing is unchanged when the backend is omitted; missing backend or opt-in fails before backend work. No network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
 | `w365agents_lifecycle` native fixture (new) | Unsupported filesystem/network/UI/clipboard/proxy blocks, including empty/default policy blocks, and malformed IDs. | Contract or backend validation fails before any checkout/status/upgrade/delete request; fixture records zero requests. |
-| Lifecycle/config fixture | Omitted/empty phase settings, blank/whitespace hosts/tokens, missing environment; explicit host plus absent/blank token with an ambient token. | Defaults/presence follow agreed contract; missing configuration fails; no credential leaves for an explicit unpaired host. |
+| Lifecycle/config fixture | Omitted/empty provision wrapper, missing/blank/invalid environment host or token, and rejected per-call overrides. | Presence follows the Phase 1 contract; missing configuration fails before requests; no per-call host or token is accepted. |
 | Lifecycle environment fixture | Omitted `process.env`, `[]`, and supplied entries, each with omitted/false/true `inheritDefaultEnv`. | Accepted requests forward only supplied entries, with none for omitted/empty env; the inheritance flag is not forwarded. Supplied env with false/omitted fails with `policy_validation` before any remote connection. No MXC host environment is forwarded. Actual guest inheritance and overrides are checked in the Phase 4 live scenario below. |
 | Lifecycle process-input fixture | Command with omitted/empty/supplied `cwd` and omitted/zero/positive `process.timeout`. | The service fixture receives the unchanged command, no `cwd` for omitted/empty input or the supplied guest path otherwise, and `timeoutMs` of 0 for omitted/zero input or the supplied positive millisecond value. |
 | Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run with omitted and zero `process.timeout`, then run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. Confirm and record guest handling of zero `timeoutMs` and applicable service-side timeout defaults and limits. The positively timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
 | `w365agents_cp_loopback` plus lifecycle fixture | Equal IDs or omitted computer ID; different/malformed computer ID with a valid session ID; lost response, unparseable body or missing/malformed session ID. | Equal/omitted computer IDs produce the same session-based ID. Rejected successful checkout reports `possiblySucceeded`; a valid session ID is retained with the pool ID and opaque `sandboxId` in error details, not a successful container result. An unavailable/invalid session ID produces no fabricated cleanup reference. No second POST occurs. |
 | Checkout/release/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
-| Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
+| Readiness fixture (later stage) | Waiting/Live then Ready, unknown state and expired budget; environment configuration/budget controls to be finalized in Phase 3. | Success only on Ready; timeout has last state; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | Executor relay lifecycle fixture | Concurrent stdout/stderr of at least 1 MiB each, binary data, stdin/EOF and slow/closed output readers through executor relayed exec. | Exact separate output with concurrent draining; bounded relay buffers and explicit local I/O errors. EOF is forwarded without checkout or release. |
 | Rust/.NET/Node Dev lifecycle fixture (new) | Provision, start, repeated captured/spawned exec, stop and deprovision through each SDK with normal native libraries; repeat without experimental opt-in. | Same checked-out Cloud PC, complete lifecycle responses, separate output and actual exits; no executor subprocess or implicit release. Missing opt-in fails before network activity; PTY/create-and-run remain refused. |
@@ -575,15 +581,11 @@ follow the [phase settings](#routing-and-phase-settings):
 | Request routing | `version: "1.1.0-alpha"`, `phase: "provision"` and `containment: "w365_agents"`. |
 | `w365Agents.provision.poolId` | Required canonical 36-character pool GUID for an existing, authorized test pool. The harness selects the pool; MXC does not discover or create it. |
 | `userType` and `userObjectId` | The delegated human-user scenario supplies `"HumanUser"` and the selected user's canonical object GUID. Both fields are optional in the proposed MXC contract; omission sends no corresponding header and does not infer a human identity. The caller supplies the identity information required by its service deployment. |
-| `cpBaseUrl` and `cpBearerToken` | An approved bare W365 service hostname and a valid resource-specific token for checkout and release. These fields may be omitted only when their required values resolve from `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN`. An explicit nonblank hostname requires an explicit nonblank token; an ambient token is not used for a host override. |
-| `provisionTimeoutMs` | Optional checkout budget in milliseconds; omission uses 45000. |
+| Service configuration (environment only) | Supply `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN` in the caller environment. Neither belongs in the provision document. |
 
-Subsequent readiness and exec requests use the returned container ID,
-`dpSuffix` or `W365A_DP_SUFFIX`, and a separate resource-specific token:
-`dpBearerToken` for start, `bearerToken` for exec, or `W365A_DP_TOKEN`.
-The same explicit-host/token pairing rule applies. Stop/deprovision use the
-checkout/release configuration and token again, including caller-renewed
-credentials when needed for cleanup.
+Stop/deprovision use the checkout/release environment again, including
+caller-renewed credentials when needed for cleanup. Readiness and exec are
+not available in Phase 2.
 
 Nightly live testing is proposed as follow-up beyond the initial experimental
 milestone. Unattended runs require an authorized test tenant, pool and identity,

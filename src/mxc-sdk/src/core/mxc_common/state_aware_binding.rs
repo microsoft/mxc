@@ -179,6 +179,30 @@ fn incompatible_payload(actual: &ContainmentBackend, backend: &str) -> MxcError 
     ))
 }
 
+/// Bind W365 provision inputs and ordinary sandbox-addressed operations.
+pub fn bind_w365_agents<B>(
+    parsed: ParsedStateAwareRequest,
+) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig,
+        StartConfig = (),
+        ExecConfig = (),
+        StopConfig = (),
+        DeprovisionConfig = (),
+    >,
+{
+    BoundStateAwareRequest::bind(
+        parsed,
+        ContainmentBackend::W365Agents,
+        "w365",
+        |provision| match provision {
+            StateAwareProvision::W365Agents(config) => Ok(config.flatten()),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+    )
+}
+
 /// Bind an IsolationSession operation without changing configuration presence.
 pub fn bind_isolation_session<B>(
     parsed: ParsedStateAwareRequest,

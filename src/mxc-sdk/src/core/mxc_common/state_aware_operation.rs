@@ -27,6 +27,16 @@ pub enum StateAwareProvision {
     MicroVm(Option<MicroVmProvisionConfig>),
     /// An omitted image remains absent until the WSLC backend chooses a default.
     Wslc(Option<WslcProvisionConfig>),
+    /// Presence is preserved until the W365 backend validates provision.
+    W365Agents(Option<Option<W365AgentsProvisionConfig>>),
+}
+
+/// Passive W365 provision inputs; defaults and enforcement belong to the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W365AgentsProvisionConfig {
+    pub pool_id: String,
+    pub user_type: Option<String>,
+    pub user_object_id: Option<String>,
 }
 
 impl StateAwareProvision {
@@ -37,6 +47,7 @@ impl StateAwareProvision {
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
             Self::MicroVm(_) => ContainmentBackend::MicroVm,
             Self::Wslc(_) => ContainmentBackend::Wslc,
+            Self::W365Agents(_) => ContainmentBackend::W365Agents,
         }
     }
 }

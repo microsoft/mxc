@@ -323,7 +323,7 @@ of putting those fields in the JSON file; the executor inserts them before
 parsing. Placement's nested `wslc.provision.sessionId` stays in JSON.
 JSON library/FFI calls include routing fields as shown above.
 
-### W365 Agents (contract only)
+### W365 Agents (experimental checkout and release)
 
 In `1.1.0-alpha`, provision accepts `containment: "w365_agents"` and
 `w365Agents.provision`:
@@ -343,9 +343,14 @@ or an agent invokes MXC.
 Service authentication differs by kind: `Local` disallows an auxiliary token;
 `HumanUser` allows one for assertion-based startup if it represents the same
 human user; `Agentic` requires one representing the selected Agent User.
-This contract slice does not provide auxiliary-token settings or implement
-session authentication.
+This lifecycle slice does not provide auxiliary-token settings, so Agentic
+session authentication is not supported.
 
-The backend is not implemented: provision returns `backend_unavailable`, even
-with experimental opt-in. Later phases using a `w365:` ID return
-`unsupported_containment`.
+With executor experimental opt-in, provision checks out a session and stop or
+deprovision requests terminal release using its retained `w365:` ID.
+Start/readiness and exec remain unavailable, and later phases reject
+`w365Agents` settings. Service configuration currently comes from the caller
+environment. Typed W365 SDK APIs do not exist, and Dev SDK JSON lifecycle
+access remains unavailable. See the
+[W365 backend guide](../../backends/w365agents/w365agents-backend.md) for
+configuration, cleanup and service-validation limits.

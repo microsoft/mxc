@@ -108,6 +108,15 @@ pub fn run_state_aware(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            let mut runner = crate::backend_modules::w365agents::Runner;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            )
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
@@ -377,6 +386,14 @@ fn exec_state_aware_with_capture_mode(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut crate::backend_modules::w365agents::Runner,
+                bound,
+            )?;
+            Err(crate::backend_modules::w365agents::deferred())
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
@@ -465,6 +482,14 @@ pub fn exec_state_aware_pty(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
+                &mut crate::backend_modules::w365agents::Runner,
+                bound,
+                size,
+            )
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
@@ -1093,6 +1118,7 @@ pub fn run_state_aware_json(
 ) -> Result<String, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    require_sdk_lifecycle_ready(&parsed)?;
     let value = run_state_aware_envelope(parsed, dry_run, &mut logger)?;
     serde_json::to_string(&value).map_err(|error| {
         Error::from(MxcError::backend_error(format!(
@@ -1113,6 +1139,7 @@ pub fn exec_state_aware_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
@@ -1122,6 +1149,7 @@ pub fn exec_state_aware_capture_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_capture_parsed(parsed, &mut logger)
 }
 
@@ -1133,7 +1161,17 @@ pub fn exec_state_aware_pty_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_pty_parsed(parsed, &mut logger, size)
+}
+
+fn require_sdk_lifecycle_ready(parsed: &ParsedStateAwareRequest) -> Result<(), Error> {
+    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents {
+        return Err(MxcError::backend_unavailable(
+            "W365 Dev SDK access is deferred until cross-SDK error details and SDK validation are ready; use the experimental native executor",
+        ).into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
