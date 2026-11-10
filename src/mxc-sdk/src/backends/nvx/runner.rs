@@ -78,10 +78,7 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        // Capturing platform snapshot templates boots VMs, so validation opens the agent without
-        // them.
-        let state_root = super::runtime::state_root()?;
-        let mut client = super::runtime::create_persistent_client(state_root)?;
+        let (_, mut client) = open_client()?;
         validate_with_client(&mut client, request)
     }
 
@@ -92,7 +89,7 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
-        let (state_root, mut client) = open_client(logger)?;
+        let (state_root, mut client) = open_client()?;
         run_with_client(
             &mut client,
             &state_root,
@@ -103,12 +100,10 @@ impl NvxRunner {
     }
 }
 
-/// Opens the agent for a create-and-run request with platform snapshots, so its sandbox starts as
-/// a clone of a template.
-fn open_client(logger: &mut Logger) -> Result<(PathBuf, NvxClient), MxcError> {
+fn open_client() -> Result<(PathBuf, NvxClient), MxcError> {
     let state_root = super::runtime::state_root()?;
     let path = state_root.path().to_path_buf();
-    let client = super::runtime::create_client_with_platform_snapshots(state_root, logger)?;
+    let client = super::runtime::create_persistent_client(state_root)?;
     Ok((path, client))
 }
 
@@ -173,7 +168,7 @@ fn run_with_client(
 ) -> Result<CapturedRun, MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let protect = |operation, error| protect_native_error(error, operation, sensitive_proxy);
-    let prepared = prepare_and_provision(client, request, cancellation);
+    let prepared = prepare_and_provision(client, request, cancellation, logger);
     let (sandbox_id, exec) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -268,12 +263,20 @@ fn start_error(
 }
 
 fn prepare_and_provision(
-    client: &impl SandboxClient,
+    client: &mut impl SandboxClient,
     request: &ExecutionRequest,
     cancellation: Option<&RunCancellation>,
+    logger: &mut Logger,
 ) -> Result<(super::runtime::SandboxId, NativeExecRequest), MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let (input, exec) = prepare_request(client, request)?;
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
+    // Capturing platform snapshot templates boots VMs, so only a validated request enables them.
+    client
+        .enable_platform_snapshots(logger)
+        .map_err(|error| protect_native_error(error, "platform_snapshots", sensitive_proxy))?;
     if let Some(cancellation) = cancellation {
         cancellation.check()?;
     }
@@ -416,8 +419,8 @@ pub(crate) fn spawn_streaming(
     super::policy::validate_request(request)?;
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
-    let (state_root, mut client) = open_client(logger)?;
-    let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
+    let (state_root, mut client) = open_client()?;
+    let (sandbox_id, exec) = match prepare_and_provision(&mut client, request, None, logger) {
         Ok(prepared) => prepared,
         Err(error) => {
             let mut cleanup = Vec::new();
@@ -1166,6 +1169,7 @@ mod tests {
         capabilities_res: Result<Capabilities, MxcError>,
         validate_provision_res: Result<(), MxcError>,
         validate_res: Result<(), MxcError>,
+        platform_snapshots_res: Result<(), MxcError>,
         probe_res: Result<(), MxcError>,
         provision_res: Result<SandboxId, MxcError>,
         start_res: Result<StartResult, MxcError>,
@@ -1188,6 +1192,7 @@ mod tests {
                 capabilities_res: Ok(test_capabilities()),
                 validate_provision_res: Ok(()),
                 validate_res: Ok(()),
+                platform_snapshots_res: Ok(()),
                 probe_res: Ok(()),
                 provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef")
                     .map_err(super::super::runtime::map_error),
@@ -1231,6 +1236,11 @@ mod tests {
             self.record("validate");
             *self.validated_request.borrow_mut() = Some(request.clone());
             self.validate_res.clone()
+        }
+
+        fn enable_platform_snapshots(&mut self, _logger: &mut Logger) -> Result<(), MxcError> {
+            self.record("platform_snapshots");
+            self.platform_snapshots_res.clone()
         }
 
         fn probe(&self) -> Result<(), MxcError> {
@@ -1449,6 +1459,7 @@ mod tests {
             "capabilities",
             "validate_provision",
             "validate_exec",
+            "platform_snapshots",
             "probe",
             "provision",
             "start",
@@ -1472,6 +1483,7 @@ mod tests {
                 "capabilities" => client.capabilities_res = Err(failure),
                 "validate_provision" => client.validate_provision_res = Err(failure),
                 "validate_exec" => client.validate_res = Err(failure),
+                "platform_snapshots" => client.platform_snapshots_res = Err(failure),
                 "probe" => client.probe_res = Err(failure),
                 "provision" => client.provision_res = Err(failure),
                 "start" => client.start_res = Err(failure),
@@ -1695,7 +1707,14 @@ mod tests {
 
     #[test]
     fn cancellation_during_startup_or_execution_runs_ordered_teardown() {
-        for phase in ["validate", "probe", "provision", "start", "exec"] {
+        for phase in [
+            "validate",
+            "platform_snapshots",
+            "probe",
+            "provision",
+            "start",
+            "exec",
+        ] {
             for cleanup_fails in [false, true] {
                 let cancellation = RunCancellation::default();
                 let mut client = MockClient::ok();
@@ -1717,9 +1736,11 @@ mod tests {
                 assert!(cancellation.was_cancelled());
                 let expected: &[&str] = match phase {
                     "validate" => &["validate", "close"],
-                    "probe" => &["validate", "probe", "close"],
+                    "platform_snapshots" => &["validate", "platform_snapshots", "close"],
+                    "probe" => &["validate", "platform_snapshots", "probe", "close"],
                     "provision" => &[
                         "validate",
+                        "platform_snapshots",
                         "probe",
                         "provision",
                         "stop",
@@ -1728,6 +1749,7 @@ mod tests {
                     ],
                     "start" => &[
                         "validate",
+                        "platform_snapshots",
                         "probe",
                         "provision",
                         "start",
@@ -1737,6 +1759,7 @@ mod tests {
                     ],
                     _ => &[
                         "validate",
+                        "platform_snapshots",
                         "probe",
                         "provision",
                         "start",
@@ -1790,6 +1813,7 @@ mod tests {
                 "capabilities",
                 "validate_provision",
                 "validate",
+                "platform_snapshots",
                 "probe",
                 "provision",
                 "start",
@@ -1850,6 +1874,7 @@ mod tests {
                     "capabilities",
                     "validate_provision",
                     "validate",
+                    "platform_snapshots",
                     "probe",
                     "provision",
                     "start",
@@ -1886,6 +1911,7 @@ mod tests {
                 "capabilities",
                 "validate_provision",
                 "validate",
+                "platform_snapshots",
                 "probe",
                 "close"
             ]
@@ -1910,6 +1936,7 @@ mod tests {
                 "capabilities",
                 "validate_provision",
                 "validate",
+                "platform_snapshots",
                 "probe",
                 "provision",
                 "start",
@@ -2010,6 +2037,7 @@ mod tests {
                     "capabilities",
                     "validate_provision",
                     "validate",
+                    "platform_snapshots",
                     "probe",
                     "provision",
                     "start",
@@ -2082,6 +2110,7 @@ mod tests {
                     "capabilities",
                     "validate_provision",
                     "validate",
+                    "platform_snapshots",
                     "probe",
                     "provision",
                     "start",

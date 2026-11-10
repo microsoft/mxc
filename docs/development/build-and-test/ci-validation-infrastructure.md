@@ -284,7 +284,8 @@ for an unregistered image all succeed, and that later concurrent requests boot
 it while its registry is unreachable. A third checks that create-and-run
 sandboxes start as clones of the platform snapshot templates, that a streaming
 request captures the templates too, that validation captures none, and that a
-host that cannot capture them cold boots sandboxes.
+host that cannot capture them cold boots sandboxes. Requests that native
+validation rejects capture no templates.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

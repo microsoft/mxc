@@ -286,12 +286,14 @@ Create-and-run MicroVMs, with captured or live output, start as clones of the
 agent's platform snapshot templates instead of booting their kernel. The first
 create-and-run request in a state directory captures two templates, one with a
 network device and one without. This adds about a second to that request and
-uses about 512 MiB of disk in the directory. Later requests, in any process,
-reuse the templates, and concurrent first requests capture them once. The
-templates fit sandboxes with one virtual processor and the agent's default
-256 MiB of memory, so a request that sets `microvm.provision.memoryMib` to
-another value cold boots. The agent captures a template again when it expires
-or a clone of it fails; meanwhile, the sandboxes that need it cold boot.
+uses about 512 MiB of disk in the directory. MXC captures them only after the
+agent validates the request, so a rejected request never boots VMs to capture
+them. Later requests, in any process, reuse the templates, and concurrent first
+requests capture them once. The templates fit sandboxes with one virtual
+processor and the agent's default 256 MiB of memory, so a request that sets
+`microvm.provision.memoryMib` to another value cold boots. The agent captures a
+template again when it expires or a clone of it fails; meanwhile, the
+sandboxes that need it cold boot.
 
 Containers that lifecycle operations provision always cold boot. Lifecycle
 operations open the agent without platform snapshots, so none of them boots
@@ -305,8 +307,8 @@ workload's standard error.
 A clone runs with the guest kernel's default CPU vulnerability mitigations,
 which a cold boot turns off. Its boot-console log has no guest boot output, so
 startup failure diagnostics show less of the console. If the agent cannot
-capture the templates, MXC opens it without them and sandboxes cold boot. With
-`--log-file`, the log records why, and each start records its `bootMode`
+capture the templates, MXC keeps it open without them and sandboxes cold boot.
+With `--log-file`, the log records why, and each start records its `bootMode`
 (`clone` or `cold`), its `template` or `coldReason`, and its
 `bootMilliseconds`.
 
@@ -336,7 +338,8 @@ later concurrent requests boot it while its registry is unreachable. A third
 checks that create-and-run sandboxes, with and without a network device,
 start as clones of the platform snapshot templates, that a streaming request
 captures the templates too, that validation captures none, and that a host
-that cannot capture them cold boots sandboxes.
+that cannot capture them cold boots sandboxes. Requests that native validation
+rejects capture no templates.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 
