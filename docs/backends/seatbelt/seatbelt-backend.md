@@ -379,9 +379,10 @@ It also grants read **and** write across all of `/private/tmp` and
 `/private/var/folders`. Your `filesystem` policy is applied after this grant, so
 `readonlyPaths` and `deniedPaths` entries inside those directories still apply.
 
-Explicit settings always win over `guiAccess`: `nestedPty` alone controls PTY
-creation, `keychainAccess` controls the Keychain, and the `ui` settings control
-WindowServer, the pasteboard, and HID input.
+Settings always win over `guiAccess`, whether written or left at their default:
+`nestedPty` alone controls PTY creation, `keychainAccess` controls the
+Keychain, and the `ui` settings control WindowServer, the pasteboard, and HID
+input.
 
 </details>
 
