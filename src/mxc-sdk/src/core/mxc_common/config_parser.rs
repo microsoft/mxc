@@ -2488,6 +2488,7 @@ mod tests {
         // Empty blocks are kept: they replace guiAccess's grant with nothing.
         let json = r#"{
             "version": "1.1.0-alpha",
+            "containment": "seatbelt",
             "seatbelt": {"customMachRegisters": {}, "customPosixShm": {}},
             "process": {"commandLine": "echo dev"}
         }"#;
