@@ -44,6 +44,9 @@ pub enum ContainmentBackend {
     /// Uses `bwrap` to create namespace-isolated processes without root
     /// privileges. Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
+    /// Development-only remote lifecycle contract; execution is not implemented.
+    #[serde(rename = "w365_agents")]
+    W365Agents,
 }
 
 impl ContainmentBackend {
@@ -60,6 +63,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::W365Agents => "w365_agents",
         }
     }
 
@@ -74,6 +78,7 @@ impl ContainmentBackend {
             ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("isolationSession"),
+            ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
@@ -127,6 +132,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
+            W::W365Agents => Self::W365Agents,
         }
     }
 }
@@ -244,6 +250,14 @@ pub struct IsolationSessionProvisionConfig {
     /// **distinct** value from an absent one and round-trips as such. The exact
     /// JSON contract rejects `null`.
     pub app_id: Option<String>,
+}
+
+/// Normalized development W365 checkout settings; execution is not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W365AgentsProvisionConfig {
+    pub pool_id: String,
+    pub user_type: Option<String>,
+    pub user_object_id: Option<String>,
 }
 
 /// Image and guest memory settings shared by MicroVM creation paths.

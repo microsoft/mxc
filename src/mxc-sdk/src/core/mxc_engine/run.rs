@@ -228,6 +228,9 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
+        ContainmentBackend::W365Agents => Err(MxcError::unsupported_phase(
+            "w365_agents supports only container lifecycle operations",
+        )),
         ContainmentBackend::MicroVm => {
             #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
             {

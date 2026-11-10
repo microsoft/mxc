@@ -180,7 +180,8 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::MicroVm(None)
-            | StateAwareProvision::Wslc(None),
+            | StateAwareProvision::Wslc(None)
+            | StateAwareProvision::W365Agents(_),
         ) => Value::Null,
 
         StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
