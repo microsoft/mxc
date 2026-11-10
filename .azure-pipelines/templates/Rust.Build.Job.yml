@@ -128,6 +128,18 @@ jobs:
             ${{ else }}:
               enableTest: 'false'
 
+      - script: |
+          set -euo pipefail
+          features="$(cargo tree --locked --target $(triplet) -p mxc-sdk --no-default-features --features hyperlight -e features -i ureq)"
+          grep -q 'ureq feature "rustls"' <<< "$features"
+          if grep -q 'ureq feature "native-tls' <<< "$features"; then
+            echo "ARM64 must not enable Hyperlight's x86_64-only native TLS dependency." >&2
+            exit 1
+          fi
+        displayName: Check ARM64 HTTP dependency features
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'arm64'))
+
       # These are separate workspace members (not deps of lxc), so the
       # workspace-member-scoped build above doesn't pick them up.
       - script: |

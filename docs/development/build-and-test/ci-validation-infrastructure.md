@@ -30,7 +30,9 @@ Azure's `Rust.Build.Job.yml` explicitly discovers and runs the engine fixture
 on Linux x64 and both fixtures on Windows x64, using an isolated executor target
 directory outside shipping artifacts. `Mac.Build.Job.yml` checks engine fixture
 discovery before its existing package suite runs it on macOS arm64. Azure's
-cross-compiled Windows/Linux arm64 jobs remain build-only.
+cross-compiled Windows/Linux arm64 jobs remain build-only. The Linux arm64 job
+also checks that enabling `hyperlight` retains W365's rustls dependency without
+enabling Hyperlight's x86_64-only native TLS dependency.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
