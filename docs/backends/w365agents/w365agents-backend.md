@@ -173,7 +173,7 @@ fixture executor; Windows CI explicitly requires and runs it.
 From `src\` on Windows:
 
 ```powershell
-# Requires openssl on PATH (included with Git for Windows).
+# Requires openssl on PATH, or MXC_W365_TEST_OPENSSL set to its executable path.
 cargo build --locked -p wxc --features test-support
 $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
 cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored
@@ -190,10 +190,15 @@ Shipping builds ignore these variables. Fixtures use only loopback services,
 synthetic credentials and generated certificates; no live tenant is needed.
 `rcgen` generates fixture certificates. The loopback server uses SChannel on
 Windows and `native-tls` elsewhere; the production client uses `native-tls`
-on all platforms. Windows fixtures require
-the OpenSSL command-line tool to package generated EC keys as PKCS#12 for
-SChannel through the existing `schannel` bindings. The imported Windows test key
-is explicitly deleted after the fixture server stops. CI uses the OpenSSL copy
-included with Git for Windows. These certificate
+on all platforms. Windows and macOS fixtures require
+the OpenSSL command-line tool to package generated EC keys as PKCS#12; their
+native PEM identity importers do not support this key format. The archive uses
+SHA-1/3DES for macOS import compatibility only, not for TLS connections or
+production cryptography. The imported Windows test key is explicitly deleted
+after the fixture server stops; `native-tls` owns a temporary macOS keychain
+removed at process exit. Windows CI selects the OpenSSL executable
+included with Git for Windows using `MXC_W365_TEST_OPENSSL`, without changing
+`PATH` or replacing other Windows tools. Otherwise fixtures find `openssl` on
+`PATH`. These certificate
 and key files exist only in a temporary directory, removed after identity
 loading; no certificates or private keys are checked in.

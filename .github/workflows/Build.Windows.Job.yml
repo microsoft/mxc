@@ -29,11 +29,11 @@ jobs:
       - name: Expose OpenSSL for Windows TLS fixtures
         shell: pwsh
         run: |
-          $opensslDirectory = Join-Path $env:ProgramFiles 'Git\usr\bin'
-          if (-not (Test-Path (Join-Path $opensslDirectory 'openssl.exe'))) {
+          $openssl = Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'
+          if (-not (Test-Path $openssl)) {
             throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
           }
-          $opensslDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "MXC_W365_TEST_OPENSSL=$openssl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Test loopback command quoting
         shell: pwsh

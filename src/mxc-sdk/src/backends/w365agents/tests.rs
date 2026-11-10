@@ -21,6 +21,9 @@ const A: &str = "22222222-2222-2222-2222-222222222222";
 const B: &str = "33333333-3333-3333-3333-333333333333";
 static ENV: Mutex<()> = Mutex::new(());
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const FIXTURE_IDENTITY_PASSWORD: &str = "fixture-only";
+
 #[cfg(target_os = "windows")]
 struct FixtureKey(Option<schannel::ncrypt_key::NcryptKey>);
 
@@ -42,36 +45,52 @@ impl Drop for FixtureKey {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn fixture_tls(
-    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
-) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn fixture_pkcs12(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Vec<u8> {
     let directory = tempfile::tempdir().unwrap();
     let certificate = directory.path().join("certificate.pem");
     let key = directory.path().join("key.pem");
     let archive = directory.path().join("identity.p12");
     std::fs::write(&certificate, cert.cert.pem()).unwrap();
     std::fs::write(&key, cert.signing_key.serialize_pem()).unwrap();
-    // SChannel's PEM loader only supports RSA; PKCS#12 also supports rcgen's EC keys.
-    let output = std::process::Command::new("openssl")
+    let openssl = std::env::var_os("MXC_W365_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
+    // macOS cannot import rcgen's EC PKCS#8 PEM. These PKCS#12 algorithms work
+    // with its identity importer; they do not configure TLS or production crypto.
+    let output = std::process::Command::new(openssl)
         .args(["pkcs12", "-export", "-out"])
         .arg(&archive)
         .arg("-inkey")
         .arg(&key)
         .arg("-in")
         .arg(&certificate)
-        .args(["-passout", "pass:"])
+        .args([
+            "-passout",
+            &format!("pass:{FIXTURE_IDENTITY_PASSWORD}"),
+            "-keypbe",
+            "PBE-SHA1-3DES",
+            "-certpbe",
+            "PBE-SHA1-3DES",
+            "-macalg",
+            "sha1",
+        ])
         .output()
-        .expect("Windows W365 TLS fixtures require openssl on PATH");
+        .expect("W365 TLS fixtures require openssl on PATH or MXC_W365_TEST_OPENSSL");
     assert!(
         output.status.success(),
         "fixture PKCS#12 conversion failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    std::fs::read(archive).unwrap()
+}
+
+#[cfg(target_os = "windows")]
+fn fixture_tls(
+    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
+) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
     // SChannel needs a persisted server key; retain its exact handle for cleanup.
     let store = schannel::cert_store::PfxImportOptions::new()
-        .password("")
-        .import(&std::fs::read(archive).unwrap())
+        .password(FIXTURE_IDENTITY_PASSWORD)
+        .import(&fixture_pkcs12(cert))
         .unwrap();
     let certificate = store.certs().next().expect("fixture certificate required");
     let key = match certificate.private_key().silent(true).acquire().unwrap() {
@@ -87,6 +106,11 @@ fn fixture_tls(
 
 #[cfg(not(target_os = "windows"))]
 fn fixture_tls(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> native_tls::TlsAcceptor {
+    #[cfg(target_os = "macos")]
+    let identity =
+        native_tls::Identity::from_pkcs12(&fixture_pkcs12(cert), FIXTURE_IDENTITY_PASSWORD)
+            .unwrap();
+    #[cfg(not(target_os = "macos"))]
     let identity = native_tls::Identity::from_pkcs8(
         cert.cert.pem().as_bytes(),
         cert.signing_key.serialize_pem().as_bytes(),

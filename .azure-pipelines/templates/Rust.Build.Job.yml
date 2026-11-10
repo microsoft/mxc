@@ -102,11 +102,11 @@ jobs:
       - checkout: self
 
       - pwsh: |
-          $opensslDirectory = Join-Path $env:ProgramFiles 'Git\usr\bin'
-          if (-not (Test-Path (Join-Path $opensslDirectory 'openssl.exe'))) {
+          $openssl = Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'
+          if (-not (Test-Path $openssl)) {
             throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
           }
-          Write-Host "##vso[task.prependpath]$opensslDirectory"
+          Write-Host "##vso[task.setvariable variable=MXC_W365_TEST_OPENSSL]$openssl"
         displayName: Expose OpenSSL for Windows TLS fixtures
         condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
