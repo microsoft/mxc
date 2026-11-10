@@ -144,8 +144,11 @@ Object.defineProperty(MxcError.prototype, inspect.custom, {
   value(this: MxcError): string {
     const context = [this.code, this.operation, this.nativeCode]
       .filter((value) => value !== undefined).join(' ');
-    const header = `${this.name}: ${this.message} [${context}]`;
-    const frames = this.stack?.split('\n').slice(1).join('\n');
+    const remediation =
+      this.remediation === undefined ? '' : `\nRemediation: ${this.remediation}`;
+    const header = `${this.name}: ${this.message} [${context}]${remediation}`;
+    const messageLines = this.message.split('\n').length;
+    const frames = this.stack?.split('\n').slice(messageLines).join('\n');
     return frames ? `${header}\n${frames}` : header;
   },
 });

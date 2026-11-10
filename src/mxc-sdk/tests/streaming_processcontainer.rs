@@ -65,8 +65,16 @@ fn dev_json_processcontainer_policy_feedback_restricts_current_request() {
     };
 
     let directory = tempfile::tempdir().expect("policy preparation workspace");
-    let restricted = directory.path().join("restricted");
-    let unrelated = directory.path().join("unrelated");
+    let temporary_root = directory.path().to_str().expect("UTF-8 temporary path");
+    let canonical_root =
+        match mxc_sdk::mxc_common::filesystem_canonical::canonicalize_path(temporary_root) {
+            mxc_sdk::mxc_common::filesystem_canonical::PathCanonical::Canonical(path) => {
+                std::path::PathBuf::from(path)
+            }
+            result => panic!("temporary workspace path was not canonical: {result:?}"),
+        };
+    let restricted = canonical_root.join("restricted");
+    let unrelated = canonical_root.join("unrelated");
     std::fs::create_dir(&restricted).unwrap();
     std::fs::create_dir(&unrelated).unwrap();
     let target = restricted.join("target.txt");

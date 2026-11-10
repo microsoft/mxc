@@ -3,6 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { inspect } from 'node:util';
 import { ErrorCode, MxcError, mxcErrorFromCode, mxcErrorFromEnvelope } from '../../src/v1/errors.js';
 
 const codes: ErrorCode[] = [
@@ -116,6 +117,19 @@ describe('MxcError structured fields', () => {
     assert.strictEqual(err.nativeCode, undefined);
     assert.strictEqual(err.remediation, undefined);
     assert.strictEqual(err.details, undefined);
+  });
+
+  it('shows remediation without duplicating multiline messages or exposing details', () => {
+    const err = new MxcError({
+      code: 'backend_error',
+      message: 'first message line\nsecond message line',
+      remediation: 'Run the policy preparation step.',
+      details: { resource: 'PRIVATE_POLICY_RESOURCE' },
+    });
+    const output = inspect(err, { depth: null });
+    assert.ok(output.includes('Remediation: Run the policy preparation step.'));
+    assert.strictEqual(output.split('second message line').length - 1, 1);
+    assert.strictEqual(output.includes('PRIVATE_POLICY_RESOURCE'), false);
   });
 
   // The overload discriminates on `typeof === 'string'`, so a nullish

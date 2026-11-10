@@ -79,36 +79,52 @@ impl PolicyResult {
 
     pub(crate) fn restriction_hints(&self) -> Option<Vec<RestrictionHint>> {
         let details = self.details.as_deref().unwrap_or_default();
-        if self.outcome.0 != 1 || details.is_empty() {
+        if self.outcome != layout::PolicyOutcome::Blocked || details.is_empty() {
             return None;
         }
         details
             .iter()
             .map(|detail| {
-                if detail.flags & ACTIONABLE == 0 || detail.flags & !KNOWN_FLAGS != 0 {
+                if detail.flags & ACTIONABLE != ACTIONABLE
+                    || detail.flags & !KNOWN_FLAGS != layout::PolicyResultFlags::None.0
+                {
                     return None;
                 }
                 match (
-                    detail.failure_class.0,
-                    detail.failure_reason.0,
-                    detail.required_action.0,
-                    detail.resource_kind.0,
-                    detail.value_kind.0,
+                    detail.failure_class,
+                    detail.failure_reason,
+                    detail.required_action,
+                    detail.resource_kind,
+                    detail.value_kind,
                 ) {
-                    (1..=3, 1, 1, 2, 0)
-                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
-                            && detail.requested_value == 0
-                            && detail.required_value == 0 =>
+                    (
+                        layout::FailureClass::Network
+                        | layout::FailureClass::Filesystem
+                        | layout::FailureClass::EnforcementMode,
+                        layout::FailureReason::CapabilityNotAllowed,
+                        layout::RequiredAction::RemoveCapability,
+                        layout::ResourceKind::Capability,
+                        layout::ValueKind::None,
+                    ) if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                        && detail.requested_value == layout::PolicyAccess::None.0
+                        && detail.required_value == layout::PolicyAccess::None.0 =>
                     {
                         Some(RestrictionHint::RemoveCapability(
                             detail.resource_text().ok()??,
                         ))
                     }
-                    (2, 2 | 3, 2, 1, 1)
-                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
-                            && detail.requested_value <= 2
-                            && detail.required_value < detail.requested_value
-                            && (detail.failure_reason.0 != 3 || detail.required_value == 0) =>
+                    (
+                        layout::FailureClass::Filesystem,
+                        layout::FailureReason::AccessExceedsCeiling
+                        | layout::FailureReason::DenyRequired,
+                        layout::RequiredAction::RestrictFilesystemAccess,
+                        layout::ResourceKind::Path,
+                        layout::ValueKind::Access,
+                    ) if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                        && detail.requested_value <= layout::PolicyAccess::ReadWrite.0
+                        && detail.required_value < detail.requested_value
+                        && (detail.failure_reason != layout::FailureReason::DenyRequired
+                            || detail.required_value == layout::PolicyAccess::None.0) =>
                     {
                         Some(RestrictionHint::RestrictPath {
                             path: detail.resource_text().ok()??,
@@ -116,10 +132,15 @@ impl PolicyResult {
                             maximum: detail.required_value,
                         })
                     }
-                    (2, 4, 3, 0, 2)
-                        if detail.flags == ACTIONABLE
-                            && detail.requested_value > detail.required_value
-                            && detail.resource.is_none() =>
+                    (
+                        layout::FailureClass::Filesystem,
+                        layout::FailureReason::RequestPathLimit,
+                        layout::RequiredAction::ReducePathCount,
+                        layout::ResourceKind::None,
+                        layout::ValueKind::PathCount,
+                    ) if detail.flags == ACTIONABLE
+                        && detail.requested_value > detail.required_value
+                        && detail.resource.is_none() =>
                     {
                         Some(RestrictionHint::ReducePathCount {
                             requested: detail.requested_value,
@@ -147,7 +168,7 @@ impl PolicyDetail {
             .as_deref()
             .ok_or("missing complete resource")?;
         if self.flags & RESOURCE_UNAVAILABLE != 0
-            || self.resource_kind.0 == 0
+            || self.resource_kind == layout::ResourceKind::None
             || resource.is_empty()
             || resource.contains(&0)
         {

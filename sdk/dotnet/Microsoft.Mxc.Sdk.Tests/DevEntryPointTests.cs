@@ -624,6 +624,42 @@ public class DevEntryPointTests
     }
 
     [Fact]
+    public void PreparedPolicyStorageRejectsDuplicateChangeValuesButPreservesRequestAnnotations()
+    {
+        using var duplicate = JsonDocument.Parse("""{"nested":{"entry":1,"entry":2}}""");
+        using var nullValue = JsonDocument.Parse("null");
+        Assert.Throws<JsonException>(() => new Dev.PreparedPolicyRequest
+        {
+            RequestJson = "{}",
+            Changes =
+            [
+                new()
+                {
+                    Operation = Dev.PolicyChangeOperation.Replace, Path = "/value",
+                    Before = duplicate.RootElement, After = nullValue.RootElement,
+                },
+            ],
+        }.ToJson());
+        Assert.Throws<JsonException>(() => new Dev.PreparedPolicyRequest
+        {
+            RequestJson = "{}",
+            Changes =
+            [
+                new()
+                {
+                    Operation = Dev.PolicyChangeOperation.Replace, Path = "/value",
+                    Before = nullValue.RootElement, After = duplicate.RootElement,
+                },
+            ],
+        }.ToJson());
+
+        const string requestJson =
+            """{"version":"1.1.0-alpha","_comment":"first","_comment":"second"}""";
+        var stored = new Dev.PreparedPolicyRequest { RequestJson = requestJson }.ToJson();
+        Assert.Equal(requestJson, Dev.PreparedPolicyRequest.FromJson(stored).RequestJson);
+    }
+
+    [Fact]
     public void PreparedPolicyStorageRejectsMalformedShapesPointersAndOperationsWithoutInputLeaks()
     {
         const string marker = "MXC_PRIVATE_PREPARATION_INPUT_5F26AC94";

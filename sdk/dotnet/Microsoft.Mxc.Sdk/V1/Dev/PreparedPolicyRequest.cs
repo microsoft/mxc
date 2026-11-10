@@ -156,6 +156,8 @@ public sealed class PreparedPolicyRequest
                 throw new JsonException("prepared policy request has a null change");
             }
             change.Validate();
+            MxcJson.RejectDuplicateProperties(change.Before);
+            MxcJson.RejectDuplicateProperties(change.After);
         }
     }
 }
