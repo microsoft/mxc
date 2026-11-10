@@ -4,7 +4,8 @@
 function Get-LibtestFailure {
     param(
         [Parameter(Mandatory)][hashtable]$Run,
-        [string[]]$RequiredTests = @()
+        [string[]]$RequiredTests = @(),
+        [string[]]$RequiredOutputLines = @()
     )
 
     if ($Run.ExitCode -ne 0) { return "exited $($Run.ExitCode)" }
@@ -18,6 +19,12 @@ function Get-LibtestFailure {
         $pattern = '^test ' + [regex]::Escape($name) + ' \.\.\. ok\r?$'
         if (-not (Select-String -LiteralPath $Run.Log -Pattern $pattern)) {
             return "'$name' did not pass"
+        }
+    }
+    foreach ($line in $RequiredOutputLines) {
+        $pattern = '^' + [regex]::Escape($line) + '\r?$'
+        if (-not (Select-String -LiteralPath $Run.Log -Pattern $pattern)) {
+            return "required output '$line' is missing"
         }
     }
 }
@@ -51,6 +58,7 @@ function Get-XunitSuiteFailure {
         [Parameter(Mandatory)][string]$ResultXml,
         [Parameter(Mandatory)][string[]]$Classes,
         [string[]]$RequiredMethods = @(),
+        [string[]]$RequiredOutputText = @(),
         [switch]$RejectSkipped
     )
 
@@ -70,6 +78,14 @@ function Get-XunitSuiteFailure {
         if (@($selected | Where-Object { $_.method -eq $method -and $_.result -eq 'Pass' }).Count -eq 0) {
             $failures += "'$method' did not pass"
         }
+    }
+    # Pins a specific theory row: its passing output must contain each marker.
+    foreach ($text in $RequiredOutputText) {
+        $found = @($selected | Where-Object {
+            $_.result -eq 'Pass' -and $_.SelectSingleNode('output') -and
+                $_.SelectSingleNode('output').InnerText.Contains($text)
+        })
+        if ($found.Count -eq 0) { $failures += "required output '$text' is missing" }
     }
     $failures -join '; '
 }

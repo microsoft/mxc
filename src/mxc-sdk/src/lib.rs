@@ -394,6 +394,11 @@ pub mod v1 {
 pub mod __ffi {
     use super::*;
     use crate::sandbox::WaitResult;
+    /// Decode bounded preparation input, rather than a terminal stored report.
+    pub fn decode_policy_failures_json(json: &str) -> Result<v1::dev::PolicyFailures, Error> {
+        v1::dev::PolicyFailures::parse(json)
+            .map_err(|message| Error::new(ErrorCode::MalformedRequest, message))
+    }
 
     /// Spawn a raw exact-version JSON container request as a live process.
     ///

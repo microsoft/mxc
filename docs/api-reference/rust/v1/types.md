@@ -206,7 +206,11 @@ impl From<MxcError> for Error {
 sets `details` to `None`. Conversions to and from the internal error preserve
 structured details, including their JSON value type. Use
 `error.details.as_deref()` to borrow the value. `Display` omits details and
-`Debug` redacts them; do not log sensitive values.
+`Debug` redacts only `details`; other fields, such as the message, remain
+visible, so do not log sensitive values. A Windows ProcessContainer
+creation refusal can carry structured policy failures in `details`;
+[V1.Dev policy preparation](dev.md#separate-policy-preparation) documents their
+typed extraction.
 
 
 ## `mxc_sdk::v1::ErrorCode`

@@ -13,6 +13,8 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text;
+using System.Text.Encodings.Web;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
@@ -36,7 +38,153 @@ static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 
 var initialPtySize = new MxcPtySize(40, 120);
 CheckRoundTrip(new Dev.JsonOptions { Experimental = true },
-    x => x.Experimental, "dev JSON options experimental authorization");
+    x => x.Experimental, "dev JSON execution options");
+CheckRoundTrip(new Dev.PolicyPreparationOptions { Experimental = true },
+    x => x.Experimental, "policy preparation options");
+var policyFailures = new Dev.PolicyFailures
+{
+    Results =
+    [
+        new()
+        {
+            Version = 99,
+            MinimumReaderVersion = 98,
+            Outcome = uint.MaxValue,
+            Details =
+            [
+                new()
+                {
+                    FailureClass = uint.MaxValue,
+                    FailureReason = 2,
+                    RequiredAction = 2,
+                    ResourceKind = 1,
+                    ValueKind = 1,
+                    Flags = uint.MaxValue,
+                    RequestedValue = ulong.MaxValue,
+                    RequiredValue = 9_007_199_254_740_993,
+                    Resource = [0xD800, 0],
+                },
+                new() { Resource = [] },
+                new(),
+            ],
+        },
+        new() { Outcome = 2 },
+    ],
+};
+var storedFailures = policyFailures.ToJson();
+var restoredFailures = Dev.PolicyFailures.FromJson(storedFailures);
+Check(restoredFailures.Results.Length == 2
+    && restoredFailures.Results[0].Version == 99
+    && restoredFailures.Results[0].MinimumReaderVersion == 98
+    && restoredFailures.Results[0].Outcome == uint.MaxValue
+    && restoredFailures.Results[0].Details[0].RequestedValue == ulong.MaxValue
+    && restoredFailures.Results[0].Details[0].RequiredValue == 9_007_199_254_740_993
+    && restoredFailures.Results[0].Details[0].Resource!.SequenceEqual(new ushort[] { 0xD800, 0 })
+    && restoredFailures.Results[0].Details[1].GetResourceText() == string.Empty
+    && restoredFailures.Results[0].Details[2].GetResourceText() is null,
+    "public policy-failure JSON helpers preserve batches, values, and resource presence");
+try
+{
+    _ = restoredFailures.Results[0].Details[0].GetResourceText();
+    Check(false, "resource text rejects malformed UTF-16");
+}
+catch (DecoderFallbackException)
+{
+}
+CheckRoundTrip(policyFailures, x => x.ToJson() == storedFailures, "policy failures root");
+CheckRoundTrip(policyFailures.Results[0],
+    x => x.Version == 99 && x.Details[0].RequestedValue == ulong.MaxValue, "native policy-result root");
+CheckRoundTrip(policyFailures.Results[0].Details[0],
+    x => x.Flags == uint.MaxValue && x.RequiredValue == 9_007_199_254_740_993, "native policy-detail root");
+var mergedFailures = restoredFailures.MergedWith(Dev.PolicyFailures.FromJson(storedFailures));
+Check(mergedFailures.ToJson() == storedFailures
+    && !ReferenceEquals(mergedFailures.Results[0].Details[0].Resource,
+        restoredFailures.Results[0].Details[0].Resource),
+    "public policy-failure merge deduplicates whole batches into owned storage");
+Dev.PreparedPolicyRequest preparedPolicy;
+using (var document = JsonDocument.Parse("""{"null":null,"value":{"large":18446744073709551615}}"""))
+{
+    var root = document.RootElement;
+    preparedPolicy = new Dev.PreparedPolicyRequest
+    {
+        RequestJson = """{"version":"1.1.0-alpha","process":{"commandLine":"echo"}}""",
+        Changes =
+        [
+            new()
+            {
+                Operation = Dev.PolicyChangeOperation.Add, Path = "/new",
+                Before = root.GetProperty("null"), After = root.GetProperty("value"),
+            },
+            new()
+            {
+                Operation = Dev.PolicyChangeOperation.Remove, Path = "/old",
+                Before = root.GetProperty("value"), After = root.GetProperty("null"),
+            },
+            new()
+            {
+                Operation = Dev.PolicyChangeOperation.Replace, Path = "/a~1b/~0field",
+                Before = root.GetProperty("null"), After = root.GetProperty("null"),
+            },
+        ],
+    };
+}
+var storedPreparation = preparedPolicy.ToJson();
+Check(Dev.PreparedPolicyRequest.FromJson(storedPreparation).ToJson() == storedPreparation,
+    "public prepared-policy storage retains owned JSON values and required null placeholders");
+const string annotatedRequest = """ {"_comment":{"x":1,"x":2},"process":{"commandLine":"<>&'"}} """;
+var annotatedStorage = "{\"requestJson\":\""
+    + JsonEncodedText.Encode(annotatedRequest, JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
+    + "\",\"changes\":[]}";
+var annotatedPreparation = Dev.PreparedPolicyRequest.FromJson(annotatedStorage);
+Check(annotatedPreparation.ToJson() == annotatedStorage
+    && annotatedPreparation.RequestJson == annotatedRequest,
+    "preparation storage preserves arbitrary comment JSON text and compact escaping");
+Check(MxcJson.Serialize("<", MxcJson.Options) == "\"\\u003C\"",
+    "preparation storage leaves the shared SDK encoder unchanged");
+foreach (var missingValue in new[]
+{
+    """{"requestJson":"{}","changes":[{"operation":"add","path":"/x","after":true}]}""",
+    """{"requestJson":"{}","changes":[{"operation":"remove","path":"/x","before":true}]}""",
+})
+{
+    try
+    {
+        _ = Dev.PreparedPolicyRequest.FromJson(missingValue);
+        Check(false, "missing policy change values are rejected");
+    }
+    catch (JsonException error)
+    {
+        Check(error.InnerException is null, "missing policy change values have safe validation errors");
+    }
+}
+CheckRoundTrip(preparedPolicy, x => x.ToJson() == storedPreparation, "prepared-policy request root");
+CheckRoundTrip(preparedPolicy.Changes[0],
+    x => x.Before.ValueKind == JsonValueKind.Null
+        && x.After.GetProperty("large").GetUInt64() == ulong.MaxValue, "policy change root");
+CheckRoundTrip(Dev.PolicyChangeOperation.Replace,
+    x => x == Dev.PolicyChangeOperation.Replace, "policy change operation root");
+using (var document = JsonDocument.Parse(storedPreparation))
+{
+    Check(document.RootElement.GetProperty("changes").EnumerateArray()
+        .Select(change => change.GetProperty("operation").GetString())
+        .SequenceEqual(["add", "remove", "replace"]), "lowercase policy change operations");
+    Check(document.RootElement.GetProperty("changes").EnumerateArray()
+        .All(change => change.TryGetProperty("before", out _) && change.TryGetProperty("after", out _)),
+        "both policy change values are serialized even when JSON null");
+}
+var errorDetailsJson = $$$"""{"policyFailures":{{{storedFailures}}},"other":{"retained":true}}""";
+CheckRoundTrip(MxcJson.Deserialize<JsonElement>(errorDetailsJson),
+    x => x.GetProperty("other").GetProperty("retained").GetBoolean(), "generic backend error details");
+MxcException policyError;
+using (var document = JsonDocument.Parse(errorDetailsJson))
+{
+    policyError = new MxcException(ErrorCode.BackendError, "creation refused",
+        "PSEC.Create", "0x80070005", null, document.RootElement);
+}
+Check(Dev.PolicyFailures.FromException(policyError)?.ToJson() == storedFailures
+    && policyError.Details!.Value.GetProperty("other").GetProperty("retained").GetBoolean()
+    && policyError.Message == "creation refused",
+    "public policy-failure extraction retains generic details independently of the original document");
 CheckRoundTrip(new Dev.PtyJsonOptions(),
     x => !x.Experimental && x.Size is null, "dev PTY options without initial dimensions");
 CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },

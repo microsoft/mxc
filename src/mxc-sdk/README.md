@@ -21,6 +21,20 @@ Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-refer
 for caller-authored MXC request JSON. It supports execution, container
 lifecycle operations, and validation through the in-process engine.
 
+For native Windows ProcessContainer, a creation refusal can return owned
+`PolicyFailures`. Merge observations explicitly with `merged_with`, then call
+`v1::dev::prepare_policy_json` to obtain complete candidate request JSON and
+structured changes without creating a container or executing a workload.
+The application inspects and accepts, edits or rejects the candidate before
+submitting its chosen JSON through ordinary strict `run_json` or `spawn_json`.
+Each creation call attempts creation once and executes only the supplied
+request.
+Specific policy failures are not formatted into error or warning text.
+Use names such as `PolicyFailureResult::OUTCOME_BLOCKED` and
+`PolicyFailureDetail::REASON_CAPABILITY_NOT_ALLOWED` to inspect numeric codes.
+See the [Dev preparation reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md#separate-policy-preparation)
+and [Rust caller example](examples/policy_feedback.rs).
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

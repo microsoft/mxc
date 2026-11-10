@@ -59,6 +59,46 @@ impl<'de> Deserialize<'de> for RawObject<'de> {
     }
 }
 
+/// Serializes the `updated` object, copying the source text of each top-level
+/// member of `source` whose value is unchanged. Re-serializing those values
+/// would round numbers and collapse duplicate keys in caller annotations.
+pub(crate) fn serialize_preserving_unchanged_members(
+    source: &str,
+    original: &serde_json::Map<String, serde_json::Value>,
+    updated: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let root: RawObject<'_> = serde_json::from_str(source).ok()?;
+    let mut emitted = std::collections::HashSet::new();
+    let mut members = Vec::with_capacity(updated.len());
+    for member in &root.members {
+        if !emitted.insert(member.key.as_str()) {
+            return None;
+        }
+        let Some(value) = updated.get(&member.key) else {
+            continue;
+        };
+        let value = if original.get(&member.key) == Some(value) {
+            member.value.get().to_owned()
+        } else {
+            serde_json::to_string(value).ok()?
+        };
+        members.push(format!(
+            "{}:{value}",
+            serde_json::to_string(&member.key).ok()?
+        ));
+    }
+    for (key, value) in updated {
+        if !emitted.contains(key.as_str()) {
+            members.push(format!(
+                "{}:{}",
+                serde_json::to_string(key).ok()?,
+                serde_json::to_string(value).ok()?
+            ));
+        }
+    }
+    Some(format!("{{{}}}", members.join(",")))
+}
+
 pub(crate) struct CommandSource<'a> {
     json: &'a str,
     root: RawObject<'a>,

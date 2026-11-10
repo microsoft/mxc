@@ -41,6 +41,8 @@ pub struct MxcErrorDetail {
     pub native_code_utf8: *mut c_char,
     /// An actionable hint, when the failure carries one. Null otherwise.
     pub remediation_utf8: *mut c_char,
+    /// Backend-specific structured information as JSON, or null when absent.
+    pub details_json_utf8: *mut c_char,
 }
 
 impl MxcErrorDetail {
@@ -51,6 +53,7 @@ impl MxcErrorDetail {
             operation_utf8: ptr::null_mut(),
             native_code_utf8: ptr::null_mut(),
             remediation_utf8: ptr::null_mut(),
+            details_json_utf8: ptr::null_mut(),
         }
     }
 
@@ -71,6 +74,9 @@ impl MxcErrorDetail {
             operation_utf8: opt_cstring(error.operation.as_deref()),
             native_code_utf8: opt_cstring(error.native_code.as_deref()),
             remediation_utf8: opt_cstring(error.remediation.as_deref()),
+            details_json_utf8: opt_cstring(
+                error.details.as_deref().map(ToString::to_string).as_deref(),
+            ),
         }
     }
 
@@ -81,6 +87,7 @@ impl MxcErrorDetail {
         free_cstr(&mut self.operation_utf8);
         free_cstr(&mut self.native_code_utf8);
         free_cstr(&mut self.remediation_utf8);
+        free_cstr(&mut self.details_json_utf8);
     }
 }
 
@@ -245,5 +252,34 @@ mod tests {
     fn freeing_null_is_tolerated() {
         // SAFETY: null is explicitly part of the contract.
         unsafe { mxc_error_detail_free(ptr::null_mut()) };
+    }
+
+    #[test]
+    fn policy_failures_owned_json_round_trips_and_frees_with_the_error() {
+        let payload = serde_json::json!({
+            "policyFailures": {
+                "formatVersion": 1,
+                "results": [],
+            },
+            "otherBackendDetail": "retained",
+        });
+        let mut error = Error::new(ErrorCode::BackendError, "Creation refused.");
+        error.details = Some(Box::new(payload.clone()));
+        let mut detail = MxcErrorDetail::from_error(&error);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&read(detail.details_json_utf8).unwrap())
+                .unwrap(),
+            payload,
+        );
+        assert_eq!(
+            read(detail.message_utf8).as_deref(),
+            Some("Creation refused.")
+        );
+        // SAFETY: this test owns a filled detail, then its already-freed storage.
+        unsafe {
+            mxc_error_detail_free(&mut detail);
+            assert!(detail.details_json_utf8.is_null());
+            mxc_error_detail_free(&mut detail);
+        }
     }
 }

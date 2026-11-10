@@ -148,22 +148,7 @@ pub fn spawn_pty_runner(
 /// `extended_error` detail into the message — rather than flattening
 /// everything to a generic `BackendError`.
 fn map_spawn_error(resp: ScriptResponse) -> MxcError {
-    use crate::mxc_common::models::FailurePhase;
-
-    let mut message = resp.error_message;
-    if !resp.extended_error.is_empty() {
-        if message.is_empty() {
-            message = resp.extended_error;
-        } else {
-            message = format!("{message} ({})", resp.extended_error);
-        }
-    }
-    match resp.failure_phase {
-        FailurePhase::BackendUnavailable => MxcError::backend_unavailable(message),
-        // The request itself cannot be honored, so a blind retry will not help.
-        FailurePhase::Rejected => MxcError::policy_validation(message),
-        _ => MxcError::backend_error(message),
-    }
+    resp.into_mxc_error()
 }
 
 #[cfg(target_os = "linux")]

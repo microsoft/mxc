@@ -140,7 +140,7 @@ impl ApiFailure {
 /// describes the platform call and on `MxcError` when it describes the
 /// failure; *backend-specific* structured data belongs in `details`, which
 /// stays open for that purpose.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MxcError {
     pub code: MxcErrorCode,
@@ -175,6 +175,20 @@ impl fmt::Display for MxcError {
 }
 
 impl std::error::Error for MxcError {}
+
+/// Debug output omits `details`, which can hold policy resource names.
+impl fmt::Debug for MxcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MxcError")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("details", &self.details.as_ref().map(|_| "<redacted>"))
+            .field("api_failure", &self.api_failure)
+            .field("remediation", &self.remediation)
+            .finish()
+    }
+}
 
 impl MxcError {
     pub fn new(code: MxcErrorCode, message: impl Into<String>) -> Self {
@@ -287,7 +301,7 @@ impl MxcError {
 ///
 /// See [`MxcError`] for the meaning of the structured failure fields and the
 /// invariant relating them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ErrorEnvelope {
     pub code: MxcErrorCode,
@@ -304,6 +318,35 @@ pub struct ErrorEnvelope {
     pub native_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub remediation: Option<String>,
+}
+
+/// Debug output omits `details`, which can hold policy resource names.
+impl fmt::Debug for ErrorEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ErrorEnvelope")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("details", &self.details.as_ref().map(|_| "<redacted>"))
+            .field("operation", &self.operation)
+            .field("native_code", &self.native_code)
+            .field("remediation", &self.remediation)
+            .finish()
+    }
+}
+
+impl MxcError {
+    pub(crate) fn from_envelope(error: ErrorEnvelope) -> Self {
+        let mut result = Self::new(error.code, error.message);
+        result.details = error.details;
+        result.remediation = error.remediation;
+        if let Some(operation) = error.operation {
+            let mut api = ApiFailure::new(operation);
+            api.native_code = error.native_code;
+            result = result.with_api_failure(api);
+        }
+        result
+    }
 }
 
 /// Top-level non-exec response envelope: `{"result": <T>}` on success, or
@@ -616,6 +659,31 @@ mod tests {
             MxcError::policy_validation("appId must not contain control characters").to_string(),
             "policy_validation: appId must not contain control characters"
         );
+    }
+
+    #[test]
+    fn debug_shows_structured_fields_but_not_policy_details() {
+        let err = MxcError::backend_error("Creation refused.")
+            .with_details(serde_json::json!({
+                "policyFailures": { "resource": "C:\\POLICY_RESOURCE_MARKER" }
+            }))
+            .with_api_failure(full_api_failure())
+            .with_remediation("Prepare a restricted request.");
+        let rendered = format!("{err:?}");
+        assert!(!rendered.contains("POLICY_RESOURCE_MARKER"), "{rendered}");
+        let envelope = format!("{:?}", err.to_envelope());
+        assert!(!envelope.contains("POLICY_RESOURCE_MARKER"), "{envelope}");
+        assert!(envelope.contains("<redacted>"), "{envelope}");
+        for visible in [
+            "BackendError",
+            "Creation refused.",
+            "IsoSessionOps.AddUserAsync",
+            "0x80070490",
+            "Prepare a restricted request.",
+            "<redacted>",
+        ] {
+            assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+        }
     }
 
     /// `Display` is a rendering concern only — the wire `message` stays the

@@ -92,9 +92,9 @@ impl From<MxcErrorCode> for ErrorCode {
 /// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
 /// `operation`, `native_code`, and `remediation` are top-level fields also
-/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
-/// in Rust errors and executor JSON error envelopes. The C error structure
-/// does not expose them.
+/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are
+/// preserved in Rust errors, executor JSON error envelopes, and the C error
+/// structure; Node and .NET expose them as `details` and `Details`.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
@@ -215,6 +215,34 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+
+    #[test]
+    fn policy_failures_error_debug_does_not_render_structured_resources() {
+        let payload =
+            serde_json::json!({ "policyFailures": { "resource": "POLICY_RESOURCE_MARKER" } });
+        let inner = MxcError::backend_error("Creation refused.").with_details(payload);
+        assert!(!format!("{inner:?}").contains("POLICY_RESOURCE_MARKER"));
+        let error = Error::from(inner);
+        assert!(!format!("{error:?}").contains("POLICY_RESOURCE_MARKER"));
+        assert!(error
+            .details
+            .as_deref()
+            .unwrap()
+            .get("policyFailures")
+            .is_some());
+    }
+
+    #[test]
+    fn policy_failures_details_survive_sdk_conversions() {
+        let payload =
+            serde_json::json!({ "policyFailures": { "formatVersion": 1, "results": [] } });
+        let original = MxcError::backend_error("Creation refused.").with_details(payload.clone());
+        let converted = Error::from(original);
+        assert_eq!(converted.details.as_deref(), Some(&payload));
+        assert_eq!(converted.into_mxc_error().details, Some(payload));
+        assert!(std::mem::size_of::<Error>() < 128);
+    }
+
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

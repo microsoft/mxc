@@ -8,6 +8,7 @@ import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   nativeStatusError,
   type AbiErrorDetail,
 } from './native-error.js';
@@ -175,7 +176,7 @@ async function createPtyFromJson(
   factory: NativeStreamFactory,
 ): Promise<MxcPtyProcess> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = await new Promise<number>((resolve, reject) => {
     spawn(outHandle, error, (callError, nativeStatus) => {
       if (callError !== null) reject(callError);

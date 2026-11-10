@@ -2,16 +2,23 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { it } from 'node:test';
-import { runJson, spawnJson, spawnWithPtyJson, validateProcessJson } from '@microsoft/mxc-sdk/v1/dev';
-import { MxcError } from '@microsoft/mxc-sdk/v1';
-import { isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
+import {
+  runJson, spawnJson, spawnWithPtyJson, validateProcessJson,
+  preparePolicyJson, parsePolicyFailures, serializePolicyFailures, type PolicyFailures,
+  PolicyFailureOutcomes, PolicyFailureClasses, PolicyFailureReasons, PolicyFailureActions,
+  PolicyFailureResourceKinds, PolicyFailureValueKinds, PolicyFailureAccessValues, PolicyFailureFlags,
+  policyFailureResourceText,
+} from '@microsoft/mxc-sdk/v1/dev';
+import { MxcError, policy } from '@microsoft/mxc-sdk/v1';
+import { createPrivateWindowsTempDir, isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
 
 const windows = process.platform === 'win32';
 const creationSkip = windows ? sandboxSkipReason
   : process.platform === 'linux' ? (isLinuxRoot ? undefined : 'Bubblewrap requires root')
   : process.platform === 'darwin' ? undefined : 'Unsupported host';
-
 async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   let text = '';
   for await (const chunk of stream) text += chunk.toString();
@@ -97,4 +104,185 @@ it('V1.Dev rejects unknown fields and unregistered exact versions through native
     validateProcessJson(unknownField),
     (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
   );
+});
+
+it('V1.Dev bounds terminal policy failures at native preparation without creating a workload', {
+  skip: !windows,
+}, async () => {
+  const report: PolicyFailures = {
+    formatVersion: 1,
+    results: Array.from({ length: 65 }, (_, outcome) => ({
+      version: 1, minimumReaderVersion: 1, outcome, details: [],
+    })),
+  };
+  const restored = parsePolicyFailures(serializePolicyFailures(report));
+  assert.deepEqual(restored, report);
+  const request = '{"version":"1.1.0-alpha","containment":"processcontainer",'
+    + '"process":{"commandLine":"echo must-not-run"}}';
+  await assert.rejects(preparePolicyJson(request, restored), (error: unknown) => {
+      assert.ok(error instanceof MxcError);
+      assert.equal(error.code, 'malformed_request');
+      assert.equal(error.details?.ffiStatus, 1);
+      assert.match(error.message, /result limit/);
+      return true;
+  });
+});
+
+it('V1.Dev prepares filesystem ceilings for caller-accepted strict creation', {
+  skip: windows ? sandboxSkipReason : 'Windows ProcessContainer only',
+  timeout: 90000,
+}, async () => {
+  const directory = createPrivateWindowsTempDir('mxc-policy-preparation', import.meta.dirname);
+  try {
+    const toolDirectory = path.join(directory, 'tools');
+    const restrictedDirectory = path.join(directory, 'restricted-😀');
+    const permittedDirectory = path.join(directory, 'permitted');
+    for (const child of [toolDirectory, restrictedDirectory, permittedDirectory]) fs.mkdirSync(child);
+    const workload = path.join(toolDirectory, 'workload.cmd');
+    const toolFile = path.join(toolDirectory, 'tool-data.txt');
+    const restrictedFile = path.join(restrictedDirectory, 'seed.txt');
+    const permittedFile = path.join(permittedDirectory, 'sentinel.txt');
+    const seed = 'RESTRICTED_SEED_UNCHANGED';
+    const permittedSeed = 'PERMITTED_SEED';
+    fs.writeFileSync(path.join(toolDirectory, 'pwsh.exe'), '');
+    fs.writeFileSync(toolFile, 'PREPARATION_TOOL_READ_OK\r\n');
+    fs.writeFileSync(restrictedFile, seed);
+    fs.writeFileSync(permittedFile, permittedSeed);
+    fs.writeFileSync(workload, [
+      '@echo off',
+      'setlocal EnableDelayedExpansion',
+      'echo PREPARATION_READY',
+      'set "INPUT="',
+      'set /p INPUT=',
+      'set "MODE=run"',
+      'if defined INPUT set "MODE=spawn"',
+      '(echo UNEXPECTED_RESTRICTED_WRITE) 2>nul >"%~1"',
+      'rem Redirection denial may leave ERRORLEVEL unchanged; verify the seed instead.',
+      'set "SEED="',
+      'set /p SEED=<"%~1"',
+      `if not "!SEED!"=="${seed}" exit /b 21`,
+      'ver >nul',
+      '>"%~2" echo PERMITTED_WRITE:!MODE!',
+      'if errorlevel 1 exit /b 22',
+      'ver >nul',
+      'type "%~3"',
+      'if errorlevel 1 exit /b 23',
+      'if /i not "%CD%"=="%~4" exit /b 24',
+      'echo PREPARATION_CWD_MATCHED',
+      'echo PREPARATION_INPUT:!INPUT!',
+      'echo PREPARATION_SEED:!SEED!',
+      'echo PREPARATION_ENV:%MXC_PREPARATION_VALUE%',
+      'echo PREPARATION_STDERR:!MODE! 1>&2',
+      'exit /b 0',
+    ].join('\r\n') + '\r\n');
+    const tools = policy.filesystem.getAvailableToolsPolicy({
+      PATH: toolDirectory,
+      SystemDrive: path.parse(directory).root.replace(/\\$/, ''),
+    }, { containerType: 'processcontainer' });
+    assert.deepEqual(tools, { readonlyPaths: [toolDirectory], readwritePaths: [] });
+    const request = {
+      version: '1.1.0-alpha',
+      containment: 'processcontainer',
+      filesystem: { ...tools, readwritePaths: [restrictedDirectory, permittedDirectory] },
+      ui: { disable: true },
+      process: {
+        commandLine: `cmd.exe /d /v:on /c ""${workload}" "${restrictedFile}" "${permittedFile}" "${toolFile}" "${restrictedDirectory}""`,
+        timeout: 30000,
+        inheritDefaultEnv: true,
+        env: ['MXC_PREPARATION_VALUE=ORIGINAL_VALUE'],
+      },
+    };
+    const failures: PolicyFailures = {
+      formatVersion: 1,
+      results: [{
+        version: 1,
+        minimumReaderVersion: 1,
+        outcome: PolicyFailureOutcomes.Blocked,
+        details: [{
+          failureClass: PolicyFailureClasses.Filesystem,
+          failureReason: PolicyFailureReasons.AccessExceedsCeiling,
+          requiredAction: PolicyFailureActions.RestrictFilesystemAccess,
+          resourceKind: PolicyFailureResourceKinds.Path,
+          valueKind: PolicyFailureValueKinds.Access,
+          flags: PolicyFailureFlags.HasActionableDetails | PolicyFailureFlags.ResourceComplete,
+          requestedValue: PolicyFailureAccessValues.ReadWrite,
+          requiredValue: PolicyFailureAccessValues.ReadOnly,
+          resource: Array.from({ length: restrictedDirectory.length }, (_, index) =>
+            restrictedDirectory.charCodeAt(index)),
+        }],
+      }],
+    };
+    const requestJson = JSON.stringify(request);
+    const storedFailures = serializePolicyFailures(failures);
+    const restoredFailures = parsePolicyFailures(storedFailures);
+    assert.deepEqual(restoredFailures, failures);
+    assert.equal(policyFailureResourceText(restoredFailures.results[0].details[0]), restrictedDirectory);
+    const baseline = await runJson(requestJson);
+    assert.equal(baseline.exitCode, 21, baseline.stderr);
+    assert.match(fs.readFileSync(restrictedFile, 'utf8'), /UNEXPECTED_RESTRICTED_WRITE/);
+    fs.writeFileSync(restrictedFile, seed);
+    const prepared = await preparePolicyJson(requestJson, restoredFailures);
+    assert.equal(JSON.stringify(request), requestJson);
+    assert.equal(serializePolicyFailures(restoredFailures), storedFailures);
+    assert.deepEqual(restoredFailures, failures);
+    assert.equal(fs.readFileSync(restrictedFile, 'utf8'), seed);
+    assert.equal(fs.readFileSync(permittedFile, 'utf8'), permittedSeed);
+    assert.deepEqual([...prepared.changes].sort((left, right) => left.path.localeCompare(right.path)), [
+      {
+        operation: 'replace', path: '/filesystem/readonlyPaths',
+        before: [toolDirectory], after: [toolDirectory, restrictedDirectory],
+      },
+      {
+        operation: 'replace', path: '/filesystem/readwritePaths',
+        before: [restrictedDirectory, permittedDirectory], after: [permittedDirectory],
+      },
+      { operation: 'add', path: '/process/cwd', before: null, after: restrictedDirectory },
+    ]);
+    assert.deepEqual(JSON.parse(prepared.requestJson), {
+      ...request,
+      filesystem: { readonlyPaths: [toolDirectory, restrictedDirectory], readwritePaths: [permittedDirectory] },
+      process: { ...request.process, cwd: restrictedDirectory },
+    });
+    // The caller accepts this inspected candidate; creation receives no observations.
+    const acceptedRequestJson = prepared.requestJson;
+    const assertOutput = (stdout: string, stderr: string, input: string, mode: string) => {
+      const lines = stdout.split(/\r?\n/).map((line) => line.trim());
+      assert.ok(lines.includes('PREPARATION_READY'), stdout);
+      assert.ok(lines.includes('PREPARATION_TOOL_READ_OK'), stdout);
+      assert.ok(lines.includes('PREPARATION_CWD_MATCHED'), stdout);
+      assert.ok(lines.includes(`PREPARATION_INPUT:${input.trim()}`), stdout);
+      assert.ok(lines.includes(`PREPARATION_SEED:${seed}`), stdout);
+      assert.ok(lines.includes('PREPARATION_ENV:ORIGINAL_VALUE'), stdout);
+      assert.ok(stderr.includes(`PREPARATION_STDERR:${mode}`), stderr);
+      assert.equal(fs.readFileSync(restrictedFile, 'utf8'), seed);
+      assert.equal(fs.readFileSync(permittedFile, 'utf8').trim(), `PERMITTED_WRITE:${mode}`);
+    };
+    const captured = await runJson(acceptedRequestJson);
+    assert.equal(captured.exitCode, 0, captured.stderr);
+    assert.equal(captured.timedOut, false);
+    assertOutput(captured.stdout, captured.stderr, '', 'run');
+    fs.writeFileSync(permittedFile, permittedSeed);
+    const spawned = await spawnJson(acceptedRequestJson);
+    try {
+      assert.ok(spawned.standardInput);
+      assert.ok(spawned.standardOutput);
+      assert.ok(spawned.standardError);
+      const stdout = readAll(spawned.standardOutput);
+      const stderr = readAll(spawned.standardError);
+      const input = 'PREPARED_STDIN\r\n';
+      spawned.standardInput.end(input);
+      const outcome = await spawned.wait();
+      const output = await stdout;
+      const errors = await stderr;
+      assert.equal(outcome.exitCode, 0, errors);
+      assert.equal(outcome.timedOut, false);
+      assertOutput(output, errors, input, 'spawn');
+    } finally {
+      spawned.dispose();
+    }
+    assert.equal(JSON.stringify(request), requestJson);
+    assert.equal(serializePolicyFailures(restoredFailures), storedFailures);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });

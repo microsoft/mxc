@@ -13,6 +13,7 @@ import type { ExecutionMetadata } from '../v1/types.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -85,6 +86,19 @@ function bindRunFunctions(
   };
 }
 
+function createAbiRunResult(): AbiRunResult {
+  return {
+    status: 0,
+    exitCode: 0,
+    timedOut: 0,
+    stdout: null,
+    stderr: null,
+    error: createAbiErrorDetail(),
+    outputMetadata: null,
+    warnings: null,
+  };
+}
+
 function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult {
   if (status !== 0 || result.status !== 0) {
     throw nativeStatusError(result.status || status, result.error);
@@ -114,7 +128,7 @@ function runJsonNative(
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native, symbol);
-    const result = {} as AbiRunResult;
+    const result = createAbiRunResult();
     let filled = false;
     try {
       const status = run(requestJson, experimental ? 1 : 0, result);
@@ -187,7 +201,7 @@ async function runRawOneShotJsonAsyncNative(
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
-    const result = {} as AbiRunResult;
+    const result = createAbiRunResult();
     let filled = false;
     try {
       const status = await new Promise<number>((resolve, reject) => {

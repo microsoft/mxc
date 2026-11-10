@@ -25,11 +25,17 @@ mod native_capture;
 #[cfg(target_os = "windows")]
 mod network_policy_helpers;
 #[cfg(target_os = "windows")]
+pub(crate) mod policy_projection;
+#[cfg(target_os = "windows")]
+mod policy_restriction;
+#[cfg(target_os = "windows")]
 pub mod probe;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 mod secenv;
+#[cfg(target_os = "windows")]
+mod secenv_policy;
 #[cfg(target_os = "windows")]
 pub use native_capture::CaptureSession;
 #[cfg(target_os = "windows")]

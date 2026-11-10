@@ -25,7 +25,7 @@ rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
 ownership; there is no separate attached-console launch API. Typed V1 does
 not accept ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
-[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
+[V1.Dev MXC request JSON API and policy preparation](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
 accepts caller-authored requests separately.
 Captured existing-container execution returns partial text on timeout
 with `timedOut: true`, without waiting for output streams to close.

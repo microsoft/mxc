@@ -87,6 +87,8 @@ use mxc_sdk::v1::{probe, ProbeOutput};
 use mxc_sdk::v1::{ExecutionResult, WaitResult};
 
 mod error_detail;
+#[cfg(test)]
+mod policy_preparation_tests;
 mod pty;
 mod state_aware;
 mod streaming;
@@ -413,6 +415,85 @@ fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRu
     execute_output(run_json(request_json, experimental))
 }
 
+/// Prepare a restrictive candidate request and structured changes without
+/// creating an environment or executing a workload.
+///
+/// `experimental` authorizes experimental backends independently of the JSON
+/// contract version. On success, `*out_json` is owned UTF-8 JSON released with
+/// [`mxc_string_free`]. On failure it stays null and `error`, when supplied,
+/// receives owned detail released with [`mxc_error_detail_free`].
+///
+/// # Safety
+/// - Both input pointers must be null or valid NUL-terminated C strings.
+/// - `out_json` must point to writable fresh pointer-sized storage.
+/// - `error` must be null or point to writable fresh [`MxcErrorDetail`] storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_prepare_policy_json(
+    request_json_utf8: *const c_char,
+    policy_failures_json_utf8: *const c_char,
+    experimental: i32,
+    out_json: *mut *mut c_char,
+    error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_json.is_null() {
+        // SAFETY: writable pointer-sized storage is guaranteed by the caller.
+        unsafe { *out_json = ptr::null_mut() };
+    }
+    if !error.is_null() {
+        // SAFETY: writable fresh detail storage is guaranteed by the caller.
+        unsafe { ptr::write(error, MxcErrorDetail::none()) };
+    }
+    if out_json.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let outcome = catch_unwind(|| {
+        prepare_policy_json_inner(
+            request_json_utf8,
+            policy_failures_json_utf8,
+            experimental != 0,
+        )
+    })
+    .unwrap_or_else(|panic| {
+        report_panic("mxc_prepare_policy_json", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+    write_json_outcome(outcome, out_json, error)
+}
+
+fn prepare_policy_json_inner(
+    request_json_utf8: *const c_char,
+    policy_failures_json_utf8: *const c_char,
+    experimental: bool,
+) -> Result<*mut c_char, (i32, MxcErrorDetail)> {
+    if request_json_utf8.is_null() || policy_failures_json_utf8.is_null() {
+        return Err((
+            MXC_STATUS_NULL_ARGUMENT,
+            MxcErrorDetail::from_message("policy preparation requires both JSON inputs"),
+        ));
+    }
+    // SAFETY: both entrypoint inputs are valid C strings, borrowed synchronously.
+    let request = unsafe { cstr_to_str(request_json_utf8) };
+    let failures = unsafe { cstr_to_str(policy_failures_json_utf8) };
+    let (Some(request), Some(failures)) = (request, failures) else {
+        return Err((
+            MXC_STATUS_INVALID_UTF8,
+            MxcErrorDetail::from_message("policy preparation JSON is not UTF-8"),
+        ));
+    };
+    let failures = mxc_sdk::__ffi::decode_policy_failures_json(failures).map_err(json_error)?;
+    let mut options = mxc_sdk::v1::dev::PolicyPreparationOptions::default();
+    options.experimental = experimental;
+    let prepared =
+        mxc_sdk::v1::dev::prepare_policy_json(request, &failures, options).map_err(json_error)?;
+    prepared
+        .to_json()
+        .map(|json| alloc_cstring(json.as_bytes()))
+        .map_err(json_error)
+}
+
 fn execute_output(output: Result<ExecutionResult, Error>) -> MxcRunResult {
     match output {
         Ok(output) => {
@@ -610,11 +691,10 @@ pub unsafe extern "C" fn mxc_probe_request_json_with_error(
             ))
         });
 
-    write_probe_outcome(outcome, out_json_utf8, out_error)
+    write_json_outcome(outcome, out_json_utf8, out_error)
 }
 
-#[cfg(target_os = "windows")]
-fn write_probe_outcome(
+fn write_json_outcome(
     outcome: Result<*mut c_char, (i32, MxcErrorDetail)>,
     out_json_utf8: *mut *mut c_char,
     out_error: *mut MxcErrorDetail,
@@ -660,9 +740,9 @@ fn probe_request_json_inner(
         Some(request_json) => parse_exact_probe_request(request_json)
             .and_then(|request| mxc_engine::probe_execution_request(Some(&request))),
     }
-    .map_err(probe_error)?;
+    .map_err(json_error)?;
 
-    serialize_probe_output(&output).map_err(probe_error)
+    serialize_probe_output(&output).map_err(json_error)
 }
 
 #[cfg(target_os = "windows")]
@@ -711,8 +791,7 @@ fn serialize_probe_output(output: &ProbeOutput) -> Result<*mut c_char, Error> {
         })
 }
 
-#[cfg(target_os = "windows")]
-fn probe_error(error: Error) -> (i32, MxcErrorDetail) {
+fn json_error(error: Error) -> (i32, MxcErrorDetail) {
     (
         status_from_error_code(error.code),
         MxcErrorDetail::from_error(&error),

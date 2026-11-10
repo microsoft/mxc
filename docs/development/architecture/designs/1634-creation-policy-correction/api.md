@@ -57,7 +57,7 @@ candidate/change data separately with `PreparedPolicyRequest::to_json`.
 Approval decisions, original companion diagnostics and retry budgets are
 application state, not part of either storage value.
 
-The [complete prototype example](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/src/mxc-sdk/examples/policy_feedback.rs)
+The [complete example](../../../../../src/mxc-sdk/examples/policy_feedback.rs)
 shows bounded caller-controlled retries, storage, exact reviewed-candidate
 acceptance and output/exit handling. It accepts an unchanged candidate without
 an approval file; changed candidates require the exact reviewed result.
@@ -621,11 +621,10 @@ SDK-specific coverage must include:
   unsigned64 observation values, UTF-16 distinctions, all-or-nothing limits
   and companion-state handling. Compare named values with the native schema.
 
-No runtime tests are claimed for this documentation PR. Prototype references
-for review are the [Rust](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/rust/v1/dev.md),
-[.NET](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/dotnet/v1/dev.md)
-and [Node](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/node/v1/dev.md)
-Dev contracts. They illustrate the accepted API; implementation delivery remains separate.
+The [Rust](../../../../api-reference/rust/v1/dev.md),
+[.NET](../../../../api-reference/dotnet/v1/dev.md)
+and [Node](../../../../api-reference/node/v1/dev.md) V1.Dev references
+document the implemented API.
 
 Consumer updates belong in all three SDK READMEs and versioned V1.Dev
 signature/type references, the API index, and caller-owned storage/resubmission

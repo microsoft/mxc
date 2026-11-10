@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::mxc_error::MxcErrorCode;
+use crate::mxc_common::mxc_error::{ErrorEnvelope, MxcError, MxcErrorCode};
 
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1134,23 +1134,40 @@ impl ExecutionRequest {
         &self,
         is_dir: impl Fn(&str) -> bool,
     ) -> Option<ResolvedWorkingDirectory<'_>> {
+        match self.try_resolved_working_directory_with(|path| {
+            Ok::<_, std::convert::Infallible>(is_dir(path))
+        }) {
+            Ok(directory) => directory,
+            Err(never) => match never {},
+        }
+    }
+
+    pub(crate) fn try_resolved_working_directory_with<E>(
+        &self,
+        mut is_dir: impl FnMut(&str) -> Result<bool, E>,
+    ) -> Result<Option<ResolvedWorkingDirectory<'_>>, E> {
         if !self.working_directory.trim().is_empty() {
-            return Some(ResolvedWorkingDirectory {
+            return Ok(Some(ResolvedWorkingDirectory {
                 path: self.working_directory.as_str(),
                 source: WorkingDirectorySource::Explicit,
-            });
+            }));
         }
-        self.policy
+        for path in self
+            .policy
             .readwrite_paths
             .iter()
             .chain(self.policy.readonly_paths.iter())
             .map(String::as_str)
             .filter(|path| !path.trim().is_empty())
-            .find(|path| is_dir(path))
-            .map(|path| ResolvedWorkingDirectory {
-                path,
-                source: WorkingDirectorySource::Policy,
-            })
+        {
+            if is_dir(path)? {
+                return Ok(Some(ResolvedWorkingDirectory {
+                    path,
+                    source: WorkingDirectorySource::Policy,
+                }));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1237,8 +1254,13 @@ pub struct ScriptResponse {
     /// [`warnings`](ScriptResponse::warnings) and
     /// [`extend_warnings`](ScriptResponse::extend_warnings) rather than the
     /// field, so the "absent" and "empty" spellings cannot drift apart.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<Box<Vec<String>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_diagnostics"
+    )]
+    #[serde(flatten)]
+    pub diagnostics: Option<Box<ScriptResponseDiagnostics>>,
     /// Structured metadata produced after the sandboxed process exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_metadata: Option<Box<SandboxOutputMetadata>>,
@@ -1253,10 +1275,33 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
-            warnings: None,
+            diagnostics: None,
             output_metadata: None,
         }
     }
+}
+
+/// Boxed response diagnostics keep failures small while preserving warning
+/// serialization and the complete structured error.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptResponseDiagnostics {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorEnvelope>,
+}
+
+// A flattened optional struct deserializes to `Some(default)` when its keys
+// are absent; keep "no diagnostics" as `None`.
+fn deserialize_diagnostics<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<ScriptResponseDiagnostics>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let diagnostics = Option::<Box<ScriptResponseDiagnostics>>::deserialize(deserializer)?;
+    Ok(diagnostics.filter(|d| !d.warnings.is_empty() || d.error.is_some()))
 }
 
 /// Structured outputs produced by optional sandbox features.
@@ -1370,7 +1415,9 @@ impl ScriptResponse {
 
     /// The non-fatal diagnostics this run recorded.
     pub fn warnings(&self) -> &[String] {
-        self.warnings.as_deref().map_or(&[], Vec::as_slice)
+        self.diagnostics
+            .as_deref()
+            .map_or(&[], |diagnostics| diagnostics.warnings.as_slice())
     }
 
     /// Append diagnostics, allocating only once there is something to record.
@@ -1379,9 +1426,40 @@ impl ScriptResponse {
         if incoming.peek().is_none() {
             return;
         }
-        self.warnings
+        self.diagnostics
             .get_or_insert_with(Box::default)
+            .warnings
             .extend(incoming);
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn with_error(mut self, error: MxcError) -> Self {
+        self.diagnostics.get_or_insert_with(Box::default).error = Some(error.to_envelope());
+        self
+    }
+
+    pub(crate) fn structured_error(&self) -> Option<&ErrorEnvelope> {
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.error.as_ref())
+    }
+
+    pub(crate) fn into_mxc_error(mut self) -> MxcError {
+        if let Some(error) = self
+            .diagnostics
+            .as_mut()
+            .and_then(|diagnostics| diagnostics.error.take())
+        {
+            return MxcError::from_envelope(error);
+        }
+        let message = if self.extended_error.is_empty() {
+            self.error_message
+        } else if self.error_message.is_empty() {
+            self.extended_error
+        } else {
+            format!("{} ({})", self.error_message, self.extended_error)
+        };
+        MxcError::new(self.failure_phase.error_code(), message)
     }
 }
 
@@ -1456,8 +1534,32 @@ mod tests {
     fn recording_nothing_allocates_nothing() {
         let mut response = ScriptResponse::default();
         response.extend_warnings(Vec::new());
-        assert!(response.warnings.is_none());
+        assert!(response.diagnostics.is_none());
         assert!(response.warnings().is_empty());
+    }
+
+    #[test]
+    fn response_wire_shape_keeps_the_warnings_array_and_optional_top_level_error() {
+        let bare: ScriptResponse = serde_json::from_str(r#"{"exit_code":0}"#).unwrap();
+        assert!(bare.diagnostics.is_none());
+        assert!(bare.warnings().is_empty());
+
+        let mut response =
+            ScriptResponse::rejected("nope").with_error(MxcError::policy_validation("nope"));
+        response.extend_warnings(["careful".to_string()]);
+        let wire = serde_json::to_value(&response).unwrap();
+        assert_eq!(wire["warnings"], serde_json::json!(["careful"]));
+        assert_eq!(wire["error"]["message"], "nope");
+        let restored: ScriptResponse = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(restored.warnings(), ["careful"]);
+        assert_eq!(restored.structured_error().unwrap().message, "nope");
+        assert_eq!(serde_json::to_value(&restored).unwrap(), wire);
+
+        let only_error = serde_json::to_value(
+            ScriptResponse::rejected("nope").with_error(MxcError::policy_validation("nope")),
+        )
+        .unwrap();
+        assert!(only_error.get("warnings").is_none());
     }
 
     // `ScriptResponse` is used as a `Result` error type, so it has to stay
@@ -1465,7 +1567,7 @@ mod tests {
     #[test]
     fn the_response_stays_small_enough_to_be_an_error_type() {
         assert!(
-            std::mem::size_of::<ScriptResponse>() <= 128,
+            std::mem::size_of::<ScriptResponse>() < 128,
             "{} bytes",
             std::mem::size_of::<ScriptResponse>()
         );
@@ -1551,6 +1653,28 @@ mod tests {
         let resolved = resolve(&req, &["C:\\rw", "C:\\ro"]).expect("explicit cwd");
         assert_eq!(resolved.path, "C:\\explicit");
         assert_eq!(resolved.source, WorkingDirectorySource::Explicit);
+    }
+
+    #[test]
+    fn fallible_working_directory_probe_stops_on_unknown_paths_and_preserves_explicit_cwd() {
+        let mut req = request_with_paths(&["C:\\blocked", "C:\\fallback"], &[]);
+        let mut calls = Vec::new();
+        let error = req
+            .try_resolved_working_directory_with(|path| {
+                calls.push(path.to_owned());
+                Err::<bool, _>("probe deadline")
+            })
+            .unwrap_err();
+        assert_eq!(error, "probe deadline");
+        assert_eq!(calls, ["C:\\blocked"]);
+        req.working_directory = "C:\\explicit".into();
+        let resolved = req
+            .try_resolved_working_directory_with(|_| -> Result<bool, &str> {
+                panic!("an explicit cwd must not use a policy directory probe")
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.path, "C:\\explicit");
     }
 
     /// An explicit cwd is the caller's own choice, so it is returned unchecked

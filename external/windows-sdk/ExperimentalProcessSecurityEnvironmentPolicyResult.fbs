@@ -1,0 +1,63 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+//
+// Experimental CPSE refusal diagnostics. All tables and numeric enum values are append-only.
+// Never change an existing field's type, default or meaning. Add optional fields at the end.
+// A producer supporting newer versions must retain a projection for every supported older
+// requested version; returning the producer's latest version is not version negotiation.
+namespace ExperimentalProcessSecurityEnvironmentPolicyResult;
+
+enum PolicyResultVersion:uint { V1 = 1 }
+// Limits bound retained diagnostics, not the number of constraints policy can enforce.
+enum PolicyResultLimit:uint { MaxDetails = 64, MaxResourceChars = 32768, MaxResultBytes = 131072 }
+
+// Unknown is a reset value, not an allow verdict. EvaluationFailed is a safe refusal
+// without a new code for every internal error.
+enum PolicyOutcome:uint { Unknown = 0, Blocked = 1, EvaluationFailed = 2 }
+// The policy domain, not a Win32/HRESULT category.
+enum FailureClass:uint { None = 0, Network = 1, Filesystem = 2, EnforcementMode = 3 }
+enum FailureReason:uint {
+    None = 0, CapabilityNotAllowed = 1, AccessExceedsCeiling = 2, DenyRequired = 3, RequestPathLimit = 4
+}
+// Suggested request changes, not authorization. A retry evaluates the then-current policy.
+enum RequiredAction:uint { None = 0, RemoveCapability = 1, RestrictFilesystemAccess = 2, ReducePathCount = 3 }
+enum ResourceKind:uint { None = 0, Path = 1, Capability = 2 }
+enum ValueKind:uint { None = 0, Access = 1, PathCount = 2 }
+enum PolicyAccess:ulong { None = 0, ReadOnly = 1, ReadWrite = 2 }
+enum PolicyResultFlags:uint {
+    None = 0,
+    // A typed remedy is identified; required resource text can still be unavailable.
+    HasActionableDetails = 1,
+    // A resource-bearing remedy requires complete text before it can be used.
+    ResourceComplete = 2,
+    ResourceUnavailable = 4
+}
+
+table PolicyDetail {
+    failure_class:FailureClass;
+    failure_reason:FailureReason;
+    required_action:RequiredAction;
+    resource_kind:ResourceKind;
+    value_kind:ValueKind;
+    // Bitmask of PolicyResultFlags.
+    // Unknown bits and enum values must not be interpreted as a known remedy.
+    flags:uint;
+    requested_value:ulong;
+    required_value:ulong;
+    // Complete UTF-16 code units, without a NUL terminator. This preserves Windows paths
+    // losslessly, including code units that cannot be represented as valid UTF-8.
+    resource:[ushort];
+}
+
+table PolicyResult {
+    // The returned contract version, not the latest version supported by the system.
+    version:uint;
+    // Old readers can verify a compatible newer snapshot before projecting their own version.
+    // A future incompatible interpretation must raise this and provide an explicit conversion.
+    minimum_reader_version:uint = 1;
+    outcome:PolicyOutcome;
+    // Bounded, non-exhaustive, ordered repairs. A refusal may have no actionable details.
+    details:[PolicyDetail];
+}
+
+root_type PolicyResult;
+file_identifier "PSEP";

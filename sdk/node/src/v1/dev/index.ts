@@ -20,6 +20,44 @@ import {
 } from '../../bindings/pty.js';
 import { spawnProcessContainerWithPtyJson } from '../../bindings/process-container-pty.js';
 import { runBindingStateAwareRequestAsync } from '../../bindings/state-aware.js';
+import { prepareBindingPolicyJsonAsync } from '../../bindings/policy-preparation.js';
+import { serializePolicyFailures, type PolicyFailures } from './policy-failures.js';
+import {
+  checkPolicyPreparationRequest,
+  parsePreparedPolicyRequest,
+  type PolicyPreparationOptions,
+  type PreparedPolicyRequest,
+} from './policy-preparation.js';
+
+export {
+  PolicyFailureNativeCodes,
+  PolicyFailureOutcomes,
+  PolicyFailureClasses,
+  PolicyFailureReasons,
+  PolicyFailureActions,
+  PolicyFailureResourceKinds,
+  PolicyFailureValueKinds,
+  PolicyFailureAccessValues,
+  PolicyFailureFlags,
+  parsePolicyFailures,
+  serializePolicyFailures,
+  mergePolicyFailures,
+  policyFailuresFromError,
+  policyFailureResourceText,
+  type PolicyFailures,
+  type PolicyFailureResult,
+  type PolicyFailureDetail,
+} from './policy-failures.js';
+
+export {
+  parsePreparedPolicyRequest,
+  serializePreparedPolicyRequest,
+  type PolicyPreparationOptions,
+  type PreparedPolicyRequest,
+  type PolicyPreparationChange,
+  type JsonPointer,
+  type JsonValue,
+} from './policy-preparation.js';
 
 /** Authorization supplied independently of the JSON contract version. */
 export interface JsonOptions {
@@ -142,6 +180,24 @@ export async function spawnJson(json: string, options: JsonOptions = {}): Promis
   checkOptions('spawnJson', options);
   const { timeoutMs } = requestInfo(json, 'spawnJson');
   return spawnBindingSandboxProcessJson(json, options.experimental === true, timeoutMs);
+}
+
+/** Prepare a candidate without creating a container or changing either input. */
+export async function preparePolicyJson(
+  requestJson: string,
+  failures: PolicyFailures,
+  options: PolicyPreparationOptions = {},
+): Promise<PreparedPolicyRequest> {
+  checkOptions('preparePolicyJson', options);
+  checkPolicyPreparationRequest(requestJson);
+  const json = await prepareBindingPolicyJsonAsync(
+    requestJson, serializePolicyFailures(failures), options.experimental === true,
+  );
+  try {
+    return parsePreparedPolicyRequest(json);
+  } catch {
+    throw new MxcError('backend_error', 'native policy preparation returned a malformed result');
+  }
 }
 
 /** Spawn a one-shot request with a PTY. */

@@ -249,9 +249,11 @@ for complete signatures and types.
 ## Errors, warnings, and discovery
 
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
-`NativeCode`, and `Remediation` when available. Security and operational
-warnings are available on `ExecutionResult.Warnings` and `MxcProcess.Warnings`.
-Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
+`NativeCode`, `Remediation`, and optional `Details` when available. `Details`
+is a `JsonElement` that remains valid after native cleanup. Security and
+operational warnings are available on `ExecutionResult.Warnings` and
+`MxcProcess.Warnings`. Provision returns identity, optional typed metadata,
+and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
 warnings become an empty array; malformed warnings fail explicitly. When
 IsolationSession provision metadata is present, `AgentUserName`, `AgentUserSid`,
@@ -282,6 +284,89 @@ existing tool directories and excludes system-critical paths; it does not
 inspect ACLs. `GetUserProfilePolicy` uses the supplied environment,
 and `GetTemporaryFilesPolicy` returns existing temporary storage without creating
 directories.
+
+## Policy preparation and caller-owned observations
+
+`Microsoft.Mxc.Sdk.V1.Dev.MxcContainer.PreparePolicyJson` and
+`PreparePolicyJsonAsync` take MXC request JSON, saved `PolicyFailures`, and
+optional `PolicyPreparationOptions`. Preparation validates supported
+restrictive changes for Windows ProcessContainer without creating a container.
+It returns an owned `PreparedPolicyRequest` with `RequestJson` and `Changes`.
+The application inspects and explicitly accepts the changes before passing
+`RequestJson` to ordinary strict creation. Each creation call makes one native
+creation attempt and executes only the supplied request. MXC keeps no
+observations between calls.
+
+```csharp
+using Microsoft.Mxc.Sdk.V1;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
+
+const string requestJson = """
+    {"version":"1.1.0-alpha","containment":"processcontainer",
+     "process":{"commandLine":"cmd.exe /c echo hello","timeout":30000}}
+    """;
+Dev.PolicyFailures saved = Dev.PolicyFailures.FromJson(
+    await File.ReadAllTextAsync("policy-failures.json"));
+Dev.PreparedPolicyRequest prepared = await Dev.MxcContainer.PreparePolicyJsonAsync(
+    requestJson, saved);
+
+await File.WriteAllTextAsync("prepared-request.json", prepared.ToJson());
+Console.WriteLine("Review prepared-request.json. Type 'accept' to execute its request.");
+if (Console.ReadLine() != "accept")
+{
+    return;
+}
+
+try
+{
+    ExecutionResult result = await Dev.MxcContainer.RunJsonAsync(prepared.RequestJson);
+    Console.WriteLine(result.Stdout);
+}
+catch (MxcException error)
+{
+    if (Dev.PolicyFailures.FromException(error) is { } current)
+    {
+        await File.WriteAllTextAsync("latest-policy-failures.json", current.ToJson());
+        Dev.PolicyFailures combined = saved.MergedWith(current);
+        await File.WriteAllTextAsync("policy-failures.json", combined.ToJson());
+    }
+    throw;
+}
+```
+
+`FromException` reads that creation attempt's observations from
+`MxcException.Details` without changing its code, message, or other backend
+details. `ToJson` and `FromJson` are public, source-generated JSON helpers
+that also work with Native AOT. They preserve native batch boundaries, unknown
+numeric codes, lossless `ulong` values as decimal strings, and optional
+`ushort[]` resources.
+`PolicyFailureDetail.GetResourceText()` throws `DecoderFallbackException` for
+malformed UTF-16 while leaving the raw units available.
+Named groups such as `Dev.PolicyFailureOutcomes.Blocked` and
+`Dev.PolicyFailureReasons.CapabilityNotAllowed` make comparisons readable
+without changing numeric JSON or discarding unknown values.
+Policy-specific resources, capabilities, and requested or required values
+remain structured rather than appearing in exception text, stacks, or warnings.
+
+`MergedWith` validates both inputs and returns an owned collection of distinct
+complete batches in first-observed order. It never modifies either input or
+truncates an overflowing merge. If merging fails, keep the original reports
+separately and stop rather than discarding observations. Storage and application
+retry budgets are caller responsibilities.
+
+Every `PolicyChange` contains an RFC 6901 JSON Pointer, a named operation
+(`add`, `remove`, or `replace` in JSON), and required `Before` and `After`
+`JsonElement` values. Add uses JSON null for an absent `Before`; Remove uses
+JSON null for an absent `After`. Replace can replace an actual JSON null value.
+`PreparedPolicyRequest.ToJson` and `FromJson` support application-owned storage;
+reading stored preparation data does not approve its changes.
+
+`JsonOptions` contains only `Experimental`. Preparation uses its own
+`PolicyPreparationOptions.Experimental`; experimental authorization does not
+grant policy approval. Successful execution keeps the ordinary result, stdin,
+cancellation, warning, and ownership behavior. See the
+[V1.Dev reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md#policy-preparation-and-caller-owned-observations)
+for preparation and storage limits.
 
 ## Package and native library
 

@@ -14,8 +14,6 @@ then submits its chosen JSON through ordinary strict creation. The application
 owns storage, merging and retry limits; MXC owns interpreting supported
 observations and proving each proposed change restrictive.
 Public declarations and caller examples are in the [API proposal](api.md).
-An [exploratory implementation](https://github.com/microsoft/mxc/commit/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae)
-illustrates the accepted contract; implementation delivery remains separate.
 
 ## Problem and scope
 

@@ -12,7 +12,9 @@
 //! so the runner never passes `NULL`. The mapping has unit coverage that
 //! needs no prepared host.
 
-use crate::mxc_common::models::{ExecutionRequest, WorkingDirectorySource};
+use crate::mxc_common::models::{
+    ExecutionRequest, ResolvedWorkingDirectory, WorkingDirectorySource,
+};
 
 /// Drive root used when neither `process.cwd` nor the filesystem policy yields
 /// a usable directory.
@@ -78,7 +80,27 @@ pub fn launch_working_directory_with(
     is_dir: impl Fn(&str) -> bool,
     drive_root: &str,
 ) -> LaunchWorkingDirectory {
-    match request.resolved_working_directory_with(is_dir) {
+    launch_directory_from_resolved(request.resolved_working_directory_with(is_dir), drive_root)
+}
+
+pub(crate) fn try_launch_working_directory(
+    request: &ExecutionRequest,
+) -> Result<LaunchWorkingDirectory, String> {
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
+    let resolved = request.try_resolved_working_directory_with(|path| {
+        probe.run(path, |path| std::path::Path::new(path).is_dir())
+    })?;
+    Ok(launch_directory_from_resolved(
+        resolved,
+        &system_drive_root(),
+    ))
+}
+
+fn launch_directory_from_resolved(
+    resolved: Option<ResolvedWorkingDirectory<'_>>,
+    drive_root: &str,
+) -> LaunchWorkingDirectory {
+    match resolved {
         Some(resolved) => LaunchWorkingDirectory {
             path: resolved.path.to_string(),
             source: match resolved.source {
