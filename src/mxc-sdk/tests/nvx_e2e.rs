@@ -220,12 +220,18 @@ mod windows_x64 {
         "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded";
 
     #[test]
-    fn streaming_and_lifecycle_validation_reach_the_crate_without_a_vm() {
+    fn native_validation_rejects_requests_without_booting_a_vm() {
         const CHILD: &str = "MXC_NVX_PHASE3_VALIDATION_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let options = dev::JsonOptions { experimental: true };
             let mut request = process_only_request("printf forbidden");
             request["runtimeConfig"] = json!({"networkProxy": "http://[::1]:3128"});
+            let error = dev::run_json(&request.to_string(), options).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PolicyValidation, "{error}");
+            assert!(
+                error.message.contains("OpenVMM reaches host loopback"),
+                "{error}"
+            );
             let error = dev::spawn_json(&request.to_string(), options)
                 .err()
                 .expect("native proxy rejection");
@@ -249,7 +255,7 @@ mod windows_x64 {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "windows_x64::streaming_and_lifecycle_validation_reach_the_crate_without_a_vm",
+                "windows_x64::native_validation_rejects_requests_without_booting_a_vm",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -262,6 +268,18 @@ mod windows_x64 {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // Rejected requests never boot VMs, including the ones that capture templates.
+        let agent_state = state.path().join(r"Microsoft\MXC\nvx");
+        let template_stores: Vec<PathBuf> = std::iter::once(agent_state.clone())
+            .chain(
+                std::fs::read_dir(&agent_state)
+                    .expect("agent state directories")
+                    .map(|entry| entry.expect("agent state directory").path()),
+            )
+            .map(|directory| directory.join("templates"))
+            .filter(|store| store.exists())
+            .collect();
+        assert!(template_stores.is_empty(), "{template_stores:?}");
     }
 
     #[test]
