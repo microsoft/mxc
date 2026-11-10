@@ -67,7 +67,7 @@ tokio.workspace = true
 tar = { version = "0.4", optional = true }
 unicode-general-category.workspace = true
 url.workspace = true
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 uuid.workspace = true
 widestring.workspace = true
 
@@ -81,7 +81,7 @@ zip = { version = "9", default-features = false, features = ["deflate"], optiona
 
 [dev-dependencies]
 rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+native-tls = "0.2"
 filetime = "0.2"
 libloading = "0.8"
 quick-xml.workspace = true
@@ -91,6 +91,7 @@ tokio = { workspace = true, features = ["test-util"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+schannel = "0.1"
 serial_test.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

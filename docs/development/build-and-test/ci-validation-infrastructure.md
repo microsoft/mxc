@@ -31,8 +31,11 @@ on Linux x64 and both fixtures on Windows x64, using an isolated executor target
 directory outside shipping artifacts. `Mac.Build.Job.yml` checks engine fixture
 discovery before its existing package suite runs it on macOS arm64. Azure's
 cross-compiled Windows/Linux arm64 jobs remain build-only. The Linux arm64 job
-also checks that enabling `hyperlight` retains W365's rustls dependency without
-enabling Hyperlight's x86_64-only native TLS dependency.
+also checks that enabling `hyperlight` retains W365's native TLS dependency
+without enabling Hyperlight's x86_64-only gzip feature. Linux build jobs install
+OpenSSL development headers and `pkg-config`; Azure's x64-to-arm64 cross-build
+additionally installs `libssl-dev:arm64` from Ubuntu's ARM64 repository and points
+the target-specific OpenSSL build variables at those headers and libraries.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /

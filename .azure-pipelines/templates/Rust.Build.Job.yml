@@ -64,6 +64,9 @@ jobs:
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/tools/lxc
         cargoFeatures: hyperlight
+        ${{ if eq(item.arch, 'arm64') }}:
+          AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
+          AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR: /usr/include
         signPattern: |
           lxc-exec
           unix-test-proxy
@@ -98,11 +101,37 @@ jobs:
     steps:
       - checkout: self
 
+      - pwsh: |
+          $opensslDirectory = Join-Path $env:ProgramFiles 'Git\usr\bin'
+          if (-not (Test-Path (Join-Path $opensslDirectory 'openssl.exe'))) {
+            throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
+          }
+          Write-Host "##vso[task.prependpath]$opensslDirectory"
+        displayName: Expose OpenSSL for Windows TLS fixtures
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+
+      - script: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+        displayName: Install Linux TLS build dependencies
+        condition: eq('${{ item.os }}', 'linux')
+
       # Install Linux ARM64 toolchain for arm64 linux builds
       - script: |
-          sudo apt-get update
+          set -euo pipefail
           sudo apt-get install -y gcc-aarch64-linux-gnu
-        displayName: Install ARM64 toolchain
+          sudo dpkg --add-architecture arm64
+          . /etc/os-release
+          sources="$(mktemp)"
+          trap 'rm -f "$sources"' EXIT
+          for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
+            echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports $suite main" >> "$sources"
+          done
+          apt_options=(-o "Dir::Etc::sourcelist=$sources" -o "Dir::Etc::sourceparts=-")
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libssl-dev:arm64
+        displayName: Install ARM64 toolchain and target OpenSSL
         condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
 
       - ${{ if eq(parameters.isOfficialBuild, true) }}:
@@ -131,9 +160,9 @@ jobs:
       - script: |
           set -euo pipefail
           features="$(cargo tree --locked --target $(triplet) -p mxc-sdk --no-default-features --features hyperlight -e features -i ureq)"
-          grep -q 'ureq feature "rustls"' <<< "$features"
-          if grep -q 'ureq feature "native-tls' <<< "$features"; then
-            echo "ARM64 must not enable Hyperlight's x86_64-only native TLS dependency." >&2
+          grep -q 'ureq feature "native-tls"' <<< "$features"
+          if grep -qE 'ureq feature "(gzip|rustls)"' <<< "$features"; then
+            echo "ARM64 must use native TLS without rustls or Hyperlight's x86_64-only gzip feature." >&2
             exit 1
           fi
         displayName: Check ARM64 HTTP dependency features
