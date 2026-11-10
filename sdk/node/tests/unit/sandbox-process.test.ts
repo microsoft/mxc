@@ -285,7 +285,9 @@ describe('native sandbox process', () => {
     proc.dispose();
 
     await assert.rejects(wait, /disposed before completion/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.strictEqual(driver.killCount, 1);
+    assert.strictEqual(driver.waitCount, 0);
     assert.strictEqual(driver.freeCount, 1);
     assert.strictEqual(driver.standardInput.destroyed, true);
     assert.strictEqual(driver.standardOutput.destroyed, true);

@@ -132,7 +132,7 @@ wxc-exec.exe --audit policy.json
 ```
 
 MXC records the observed accesses and produces policy-authoring artifacts. See
-[logging access denied](docs/logging-access-denied.md) for safe
+[learning mode](docs/learning-mode.md) for safe
 deny-and-record diagnostics, audit outputs, and supported workflows.
 
 ## Telemetry
@@ -199,7 +199,7 @@ build.bat --all             # Release build for current architecture
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
-| Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
+| Learning mode | [`docs/learning-mode.md`](docs/learning-mode.md) | Diagnose blocked accesses and author policy |
 | Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Required diagnostic data and administrative controls |
 | Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
 

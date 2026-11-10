@@ -42,6 +42,7 @@ fn provision_dispatch(
     microvm: Value,
     wslc: Value,
     kata: Value,
+    w365_agents: Value,
 ) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
@@ -58,7 +59,11 @@ fn provision_dispatch(
                     branch(
                         discriminator("containment", "kata"),
                         kata,
-                        Value::Bool(false),
+                        branch(
+                            discriminator("containment", "w365_agents"),
+                            w365_agents,
+                            Value::Bool(false),
+                        ),
                     ),
                 ),
             ),
@@ -177,13 +182,21 @@ pub fn development_schema() -> Value {
     let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
     let kata = subschema::<KataProvisionRequest>(&mut generator);
+    let w365_agents = subschema::<super::W365AgentsProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
     let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, microvm, wslc, kata);
+    let provision = provision_dispatch(
+        windows_sandbox,
+        isolation_session,
+        microvm,
+        wslc,
+        kata,
+        w365_agents,
+    );
     let state_aware = phase_dispatch(
         session_dispatch(wslc_session),
         provision,
@@ -224,6 +237,7 @@ mod tests {
         "MicroVmProvisionRequest",
         "WslcProvisionRequest",
         "KataProvisionRequest",
+        "W365AgentsProvisionRequest",
         "StartRequest",
         "ExecRequest",
         "StopRequest",
@@ -245,6 +259,7 @@ mod tests {
                 ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
                 ("KataProvisionRequest", "provision"),
+                ("W365AgentsProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
@@ -258,6 +273,7 @@ mod tests {
                 ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
                 ("KataProvisionRequest", "kata"),
+                ("W365AgentsProvisionRequest", "w365_agents"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,

@@ -39,6 +39,7 @@ fn accepts_and_rejects_every_discovered_fixture() {
     assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
     assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
     assert_root_fixtures::<KataProvisionRequest>("kata_provision");
+    assert_root_fixtures::<mxc_sdk::mxc_contract::dev::W365AgentsProvisionRequest>("w365_agents_provision");
     assert_root_fixtures::<StartRequest>("start");
     assert_root_fixtures::<ExecRequest>("exec");
     assert_root_fixtures::<StopRequest>("stop");

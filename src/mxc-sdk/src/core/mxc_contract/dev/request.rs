@@ -82,6 +82,9 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
             deserialize(json, "MicroVM provision").map(ProvisionRequest::MicroVm)
         }
         Containment::Wslc => deserialize(json, "WSLC provision").map(ProvisionRequest::Wslc),
+        Containment::W365Agents => {
+            deserialize(json, "W365 Agents provision").map(ProvisionRequest::W365Agents)
+        }
     }
 }
 

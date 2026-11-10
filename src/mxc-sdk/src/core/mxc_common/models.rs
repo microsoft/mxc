@@ -185,6 +185,11 @@ pub struct SeatbeltConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub extra_mach_lookups: Vec<String>,
+
+    /// Records sandbox denials through the unified log while the workload
+    /// runs. On macOS, `retain_etl` keeps the raw log as `.seatbelt.log`.
+    #[serde(rename = "captureDenials", skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsConfig>,
 }
 
 fn default_nested_pty() -> bool {
@@ -199,6 +204,7 @@ impl Default for SeatbeltConfig {
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
+            capture_denials: None,
         }
     }
 }
@@ -758,8 +764,9 @@ pub struct CaptureDenialsConfig {
     /// falls back to a managed per-run temporary file and prints its path on
     /// stderr.
     pub output_path: Option<String>,
-    /// Whether to preserve the sealed ETL trace after analysis. Defaults to
-    /// `false`, which deletes the internal trace. Retention is honored only by
+    /// Whether to preserve the sealed ETL trace (on macOS, the raw
+    /// `.seatbelt.log`) after analysis. Defaults to `false`, which deletes the
+    /// internal trace. Retention is honored only by
     /// a terminal wait that leaves structured output observable; abandoning the
     /// process handle deletes the trace.
     pub retain_etl: bool,
@@ -1362,7 +1369,8 @@ pub struct CaptureDenialsOutput {
     pub total_denials: usize,
     /// Whether the emitted denial set was truncated.
     pub denied_resources_truncated: bool,
-    /// Absolute path to the retained ETL trace, when retention was requested.
+    /// Absolute path to the retained ETL trace (on macOS, the `.seatbelt.log`),
+    /// when retention was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etl_path: Option<String>,
 }
@@ -1370,6 +1378,19 @@ pub struct CaptureDenialsOutput {
 impl CaptureDenialsOutput {
     /// The fixed `type` discriminator value.
     pub const KIND: &'static str = "captureDenials";
+}
+
+impl From<crate::learning_mode_core::DenialsOutputPointer> for CaptureDenialsOutput {
+    fn from(pointer: crate::learning_mode_core::DenialsOutputPointer) -> Self {
+        Self {
+            kind: pointer.kind,
+            output_path: pointer.output_path,
+            exit_code: pointer.exit_code,
+            total_denials: pointer.total_denials,
+            denied_resources_truncated: pointer.denied_resources_truncated,
+            etl_path: None,
+        }
+    }
 }
 
 impl ScriptResponse {

@@ -220,12 +220,74 @@ mod windows_x64 {
         "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded";
 
     #[test]
+    fn streaming_and_lifecycle_validation_reach_the_crate_without_a_vm() {
+        const CHILD: &str = "MXC_NVX_PHASE3_VALIDATION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let options = dev::JsonOptions { experimental: true };
+            let mut request = process_only_request("printf forbidden");
+            request["runtimeConfig"] = json!({"networkProxy": "http://[::1]:3128"});
+            let error = dev::spawn_json(&request.to_string(), options)
+                .err()
+                .expect("native proxy rejection");
+            assert_eq!(error.code, ErrorCode::PolicyValidation, "{error}");
+            assert!(
+                error.message.contains("OpenVMM reaches host loopback"),
+                "{error}"
+            );
+            request.as_object_mut().unwrap().remove("process");
+            request["phase"] = json!("provision");
+            request["microvm"]["provision"] = json!({"memoryMib": 256});
+            let error = dev::validate_provision_json(&request.to_string(), options).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PolicyValidation, "{error}");
+            assert!(
+                error.message.contains("OpenVMM reaches host loopback"),
+                "{error}"
+            );
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows_x64::streaming_and_lifecycle_validation_reach_the_crate_without_a_vm",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("LOCALAPPDATA", state.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn experimental_opt_in_is_required_before_backend_discovery() {
         let error =
             mxc_sdk::__ffi::run_json(&process_only_request("printf forbidden").to_string(), false)
                 .unwrap_err();
         assert_eq!(error.code, ErrorCode::BackendUnavailable);
         assert!(error.message.contains("experimental"));
+    }
+
+    #[test]
+    fn malformed_environment_is_rejected_with_host_loopback_allow() {
+        let mut request = process_only_request("printf forbidden");
+        request["process"]["env"] = json!(["MISSING_EQUALS"]);
+        request["process"]["inheritDefaultEnv"] = json!(true);
+        request["network"] = json!({
+            "ingress": {"default": "deny", "hostLoopback": "allow"}
+        });
+
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert_eq!(
+            error.message,
+            "NVX process.env entries must be KEY=VALUE without null bytes"
+        );
     }
 
     #[test]
@@ -297,6 +359,15 @@ mod windows_x64 {
     }
 
     fn executor_output_with_mode(request: &Value, missing_bundle: bool, dry_run: bool) -> Output {
+        executor_output_with_env(request, missing_bundle, dry_run, &[])
+    }
+
+    fn executor_output_with_env(
+        request: &Value,
+        missing_bundle: bool,
+        dry_run: bool,
+        environment: &[(&str, &std::ffi::OsStr)],
+    ) -> Output {
         let directory = tempfile::tempdir().expect("executor request directory");
         let path = directory.path().join("request.json");
         std::fs::write(&path, request.to_string()).expect("write executor request");
@@ -309,6 +380,7 @@ mod windows_x64 {
             command.env(BUNDLE_ENV, directory.path().join("absent"));
         }
         let child = command
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -588,7 +660,79 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         assert_eq!(error.code, ErrorCode::BackendError);
         assert_eq!(error.message, CAPTURE_ERROR);
         assert_no_run_state(std::process::id());
+        exercise_streaming_and_lifecycle();
         println!("VM_EXECUTED SDK JSON binary capture timeout limit and cleanup");
+    }
+
+    fn exercise_streaming_and_lifecycle() {
+        let options = dev::JsonOptions { experimental: true };
+        let command = "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; exit 42";
+        let process = dev::spawn_json(&process_only_request(command).to_string(), options).unwrap();
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.outcome, WaitResult::Exited(42));
+        assert_eq!(output.stdout, vec![0; 131072]);
+        assert_eq!(output.stderr, vec![0; 131072]);
+        assert_no_run_state(std::process::id());
+
+        struct Container {
+            id: String,
+            cleaned: bool,
+        }
+        impl Drop for Container {
+            fn drop(&mut self) {
+                if self.cleaned {
+                    return;
+                }
+                let options = dev::JsonOptions { experimental: true };
+                let phase = |name| {
+                    json!({
+                        "version": "1.1.0-alpha", "phase": name, "sandboxId": self.id
+                    })
+                    .to_string()
+                };
+                if let Err(error) = dev::stop_container_json(&phase("stop"), options) {
+                    eprintln!("lifecycle fixture stop failed: {error}");
+                }
+                if let Err(error) = dev::deprovision_container_json(&phase("deprovision"), options)
+                {
+                    eprintln!("lifecycle fixture deprovision failed: {error}");
+                }
+            }
+        }
+        let mut provision = process_only_request("unused");
+        provision.as_object_mut().unwrap().remove("process");
+        provision["phase"] = json!("provision");
+        let result: Value = serde_json::from_str(
+            &dev::provision_container_json(&provision.to_string(), options).unwrap(),
+        )
+        .unwrap();
+        let mut container = Container {
+            id: result["result"]["sandboxId"].as_str().unwrap().to_owned(),
+            cleaned: false,
+        };
+        assert!(container.id.starts_with("microvm:"));
+        let phase = |name| {
+            json!({
+                "version": "1.1.0-alpha", "phase": name, "sandboxId": container.id
+            })
+        };
+        dev::start_container_json(&phase("start").to_string(), options).unwrap();
+        let mut exec = phase("exec");
+        exec["process"] = json!({"commandLine": command, "timeout": 30000});
+        let process = dev::spawn_in_container_json(&exec.to_string(), options).unwrap();
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.outcome, WaitResult::Exited(42));
+        assert_eq!(output.stdout, vec![0; 131072]);
+        assert_eq!(output.stderr, vec![0; 131072]);
+        exec["process"] = json!({"commandLine": "printf container-reused", "timeout": 30000});
+        let output = dev::run_in_container_json(&exec.to_string(), options).unwrap();
+        assert_eq!(output.outcome, WaitResult::Exited(0));
+        assert_eq!(output.stdout, b"container-reused");
+        assert!(output.stderr.is_empty());
+        dev::stop_container_json(&phase("stop").to_string(), options).unwrap();
+        dev::deprovision_container_json(&phase("deprovision").to_string(), options).unwrap();
+        // Explicit cleanup above is asserted; Drop is only for failed assertions.
+        container.cleaned = true;
     }
 
     #[test]
@@ -939,6 +1083,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .arg(&request_path)
                 .env("TEMP", &state)
                 .env("TMP", &state)
+                .env("LOCALAPPDATA", &state)
                 .stdin(Stdio::null())
                 .stdout(std::fs::File::create(&stdout_path).expect("stdout file"))
                 .stderr(std::fs::File::create(&stderr_path).expect("stderr file"))
@@ -997,13 +1142,20 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             WAIT_OBJECT_0,
             "owned OpenVMM is still running",
         );
-        assert!(
-            std::fs::read_dir(&state)
-                .expect("run state listing")
-                .next()
-                .is_none(),
-            "cancelled run state was retained"
+        // The cancelled request must leave the shared agent state directory usable.
+        let after = executor_output_with_env(
+            &process_only_request("printf after-interrupt"),
+            false,
+            false,
+            &[("LOCALAPPDATA", state.as_os_str())],
         );
+        assert_eq!(
+            after.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&after.stderr)
+        );
+        assert_eq!(after.stdout, b"after-interrupt");
         assert!(std::fs::read(&stdout_path)
             .expect("stdout bytes")
             .is_empty());
@@ -1082,5 +1234,65 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         println!(
             "VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup"
         );
+    }
+
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_executor_reuses_registered_images() {
+        use std::ffi::OsStr;
+
+        // An isolated LOCALAPPDATA starts the executor with an empty agent state directory, and
+        // a proxy that refuses every connection makes any registry pull fail.
+        let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+        let state = [("LOCALAPPDATA", local_app_data.path().as_os_str())];
+        let offline = [
+            state[0],
+            ("HTTPS_PROXY", OsStr::new("http://127.0.0.1:9")),
+            ("HTTP_PROXY", OsStr::new("http://127.0.0.1:9")),
+        ];
+        let request = process_only_request("printf registered");
+        let image = request["microvm"]["image"]
+            .as_str()
+            .expect("image reference");
+        let run_concurrently = |environment: &[(&str, &OsStr)]| {
+            let outputs: Vec<Output> = std::thread::scope(|scope| {
+                let runs: Vec<_> = (0..3)
+                    .map(|_| {
+                        scope
+                            .spawn(|| executor_output_with_env(&request, false, false, environment))
+                    })
+                    .collect();
+                runs.into_iter()
+                    .map(|run| run.join().expect("concurrent executor"))
+                    .collect()
+            });
+            for output in outputs {
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(output.stdout, b"registered");
+            }
+        };
+
+        let output = executor_output_with_env(&request, false, false, &offline);
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "an unregistered image needs its registry"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(image),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Concurrent first requests race to register the image, and each must boot it.
+        run_concurrently(&state);
+        // Later concurrent requests boot the registered image without the registry.
+        run_concurrently(&offline);
+        println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
     }
 }

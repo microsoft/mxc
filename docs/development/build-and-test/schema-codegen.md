@@ -95,7 +95,7 @@ dispatch:
 2. a present `phase` selects provision-session, provision, start, exec, stop,
    deprovision, or deprovision-session;
 3. provision additionally selects a backend-specific root by `containment`
-   (Windows Sandbox, IsolationSession, MicroVM, or WSLC in v1.1 development;
+   (Windows Sandbox, IsolationSession, MicroVM, WSLC, or W365 Agents in v1.1 development;
    IsolationSession or WSLC in published v0.9 and v1.0). The two session phases
    select by `containment` as well, but admit only WSLC.
 

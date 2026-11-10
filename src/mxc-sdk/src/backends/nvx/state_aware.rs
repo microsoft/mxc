@@ -10,7 +10,7 @@ use crate::mxc_common::state_aware_backend::{
     StopResult,
 };
 
-use super::abi::ProvisionInput;
+use super::runtime::PreparedProvision;
 use super::runtime::{NvxClient, SandboxClient, SandboxId};
 
 pub(crate) struct NvxStateAwareRunner {
@@ -138,7 +138,7 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
             .map_err(|error| protect("capabilities", error))?;
         let (request, spec) =
             super::policy::provision_request_with_config(request, config.as_ref(), &capabilities)?;
-        let input = ProvisionInput { request, spec };
+        let input = PreparedProvision { request, spec };
         client
             .validate_provision(&input)
             .map_err(|error| protect("validate_provision", error))?;
@@ -237,7 +237,7 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
         let (request, spec) =
             super::policy::provision_request_with_config(request, config, &capabilities)?;
         client
-            .validate_provision(&ProvisionInput { request, spec })
+            .validate_provision(&PreparedProvision { request, spec })
             .map_err(|error| protect("validate_provision", error))
     }
 

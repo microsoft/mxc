@@ -38,8 +38,8 @@ the individual local test scripts are documented in
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
-| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests in the existing Windows artifact and checks required test discovery. |
-| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, and compiles `nvx_e2e` with `microvm` on Windows x64 without running a VM. |
+| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests, checks required test discovery, and verifies Microsoft signatures and integrity of the staged runtime without starting a VM. |
+| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, compiles `nvx_e2e`, and runs host-only signature and integrity validation with `microvm` on Windows x64. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
@@ -72,7 +72,7 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks and the Kata modules, Bubblewrap SDK streaming/PTY tests, the Kata request-refusal tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>` (which includes the prebuilt `streaming_kata` live test). |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
@@ -288,7 +288,10 @@ The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
 They check executor configurations, JSON requests that collect output, image
 selection, file access rules, and network address and port rules. They also
 check that traffic through a proxy works while direct connections are blocked,
-and that interrupting startup or execution removes the VM and its temporary files.
+and that interrupting startup or execution removes the VM and leaves the agent
+state directory usable. Another scenario checks that concurrent first requests
+for an unregistered image all succeed, and that later concurrent requests boot
+it while its registry is unreachable.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

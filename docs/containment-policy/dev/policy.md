@@ -141,7 +141,7 @@ support.
 | `processContainer` | `leastPrivilege` (boolean), `capabilities` (array of single capability names, no commas), `learningMode` (boolean), `captureDenials` (`mode`: `block` or `allow`, default `block`; optional `outputPath` and `retainEtl`), `filesystem.enumeratePaths` (array of paths), `network.allowedProxyPeer` (proxy peer identity), and `ui` (below). `enumeratePaths` needs host support and cannot combine with `leastPrivilege`. `captureDenials.mode: "allow"` permits and records otherwise denied access. |
 | `processContainer.ui` | Optional `isolation` (`container`, `desktop`, `handles`, `atoms`), `desktopSystemControl` and `ime` booleans, and `systemSettings` (`none`, `parameters`, `display`, `all`). |
 | `lxc` | `distribution` and `release` strings, both required if this section is present. |
-| `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), and `extraMachLookups` (string array). |
+| `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), `extraMachLookups` (string array), and `captureDenials` (`mode`: `block` or `allow`, default `block`; optional `outputPath` and `retainEtl`). `captureDenials` cannot combine with `profileOverride`. |
 | `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. The contract accepts any `targetOs` string, but the WSLc backend rejects values other than `"linux"`; omit it or use `"linux"`. |
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
 | `hyperlight` | Optional `runtime`: `agent` (default), `python`, `python-shell`, `node`, `bash`, or `dotnet-jit`. The command line supplies source for that guest runtime. |
@@ -187,6 +187,7 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
 | `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
+| `provision` / `w365_agents` | Contract only; optional `w365Agents.provision` settings (below). No process or local policy sections. Runtime returns `backend_unavailable`. |
 | `provision` / `microvm` | Required registry-qualified `microvm.image`; optional positive `microvm.provision.memoryMib` when the runtime advertises memory support. Optional filesystem read-only, read-write, and denied paths, directional network defaults/rules, and `runtimeConfig.networkProxy`, subject to NVX capabilities and limits. These settings are fixed at provision. No filesystem enumeration, UI, or session phases. Requires experimental authorization. |
 | `provision` / `kata` | Required `kata` (`rootfs`, optional `hypervisor`); optional `filesystem` and `network`, fixed at provision. Only a deny-all network is accepted. Requires experimental authorization. |
 | `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
@@ -327,3 +328,30 @@ via `--container-id`, and a release's `sessionId` via `--session-id` instead
 of putting those fields in the JSON file; the executor inserts them before
 parsing. Placement's nested `wslc.provision.sessionId` stays in JSON.
 JSON library/FFI calls include routing fields as shown above.
+
+### W365 Agents (contract only)
+
+In `1.1.0-alpha`, provision accepts `containment: "w365_agents"` and
+`w365Agents.provision`:
+
+| Field | Requirement |
+|---|---|
+| `poolId` | Required when the provision settings object is supplied; hyphenated ASCII-hex GUID (`8-4-4-4-12`). |
+| `userType` | Optional; `"Local"`, `"HumanUser"`, or `"Agentic"`. |
+| `userObjectId` | Optional; the same GUID format as `poolId`. |
+
+`Local` runs Windows under a local account; `userObjectId` identifies the
+remote-control owner, not the Windows account. `HumanUser` uses a human user's
+Microsoft Entra identity. `Agentic` uses an Agent User identity identified by
+`userObjectId`. These values describe the session account, not whether a human
+or an agent invokes MXC.
+
+Service authentication differs by kind: `Local` disallows an auxiliary token;
+`HumanUser` allows one for assertion-based startup if it represents the same
+human user; `Agentic` requires one representing the selected Agent User.
+This contract slice does not provide auxiliary-token settings or implement
+session authentication.
+
+The backend is not implemented: provision returns `backend_unavailable`, even
+with experimental opt-in. Later phases using a `w365:` ID return
+`unsupported_containment`.
