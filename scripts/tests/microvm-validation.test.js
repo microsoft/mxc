@@ -167,6 +167,9 @@ fn main() {
         if mode != "missing-interruption-discovery" {
             println!("windows_x64::signed_bundle_executor_console_interrupt: test");
         }
+        if mode != "missing-image-reuse-discovery" {
+            println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
+        }
         if mode != "missing-discovery" {
             println!("windows_x64::signed_bundle_facade_create_and_run: test");
         }
@@ -212,6 +215,9 @@ fn main() {
     }
     if mode != "missing-interruption" {
         println!("VM_EXECUTED executor console interruption startup/execution/owned-vmm/cleanup");
+    }
+    if mode != "missing-image-reuse" {
+        println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
     }
     if mode != "missing-network" {
         println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
@@ -561,6 +567,7 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED JSON selected-image filesystem /);
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption /);
+  assert.match(log, /VM_EXECUTED executor registered-image reuse offline and concurrent/);
   assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement/);
   assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
   assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
@@ -576,6 +583,7 @@ for (const [mode, message] of [
   ["missing-executor", /did not execute the executor VM scenario/],
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
+  ["missing-image-reuse", /did not execute the executor image reuse VM scenario/],
   ["missing-network", /did not execute the network rules VM scenario/],
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
   ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
@@ -669,6 +677,7 @@ for (const [mode, message] of [
   ["missing-discovery", /did not discover windows_x64::signed_bundle_facade_create_and_run/],
   ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
+  ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
   ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
@@ -687,6 +696,7 @@ for (const [mode, message] of [
       "missing-discovery",
       "missing-sdk-json-discovery",
       "missing-interruption-discovery",
+      "missing-image-reuse-discovery",
       "missing-network-discovery",
       "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",

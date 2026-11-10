@@ -55,6 +55,7 @@ foreach ($name in @(
     'windows_x64::signed_executor_proxy_validation_withholds_credentials',
     'windows_x64::signed_bundle_executor_configs',
     'windows_x64::signed_bundle_executor_create_and_run',
+    'windows_x64::signed_bundle_executor_reuses_registered_images',
     'windows_x64::signed_bundle_executor_console_interrupt',
     'windows_x64::signed_bundle_facade_create_and_run',
     'windows_x64::signed_bundle_sdk_json_capture',
