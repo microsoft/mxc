@@ -52,6 +52,10 @@ without enabling Hyperlight's x86_64-only gzip feature. Linux build jobs install
 OpenSSL development headers and `pkg-config`; Azure's x64-to-arm64 cross-build
 additionally installs `libssl-dev:arm64` from Ubuntu's ARM64 repository and points
 the target-specific OpenSSL build variables at those headers and libraries.
+Windows and macOS TLS fixtures use OpenSSL to package their generated test
+identities as PKCS#12. Windows jobs set `MXC_W365_TEST_OPENSSL` to Git for
+Windows' executable without adding its Unix tools to `PATH`, so native Windows
+archive tools remain selected.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
