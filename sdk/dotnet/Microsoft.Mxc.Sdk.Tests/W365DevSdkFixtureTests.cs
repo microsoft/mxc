@@ -64,6 +64,7 @@ public class W365DevSdkFixtureTests
                 break;
             case "uncertain-release":
             case "rejected":
+            case "http-error":
             case "unknown":
                 var error = mode == "uncertain-release"
                     ? await Assert.ThrowsAsync<MxcException>(() =>
@@ -81,6 +82,11 @@ public class W365DevSdkFixtureTests
                     Assert.Equal(Id, details.GetProperty("sandboxId").GetString());
                 if (mode == "uncertain-release")
                     Assert.Equal(408, details.GetProperty("httpStatus").GetInt32());
+                if (mode == "http-error")
+                {
+                    Assert.Equal(500, details.GetProperty("httpStatus").GetInt32());
+                    Assert.Equal("provision_timeout", details.GetProperty("code").GetString());
+                }
                 Assert.DoesNotContain(Id, error.ToString());
                 break;
             default:

@@ -187,7 +187,7 @@ jobs:
           foreach ($name in @('lifecycle_contract_and_recovery_fixture', 'lifecycle_fresh_executor_fixture')) {
             if (-not ($tests -match "${name}: test")) { throw "Missing W365 fixture: $name" }
           }
-          cargo test --locked --release --target $(triplet) -p mxc-sdk --lib lifecycle_ -- --include-ignored
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --lib backend_modules::w365agents::tests::lifecycle_ -- --include-ignored
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         displayName: Test W365 checkout and fresh-executor release fixtures
         workingDirectory: $(Build.SourcesDirectory)/src

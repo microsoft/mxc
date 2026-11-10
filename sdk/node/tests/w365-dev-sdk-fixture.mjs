@@ -52,6 +52,7 @@ switch (mode) {
   }
   case 'uncertain-release':
   case 'rejected':
+  case 'http-error':
   case 'unknown':
     if (mode === 'unknown') delete provision.w365Agents.provision.userType;
     await assert.rejects(
@@ -67,6 +68,10 @@ switch (mode) {
         if (mode === 'unknown') assert.equal(error.details.sandboxId, undefined);
         else assert.equal(error.details.sandboxId, id);
         if (mode === 'uncertain-release') assert.equal(error.details.httpStatus, 408);
+        if (mode === 'http-error') {
+          assert.equal(error.details.httpStatus, 500);
+          assert.equal(error.details.code, 'provision_timeout');
+        }
         return true;
       },
     );

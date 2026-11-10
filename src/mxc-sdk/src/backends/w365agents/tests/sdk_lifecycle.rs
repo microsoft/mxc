@@ -72,17 +72,26 @@ fn public_rust_sdk_lifecycle_fixture() {
     );
     fixture.reply(204, "");
     dev::deprovision_container_json(&request("deprovision", A).to_string(), options).unwrap();
+    fixture.reply(500, &json!({"sessionId":A}).to_string());
+    let error = dev::provision_container_json(&json, options).unwrap_err();
+    let details = error.details.as_ref().unwrap();
+    assert_eq!(details["sandboxId"], format!("w365:{POOL}:{A}"));
+    assert_eq!(details["code"], "provision_timeout");
+    assert_eq!(details["httpStatus"], 500);
+    assert_eq!(details["possiblySucceeded"], true);
+    fixture.reply(204, "");
+    dev::deprovision_container_json(&request("deprovision", A).to_string(), options).unwrap();
     fixture.reply(200, r#"{"status":"Succeeded"}"#);
     let error = dev::provision_container_json(&provision().to_string(), options).unwrap_err();
     assert_eq!(error.details.as_ref().unwrap()["possiblySucceeded"], true);
     assert!(error.details.as_ref().unwrap().get("sandboxId").is_none());
     assert_eq!(
         fixture.count(),
-        6,
+        8,
         "SDK must not replay checkout or release"
     );
     assert!(!fixture
-        .request(5)
+        .request(7)
         .to_ascii_lowercase()
         .contains("user-type:"));
 }
@@ -119,9 +128,15 @@ fn sdk_fresh_caller_fixture() {
         ),
         ("cleanup", Some((204, String::new())), 5),
         (
+            "http-error",
+            Some((500, json!({"sessionId":A}).to_string())),
+            6,
+        ),
+        ("cleanup", Some((204, String::new())), 7),
+        (
             "unknown",
             Some((200, r#"{"status":"Succeeded"}"#.into())),
-            6,
+            8,
         ),
     ] {
         if let Some((status, body)) = reply {
@@ -177,13 +192,13 @@ fn sdk_fresh_caller_fixture() {
     assert!(checkout.contains("user-type: local"));
     assert!(checkout.contains("initial-fixture-token"));
     assert_eq!(checkout.split_once("\r\n\r\n").unwrap().1, "");
-    for n in [1, 2, 4] {
+    for n in [1, 2, 4, 6] {
         let sent = fixture.request(n);
         assert!(sent.starts_with(&format!("DELETE /api/sessions/{A}?api-version=2.0")));
         assert!(sent.contains("renewed-fixture-token"));
     }
     assert!(!fixture
-        .request(5)
+        .request(7)
         .to_ascii_lowercase()
         .contains("user-type:"));
 }
