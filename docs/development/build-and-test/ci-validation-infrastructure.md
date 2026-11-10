@@ -6,7 +6,8 @@ How MXC runs its backend end-to-end suites across real operating systems, what
 each job covers today, and what to change when you need to add, remove, or
 retire something.
 
-This document describes the GitHub Actions validation matrix only. PR-time
+This document describes the GitHub Actions validation matrix, with Azure build
+coverage noted for W365 below. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
@@ -40,6 +41,12 @@ The Node fixture must use the normal Koffi async configuration. Its native
 worker stack is small, so W365 control-plane TLS runs on a scoped native thread
 with a 2 MiB stack, joined before the SDK call returns. Do not mask regressions
 by increasing Koffi's global stack configuration in the fixture.
+
+Azure's `Rust.Build.Job.yml` explicitly discovers and runs the engine fixture
+on Linux x64 and both fixtures on Windows x64, using an isolated executor target
+directory outside shipping artifacts. `Mac.Build.Job.yml` checks engine fixture
+discovery before its existing package suite runs it on macOS arm64. Azure's
+cross-compiled Windows/Linux arm64 jobs remain build-only.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /

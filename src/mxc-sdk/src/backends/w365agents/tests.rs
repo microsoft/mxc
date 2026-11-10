@@ -220,9 +220,11 @@ impl Fixture {
         env.set("MXC_W365_TEST_PORT", &self.port.to_string());
     }
     fn reply(&self, status: u16, body: &str) {
+        self.reply_with_length(status, body, body.len());
+    }
+    fn reply_with_length(&self, status: u16, body: &str, length: usize) {
         self.replies.lock().unwrap().push_back(Some(format!(
-            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nx-ms-request-id: fixture-request\r\nConnection: close\r\n\r\n{body}",
-            body.len()
+            "HTTP/1.1 {status} Fixture\r\nContent-Length: {length}\r\nx-ms-request-id: fixture-request\r\nConnection: close\r\n\r\n{body}"
         )));
     }
     fn drop_reply(&self) {
@@ -512,6 +514,59 @@ fn lifecycle_contract_and_recovery_fixture() {
         assert!(details.get("sandboxId").is_none());
         assert_eq!(fixture.count(), n + 1);
     }
+    for (status, code) in [(500, "provision_timeout"), (408, "checkout_failed")] {
+        let n = fixture.count();
+        fixture.reply(
+            status,
+            &json!({
+                "sessionId":upper,
+                "computerId":B,
+                "connectivityUrl":"https://example.invalid/?ticket=must-not-persist",
+            })
+            .to_string(),
+        );
+        let error = invoke(&provision(), true).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::BackendError);
+        assert!(!format!("{error:?}").contains("must-not-persist"));
+        let details = error.details.unwrap();
+        assert_eq!(details["code"], code);
+        assert_eq!(details["httpStatus"], status);
+        assert_eq!(details["possiblySucceeded"], true);
+        assert_eq!(details["requestId"], "fixture-request");
+        assert!(uuid::Uuid::parse_str(details["clientRequestId"].as_str().unwrap()).is_ok());
+        assert_eq!(details["poolId"], POOL);
+        assert_eq!(details["sessionId"], upper.to_ascii_lowercase());
+        assert_eq!(
+            details["sandboxId"],
+            format!("w365:{POOL}:{}", upper.to_ascii_lowercase())
+        );
+        assert_eq!(fixture.count(), n + 1, "failed checkout must not replay");
+        fixture.reply(204, "");
+        invoke(&request("deprovision", upper), true).unwrap();
+        assert!(fixture.request(n + 1).starts_with(&format!(
+            "DELETE /api/sessions/{}?api-version=2.0",
+            upper.to_ascii_lowercase()
+        )));
+
+        let valid_body = json!({"sessionId":A}).to_string();
+        for (body, length) in [
+            ("{bad", 4),
+            ("{}", 2),
+            (r#"{"sessionId":"bad"}"#, 19),
+            (valid_body.as_str(), valid_body.len() + 1),
+            (valid_body.as_str(), 1024 * 1024 + 1),
+        ] {
+            let n = fixture.count();
+            fixture.reply_with_length(status, body, length);
+            let details = invoke(&provision(), true).unwrap_err().details.unwrap();
+            assert_eq!(details["code"], code);
+            assert_eq!(details["httpStatus"], status);
+            assert_eq!(details["possiblySucceeded"], true);
+            assert!(details.get("sandboxId").is_none());
+            assert!(details.get("sessionId").is_none());
+            assert_eq!(fixture.count(), n + 1);
+        }
+    }
     for status in [401, 403, 404, 408, 429, 500, 502, 201, 302, 418] {
         let n = fixture.count();
         fixture.reply(status, "ticket-secret-must-not-surface");
@@ -682,4 +737,29 @@ fn lifecycle_fresh_executor_fixture() {
     assert!(fixture
         .request(4)
         .starts_with(&format!("DELETE /api/sessions/{A}?")));
+
+    fixture.reply(500, &json!({"sessionId":B}).to_string());
+    let failed = run(provision(), true);
+    assert!(!failed.status.success());
+    let error: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(error["error"]["details"]["code"], "provision_timeout");
+    assert_eq!(error["error"]["details"]["httpStatus"], 500);
+    assert_eq!(error["error"]["details"]["possiblySucceeded"], true);
+    assert_eq!(
+        error["error"]["details"]["sandboxId"],
+        format!("w365:{POOL}:{B}")
+    );
+    assert_eq!(fixture.count(), 6, "failed checkout must not replay");
+    let mut cleanup = request("deprovision", B);
+    cleanup["sandboxId"] = error["error"]["details"]["sandboxId"].clone();
+    env.set("W365A_CP_TOKEN", "renewed-error-cleanup-token");
+    fixture.reply(204, "");
+    assert!(run(cleanup, true).status.success());
+    assert_eq!(fixture.count(), 7);
+    assert!(fixture
+        .request(6)
+        .starts_with(&format!("DELETE /api/sessions/{B}?")));
+    assert!(fixture
+        .request(6)
+        .contains("Bearer renewed-error-cleanup-token"));
 }

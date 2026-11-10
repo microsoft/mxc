@@ -196,26 +196,8 @@ impl Client {
         })?;
         let status = response.status().as_u16();
         let server_id = safe_request_id(&response);
-        if !(200..300).contains(&status) {
-            let code = match status {
-                401 | 403 => "auth_denied",
-                404 => "pool_not_found",
-                429 => "checkout_throttled",
-                500 => "provision_timeout",
-                _ => "checkout_failed",
-            };
-            return Err(failure(
-                code,
-                "checkout",
-                Some(status),
-                &request_id,
-                server_id.as_deref(),
-                status >= 500 || status == 408 || (200..400).contains(&status),
-                None,
-            ));
-        }
         let mut response = response;
-        let body = response
+        let value = response
             .body_mut()
             .with_config()
             .limit(MAX_RESPONSE)
@@ -230,27 +212,51 @@ impl Client {
                     true,
                     None,
                 )
-            })?;
-        // Do not include any response body or ticket-bearing metadata in diagnostics.
-        let value: Value = serde_json::from_str(&body).map_err(|_| {
-            failure(
-                "unparsable_response",
-                "checkout",
-                Some(status),
-                &request_id,
-                server_id.as_deref(),
-                true,
-                None,
-            )
-        })?;
+            })
+            .and_then(|body| {
+                // Never include response bodies or ticket-bearing metadata in diagnostics.
+                serde_json::from_str::<Value>(&body).map_err(|_| {
+                    failure(
+                        "unparsable_response",
+                        "checkout",
+                        Some(status),
+                        &request_id,
+                        server_id.as_deref(),
+                        true,
+                        None,
+                    )
+                })
+            });
         let session = value
-            .get("sessionId")
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("sessionId"))
             .and_then(Value::as_str)
             .filter(|id| guid(id));
         let identity = session.map(|id| Identity {
             pool_id: pool.clone(),
             session_id: id.to_ascii_lowercase(),
         });
+        if !(200..300).contains(&status) {
+            let code = match status {
+                401 | 403 => "auth_denied",
+                404 => "pool_not_found",
+                429 => "checkout_throttled",
+                500 => "provision_timeout",
+                _ => "checkout_failed",
+            };
+            // Body failures must not replace the HTTP error; a valid ID still permits cleanup.
+            return Err(failure(
+                code,
+                "checkout",
+                Some(status),
+                &request_id,
+                server_id.as_deref(),
+                status >= 500 || status == 408 || (200..400).contains(&status),
+                identity.as_ref(),
+            ));
+        }
+        let value = value?;
         let reject = |code| {
             failure(
                 code,

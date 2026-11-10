@@ -171,8 +171,11 @@ tokens or ticket-bearing metadata.
 
 Rejected successful checkout retains a valid cleanup identity as
 `error.details.sandboxId`, `poolId` and `sessionId`, with
-`possiblySucceeded: true`. No ID is fabricated for an absent or invalid
-session ID. Unparseable, dropped and ambiguous checkout replies report
+`possiblySucceeded: true`. HTTP error replies also retain a valid session ID
+from a parseable response body within the 1 MiB limit, preserving the HTTP
+error code and uncertainty classification even when the body cannot be read
+or parsed. No ID is fabricated for an absent or invalid session ID.
+Unparseable, dropped and ambiguous checkout replies report
 uncertainty and request context. Never automatically repeat that POST.
 HTTP authorization, missing-pool, throttling and server failures have
 operation-specific `details.code` values.
@@ -534,6 +537,9 @@ Do not use the test-support FFI for a live test.
 CI uses a separate target directory so fixture executors cannot replace
 shipping artifacts. Linux builds `lxc` and macOS builds `mxc_darwin` with
 `mxc-sdk/test-support`, then supplies the corresponding executable.
+Azure additionally requires the lifecycle engine fixture on native Windows/Linux
+x64 and macOS arm64 hosts, and the fresh-executor lifecycle fixture on Windows
+x64. Cross-compiled Azure Windows/Linux arm64 jobs do not execute fixtures.
 Only test builds honor `MXC_W365_TEST_CA` and `MXC_W365_TEST_PORT`; they add a
 trusted fixture certificate, never disable certificate or hostname validation.
 Shipping builds ignore these variables. Fixtures use only loopback services,
