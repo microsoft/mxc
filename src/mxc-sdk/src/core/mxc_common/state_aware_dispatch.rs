@@ -240,9 +240,15 @@ pub fn dispatch_state_aware_typed<B: StatefulSandboxBackend>(
 pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBackend, MxcError> {
     let phase = parsed.phase();
     if phase.routes_by_containment() {
-        return parsed.containment().ok_or_else(|| {
+        let backend = parsed.containment().ok_or_else(|| {
             MxcError::malformed_request(format!("{phase} phase requires a containment field"))
-        });
+        })?;
+        if backend == ContainmentBackend::W365Agents {
+            return Err(MxcError::backend_unavailable(
+                "w365_agents has a development request contract but its backend is not implemented",
+            ));
+        }
+        return Ok(backend);
     }
     let sandbox_id = parsed.sandbox_id_required()?;
     let prefix = parse_sandbox_id_prefix(sandbox_id)?;

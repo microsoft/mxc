@@ -11,7 +11,7 @@
 
 use crate::mxc_common::models::{
     ContainmentBackend, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
-    WslcProvisionConfig, WslcProvisionSessionConfig,
+    W365AgentsProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_request::Phase;
@@ -27,6 +27,8 @@ pub enum StateAwareProvision {
     MicroVm(Option<MicroVmProvisionConfig>),
     /// An omitted image remains absent until the WSLC backend chooses a default.
     Wslc(Option<WslcProvisionConfig>),
+    /// Retains wrapper and provision presence until the unavailable backend is resolved.
+    W365Agents(Option<Option<W365AgentsProvisionConfig>>),
 }
 
 impl StateAwareProvision {
@@ -37,6 +39,7 @@ impl StateAwareProvision {
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
             Self::MicroVm(_) => ContainmentBackend::MicroVm,
             Self::Wslc(_) => ContainmentBackend::Wslc,
+            Self::W365Agents(_) => ContainmentBackend::W365Agents,
         }
     }
 }

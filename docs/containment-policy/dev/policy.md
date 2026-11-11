@@ -347,5 +347,9 @@ This contract slice does not provide auxiliary-token settings or implement
 session authentication.
 
 The backend is not implemented: provision returns `backend_unavailable`, even
-with experimental opt-in. Later phases using a `w365:` ID return
+with experimental opt-in or validation-only execution. Valid provision requests
+parse as container lifecycle operations; passing them to a create-and-run SDK
+API returns `malformed_request` before checking backend availability. Executor
+provision reports the availability error with exit code `-1`, not a
+configuration-rejection diagnostic. Later phases using a `w365:` ID return
 `unsupported_containment`.

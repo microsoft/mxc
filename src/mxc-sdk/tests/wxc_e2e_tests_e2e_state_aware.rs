@@ -48,6 +48,42 @@ fn assert_error_envelope_on_stdout(result: &CommandResult) -> String {
 }
 
 #[test]
+fn w365_agents_unavailability_preserves_exit_code_and_diagnostics() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let request = json!({
+        "version": "1.1.0-alpha",
+        "phase": "provision",
+        "containment": "w365_agents"
+    });
+    for experimental in [false, true] {
+        for dry_run in [false, true] {
+            let log_path = directory
+                .path()
+                .join(format!("{experimental}-{dry_run}.log"));
+            let mut args = vec!["--log-file", log_path.to_str().unwrap()];
+            if experimental {
+                args.push("--experimental");
+            }
+            if dry_run {
+                args.push("--dry-run");
+            }
+            let result = run_wxc_state_aware("W365 unavailable", &request, &args);
+            assert_eq!(
+                assert_error_envelope_on_stdout(&result),
+                "backend_unavailable"
+            );
+            assert_eq!(result.code, Some(-1), "{result:?}");
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            assert!(!log.contains("mxc.ConfigRejected"), "{log}");
+        }
+    }
+}
+
+#[test]
 fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
     if !cached_has_wxc_exe() {
         return;

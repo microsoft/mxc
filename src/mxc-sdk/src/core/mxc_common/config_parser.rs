@@ -1338,6 +1338,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Seatbelt) => "seatbelt",
         Some(wire::Containment::IsolationSession) => "isolation_session",
         Some(wire::Containment::Bubblewrap) => "bubblewrap",
+        Some(wire::Containment::W365Agents) => "w365_agents",
     }
 }
 
@@ -1735,6 +1736,7 @@ fn normalize_state_aware(
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
                     StateAwareProvision::MicroVm(_) => wire::Containment::Microvm,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
+                    StateAwareProvision::W365Agents(_) => wire::Containment::W365Agents,
                 }),
                 StateAwareOperation::Start { .. }
                 | StateAwareOperation::Exec { .. }
@@ -2027,6 +2029,7 @@ mod tests {
         WindowsSandbox,
         MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
+        W365Agents(Option<Option<crate::mxc_common::models::W365AgentsProvisionConfig>>),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -2055,6 +2058,9 @@ mod tests {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())
                                 }))
+                            }
+                            StateAwareProvision::W365Agents(config) => {
+                                ProvisionSnapshot::W365Agents(config.clone())
                             }
                         }),
                         _ => None,
