@@ -153,6 +153,30 @@ $cases = @(
         }
     }; Fails = $true }
 )
+$cases += foreach ($field in @('mxc.session_id', '__TlgCV__')) {
+    foreach ($previousLifecycle in 1, 2) {
+        @{
+            Name = "third lifecycle reuses $field from lifecycle $previousLifecycle"
+            Field = $field
+            PreviousLifecycle = $previousLifecycle
+            Fails = $true
+            ErrorPattern = 'new lifecycle reused attribution'
+            Mutate = {
+                $thirdProcessIds = @($invocations | Where-Object Lifecycle -EQ 3 | ForEach-Object ProcessId)
+                foreach ($event in $trace.SelectNodes("//*[local-name()='Event']")) {
+                    if ([int]$event.System.Execution.ProcessID -notin $thirdProcessIds) { continue }
+                    $field = $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='$($case.Field)']")
+                    if ($null -eq $field) { continue }
+                    $field.InnerText = if ($case.Field -ceq 'mxc.session_id') {
+                        "00000000-0000-4000-8000-00000000000$($case.PreviousLifecycle)"
+                    } else {
+                        "lifecycle$($case.PreviousLifecycle).$($event.System.Execution.ProcessID).0"
+                    }
+                }
+            }
+        }
+    }
+}
 $cases += foreach ($lifecycle in 1, 2, 3) {
     foreach ($excludedTask in @(
         'MXC.VerboseDenials', 'MXC.ProcessTimedOut', 'MXC.ProcessKillFailed',

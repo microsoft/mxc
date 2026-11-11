@@ -81,11 +81,9 @@ pub(super) fn build_request(
     };
     let contract = ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?));
     let mut logger = Logger::new(Mode::Buffer);
-    let mut inner =
-        load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
-            MxcError::malformed_request(format!("failed to build request: {error}"))
-        })?;
-    inner.source_contract = None;
+    let inner = load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
+        MxcError::malformed_request(format!("failed to build request: {error}"))
+    })?;
     Ok(PreparedContainerRequest {
         inner,
         #[cfg(test)]

@@ -42,7 +42,7 @@
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
-//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
+//! | `source_contract` | Contract attribution used only for diagnostics and telemetry. |
 //!
 //! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
 //! `windowsSandbox` root keys.

@@ -169,8 +169,8 @@ function Assert-TelemetryExecutionTrace {
         }
     }
     if ($RequireLifecycles -and
-        ($lifecycleSessions['1'] -eq $lifecycleSessions['2'] -or
-         $lifecycleRoots['1'] -ceq $lifecycleRoots['2'])) {
+        (@($lifecycleSessions.Values | Sort-Object -Unique).Count -ne $lifecycleSessions.Count -or
+         @($lifecycleRoots.Values | Sort-Object -Unique -CaseSensitive).Count -ne $lifecycleRoots.Count)) {
         throw 'The new lifecycle reused attribution from the cleaned-up lifecycle.'
     }
 }

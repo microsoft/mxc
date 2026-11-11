@@ -772,11 +772,9 @@ impl PreparedContainerRequest {
         self
     }
 
-    /// Enable or disable telemetry for this invocation.
+    /// Preserve the invocation's telemetry compatibility preference.
     ///
-    /// Enabling this per-request switch is necessary but not sufficient:
-    /// telemetry still requires persisted user consent and an administrative
-    /// policy that permits collection. It is independent of experimental mode.
+    /// Required collection ignores this value. It is independent of experimental mode.
     pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
@@ -915,6 +913,10 @@ mod tests {
             });
             let prepared = super::prepare_creation_request(&request, telemetry).unwrap();
             assert!(!prepared.inner.experimental_enabled);
+            assert_eq!(
+                prepared.inner.source_contract,
+                Some(crate::mxc_contract::ContractVersion::V1_0_0)
+            );
             assert_eq!(
                 prepared.inner.telemetry.as_ref().and_then(|t| t.enabled),
                 enabled

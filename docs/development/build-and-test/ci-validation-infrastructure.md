@@ -338,7 +338,8 @@ and deprovision three times, once per `0.9.0-alpha`, `1.0.0`, and
 `1.1.0-alpha`, with request telemetry disabled and each phase in a separate executor process. The local
 ETW trace must contain one matching ExecutionStart/ExecutionEnd pair per
 recorded PID, correct phase/backend/mode attribution, one session ID and CV
-root throughout each lifecycle, and fresh attribution after cleanup. Successful
+root throughout each lifecycle, and unique session IDs and roots across all
+three lifecycles after cleanup. Successful
 deprovision must remove the isolated correlation records. Missing privileges,
 unsupported hosts, incomplete scenarios and missing events fail the job.
 

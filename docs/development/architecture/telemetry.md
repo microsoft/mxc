@@ -75,7 +75,7 @@ builds use keyword `0x1` and privacy tag `0` for both categories.
 The selection travels with request-scoped session context, including streaming
 handles and worker threads. The shared writer selects the keyword and tag
 together. Event names, field order and types are unchanged for every contract.
-Typed SDK lifecycle normalization preserves its selected compatibility contract
+Typed SDK creation and lifecycle normalization preserve their selected compatibility contract
 for this decision, without retaining caller JSON or changing operation routing.
 Requests without source-contract attribution retain the
 full inventory, request opt-in, MXC consent and administrative policy gates.
