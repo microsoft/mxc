@@ -14,6 +14,7 @@
 //!   remains open.
 
 use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,7 +65,11 @@ struct PipeRelayParams {
     reader: InterruptiblePipeReader,
     h_write: OwnedHandle,
     progress_bytes: Arc<AtomicU64>,
+    stdin_closer: Option<StdinCloser>,
 }
+
+/// Called once after stdin EOF and release of the relay's writer.
+pub(super) type StdinCloser = Box<dyn FnOnce() + Send>;
 
 pub(super) struct PipeRelay {
     thread: OwnedHandle,
@@ -108,9 +113,10 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
     let mut params = unsafe { Box::from_raw(param as *mut PipeRelayParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
 
-    loop {
+    let source_ended = loop {
         let bytes_read = match params.reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break !params.reader.was_cancelled(),
+            Err(_) => break false,
             Ok(n) => n,
         };
 
@@ -124,13 +130,23 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
         .is_err()
             || bytes_written as usize != bytes_read
         {
-            break;
+            break false;
         }
         params
             .progress_bytes
             .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
         let _ = FlushFileBuffers(params.h_write.get());
+    };
+
+    let stdin_closer = params.stdin_closer.take();
+    // Release the relay's writer before asking the platform to deliver EOF.
+    drop(params);
+    if source_ended {
+        if let Some(stdin_closer) = stdin_closer {
+            // A callback must not unwind through the native thread entry point.
+            let _ = catch_unwind(AssertUnwindSafe(stdin_closer));
+        }
     }
 
     0
@@ -147,6 +163,18 @@ pub(super) unsafe fn create_relay_thread(
     h_read: HANDLE,
     h_write: HANDLE,
 ) -> Result<PipeRelay, WxcError> {
+    unsafe { create_relay_thread_with_stdin_closer(h_read, h_write, None) }
+}
+
+/// Create a pipe relay with optional platform stdin closure at uncancelled EOF.
+///
+/// # Safety
+/// Both handles must be valid while they are duplicated during setup.
+pub(super) unsafe fn create_relay_thread_with_stdin_closer(
+    h_read: HANDLE,
+    h_write: HANDLE,
+    stdin_closer: Option<StdinCloser>,
+) -> Result<PipeRelay, WxcError> {
     let reader = InterruptiblePipeReader::new(duplicate_handle(h_read)?);
     let canceller = reader.canceller();
     let progress_bytes = Arc::new(AtomicU64::new(0));
@@ -154,6 +182,7 @@ pub(super) unsafe fn create_relay_thread(
         reader,
         h_write: duplicate_handle(h_write)?,
         progress_bytes: Arc::clone(&progress_bytes),
+        stdin_closer,
     }));
     match unsafe {
         CreateThread(
@@ -374,8 +403,9 @@ mod tests {
     use super::*;
     use crate::mxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
     use crate::mxc_common::string_util;
+    use std::sync::atomic::AtomicUsize;
     use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, WAIT_TIMEOUT};
-    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
     use windows::Win32::System::Threading::{
         CreateEventW, CreateProcessW, SetEvent, WaitForSingleObject, CREATE_NO_WINDOW,
         PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
@@ -486,6 +516,111 @@ mod tests {
         assert_eq!(output, "Hello from relay test!");
     }
 
+    #[test]
+    fn stdin_eof_closes_the_writer_before_calling_the_closer() {
+        for payload in [b"".as_slice(), b"finite input\r\n".as_slice()] {
+            let (source_read, source_write) = create_test_pipes();
+            let (mut dest_read, dest_write) = create_test_pipes();
+            let mut probe = duplicate_handle(dest_read.get()).unwrap();
+            let probe = SendOwnedHandle::take(&mut probe);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let callback_calls = Arc::clone(&calls);
+            let closer: StdinCloser = Box::new(move || {
+                let error = unsafe { PeekNamedPipe(probe.get(), None, 0, None, None, None) }
+                    .expect_err("the relay's writer must be closed before the callback");
+                assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+            });
+            let relay = unsafe {
+                create_relay_thread_with_stdin_closer(
+                    source_read.get(),
+                    dest_write.get(),
+                    Some(closer),
+                )
+            }
+            .unwrap();
+            drop(dest_write);
+            let dest_send = SendOwnedHandle::take(&mut dest_read);
+            let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+            let mut written = 0;
+            unsafe { WriteFile(source_write.get(), Some(payload), Some(&mut written), None) }
+                .unwrap();
+            assert_eq!(written as usize, payload.len());
+            drop(source_write);
+
+            assert_eq!(
+                unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+                WAIT_OBJECT_0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(reader.join().unwrap().as_bytes(), payload);
+        }
+    }
+
+    #[test]
+    fn stdin_closer_is_not_called_on_copy_errors() {
+        for fail_read in [true, false] {
+            let (source_read, source_write) = create_test_pipes();
+            let (dest_read, dest_write) = create_test_pipes();
+            let unreadable = create_test_stop_event();
+            drop(dest_read);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let callback_calls = Arc::clone(&calls);
+            let closer: StdinCloser = Box::new(move || {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+            });
+            let relay = unsafe {
+                create_relay_thread_with_stdin_closer(
+                    if fail_read {
+                        unreadable.get()
+                    } else {
+                        source_read.get()
+                    },
+                    dest_write.get(),
+                    Some(closer),
+                )
+            }
+            .unwrap();
+            if !fail_read {
+                let mut written = 0;
+                unsafe { WriteFile(source_write.get(), Some(b"input"), Some(&mut written), None) }
+                    .unwrap();
+            }
+            assert_eq!(
+                unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+                WAIT_OBJECT_0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn stdin_closer_panic_does_not_abort_the_relay() {
+        let (source_read, source_write) = create_test_pipes();
+        let (dest_read, dest_write) = create_test_pipes();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let closer: StdinCloser = Box::new(move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected stdin relay callback panic");
+        });
+        let relay = unsafe {
+            create_relay_thread_with_stdin_closer(source_read.get(), dest_write.get(), Some(closer))
+        }
+        .unwrap();
+        drop(dest_write);
+        drop(source_write);
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+            WAIT_OBJECT_0
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let error = unsafe { PeekNamedPipe(dest_read.get(), None, 0, None, None, None) }
+            .expect_err("the callback must not keep the writer open");
+        assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
+    }
+
     /// The write end stays open, so the relay's `ReadFile` never reaches EOF.
     /// Cancelling it must still end the thread.
     ///
@@ -524,9 +659,16 @@ mod tests {
         let (source_read, _source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let (relay_thread, canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() }
-                .into_thread_and_canceller();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let closer: StdinCloser = Box::new(move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        let (relay_thread, canceller) = unsafe {
+            create_relay_thread_with_stdin_closer(source_read.get(), dest_write.get(), Some(closer))
+        }
+        .unwrap()
+        .into_thread_and_canceller();
 
         // Mirror `process.Close()`: the caller drops its original agent-stdin
         // write handle while the relay's duplicate is still live.
@@ -548,6 +690,7 @@ mod tests {
 
         let dest_send = SendOwnedHandle::take(&mut dest_read);
         assert_eq!(read_from_pipe(dest_send.get()), "");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// Closing the source handle the relay was built from does not disturb it:
