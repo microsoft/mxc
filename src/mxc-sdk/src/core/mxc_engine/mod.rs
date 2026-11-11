@@ -23,6 +23,8 @@
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
+//! - [`hold_container`] — a container held for the life of the executor
+//!   process, which runs exec requests side by side.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
 //! - [`available_backends`] / [`AvailableBackend`] — read-only host
 //!   backend-availability probe (with effective isolation tier).
@@ -33,6 +35,7 @@ mod backend_registry;
 mod dispatch;
 mod error;
 mod experimental;
+mod held_container;
 mod platform;
 mod probe;
 #[cfg(target_os = "windows")]
@@ -44,6 +47,7 @@ mod state_aware;
 mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
+pub use held_container::hold_container;
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};

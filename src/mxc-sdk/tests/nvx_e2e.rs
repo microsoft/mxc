@@ -949,21 +949,13 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_console_interrupt() {
-        use mxc_sdk::mxc_common::process_util::OwnedHandle;
         use std::os::windows::process::CommandExt;
         use std::time::Duration;
-        use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Console::{
             GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_C_EVENT,
         };
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        };
-        use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, WaitForSingleObject, CREATE_NEW_CONSOLE,
-            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-        };
+        use windows::Win32::System::Threading::{WaitForSingleObject, CREATE_NEW_CONSOLE};
 
         const CHILD_ENV: &str = "MXC_NVX_CONSOLE_CHILD";
         if std::env::var_os(CHILD_ENV).is_none() {
@@ -999,73 +991,6 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         unsafe { SetConsoleCtrlHandler(Some(helper_handler), true) }
             .expect("helper control handler");
 
-        struct ExecutorGuard {
-            child: std::process::Child,
-            vmm: Option<OwnedHandle>,
-        }
-        impl Drop for ExecutorGuard {
-            fn drop(&mut self) {
-                match self.child.try_wait() {
-                    Ok(Some(_)) => {}
-                    _ => {
-                        if let Err(error) = self.child.kill() {
-                            eprintln!("failed-test executor cleanup failed: {error}");
-                        }
-                        if let Err(error) = self.child.wait() {
-                            eprintln!("failed-test executor wait failed: {error}");
-                        }
-                    }
-                }
-                if let Some(vmm) = &self.vmm {
-                    if unsafe { WaitForSingleObject(vmm.get(), 0) } == WAIT_TIMEOUT {
-                        if let Err(error) = unsafe { TerminateProcess(vmm.get(), 1) } {
-                            eprintln!("failed-test owned VMM cleanup failed: {error}");
-                        } else if unsafe { WaitForSingleObject(vmm.get(), 30_000) } != WAIT_OBJECT_0
-                        {
-                            eprintln!("failed-test owned VMM cleanup did not complete");
-                        }
-                    }
-                }
-            }
-        }
-
-        fn owned_vmm(pid: u32) -> Option<OwnedHandle> {
-            let snapshot = OwnedHandle::new(
-                unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
-                    .expect("process snapshot"),
-            );
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-            let mut next = unsafe { Process32FirstW(snapshot.get(), &mut entry) };
-            loop {
-                match next {
-                    Ok(()) => {}
-                    Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => return None,
-                    Err(error) => panic!("process enumeration failed: {error}"),
-                }
-                let end = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-                if entry.th32ParentProcessID == pid && name.eq_ignore_ascii_case("openvmm.exe") {
-                    let handle = unsafe {
-                        OpenProcess(
-                            PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
-                            false,
-                            entry.th32ProcessID,
-                        )
-                    }
-                    .expect("owned OpenVMM handle");
-                    return Some(OwnedHandle::new(handle));
-                }
-                next = unsafe { Process32NextW(snapshot.get(), &mut entry) };
-            }
-        }
-
         let directory = tempfile::tempdir().expect("interruption test directory");
         let state = directory.path().join("state");
         std::fs::create_dir(&state).expect("isolated state directory");
@@ -1100,7 +1025,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 std::fs::read_to_string(&stderr_path).expect("executor stderr")
             );
             if guard.vmm.is_none() {
-                guard.vmm = owned_vmm(guard.child.id());
+                guard.vmm = owned_vmms(guard.child.id()).into_iter().next();
             }
             let executing = match std::fs::read_to_string(&log_path) {
                 Ok(log) => log.contains("NVX execution started"),
@@ -1167,6 +1092,254 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             .contains("mxc.SandboxTornDown"));
         unsafe { SetConsoleCtrlHandler(Some(helper_handler), false) }
             .expect("remove helper handler");
+    }
+
+    /// Reads a held container's events and finds the ones a test waits for.
+    struct HeldEvents {
+        events: std::sync::mpsc::Receiver<Value>,
+        seen: Vec<Value>,
+    }
+
+    impl HeldEvents {
+        fn wait_for(&mut self, found: impl Fn(&Value) -> bool) -> Value {
+            let deadline = Instant::now() + std::time::Duration::from_secs(180);
+            loop {
+                if let Some(event) = self.seen.iter().find(|event| found(event)) {
+                    return event.clone();
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match self.events.recv_timeout(remaining) {
+                    Ok(event) => self.seen.push(event),
+                    Err(_) => panic!("the event never arrived; events: {:?}", self.seen),
+                }
+            }
+        }
+
+        fn ended(&mut self, id: &str) -> Value {
+            self.wait_for(|event| {
+                event["id"] == id
+                    && matches!(event["type"].as_str(), Some("exit" | "timeout" | "error"))
+            })
+        }
+
+        fn output(&self, id: &str, stream: &str) -> String {
+            use base64::Engine as _;
+            let bytes: Vec<u8> = self
+                .seen
+                .iter()
+                .filter(|event| event["id"] == id && event["type"] == stream)
+                .flat_map(|event| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(event["data"].as_str().expect("output data"))
+                        .expect("base64 output")
+                })
+                .collect();
+            String::from_utf8(bytes).expect("UTF-8 output")
+        }
+    }
+
+    /// Holds a container with `--hold`, runs execs side by side in it, cancels one, and closes
+    /// stdin, then checks that the executor stopped the container's VM and exited with 0.
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_executor_holds_a_container() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::time::Duration;
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        let directory = tempfile::tempdir().expect("held container directory");
+        let request_path = directory.path().join("provision.json");
+        let stderr_path = directory.path().join("stderr");
+        let mut provision = process_only_request("unused");
+        provision.as_object_mut().unwrap().remove("process");
+        std::fs::write(&request_path, provision.to_string()).expect("provision request");
+        let mut guard = ExecutorGuard {
+            child: Command::new(executor())
+                .args(["--experimental", "--operation", "provision", "--hold"])
+                .arg(&request_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(std::fs::File::create(&stderr_path).expect("stderr file"))
+                .spawn()
+                .expect("held-container executor"),
+            vmm: None,
+        };
+        let stderr = || std::fs::read_to_string(&stderr_path).expect("executor stderr");
+        let mut requests = guard.child.stdin.take().expect("executor stdin");
+        let stdout = guard.child.stdout.take().expect("executor stdout");
+        let (sender, events) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            for line in BufReader::new(stdout).lines() {
+                let line = line.expect("event line");
+                let _ = sender.send(serde_json::from_str::<Value>(&line).expect("event JSON"));
+                lines.push(line);
+            }
+            lines.join("\n")
+        });
+        let mut held = HeldEvents {
+            events,
+            seen: Vec::new(),
+        };
+        let mut send = move |request: Value| {
+            writeln!(requests, "{request}").expect("held-container request");
+            requests.flush().expect("flushed request");
+        };
+        let exec = |id: &str, command: &str| {
+            json!({
+                "type": "exec",
+                "id": id,
+                "request": {
+                    "version": "1.1.0-alpha",
+                    "process": { "commandLine": command, "timeout": 0 }
+                }
+            })
+        };
+
+        let ready = held.wait_for(|event| event["type"] == "ready" || event["type"] == "error");
+        assert_eq!(ready["type"], "ready", "{ready}\n{}", stderr());
+        guard.vmm = owned_vmms(guard.child.id()).into_iter().next();
+        assert!(guard.vmm.is_some(), "the held container has no VM");
+
+        // The second exec runs while the first still runs, and leaves a file for later ones.
+        send(exec("long", "sleep 600"));
+        send(exec("write", "printf held > /tmp/held; printf written"));
+        assert_eq!(held.ended("write")["exitCode"], 0);
+        assert_eq!(held.output("write", "stdout"), "written");
+        send(exec("read", "cat /tmp/held; printf failed >&2; exit 3"));
+        assert_eq!(held.ended("read")["exitCode"], 3);
+        assert_eq!(held.output("read", "stdout"), "held");
+        assert_eq!(held.output("read", "stderr"), "failed");
+
+        // Cancelling an exec ends that exec only.
+        let cancelled = Instant::now();
+        send(json!({ "type": "cancel", "id": "long" }));
+        assert_eq!(held.ended("long")["exitCode"], 137);
+        assert!(
+            cancelled.elapsed() < Duration::from_secs(30),
+            "cancellation took {:?}",
+            cancelled.elapsed()
+        );
+        send(exec("after", "cat /tmp/held"));
+        assert_eq!(held.ended("after")["exitCode"], 0);
+        assert_eq!(held.output("after", "stdout"), "held");
+
+        // Closing stdin cancels what still runs, then stops and deprovisions the container.
+        send(exec("orphan", "sleep 600"));
+        drop(send);
+        let closed = Instant::now();
+        let exit = loop {
+            if let Some(exit) = guard.child.try_wait().expect("held executor status") {
+                break exit;
+            }
+            assert!(
+                closed.elapsed() < Duration::from_secs(120),
+                "held-container teardown hung"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(exit.code(), Some(0), "{}", stderr());
+        assert_eq!(held.ended("orphan")["exitCode"], 137);
+        assert_eq!(
+            unsafe { WaitForSingleObject(guard.vmm.as_ref().expect("held VM").get(), 0) },
+            WAIT_OBJECT_0,
+            "the held container's OpenVMM is still running",
+        );
+        for vmm in owned_vmms(guard.child.id()) {
+            assert_eq!(
+                unsafe { WaitForSingleObject(vmm.get(), 0) },
+                WAIT_OBJECT_0,
+                "an OpenVMM that the executor started is still running",
+            );
+        }
+        // The container ID never leaves the executor.
+        let events = reader.join().expect("event reader");
+        assert!(!events.contains("microvm:"), "{events}");
+        assert!(!stderr().contains("microvm:"), "{}", stderr());
+        println!("VM_EXECUTED executor held container side-by-side execs/state/cancel/teardown");
+    }
+
+    /// Kills an executor, and the VM it started, that a failed test left running.
+    struct ExecutorGuard {
+        child: std::process::Child,
+        vmm: Option<mxc_sdk::mxc_common::process_util::OwnedHandle>,
+    }
+    impl Drop for ExecutorGuard {
+        fn drop(&mut self) {
+            use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+            match self.child.try_wait() {
+                Ok(Some(_)) => {}
+                _ => {
+                    if let Err(error) = self.child.kill() {
+                        eprintln!("failed-test executor cleanup failed: {error}");
+                    }
+                    if let Err(error) = self.child.wait() {
+                        eprintln!("failed-test executor wait failed: {error}");
+                    }
+                }
+            }
+            if let Some(vmm) = &self.vmm {
+                if unsafe { WaitForSingleObject(vmm.get(), 0) } == WAIT_TIMEOUT {
+                    if let Err(error) = unsafe { TerminateProcess(vmm.get(), 1) } {
+                        eprintln!("failed-test owned VMM cleanup failed: {error}");
+                    } else if unsafe { WaitForSingleObject(vmm.get(), 30_000) } != WAIT_OBJECT_0 {
+                        eprintln!("failed-test owned VMM cleanup did not complete");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The OpenVMM processes that process `pid` started.
+    fn owned_vmms(pid: u32) -> Vec<mxc_sdk::mxc_common::process_util::OwnedHandle> {
+        use mxc_sdk::mxc_common::process_util::OwnedHandle;
+        use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        };
+
+        let snapshot = OwnedHandle::new(
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.expect("process snapshot"),
+        );
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut vmms = Vec::new();
+        let mut next = unsafe { Process32FirstW(snapshot.get(), &mut entry) };
+        loop {
+            match next {
+                Ok(()) => {}
+                Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => return vmms,
+                Err(error) => panic!("process enumeration failed: {error}"),
+            }
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            if entry.th32ParentProcessID == pid && name.eq_ignore_ascii_case("openvmm.exe") {
+                // A VM can exit between the snapshot and the open.
+                if let Ok(handle) = unsafe {
+                    OpenProcess(
+                        PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                        false,
+                        entry.th32ProcessID,
+                    )
+                } {
+                    vmms.push(OwnedHandle::new(handle));
+                }
+            }
+            next = unsafe { Process32NextW(snapshot.get(), &mut entry) };
+        }
     }
 
     #[test]

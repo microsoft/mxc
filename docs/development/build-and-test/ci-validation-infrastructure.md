@@ -285,7 +285,10 @@ check that traffic through a proxy works while direct connections are blocked,
 and that interrupting startup or execution removes the VM and leaves the agent
 state directory usable. Another scenario checks that concurrent first requests
 for an unregistered image all succeed, and that later concurrent requests boot
-it while its registry is unreachable.
+it while its registry is unreachable. A held-container scenario runs execs side
+by side in a container that `wxc-exec --operation provision --hold` keeps,
+cancels one, and closes stdin, then checks that the container's VM ended and
+that its ID never left the executor.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

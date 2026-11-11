@@ -137,7 +137,7 @@ does not define the limits of this integration.
 | Execution | Create-and-run development JSON requests with captured output or live stdout and stderr, plus persistent container lifecycle operations. |
 | Rust SDK API | `v1::dev::run_json` and `v1::dev::spawn_json` support MicroVM JSON requests. The `v1::dev` JSON lifecycle functions support provision, start, captured or live exec, stop, and deprovision. Typed V1 operations do not expose MicroVM selection. |
 | C ABI, Node, and .NET | Existing JSON entry points support MicroVM captured execution, streaming, and lifecycle operations with experimental authorization. Typed V1 request APIs do not expose MicroVM selection. |
-| Executor | MicroVM lifecycle requests through `--operation`, including `--dry-run`, use the shared engine and require experimental authorization. |
+| Executor | MicroVM lifecycle requests through `--operation`, including `--dry-run`, use the shared engine and require experimental authorization. `--operation provision --hold` keeps a container for the life of one executor process and runs its execs side by side. |
 | Streaming and PTY | Live stdout and stderr are supported. Writable stdin and PTY operations are rejected before workload launch. |
 | Container lifecycle operations | Supported through JSON entry points and the executor. Network, proxy, filesystem, image, and memory policy are fixed at provision. |
 | Workload image | Required caller-selected registry reference in `microvm.image`. |
@@ -253,6 +253,25 @@ Closing the console or forcibly terminating the process does not provide this
 cooperative-cleanup guarantee. Embedding the SDK does not install a
 process-wide console handler.
 
+### Concurrent execs and held containers
+
+A MicroVM serves one host session at a time. One process can run up to 16
+execs side by side over its session, but an `exec` from another process waits
+until the process holding the session releases it, which the executor does
+when it exits. Separate `wxc-exec --operation exec` calls on one container
+therefore run one at a time.
+
+To run execs side by side from the executor, hold the container in one
+process with `wxc-exec --experimental --operation provision --hold`. It
+provisions and starts the container, reads exec and cancel requests from
+stdin as JSON lines, streams each exec's output and outcome to stdout, and
+stops and deprovisions the container when stdin closes. Cancelling one exec
+leaves the container and its other execs running. The container ID stays in
+the executor. The [lifecycle transport](../../development/architecture/container-lifecycle.md#held-containers)
+describes the requests and events. Each exec runs as its own process tree in
+the guest: files persist between execs, but a process an exec started in the
+background ends with that exec.
+
 ### Agent state directory
 
 The signed agent keeps its sandbox records, VM control data, diagnostics, and
@@ -297,7 +316,11 @@ The SDK JSON scenario also covers live output larger than pipe capacity,
 container provision/start, live and captured exec, reuse, stop and deprovision.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and that a later
-request succeeds with the same agent state directory. Another scenario checks
+request succeeds with the same agent state directory. A held-container scenario
+runs execs side by side in a container held with `--hold`, checks that files
+persist between them, cancels one while the container keeps running, and closes
+stdin, then checks that the executor stopped the container's VM and never
+reported its ID. Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
 later concurrent requests boot it while its registry is unreachable.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.

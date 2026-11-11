@@ -19,7 +19,6 @@ use mxc_sdk::mxc_common::error::WxcError;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode};
-#[cfg(target_os = "windows")]
 use mxc_sdk::mxc_common::script_runner::RunCancellation;
 use mxc_sdk::mxc_common::script_runner::{
     emit_mxc_error_exit, emit_warning_envelopes, handle_dry_run_exit, ScriptRunner,
@@ -88,6 +87,18 @@ struct Cli {
         conflicts_with = "container_id"
     )]
     session_id: Option<String>,
+
+    /// Hold the container for the life of this process. With
+    /// `--operation provision`, start the container, run the exec requests
+    /// read from stdin as JSON lines side by side, write their output and
+    /// outcomes to stdout as JSON lines, and stop and deprovision the
+    /// container when stdin closes. The container ID stays in this process.
+    #[arg(
+        long,
+        requires = "operation",
+        conflicts_with_all = ["dry_run", "container_id", "session_id", "command"]
+    )]
+    hold: bool,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -710,6 +721,52 @@ fn run_state_aware_main(
     }
 }
 
+/// Holds a container on stdin and stdout until stdin closes (see
+/// [`mxc_sdk::mxc_engine::hold_container`]), then exits with 0, with 130 after
+/// Ctrl-C, or with the status of the failure that ended the container, which
+/// the last line of stdout reports.
+fn run_held_container_main(
+    operation: CliOperation,
+    config_json: &str,
+    experimental: bool,
+    logger: &mut Logger,
+) -> ! {
+    if operation != CliOperation::Provision {
+        let error = MxcError::malformed_request("--hold requires --operation provision");
+        println!(
+            "{}",
+            serde_json::json!({ "type": "error", "error": error.to_envelope() })
+        );
+        process::exit(error.code.exit_code());
+    }
+    let cancellation = RunCancellation::default();
+    #[cfg(target_os = "windows")]
+    let console_run = ConsoleRunGuard::new(Some(cancellation.clone()));
+    let diagnostic_sink = logger.install_thread_diagnostic_sink();
+    let result = mxc_sdk::mxc_engine::hold_container(
+        config_json,
+        experimental,
+        logger,
+        std::io::stdin(),
+        std::io::stdout(),
+        &cancellation,
+    );
+    drop(diagnostic_sink);
+    #[cfg(target_os = "windows")]
+    let cancelled = console_run.finish();
+    #[cfg(not(target_os = "windows"))]
+    let cancelled = cancellation.was_cancelled();
+    let buffered = logger.get_buffer();
+    if !buffered.is_empty() {
+        eprint!("{buffered}");
+    }
+    match result {
+        Err(error) => process::exit(error.code.exit_code()),
+        Ok(()) if cancelled => process::exit(130),
+        Ok(()) => process::exit(0),
+    }
+}
+
 /// The terminal action [`run_state_aware_main`] takes for a dispatch outcome,
 /// factored out of that `-> !` entry point so the outcome→exit mapping is
 /// unit-testable without spawning a process or calling [`process::exit`].
@@ -1185,6 +1242,9 @@ fn main() {
         }
     };
     if let Some(operation) = cli.operation {
+        if cli.hold {
+            run_held_container_main(operation, &config_json, cli.experimental, &mut logger)
+        }
         let phase = operation.into();
         let target_id = cli
             .container_id
@@ -1814,6 +1874,55 @@ mod tests {
                 error.kind(),
                 clap::error::ErrorKind::ArgumentConflict,
                 "{utility_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_hold_requires_an_operation_and_rejects_one_off_options() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "provision",
+            "--hold",
+        ]);
+        assert!(cli.hold);
+        assert!(!parse_cli(&["wxc-exec", "policy.json", "--operation", "provision"]).hold);
+
+        let error = match Cli::try_parse_from(["wxc-exec", "policy.json", "--hold"]) {
+            Err(error) => error,
+            Ok(_) => panic!("--hold must require --operation"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        for extra in [
+            &["--dry-run"][..],
+            &["--container-id", "microvm:0123456789abcdef0123456789abcdef"],
+            &["--session-id", "wslcsess:0123456789abcdef0123456789abcdef"],
+            &["--", "echo", "hello"],
+        ] {
+            let argv = [
+                &[
+                    "wxc-exec",
+                    "policy.json",
+                    "--operation",
+                    "provision",
+                    "--hold",
+                ][..],
+                extra,
+            ]
+            .concat();
+            let error = match Cli::try_parse_from(&argv) {
+                Err(error) => error,
+                Ok(_) => panic!("{argv:?} must be rejected"),
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{argv:?}"
             );
         }
     }
