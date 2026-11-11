@@ -85,21 +85,7 @@ print(f"CAPABILITIES_DROPPED_{mode}")
 '''
 
 failed = []
-interfaces = json.loads(subprocess.check_output(
-    ["ip", "-j", "-4", "address", "show", "up", "scope", "global"], text=True,
-))
-host_address = next((
-    address["local"]
-    for interface in interfaces
-    if "LOOPBACK" not in interface.get("flags", [])
-    for address in interface.get("addr_info", [])
-    if address.get("family") == "inet"
-    and ipaddress.ip_address(address["local"]) not in ipaddress.ip_network("10.0.2.0/24")
-), None)
-if host_address is None:
-    print("SKIPPED: a non-loopback host IPv4 address outside slirp's subnet is required.")
-    sys.exit(77)
-
+skipped = []
 with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory, \
         socket.socket() as proxy_listener, socket.socket() as firewall_listener:
     root = Path(directory)
@@ -110,15 +96,33 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
     proxy_listener.listen(8)
     proxy_port = proxy_listener.getsockname()[1]
 
-    # Firewall mode denies the slirp host-loopback gateway, even in an allowlisted CIDR.
-    firewall_listener.bind((host_address, 0))
-    firewall_listener.listen(8)
-    firewall_port = firewall_listener.getsockname()[1]
-    with socket.create_connection((host_address, firewall_port), timeout=5):
-        pass
     for mode in ("isolated", "firewall", "proxy"):
-        address = "10.0.2.2" if mode == "proxy" else host_address
-        port = proxy_port if mode == "proxy" else firewall_port
+        address, port = "10.0.2.2", proxy_port
+        if mode == "firewall":
+            interfaces = json.loads(subprocess.check_output(
+                ["ip", "-j", "-4", "address", "show", "up", "scope", "global"], text=True,
+            ))
+            host_address = next((
+                address["local"]
+                for interface in interfaces
+                if "LOOPBACK" not in interface.get("flags", [])
+                for address in interface.get("addr_info", [])
+                if address.get("family") == "inet"
+                and ipaddress.ip_address(address["local"]) not in ipaddress.ip_network("10.0.2.0/24")
+            ), None)
+            if host_address is None:
+                print("SKIPPED: firewall requires a non-loopback host IPv4 address "
+                      "outside slirp's subnet.", flush=True)
+                skipped.append(mode)
+                continue
+
+            # Firewall mode denies the slirp host-loopback gateway, even in an allowlisted CIDR.
+            firewall_listener.bind((host_address, 0))
+            firewall_listener.listen(8)
+            address, port = firewall_listener.getsockname()
+            with socket.create_connection((address, port), timeout=5):
+                pass
+
         command = (
             f"python3 - {shlex.quote(str(fixture))} {os.getuid()} {port} {mode} {address} <<'WORKLOAD'\n"
             + workload + "\nWORKLOAD"
@@ -136,7 +140,7 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
         }
         if mode == "firewall":
             config["network"] = {
-                "egress": {"default": "deny", "allow": [{"to": [{"cidr": f"{host_address}/32"}]}]},
+                "egress": {"default": "deny", "allow": [{"to": [{"cidr": f"{address}/32"}]}]},
             }
         elif mode == "proxy":
             config["runtimeConfig"] = {"networkProxy": f"http://127.0.0.1:{port}"}
@@ -156,5 +160,8 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
 
 if failed:
     sys.exit(1)
+if skipped:
+    print(f"Bubblewrap capability test incomplete: skipped {', '.join(skipped)}.")
+    sys.exit(77)
 print("Bubblewrap capability test complete.")
 PY

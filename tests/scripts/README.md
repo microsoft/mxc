@@ -144,6 +144,11 @@ overrides are assigned only to child processes, never to the invoking shell.
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
 run focused backend suites; the aggregate scripts above are what CI dispatches to.
 
+The Bubblewrap capability test still runs its isolated and proxy cases when
+no suitable host IPv4 address is available for the firewall fixture. It reports
+the firewall case as skipped and returns 77 after the remaining cases, or 1
+if any case fails. CI continues to reject incomplete coverage.
+
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
 run are reached through the dispatchers below rather than being invoked
