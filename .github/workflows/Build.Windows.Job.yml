@@ -160,6 +160,7 @@ jobs:
           foreach ($case in @(
             'lifecycle_contract_and_recovery_fixture', 'lifecycle_fresh_executor_fixture',
             'sdk_lifecycle::public_rust_sdk_lifecycle_fixture',
+            'execution::public_rust_sdk_execution_fixture',
             'readiness_contract_fixture', 'execution::native_execution_streams_fixture',
             'execution::native_execution_backpressure_fixture',
             'execution::native_execution_failure_and_disposal_fixture',
@@ -170,7 +171,7 @@ jobs:
               throw "Missing required W365 fixture: $case"
             }
           }
-          cargo test --locked -p mxc-sdk --lib --target '${{ matrix.target }}' w365 -- --include-ignored --skip sdk_fresh_caller_fixture
+          cargo test --locked -p mxc-sdk --lib --target '${{ matrix.target }}' w365 -- --include-ignored --skip sdk_fresh_caller_fixture --skip test_app_fresh_caller_fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -183,11 +184,21 @@ jobs:
         with:
           node-version: '24.x'
 
-      - name: Test public W365 Dev SDK lifecycle with trusted TLS fixtures
+      - name: Test public W365 Dev SDK execution and C# application with trusted TLS fixtures
         if: matrix.arch == 'x64'
         working-directory: ${{ github.workspace }}
         shell: pwsh
         run: tests\scripts\run_w365_sdk_fixtures.ps1
+
+      - name: Test W365 native runner and authentication offline
+        if: matrix.arch == 'x64'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          tests\scripts\test_w365_command_manual.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests\scripts -p test_w365_auth.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build debug executor for isolated telemetry smoke tests
         env:

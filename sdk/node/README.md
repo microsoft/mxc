@@ -13,8 +13,8 @@ Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
 
-W365 Dev JSON supports experimental provision, stop and deprovision only;
-start and execution remain gated. Failures retain cleanup/uncertainty context
+W365 Dev JSON supports experimental lifecycle, captured execution and pipe-backed
+spawn. PTY and create-and-run execution remain unavailable. Failures retain cleanup/uncertainty context
 in `MxcError.details`. See the
 [W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md)
 for caller-supplied environment credentials and terminal release semantics.

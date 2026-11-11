@@ -36,6 +36,8 @@ impl ExecFixture {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let scripts = Arc::new(Mutex::new(VecDeque::<Script>::new()));
         let starts = Arc::new(Mutex::new(Vec::new()));
+        let replies = Arc::new(Mutex::new(VecDeque::<Option<String>>::new()));
+        let responses = replies.clone();
         let (work, seen, recorded, stop_worker) = (
             scripts.clone(),
             requests.clone(),
@@ -76,9 +78,17 @@ impl ExecFixture {
                 if header.is_empty() {
                     continue;
                 }
-                seen.lock()
-                    .unwrap()
-                    .push(String::from_utf8(header).unwrap());
+                let header = String::from_utf8(header).unwrap();
+                let exec =
+                    header.starts_with("GET /computers/") && header.contains("/microsoft.exec?");
+                seen.lock().unwrap().push(header);
+                if let Some(reply) = responses.lock().unwrap().pop_front() {
+                    let reply = reply.expect("reply required");
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                    continue;
+                }
+                assert!(exec, "one explicit lifecycle reply required");
                 stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\n\r\n").unwrap();
                 stream.flush().unwrap();
                 let (kind, start) = read_frame(&mut stream).unwrap();
@@ -99,7 +109,7 @@ impl ExecFixture {
             requests,
             stop,
             worker: None,
-            replies: Arc::new(Mutex::new(VecDeque::new())),
+            replies,
             #[cfg(target_os = "windows")]
             _key: None,
         };
@@ -119,12 +129,111 @@ impl ExecFixture {
     }
 }
 
+#[test]
+#[ignore = "requires the offline C# test-app caller"]
+fn test_app_fresh_caller_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = ExecFixture::new(&env);
+    let command: Vec<String> = serde_json::from_str(
+        &std::env::var("MXC_W365_TEST_APP_COMMAND").expect("app fixture command required"),
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let receipt = directory.path().join("session.json");
+    for (mode, expected) in [
+        ("new", 3),
+        ("reuse", 5),
+        ("release", 6),
+        ("checkout-error", 7),
+    ] {
+        if mode == "new" {
+            fixture.fixture.reply(
+                200,
+                &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+            );
+        }
+        if mode == "release" {
+            fixture.fixture.reply(202, "");
+        } else if mode == "checkout-error" {
+            fixture
+                .fixture
+                .reply(500, &json!({"sessionId":A}).to_string());
+        } else {
+            fixture.fixture.reply(200, r#"{"status":"Ready"}"#);
+            fixture.script(|stream| {
+                started(stream);
+                eof(stream);
+                send(stream, 0x12, b"fixture-out");
+                exit(stream, 0);
+            });
+        }
+        let marker = directory.path().join(format!("{mode}.completed"));
+        let mut child = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("MXC_W365_TEST_APP_MODE", mode)
+            .env(
+                "MXC_W365_TEST_APP_RECEIPT",
+                if mode == "checkout-error" {
+                    directory.path().join("failed.json")
+                } else {
+                    receipt.clone()
+                },
+            )
+            .env("MXC_W365_TEST_SDK_MARKER", &marker)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(90);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= until {
+                child.kill().unwrap();
+                panic!("C# app fixture timed out: {mode}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), mode);
+        assert_eq!(
+            fixture.fixture.count(),
+            expected,
+            "reuse/release must never allocate"
+        );
+    }
+    let requests = fixture.fixture.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("DELETE "))
+            .count(),
+        1
+    );
+    assert!(requests[5].starts_with(&format!("DELETE /api/sessions/{A}?")));
+}
+
 impl Drop for ExecFixture {
     fn drop(&mut self) {
         self.fixture
             .stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        let joined = self.worker.take().unwrap().join();
+        if !std::thread::panicking() {
+            joined.unwrap();
+        }
     }
 }
 
@@ -204,6 +313,106 @@ fn details(error: std::io::Error) -> Value {
         .details
         .clone()
         .unwrap()
+}
+
+#[test]
+fn public_rust_sdk_execution_fixture() {
+    use crate::v1::dev;
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = ExecFixture::new(&env);
+    let options = dev::JsonOptions { experimental: true };
+    for code in [7, -1, 124] {
+        fixture.script(move |stream| {
+            started(stream);
+            eof(stream);
+            send(stream, 0x12, b"fixture-out");
+            send(stream, 0x13, b"fixture-err");
+            exit(stream, code);
+        });
+        let output = dev::run_in_container_json(&exec_request().to_string(), options).unwrap();
+        assert_eq!(output.outcome, crate::v1::WaitResult::Exited(code));
+        assert_eq!(output.stdout, b"fixture-out");
+        assert_eq!(output.stderr, b"fixture-err");
+    }
+    fixture.script(|stream| {
+        started(stream);
+        eof(stream);
+        send(
+            stream,
+            0x15,
+            br#"{"code":"fixture_failure","message":"remote failure"}"#,
+        );
+    });
+    let error = dev::run_in_container_json(&exec_request().to_string(), options).unwrap_err();
+    assert!(
+        error.details.is_some(),
+        "capture must preserve backend error context"
+    );
+    assert_eq!(fixture.fixture.count(), 4);
+}
+
+#[test]
+#[ignore = "requires a separately built public SDK test caller"]
+fn execution_sdk_fresh_caller_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = ExecFixture::new(&env);
+    let command: Vec<String> = serde_json::from_str(
+        &std::env::var("MXC_W365_TEST_SDK_COMMAND").expect("SDK fixture command required"),
+    )
+    .unwrap();
+    for (index, mode) in ["capture", "pipe", "exec-error", "spawn-error"]
+        .into_iter()
+        .enumerate()
+    {
+        if mode == "spawn-error" {
+            fixture.fixture.reply(403, "never-return-service-body");
+        } else {
+            fixture.script(move |stream| {
+                started(stream);
+                eof(stream);
+                if mode == "exec-error" {
+                    send(
+                        stream,
+                        0x15,
+                        br#"{"code":"fixture_failure","message":"remote failure"}"#,
+                    );
+                } else {
+                    send(stream, 0x12, b"fixture-out");
+                    send(stream, 0x13, b"fixture-err");
+                    exit(stream, 7);
+                }
+            });
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("completed");
+        let mut child = std::process::Command::new(&command[0])
+            .args(&command[1..])
+            .env("MXC_W365_TEST_SDK_MODE", mode)
+            .env("MXC_W365_TEST_SDK_MARKER", &marker)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(90);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= until {
+                child.kill().unwrap();
+                panic!("public SDK execution fixture timed out: {mode}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), mode);
+        assert_eq!(fixture.fixture.count(), index + 1, "no command replay");
+    }
 }
 
 #[test]

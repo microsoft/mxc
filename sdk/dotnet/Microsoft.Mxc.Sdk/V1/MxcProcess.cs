@@ -523,9 +523,8 @@ public class MxcProcess : IMxcProcess
             }
             if (status != (int)ErrorCode.Success)
             {
-                throw new MxcException(
-                    (ErrorCode)status,
-                    "querying the sandbox process status failed");
+                unsafe { throw NativeError.ProcessException(status, _handle.Ptr,
+                    "querying the sandbox process status failed"); }
             }
             exitCode = nativeExitCode;
             timedOut = nativeTimedOut != 0;
@@ -680,11 +679,14 @@ public class MxcProcess : IMxcProcess
         int exit = 0;
         int nativeTimedOut = 0;
         int status;
+        MxcException? failure = null;
         try
         {
             unsafe
             {
                 status = NativeMethods.mxc_sandbox_wait(_handle.Ptr, &exit, &nativeTimedOut);
+                if (status != (int)ErrorCode.Success)
+                    failure = NativeError.ProcessException(status, _handle.Ptr, "waiting on the sandbox failed");
             }
         }
         finally
@@ -693,7 +695,7 @@ public class MxcProcess : IMxcProcess
         }
         if (status != (int)ErrorCode.Success)
         {
-            throw new MxcException((ErrorCode)status, "waiting on the sandbox failed");
+            throw failure!;
         }
         return new WaitResult { ExitCode = exit, TimedOut = timedOut || nativeTimedOut != 0 };
     }
@@ -871,7 +873,7 @@ public class MxcProcess : IMxcProcess
             }
             if (status != (int)ErrorCode.Success)
             {
-                throw new MxcException((ErrorCode)status, "killing the sandbox failed");
+                unsafe { throw NativeError.ProcessException(status, _handle.Ptr, "killing the sandbox failed"); }
             }
         }
     }

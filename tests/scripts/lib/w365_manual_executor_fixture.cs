@@ -36,6 +36,7 @@ class W365ManualExecutorFixture
     static int Main(string[] args)
     {
         var scenario = Environment.GetEnvironmentVariable("W365_MANUAL_FIXTURE_SCENARIO");
+        if (scenario != null && scenario.StartsWith("reuse_")) scenario = scenario.Substring(6);
         if (args.Length == 1 && args[0] == "hang") { Thread.Sleep(10000); return 0; }
         var values = new Dictionary<string, string>();
         bool dry = false, experimental = false;

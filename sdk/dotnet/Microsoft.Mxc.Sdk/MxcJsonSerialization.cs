@@ -98,6 +98,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(ContainerId))]
 [JsonSerializable(typeof(NativeLifecycleErrorEnvelope))]
 [JsonSerializable(typeof(NativeLifecycleError))]
+[JsonSerializable(typeof(JsonElement))]
 // Primitive and collection shapes resolved by the custom converters and helpers.
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(List<string>))]

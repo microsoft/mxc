@@ -22,7 +22,9 @@ together and settle important design questions before you invest in implementati
 Experimental native backend support does not automatically enable Dev SDK
 access. Before opening an SDK lifecycle phase, preserve structured recovery
 errors across Rust, .NET and Node and add public SDK functional coverage.
-W365 currently exposes only Dev JSON provision, stop and deprovision; see its
+W365 exposes experimental Dev JSON lifecycle, captured execution and pipe-backed
+spawn under the approved scope in [#1619](https://github.com/microsoft/mxc/pull/1619);
+PTY and create-and-run execution remain unavailable. See its
 [backend guide](../../backends/w365agents/w365agents-backend.md).
 
 Find or open an issue describing the problem and desired behavior. Share your

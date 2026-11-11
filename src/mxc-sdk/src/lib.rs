@@ -553,6 +553,12 @@ fn captured_execution_result(
 
 fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
     sandbox.wait_with_output().map_err(|e| {
+        if let Some(error) = e
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<mxc_common::mxc_error::MxcError>())
+        {
+            return error.clone().into();
+        }
         Error::new(
             ErrorCode::BackendError,
             format!("waiting for the sandbox to complete failed: {e}"),

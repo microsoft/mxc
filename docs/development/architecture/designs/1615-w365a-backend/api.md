@@ -2,7 +2,7 @@
 
 > **Audience:** MXC developers
 
-- **Status:** Proposed
+- **Status:** Approved in [#1619](https://github.com/microsoft/mxc/pull/1619), merged as `2ff2b893fb9e2db7b789513ec15297dba4d33b4c`.
 - **Issue:** [#1615](https://github.com/microsoft/mxc/issues/1615)
 - **Feature design spec:** [Windows 365 for Agents backend](README.md).
 
@@ -14,15 +14,15 @@ stdio relay; callers need not mix interfaces.
 
 Invocation signatures and result types are unchanged. The only public API
 additions are optional Rust/.NET error details; Node's existing member is
-preserved. These are proposed capabilities, not working W365 examples.
+preserved. Offline fixtures exercise these capabilities; live native/SDK Exec
+compatibility remains unverified.
 Typed W365 configuration and contract publication remain out of scope.
 
 **Implementation boundary:** Phase 3 implements native checkout, readiness,
 executor relay, internal native pipe/capture adapters and terminal release.
-Dev SDK JSON provision, stop and deprovision are implemented with cross-SDK
-structured error metadata and offline SDK fixtures. Start, execution and
-pipe-backed spawn remain explicitly unavailable. The complete-workflow examples
-below still describe the proposed later stage, not runnable SDK execution.
+Dev SDK JSON provision, start, stop, deprovision, captured execution and
+pipe-backed spawn are implemented with cross-SDK structured errors and offline
+public SDK fixtures. PTY and create-and-run execution remain unavailable.
 No typed SDK authoring APIs or C ABI layout changes are introduced. See the
 [backend guide](../../../../backends/w365agents/w365agents-backend.md).
 

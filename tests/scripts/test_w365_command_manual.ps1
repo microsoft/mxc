@@ -29,7 +29,8 @@ function Assert([bool] $Condition, [string] $Message) {
 }
 
 function Invoke-Scenario([string] $Scenario, [string[]] $Extra = @(), [switch] $MissingCommand,
-        [switch] $ExistingReceipt, [switch] $EnvironmentEndpoints, [switch] $DefaultReceipt) {
+        [switch] $ExistingReceipt, [switch] $EnvironmentEndpoints, [switch] $DefaultReceipt,
+        [switch] $Config) {
     $receipt = Join-Path $scratch "$Scenario.json"
     if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
     if ($ExistingReceipt) { [IO.File]::WriteAllText($receipt, '{"state":"ReleaseAccepted"}') }
@@ -44,11 +45,21 @@ function Invoke-Scenario([string] $Scenario, [string[]] $Extra = @(), [switch] $
         $parameters.ControlPlaneHost = 'control.example.invalid'
         $parameters.DataPlaneSuffix = 'data.example.invalid'
     }
+    if ($Config) {
+        $configPath = Join-Path $scratch 'config.json'
+        [IO.File]::WriteAllText($configPath, (@{
+            poolId = $pool; tenantId = $pool; clientId = $client
+            controlPlaneHost = 'control.example.invalid'; dataPlaneSuffix = 'data.example.invalid'
+        } | ConvertTo-Json -Compress))
+        foreach ($key in @('PoolId', 'TenantId', 'ClientId', 'ControlPlaneHost', 'DataPlaneSuffix')) { $parameters.Remove($key) }
+        $parameters.ConfigPath = $configPath
+    }
     for ($i = 0; $i -lt $Extra.Count; $i++) {
         $key = $Extra[$i].TrimStart('-')
         $value = if ($key -eq 'ForceSignIn') { $null } else { $Extra[++$i] }
         $parameters[$key] = $value
     }
+    if ($parameters.Contains('ReceiptPath')) { $receipt = $parameters.ReceiptPath }
     foreach ($key in $parameters.Keys) {
         $start.ArgumentList.Add("-$key")
         if ($null -ne $parameters[$key]) { $start.ArgumentList.Add($parameters[$key]) }
@@ -63,7 +74,7 @@ function Invoke-Scenario([string] $Scenario, [string[]] $Extra = @(), [switch] $
     $start.Environment['MXC_W365_TEST_PORT'] = '1'
     $start.Environment['W365A_CONTROLPLANE_URL'] = if ($EnvironmentEndpoints) { 'control.example.invalid' } else { 'invalid inherited URL' }
     $start.Environment['W365A_DP_SUFFIX'] = if ($EnvironmentEndpoints) { 'data.example.invalid' } else { 'invalid inherited suffix' }
-    if ($Scenario -eq 'missing_environment_endpoints') {
+    if ($Scenario -eq 'missing_environment_endpoints' -or $Config) {
         $null = $start.Environment.Remove('W365A_CONTROLPLANE_URL')
         $null = $start.Environment.Remove('W365A_DP_SUFFIX')
     }
@@ -157,16 +168,16 @@ try {
 
     foreach ($scenario in @('success', 'environment_endpoints', 'native_defaults', 'service_default_timeout',
             'exec_nonzero', 'exec_negative', 'exec_timeout', 'checkout_error_id',
-            'checkout_nonzero', 'readiness_failure', 'readiness_live', 'readiness_invalid', 'release_failure',
-            'release_invalid', 'primary_and_cleanup_failure', 'large_output', 'long_readiness', 'journal_write_failure')) {
+            'checkout_nonzero', 'readiness_failure', 'readiness_live', 'readiness_invalid',
+            'primary_and_cleanup_failure', 'large_output', 'long_readiness', 'journal_write_failure')) {
         $extra = if ($scenario -eq 'native_defaults') { @('-ForceSignIn') }
             else { @('-WorkingDirectory', 'C:\existing guest path', '-ExpectedUserObjectId', $owner, '-ForceSignIn') }
         if ($scenario -eq 'service_default_timeout') { $extra += @('-TimeoutMs', '0') }
         $result = Invoke-Scenario $scenario -EnvironmentEndpoints:($scenario -eq 'environment_endpoints') -Extra $extra
         $operations = @($result.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
-        $expected = if ($scenario -in @('checkout_error_id', 'checkout_nonzero')) { 'provision,deprovision' }
-            elseif ($scenario -in @('readiness_failure', 'readiness_live', 'readiness_invalid', 'primary_and_cleanup_failure', 'journal_write_failure')) { 'provision,start,deprovision' }
-            else { 'provision,start,exec,deprovision' }
+        $expected = if ($scenario -in @('checkout_error_id', 'checkout_nonzero')) { 'provision' }
+            elseif ($scenario -in @('readiness_failure', 'readiness_live', 'readiness_invalid', 'primary_and_cleanup_failure', 'journal_write_failure')) { 'provision,start' }
+            else { 'provision,start,exec' }
         Assert (($operations.operation -join ',') -ceq $expected) "Incorrect lifecycle sequence for $scenario."
         Assert (@($operations.pid | Select-Object -Unique).Count -eq $operations.Count) 'Lifecycle operations did not use independent child processes.'
         Assert (@($operations | Where-Object { $_.id -and $_.id -ne "w365:${pool}:44444444-4444-4444-4444-444444444444" }).Count -eq 0) 'Cleanup or command targeted another reservation.'
@@ -183,7 +194,7 @@ try {
             if ($scenario -eq 'native_defaults') { Assert (-not $processRequest.ContainsKey('cwd')) 'Omitted guest working directory was defaulted locally.' }
         }
         if ($scenario -eq 'journal_write_failure') {
-            Assert ($result.Output.Contains('Terminal release accepted') -and $result.Code -ne 0) 'Journal failure prevented release or was reported as success.'
+            Assert ($result.Output.Contains('Session NOT automatically released') -and $result.Code -ne 0) 'Journal failure hid the retained session or was reported as success.'
             [IO.File]::SetAttributes($result.Path, [IO.FileAttributes]::Normal)
             $passed++
             continue
@@ -192,11 +203,9 @@ try {
             Assert ($result.Output.Contains(('O' * 524288)) -and $result.Output.Contains(('E' * 524288))) 'Large output was not drained.'
             Assert (-not ([IO.File]::ReadAllText($result.Path)).Contains('guest_not_native')) 'Guest JSON was parsed into receipt.'
         }
-        if ($scenario -in @('release_failure', 'release_invalid', 'primary_and_cleanup_failure')) {
-            Assert (-not $result.Journal.releaseAccepted -and $result.Journal.cleanupFailure) 'Cleanup failure was lost.'
-        } else { Assert $result.Journal.releaseAccepted "Release not accepted for $scenario." }
+        Assert (-not $result.Journal.releaseAccepted -and $result.Journal.sessionId -ceq $result.Journal.sandboxId) 'Run released the session or returned a raw service GUID.'
         if ($scenario -eq 'primary_and_cleanup_failure') {
-            Assert ($result.Journal.primaryFailure -and $result.Journal.cleanupFailure) 'Primary and cleanup failures were conflated.'
+            Assert ([bool]$result.Journal.primaryFailure) 'Primary failure was lost.'
             Assert ($result.Journal.operations[1].error.httpStatus -eq 403 -and
                 $result.Journal.operations[1].error.clientRequestId -eq '44444444-4444-4444-4444-444444444444') 'Structured diagnostics lost.'
         }
@@ -206,7 +215,48 @@ try {
         $result = Invoke-Scenario $scenario
         $operations = @($result.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
         Assert ($result.Code -ne 0 -and ($operations.operation -join ',') -eq 'provision') 'Unknown checkout was retried or a fake cleanup ID used.'
-        Assert ($result.Journal.reconciliationRequired -and -not $result.Journal.ContainsKey('sandboxId')) 'Missing ID was not recorded as uncertain.'
+        Assert ($result.Journal.reconciliationRequired -and -not $result.Journal.sandboxId) 'Missing ID was not recorded as uncertain.'
+        $passed++
+    }
+
+    $id = "w365:${pool}:44444444-4444-4444-4444-444444444444"
+    $configured = Invoke-Scenario 'minimal_config' -Config
+    Assert ($configured.Code -eq 0 -and $configured.Journal.sessionId -ceq $id) 'Minimal shared deployment config was not used.'
+    $passed++
+    $first = Invoke-Scenario 'reusable'
+    Assert ($first.Code -eq 0 -and $first.Journal.sessionId -ceq $id) 'Initial run did not return opaque identity.'
+    $again = Invoke-Scenario 'reuse' -Extra @('-SessionId', $id, '-ReceiptPath', $first.Path)
+    $operations = @($again.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
+    Assert ($again.Code -eq 0 -and ($operations.operation -join ',') -ceq 'start,exec') 'Reuse allocated or failed.'
+    $release = Invoke-Scenario 'explicit_release' -MissingCommand -Extra @('-Operation', 'Release', '-SessionId', $id, '-ReceiptPath', $first.Path)
+    $operations = @($release.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
+    Assert ($release.Code -eq 0 -and ($operations.operation -join ',') -ceq 'deprovision' -and
+        $release.Journal.releaseAccepted -and -not $release.Journal.remoteResetConfirmed) 'Explicit release targeted wrong phase or claimed reset.'
+    $afterRelease = Invoke-Scenario 'reuse_released' -Extra @('-SessionId', $id, '-ReceiptPath', $first.Path)
+    Assert ($afterRelease.Code -ne 0 -and $afterRelease.Events.Count -eq 0) 'Released session was reused.'
+    $passed += 4
+    foreach ($scenario in @('receiptless_reuse', 'readiness_failure', 'exec_timeout')) {
+        $result = Invoke-Scenario "reuse_$scenario" -Extra @('-SessionId', $id)
+        $operations = @($result.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
+        Assert (@($operations | Where-Object { $_.operation -in @('provision', 'deprovision') }).Count -eq 0) 'Reuse allocated or automatically released.'
+        $passed++
+    }
+    foreach ($scenario in @('release_failure', 'release_invalid', 'receiptless_release')) {
+        $result = Invoke-Scenario $scenario -MissingCommand -Extra @('-Operation', 'Release', '-SessionId', $id)
+        $operations = @($result.Events | Where-Object { $_.ContainsKey('dry') -and -not $_.dry })
+        Assert (($operations.operation -join ',') -ceq 'deprovision') 'Receiptless release performed another operation.'
+        Assert (($result.Code -eq 0) -eq ($scenario -eq 'receiptless_release')) 'Explicit release error was lost.'
+        Assert ($result.Journal.sessionId -ceq $id) 'Release lost opaque ID.'
+        if ($scenario -ne 'receiptless_release') {
+            $retry = Invoke-Scenario "${scenario}_retry" -MissingCommand -Extra @('-Operation', 'Release', '-SessionId', $id, '-ReceiptPath', $result.Path)
+            Assert ($retry.Code -ne 0 -and $retry.Events.Count -eq 0) 'Uncertain release was replayed.'
+            $passed++
+        }
+        $passed++
+    }
+    foreach ($bad in @('44444444-4444-4444-4444-444444444444', "w365:${client}:44444444-4444-4444-4444-444444444444")) {
+        $result = Invoke-Scenario ('bad_id_' + $passed) -Extra @('-SessionId', $bad)
+        Assert ($result.Code -ne 0 -and $result.Events.Count -eq 0) 'Invalid identity reached auth or native calls.'
         $passed++
     }
 
@@ -225,7 +275,7 @@ try {
     try {
         $env:W365_MANUAL_FIXTURE_SCENARIO = 'cleanup_refresh'
         $env:W365_MANUAL_FIXTURE_LOG = $log
-        Remove-Item -LiteralPath $log
+        if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
         $fresh = Get-W365CleanupAuth @{ ExpiresOn = 0; Token = 'expired-synthetic'; UserObjectId = $owner } $pool $client ''
         Assert ($fresh.UserObjectId -eq $owner -and $fresh.Token -eq 'synthetic-private-computer-token') 'Cleanup did not renew the same identity.'
         $event = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($log)) -AsHashtable

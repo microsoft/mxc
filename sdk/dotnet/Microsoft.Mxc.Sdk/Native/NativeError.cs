@@ -35,6 +35,21 @@ internal sealed class NativeLifecycleError
 /// </remarks>
 internal static unsafe class NativeError
 {
+    internal static MxcException ProcessException(int status, MxcSandbox* handle, string message)
+    {
+        byte* json = null;
+        var detailsStatus = NativeMethods.mxc_sandbox_error_details_json(handle, &json);
+        try
+        {
+            if (detailsStatus != (int)ErrorCode.Success)
+                return new MxcException((ErrorCode)detailsStatus, "reading process error details failed");
+            var text = ToStringOrNull(json);
+            return new MxcException((ErrorCode)status, message, null, null, null,
+                text is null ? null : MxcJson.Deserialize<JsonElement>(text));
+        }
+        finally { NativeMethods.mxc_string_free(json); }
+    }
+
     internal static MxcException LifecycleException(
         int status, MxcStateAwareResult result, string fallbackMessage)
     {

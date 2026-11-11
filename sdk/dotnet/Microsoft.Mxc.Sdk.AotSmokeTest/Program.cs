@@ -29,6 +29,9 @@ static void Check(bool condition, string what)
 // Reflection-free serialization must be in force, or this test proves nothing.
 Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disabled");
 
+var processDetails = MxcJson.Deserialize<System.Text.Json.JsonElement>(
+    """{"code":"exec_remote_error","possiblySucceeded":true}""");
+CheckRoundTrip(processDetails, x => x.GetProperty("possiblySucceeded").GetBoolean(), "process error details");
 var lifecycleError = MxcJson.Deserialize<NativeLifecycleErrorEnvelope>(
     """{"error":{"code":"backend_error","message":"checkout failed","details":{"sandboxId":"w365:fixture","possiblySucceeded":true}}}""")!;
 var lifecycleRoundTrip = MxcJson.Deserialize<NativeLifecycleErrorEnvelope>(

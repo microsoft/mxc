@@ -24,7 +24,8 @@ public static class MxcLifecycle
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(RunInContainerJson), "exec");
         using var process = await Microsoft.Mxc.Sdk.V1.MxcLifecycle.RunBlockingOperationAsync(
-            () => SpawnInContainer(request, timeout, options), late => late.Dispose(), cancellationToken)
+            () => SpawnInContainer(request, timeout, options, waitClosesUntakenStdin: true),
+            late => late.Dispose(), cancellationToken)
             .ConfigureAwait(false);
         var (outcome, stdout, stderr) = await process
             .WaitForExitWithOutputAsync(cancellationToken).ConfigureAwait(false);
@@ -46,28 +47,25 @@ public static class MxcLifecycle
     }
 
     private static MxcProcess SpawnInContainer(
-        byte[] request, uint? timeout, JsonOptions? options)
+        byte[] request, uint? timeout, JsonOptions? options, bool waitClosesUntakenStdin = false)
     {
         unsafe
         {
             fixed (byte* requestPtr = request)
             {
                 NativeSandbox* handle = null;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_exec_state_aware_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
-                if (status != (int)ErrorCode.Success)
+                MxcStateAwareResult result = default;
+                var status = NativeMethods.mxc_exec_state_aware_json_with_details(
+                    requestPtr, options?.Experimental == true ? 1 : 0, 0, &handle, &result);
+                try
                 {
-                    try
+                    if (status != (int)ErrorCode.Success)
                     {
-                        throw NativeError.ToException(status, error, "spawning exact JSON exec failed");
+                        throw NativeError.LifecycleException(status, result, "spawning exact JSON exec failed");
                     }
-                    finally
-                    {
-                        NativeMethods.mxc_error_detail_free(&error);
-                    }
+                    return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout, waitClosesUntakenStdin);
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                finally { NativeMethods.mxc_state_aware_result_free(&result); }
             }
         }
     }

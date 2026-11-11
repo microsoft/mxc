@@ -88,6 +88,7 @@ use crate::{
 /// [`mxc_sandbox_free`].
 pub struct MxcSandbox {
     inner: Box<dyn LiveSandbox>,
+    error_details: Option<serde_json::Value>,
 }
 
 impl MxcSandbox {
@@ -97,22 +98,34 @@ impl MxcSandbox {
     pub(crate) fn new(inner: MxcProcess) -> Self {
         Self {
             inner: Box::new(inner),
+            error_details: None,
         }
     }
 
     pub(crate) fn new_pty(inner: MxcPtyProcess) -> Self {
         Self {
             inner: Box::new(PtySandbox::new(inner)),
+            error_details: None,
         }
     }
 
     #[cfg(feature = "test-support")]
     pub(crate) fn from_live(inner: Box<dyn LiveSandbox>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            error_details: None,
+        }
     }
 
     pub(crate) fn resize_pty(&self, size: MxcPtySize) -> std::io::Result<()> {
         self.inner.resize_pty(size)
+    }
+
+    fn retain_error(&mut self, error: &std::io::Error) {
+        self.error_details = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<mxc_sdk::mxc_common::mxc_error::MxcError>())
+            .and_then(|source| source.details.clone());
     }
 }
 
@@ -972,6 +985,47 @@ pub unsafe extern "C" fn mxc_sandbox_output_metadata_json(
     })
 }
 
+/// Return structured context from the most recent process-control error.
+///
+/// The caller owns a non-null result and frees it with [`crate::mxc_string_free`].
+/// Absence of backend details leaves the output null. Like other handle calls,
+/// this getter must be serialized with process control and free.
+///
+/// # Safety
+/// `handle` must be null or live, and `out_json_utf8` must be null or writable
+/// pointer storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_error_details_json(
+    handle: *mut MxcSandbox,
+    out_json_utf8: *mut *mut c_char,
+) -> i32 {
+    if !out_json_utf8.is_null() {
+        // SAFETY: caller guarantees writable storage.
+        unsafe { *out_json_utf8 = ptr::null_mut() };
+    }
+    if handle.is_null() || out_json_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller guarantees a live serialized handle.
+        let sandbox = unsafe { &*handle };
+        let Some(details) = &sandbox.error_details else {
+            return MXC_STATUS_SUCCESS;
+        };
+        let json = match serde_json::to_vec(details) {
+            Ok(json) => json,
+            Err(_) => return MXC_STATUS_BACKEND_ERROR,
+        };
+        // SAFETY: caller guarantees writable pointer storage.
+        unsafe { *out_json_utf8 = alloc_cstring(&json) };
+        MXC_STATUS_SUCCESS
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_error_details_json", &*panic);
+        MXC_STATUS_PANIC
+    })
+}
+
 /// Return the sandbox's security warnings as owned JSON.
 ///
 /// A successful call leaves `*out_json_utf8` null when there are no warnings.
@@ -1050,7 +1104,11 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
-        match try_wait_result_to_abi(sandbox.inner.try_wait()) {
+        let result = sandbox.inner.try_wait();
+        if let Err(error) = &result {
+            sandbox.retain_error(error);
+        }
+        match try_wait_result_to_abi(result) {
             Ok((exit, running, timed_out)) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
@@ -1126,7 +1184,10 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
                 }
                 MXC_STATUS_SUCCESS
             }
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
+            Err(error) => {
+                sandbox.retain_error(&error);
+                MXC_STATUS_BACKEND_ERROR
+            }
         }
     }));
     status.unwrap_or_else(|panic| {
@@ -1151,7 +1212,10 @@ pub unsafe extern "C" fn mxc_sandbox_kill(handle: *mut MxcSandbox) -> i32 {
         let sandbox = unsafe { &mut *handle };
         match sandbox.inner.kill() {
             Ok(()) => MXC_STATUS_SUCCESS,
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
+            Err(error) => {
+                sandbox.retain_error(&error);
+                MXC_STATUS_BACKEND_ERROR
+            }
         }
     }));
     status.unwrap_or_else(|panic| {
@@ -1180,7 +1244,10 @@ pub unsafe extern "C" fn mxc_sandbox_kill_for_timeout(handle: *mut MxcSandbox) -
         let sandbox = unsafe { &mut *handle };
         match sandbox.inner.kill_for_timeout() {
             Ok(()) => MXC_STATUS_SUCCESS,
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
+            Err(error) => {
+                sandbox.retain_error(&error);
+                MXC_STATUS_BACKEND_ERROR
+            }
         }
     }));
     status.unwrap_or_else(|panic| {

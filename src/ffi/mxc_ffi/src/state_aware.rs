@@ -282,6 +282,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
             execute_lifecycle_json,
             out_handle,
             out_error,
+            ptr::null_mut(),
         )
     }
 }
@@ -307,8 +308,58 @@ pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
             execute_lifecycle_with_stdin_json,
             out_handle,
             out_error,
+            ptr::null_mut(),
         )
     }
+}
+
+/// Spawn lifecycle exec, retaining owned structured errors without changing the
+/// legacy entry points or their result layouts. `with_stdin` selects writable stdin.
+/// On failure, `out.response_json_utf8` may contain an error envelope.
+///
+/// # Safety
+/// As for [`mxc_exec_state_aware_json`], with writable `out` storage instead of
+/// `out_error`. Free `out` with [`mxc_state_aware_result_free`], including failures.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_exec_state_aware_json_with_details(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    with_stdin: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out: *mut MxcStateAwareResult,
+) -> i32 {
+    if out.is_null() {
+        if !out_handle.is_null() {
+            // SAFETY: caller guarantees writable storage when non-null.
+            unsafe { *out_handle = ptr::null_mut() };
+        }
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let mut result = MxcStateAwareResult {
+        status: MXC_STATUS_SUCCESS,
+        response_json_utf8: ptr::null_mut(),
+        error: MxcErrorDetail::none(),
+    };
+    // SAFETY: forwarded under this entry point's contract; local result owns strings.
+    result.status = unsafe {
+        exec_streaming(
+            "mxc_exec_state_aware_json_with_details",
+            request_json_utf8,
+            experimental,
+            if with_stdin != 0 {
+                execute_lifecycle_with_stdin_json
+            } else {
+                execute_lifecycle_json
+            },
+            out_handle,
+            &mut result.error,
+            &mut result.response_json_utf8,
+        )
+    };
+    let status = result.status;
+    // SAFETY: caller guarantees writable result storage.
+    unsafe { ptr::write(out, result) };
+    status
 }
 
 /// # Safety
@@ -320,6 +371,7 @@ unsafe fn exec_streaming(
     execute: fn(&str, bool) -> Result<mxc_sdk::v1::MxcProcess, mxc_sdk::v1::Error>,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
+    out_details: *mut *mut c_char,
 ) -> i32 {
     if !out_handle.is_null() {
         // SAFETY: caller-guaranteed writable pointer-sized storage.
@@ -353,10 +405,16 @@ unsafe fn exec_streaming(
             }
         };
         execute(request_json, experimental != 0).map_err(|e| {
-            (
+            let failure = (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
-            )
+            );
+            if !out_details.is_null() {
+                let envelope = serde_json::json!({"error": e.into_mxc_error().to_envelope()});
+                // SAFETY: non-null output is writable under the private caller contract.
+                unsafe { *out_details = alloc_cstring(envelope.to_string().as_bytes()) };
+            }
+            failure
         })
     }))
     .unwrap_or_else(|panic| {
@@ -723,47 +781,73 @@ mod tests {
     }
 
     #[test]
-    fn w365_sdk_start_and_execution_remain_staged_off() {
+    fn w365_sdk_execution_keeps_experimental_and_policy_guards() {
         for experimental in [false, true] {
             for phase in ["start", "exec"] {
                 let mut value = serde_json::json!({
                     "version":"1.1.0-alpha", "phase":phase,
                 });
-                if phase == "provision" {
-                    value["containment"] = serde_json::json!("w365_agents");
-                    value["w365Agents"] = serde_json::json!({"provision":{
-                        "poolId":"11111111-1111-1111-1111-111111111111",
-                    }});
-                } else {
-                    value["sandboxId"] = serde_json::json!(
-                        "w365:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
-                    );
-                }
+                value["sandboxId"] = serde_json::json!(
+                    "w365:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
+                );
                 if phase == "exec" {
                     value["process"] = serde_json::json!({"commandLine":"echo must-not-run"});
-                    let error = mxc_sdk::mxc_engine::exec_state_aware_capture_json(
-                        &value.to_string(),
-                        experimental,
-                    )
-                    .err()
-                    .expect("W365 SDK capture remains unavailable");
-                    assert!(error
-                        .to_string()
-                        .contains("start and execution remain unavailable"));
                 }
-                let mut out = call_opt(&value.to_string(), false, experimental);
-                assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+                if experimental {
+                    value["network"] = serde_json::json!({});
+                }
+                let mut out = call_opt(&value.to_string(), true, experimental);
+                assert_eq!(
+                    out.status,
+                    if experimental {
+                        if phase == "start" {
+                            crate::MXC_STATUS_MALFORMED_REQUEST
+                        } else {
+                            crate::MXC_STATUS_POLICY_VALIDATION
+                        }
+                    } else {
+                        crate::MXC_STATUS_BACKEND_UNAVAILABLE
+                    }
+                );
                 assert!(out.response_json_utf8.is_null());
-                // SAFETY: the failed native call returned an owned error string.
-                let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) };
-                assert!(message
-                    .to_str()
-                    .unwrap()
-                    .contains("start and execution remain unavailable"));
+                assert!(!out.error.message_utf8.is_null());
                 // SAFETY: all result strings were allocated by the native call.
                 unsafe { mxc_state_aware_result_free(&mut out) };
             }
         }
+    }
+
+    #[test]
+    fn detailed_exec_rejects_nulls_and_owns_failure_strings() {
+        let mut handle = std::ptr::dangling_mut::<MxcSandbox>();
+        let mut result = MxcStateAwareResult::empty();
+        // SAFETY: null request and writable outputs exercise argument validation only.
+        let status = unsafe {
+            mxc_exec_state_aware_json_with_details(ptr::null(), 1, 1, &mut handle, &mut result)
+        };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        assert!(handle.is_null());
+        assert!(!result.error.message_utf8.is_null());
+        // SAFETY: both frees operate on the initialized owned result.
+        unsafe {
+            mxc_state_aware_result_free(&mut result);
+            mxc_state_aware_result_free(&mut result);
+        }
+        handle = std::ptr::dangling_mut::<MxcSandbox>();
+        // SAFETY: the null result must reject the call and clear the writable handle.
+        assert_eq!(
+            unsafe {
+                mxc_exec_state_aware_json_with_details(
+                    ptr::null(),
+                    1,
+                    0,
+                    &mut handle,
+                    ptr::null_mut(),
+                )
+            },
+            MXC_STATUS_NULL_ARGUMENT
+        );
+        assert!(handle.is_null());
     }
 
     #[test]

@@ -1120,7 +1120,6 @@ pub fn run_state_aware_json(
 ) -> Result<String, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     let value = run_state_aware_envelope(parsed, dry_run, &mut logger)?;
     serde_json::to_string(&value).map_err(|error| {
         Error::from(MxcError::backend_error(format!(
@@ -1141,7 +1140,6 @@ pub fn exec_state_aware_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
@@ -1151,7 +1149,6 @@ pub fn exec_state_aware_capture_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_capture_parsed(parsed, &mut logger)
 }
 
@@ -1163,22 +1160,16 @@ pub fn exec_state_aware_pty_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
+    require_sdk_pty_ready(&parsed)?;
     exec_state_aware_pty_parsed(parsed, &mut logger, size)
 }
 
-fn require_sdk_lifecycle_ready(parsed: &ParsedStateAwareRequest) -> Result<(), Error> {
-    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents
-        && !matches!(
-            parsed.phase(),
-            crate::mxc_common::state_aware_request::Phase::Provision
-                | crate::mxc_common::state_aware_request::Phase::Stop
-                | crate::mxc_common::state_aware_request::Phase::Deprovision
-        )
-    {
+fn require_sdk_pty_ready(parsed: &ParsedStateAwareRequest) -> Result<(), Error> {
+    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents {
         return Err(MxcError::backend_unavailable(
-            "W365 Dev SDK supports only provision, stop and deprovision; start and execution remain unavailable",
-        ).into());
+            "W365 Dev SDK supports pipe and captured execution, not PTY",
+        )
+        .into());
     }
     Ok(())
 }

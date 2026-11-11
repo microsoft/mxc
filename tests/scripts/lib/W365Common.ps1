@@ -145,8 +145,9 @@ function Get-W365SandboxId([string] $Value, [string] $Pool) {
     if ($parts.Length -ne 3 -or $parts[0] -cne 'w365' -or $parts[1] -ine $Pool) {
         throw 'Invalid native cleanup identity; reconcile with the service operator.'
     }
-    $sessionId = Assert-W365Guid $parts[2] 'Native sessionId'
-    return "w365:${Pool}:$sessionId"
+    $null = Assert-W365Guid $parts[1] 'Native poolId'
+    $null = Assert-W365Guid $parts[2] 'Native sessionId'
+    return $Value
 }
 
 function Save-W365Journal([string] $Path, [hashtable] $Journal, [switch] $Create) {

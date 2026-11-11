@@ -28,15 +28,64 @@ switch (mode) {
     await dev.validateStopJson(request('stop'), options);
     await dev.validateDeprovisionJson(request('deprovision'), options);
     await assert.rejects(dev.provisionContainerJson(JSON.stringify({ ...provision, filesystem: {} }), options));
-    await assert.rejects(dev.startContainerJson(request('start'), options), { code: 'backend_unavailable' });
-    await assert.rejects(dev.spawnInContainerJson(request('exec'), options));
-    await assert.rejects(dev.runInContainerJson(request('exec'), options));
+    await dev.validateStartJson(request('start'), options);
+    await dev.validateProcessJson(request('exec'), options);
     await assert.rejects(dev.spawnInContainerWithPtyJson(request('exec'), options));
     await assert.rejects(dev.runJson(JSON.stringify({
       version: '1.1.0-alpha', containment: 'w365_agents', process: { commandLine: 'echo must-not-run' },
     }), options));
     break;
   }
+  case 'ready':
+    assert.equal(JSON.parse(await dev.startContainerJson(request('start'), options)).result.metadata.status, 'Ready');
+    break;
+  case 'capture': {
+    const result = await dev.runInContainerJson(request('exec'), options);
+    assert.equal(result.exitCode, 7);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.stdout, 'fixture-out');
+    assert.equal(result.stderr, 'fixture-err');
+    break;
+  }
+  case 'pipe': {
+    const process = await dev.spawnInContainerJson(request('exec'), options);
+    process.standardInput?.end();
+    let stdout = '';
+    let stderr = '';
+    const out = process.standardOutput;
+    const err = process.standardError;
+    out.on('data', chunk => { stdout += chunk.toString(); });
+    err.on('data', chunk => { stderr += chunk.toString(); });
+    try {
+      assert.equal((await process.wait()).exitCode, 7);
+      await Promise.all([out, err].map(stream =>
+        stream.readableEnded ? Promise.resolve() : new Promise((resolve, reject) => {
+          stream.once('end', resolve);
+          stream.once('error', reject);
+        })));
+      assert.equal(stdout, 'fixture-out');
+      assert.equal(stderr, 'fixture-err');
+    } finally { process.dispose(); }
+    break;
+  }
+  case 'exec-error':
+    await assert.rejects(dev.runInContainerJson(request('exec'), options), error => {
+      assert.ok(error instanceof MxcError);
+      assert.equal(error.details.code, 'remote_exec_error');
+      assert.equal(error.details.possiblySucceeded, true);
+      return true;
+    });
+    break;
+  case 'spawn-error':
+    await assert.rejects(dev.spawnInContainerJson(request('exec'), options), error => {
+      assert.ok(error instanceof MxcError);
+      assert.equal(error.details.code, 'auth_denied');
+      assert.equal(error.details.possiblySucceeded, false);
+      assert.equal(error.details.httpStatus, 403);
+      assert.equal(error.details.sandboxId, id);
+      return true;
+    });
+    break;
   case 'provision':
     assert.equal(JSON.parse(await dev.provisionContainerJson(JSON.stringify(provision), options)).result.sandboxId, id);
     break;

@@ -12,19 +12,17 @@ const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
-fn with_transport_stack<T: Send>(
+pub(super) fn with_transport_stack<T: Send>(
     operation: impl FnOnce() -> Result<T, MxcError> + Send,
 ) -> Result<T, MxcError> {
     // TLS must not run on a foreign FFI caller's small stack. Join before returning.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .name("mxc-w365-control-plane".into())
+            .name("mxc-w365-transport".into())
             .stack_size(2 * 1024 * 1024)
             .spawn_scoped(scope, operation)
             .map_err(|error| {
-                MxcError::backend_error(format!(
-                    "could not start W365 control-plane transport: {error}"
-                ))
+                MxcError::backend_error(format!("could not start W365 transport: {error}"))
             })?
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))

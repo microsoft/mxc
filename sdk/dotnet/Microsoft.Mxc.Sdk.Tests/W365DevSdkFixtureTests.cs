@@ -36,15 +36,52 @@ public class W365DevSdkFixtureTests
                 Dev.MxcLifecycle.ValidateDeprovisionJson(Request("deprovision"), Options);
                 Assert.Throws<MxcException>(() => Dev.MxcLifecycle.ProvisionContainerJson(
                     Provision.Replace("\"w365Agents\"", "\"filesystem\":{},\"w365Agents\""), Options));
-                Assert.Equal(ErrorCode.BackendUnavailable,
-                    Assert.Throws<MxcException>(() => Dev.MxcLifecycle.StartContainerJson(Request("start"), Options)).Code);
+                Dev.MxcLifecycle.ValidateStartJson(Request("start"), Options);
                 var exec = Request("exec").Replace("}", ",\"process\":{\"commandLine\":\"echo must-not-run\"}}");
-                Assert.Throws<MxcException>(() => Dev.MxcLifecycle.SpawnInContainerJson(exec, Options));
-                Assert.Throws<MxcException>(() => Dev.MxcLifecycle.RunInContainerJson(exec, Options));
+                Dev.MxcLifecycle.ValidateProcessJson(exec, Options);
                 Assert.Throws<MxcException>(() => Dev.MxcLifecycle.SpawnInContainerWithPtyJson(
                     exec, new Dev.PtyJsonOptions { Experimental = true }));
                 Assert.Throws<MxcException>(() => Dev.MxcContainer.RunJson(
                     """{"version":"1.1.0-alpha","containment":"w365_agents","process":{"commandLine":"echo must-not-run"}}""", Options));
+                break;
+            case "ready":
+                using (var doc = JsonDocument.Parse(await Dev.MxcLifecycle.StartContainerJsonAsync(Request("start"), Options)))
+                    Assert.Equal("Ready", doc.RootElement.GetProperty("result").GetProperty("metadata").GetProperty("status").GetString());
+                break;
+            case "capture":
+                var captured = await Dev.MxcLifecycle.RunInContainerJsonAsync(
+                    Request("exec").Replace("}", ",\"process\":{\"commandLine\":\"cmd.exe /c echo fixture\",\"timeout\":1234}}"),
+                    Options, TestContext.Current.CancellationToken);
+                Assert.Equal(7, captured.ExitCode);
+                Assert.False(captured.TimedOut);
+                Assert.Equal("fixture-out", captured.Stdout);
+                Assert.Equal("fixture-err", captured.Stderr);
+                break;
+            case "pipe":
+                using (var process = Dev.MxcLifecycle.SpawnInContainerJson(
+                    Request("exec").Replace("}", ",\"process\":{\"commandLine\":\"cmd.exe /c echo fixture\",\"timeout\":1234}}"), Options))
+                {
+                    process.StandardInput?.Dispose();
+                    var result = await process.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+                    Assert.Equal(7, result.Item1.ExitCode);
+                    Assert.Equal("fixture-out", System.Text.Encoding.UTF8.GetString(result.Item2));
+                    Assert.Equal("fixture-err", System.Text.Encoding.UTF8.GetString(result.Item3));
+                }
+                break;
+            case "exec-error":
+                var execError = Assert.Throws<MxcException>(() => Dev.MxcLifecycle.RunInContainerJson(
+                    Request("exec").Replace("}", ",\"process\":{\"commandLine\":\"cmd.exe /c echo fixture\",\"timeout\":1234}}"), Options));
+                Assert.NotNull(execError.Details);
+                Assert.Equal("remote_exec_error", execError.Details.Value.GetProperty("code").GetString());
+                Assert.True(execError.Details.Value.GetProperty("possiblySucceeded").GetBoolean());
+                break;
+            case "spawn-error":
+                var spawnError = Assert.Throws<MxcException>(() => Dev.MxcLifecycle.SpawnInContainerJson(
+                    Request("exec").Replace("}", ",\"process\":{\"commandLine\":\"cmd.exe /c echo fixture\",\"timeout\":1234}}"), Options));
+                Assert.Equal("auth_denied", spawnError.Details!.Value.GetProperty("code").GetString());
+                Assert.False(spawnError.Details.Value.GetProperty("possiblySucceeded").GetBoolean());
+                Assert.Equal(403, spawnError.Details.Value.GetProperty("httpStatus").GetInt32());
+                Assert.Equal(Id, spawnError.Details.Value.GetProperty("sandboxId").GetString());
                 break;
             case "provision":
                 using (var doc = JsonDocument.Parse(await Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, Options)))

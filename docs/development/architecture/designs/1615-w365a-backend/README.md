@@ -2,14 +2,15 @@
 
 > **Audience:** MXC developers
 
-- **Status:** Proposed
+- **Status:** Approved in [#1619](https://github.com/microsoft/mxc/pull/1619).
 - **Issue:** [#1615: Add new experimental backend for Windows 365](https://github.com/microsoft/mxc/issues/1615)
 - **SDK usage and API proposal:** [Experimental JSON lifecycle and execution](api.md).
 - **Contributor:** @tbyfield (proposal); W365 team (planned implementation).
-- **Implementation PRs:** Not started.
 
-The issue has `feature-accepted`; scope and contributor are agreed.
-Design approval is pending.
+The issue has `feature-accepted`. The complete existing Dev JSON lifecycle,
+capture and pipe-backed spawn scope was approved and merged on 2026-11-05 as
+`2ff2b893fb9e2db7b789513ec15297dba4d33b4c`. Implementation staging does not
+remove that approved scope.
 
 ## Problem and scope
 
@@ -97,9 +98,10 @@ not separate reasons to choose W365A.
 
 **Current implementation:** [Native lifecycle and execution](../../../../backends/w365agents/w365agents-backend.md)
 implements the environment-only provision contract, terminal release, readiness,
-executor relay and native pipe/capture adapters. Public Dev SDK access remains
-deferred until the cross-SDK metadata and validation stage; SDK behavior below is
-still a proposal. Native Phase 3 uses the supplied released `microsoft.exec`
+executor relay and native pipe/capture adapters. The existing public Dev JSON
+APIs also support lifecycle, captured execution and pipe-backed spawn, with
+cross-SDK error details and offline functional fixtures. PTY, create-and-run
+execution and typed authoring remain unavailable. Native Phase 3 uses the supplied released `microsoft.exec`
 protocol rather than the earlier prototype's upgrade. See the backend guide for
 the staged access boundary, process mapping and actual service evidence.
 

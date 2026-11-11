@@ -13,13 +13,12 @@ engine; their existing create-and-run paths and platform checks are unchanged.
 
 PTY, create-and-run execution and placement sessions remain unavailable.
 They fail explicitly without service work. Typed W365 SDK authoring APIs do not
-exist. Rust, .NET and Node Dev SDK JSON supports **provision, stop and
-deprovision only**, including their validation methods. SDK start, exec,
-live/captured execution and PTY remain unavailable, even with experimental
-authorization. Native executor start/exec support does not establish service
-compatibility or enable these SDK operations.
+exist. Rust, .NET and Node Dev SDK JSON supports provision, start, stop,
+deprovision, captured execution, pipe-backed spawn and validation, with explicit
+experimental authorization on every call. Offline functional coverage does not
+establish authenticated service compatibility.
 
-### Dev SDK lifecycle
+### Dev SDK lifecycle and execution
 
 Author the complete development request JSON with an explicit `phase`.
 Rust uses `mxc_sdk::v1::dev::{provision_container_json, stop_container_json,
@@ -30,6 +29,16 @@ deprovision_container_json}` with `JsonOptions { experimental: true }`.
 Node exports the corresponding `provisionContainerJson`, `stopContainerJson`
 and `deprovisionContainerJson` from `@microsoft/mxc-sdk/v1/dev`, with
 `{ experimental: true }`. All return the complete response JSON string.
+
+After provision, call the corresponding `start_container_json`,
+`StartContainerJson` or `startContainerJson` with the saved opaque `sandboxId`.
+Only `Ready` permits execution. Execute repeatedly with
+`run_in_container_json`, `RunInContainerJson` or `runInContainerJson`, or their
+pipe-backed spawn counterparts, using that same ID. These existing APIs do not
+allocate replacements or release the reservation. Captured methods return the
+normal SDK execution result; pipe-backed handles retain their normal stream,
+wait and disposal ownership. Disposal is not terminal reservation release and
+does not prove remote process termination. Explicitly stop/deprovision when done.
 
 Provision returns `result.sandboxId` and
 `result.metadata.{poolId,sessionId,computerId}`. Retain the ID before any later
@@ -210,8 +219,8 @@ trusted-TLS fixtures do not establish pool Exec permission or interoperability.
 ## Manual PowerShell command runner (Windows)
 
 `tests\scripts\run_w365_command_manual.ps1` is an explicit, **manual-only**
-backend/CLI validation tool. Neither it nor its offline regression scripts
-are registered in CI or aggregate runners. It uses `wxc-exec.exe` for all
+backend/CLI validation tool. Its offline regressions run in Windows x64 CI;
+CI never invokes the live tool. It uses `wxc-exec.exe` for all
 service operations, not public SDK lifecycle APIs or a PowerShell implementation
 of the service protocol. It does not change the SDK availability described above.
 
@@ -227,13 +236,16 @@ Build the executor from `src\` with `cargo build -p wxc`, or pass a known
 compatible binary. The default discovery checks host-architecture release,
 unqualified release, host-architecture debug, then unqualified debug under
 `src\target`. Before authentication, the runner uses credential-free synthetic
-tokens and `--dry-run --experimental` to validate all four operations against
+tokens and `--dry-run --experimental` to validate the requested operations against
 the `1.1.0-alpha` contract. Dry-runs do not contact the service.
 
 | Argument | Meaning |
 | --- | --- |
-| `-PoolId`, `-TenantId`, `-ClientId` | Required nonempty GUIDs for the pool, authentication tenant, and approved public browser client app. No deployment/account defaults. |
-| `-CommandLine` | Required full Windows executable command line, passed unchanged. There is no implicit shell. |
+| `-Operation` | `Run` (default) or `Release`. Release requires an ID and no command. |
+| `-SessionId` | Full opaque `w365:<pool-guid>:<session-guid>` returned by MXC. Supplying it never performs checkout. |
+| `-ConfigPath` | Token-free five-field deployment JSON; defaults to `w365-test.json` beside the script. See the [shared example](../../../tests/tools/w365/w365-test.example.json). Explicit arguments override config. |
+| `-PoolId`, `-TenantId`, `-ClientId` | Nonempty GUIDs for the pool, authentication tenant, and approved public browser client app; supply in config or arguments. No deployment/account defaults. |
+| `-CommandLine` | Required for Run: full Windows executable command line, passed unchanged. There is no implicit shell. |
 | `-ControlPlaneHost` | Bare DNS host. If supplied, overrides only the executor child's `W365A_CONTROLPLANE_URL`; otherwise inherits the caller's value. |
 | `-DataPlaneSuffix` | Bare DNS suffix, with the same precedence over the executor child's `W365A_DP_SUFFIX`. No region is inferred. |
 | `-WxcExePath` | Explicit executor path instead of repository discovery. |
@@ -241,10 +253,11 @@ the `1.1.0-alpha` contract. Dry-runs do not contact the service.
 | `-ExpectedUserObjectId` | Optional actual token `oid` that must match before checkout. |
 | `-WorkingDirectory` | Existing guest path, not a host path. Omission uses the service default; the runner does not create it. |
 | `-TimeoutMs` | Command timeout, default `30000`. Explicit `0` uses the service default described above, not unlimited execution. |
-| `-ReceiptPath` | New journal file in an existing directory. Default is a freshly named `mxc-w365-manual-<random>.json` in the current user's temporary directory, printed before sign-in. |
+| `-ReceiptPath` | Token-free journal in an existing directory. Reuse the same path for subsequent calls on the saved ID. Omission creates a freshly named temporary journal, printed before sign-in. |
 | `-ForceSignIn` | Force system-browser authentication even if the protected cache has a valid token. |
 
-Both effective endpoints must be present and valid before any sign-in,
+Both effective endpoints for Run, or only the control-plane endpoint for Release,
+must be present and valid before any sign-in,
 allocation or service request. URLs, ports, paths, credentials, whitespace,
 non-ASCII names and an overlong pool-prefixed data-plane host are rejected.
 The runner does not change the parent/global environment.
@@ -310,15 +323,27 @@ confirmed stale. The next invocation requires browser sign-in. DPAPI caches
 deliberately contain encrypted secrets; never upload them. `-ForceSignIn`
 does not disable caching or revoke existing credentials.
 
-### One reservation, one command, terminal cleanup
+### Allocate once, reuse explicitly, release explicitly
 
 The runner atomically journals the attempt **before submitting one provision**,
 saves a valid success or error cleanup ID, calls native `start` (only `Ready`
-permits execution), submits one `exec`, then invokes terminal `deprovision`
-in `finally` using the same ID in a fresh executor process. It never retries
-checkout, replaces a reservation, replays a command, keeps/reuses a reservation,
-or scans prior receipts. Calling the script is the intentional authorization
-to run this sequence; there is no additional confirmation switch.
+permits execution), and submits one `exec`. It **does not release automatically**,
+including on failure. `-SessionId` skips checkout, calls start, and runs on the
+same reservation; it never falls back to another allocation.
+`-Operation Release -SessionId <opaque-id>` performs only native deprovision,
+in a fresh executor process. Calling the tool intentionally authorizes the
+requested operation; there is no additional confirmation switch.
+
+For example, after supplying the deployment config and saving the printed ID:
+
+```powershell
+.\tests\scripts\run_w365_command_manual.ps1 -ConfigPath .\w365-test.json `
+    -CommandLine 'cmd.exe /c echo first' -ReceiptPath .\session.json
+.\tests\scripts\run_w365_command_manual.ps1 -ConfigPath .\w365-test.json `
+    -SessionId $id -CommandLine 'cmd.exe /c echo second' -ReceiptPath .\session.json
+.\tests\scripts\run_w365_command_manual.ps1 -ConfigPath .\w365-test.json `
+    -Operation Release -SessionId $id -ReceiptPath .\session.json
+```
 
 Only the executor's private child environment receives `W365A_CP_TOKEN` and
 `W365A_DP_TOKEN`. Inherited W365 test hooks are removed. Tokens never enter
@@ -332,8 +357,7 @@ Command output streams as bytes on stdout/stderr with concurrent draining,
 without lifecycle-JSON interpretation, including guest output that looks like
 an error envelope. Unused stdin is closed immediately to deliver EOF; this
 runner is not an interactive-input tool. The native exec exit status is
-preserved when cleanup succeeds; any cleanup failure fails the
-runner too. A nonzero exec may be a program result **or** a native adapter
+preserved. A nonzero exec may be a program result **or** a native adapter
 failure: inspect streamed native stderr, not guest-output JSON, for the cause.
 The journal retains the native exit status without pretending it independently
 proved a remote process exit. Negative native exit statuses are also preserved.
@@ -344,18 +368,20 @@ for exec, and 45 for release. Output drain and local worker cleanup waits are
 bounded separately. Local timeout/disconnect has an unknown remote outcome;
 it never proves the remote process was killed.
 
-If needed, cleanup silently renews from the same protected cache, bound to the
-already verified object ID; it never opens a browser in `finally`. A renewal or
-release failure retains the reservation ID for intentional later release.
-Primary and cleanup failures are separate. A receipt-write failure after a
-valid ID is known still attempts native release and makes the runner fail.
+If needed, credentials renew silently between phases from the same protected
+cache, bound to the verified object ID. Renewal or release failure retains the
+reservation ID. A receipt-write failure stops further work and reports the ID;
+it never silently releases or makes another checkout.
 
 The token-free journal records pool/session identity, deployment/account
 context, local run ID, per-operation results and safe returned request IDs,
 not commands, guest output, raw service bodies or credentials. Native successful
 responses do not expose HTTP request IDs; the local run ID is not a service
-correlation ID. Existing receipt paths always refuse, even if the old attempt
-was uncertain or release was accepted. All old temporary receipts are retained.
+correlation ID. Existing receipts require the same opaque ID, deployment and
+owner. Another checkout is always refused. An uncertain command must be
+reconciled before another Run; explicit release remains available. A submitted
+release must be reconciled before another release attempt. Accepted release
+blocks both reuse and duplicate release. All old temporary receipts are retained.
 
 On missing/invalid checkout identity, keep the receipt, stop allocation, and
 ask the authorized service operator to reconcile the pool/user and any returned
@@ -363,8 +389,8 @@ request IDs. Never invent an ID or delete the journal to retry blindly.
 After a crash, the last submitted phase may have an unknown outcome.
 For a known saved `sandboxId`, use the credential-free release request and
 explicit native `deprovision --container-id` procedure below, in a fresh process
-with approved renewed credentials. Do not run this command runner again to
-recover an existing reservation. Release acceptance means accepted/already
+with approved renewed credentials, or use this runner's explicit Release
+operation with the retained receipt. Release acceptance means accepted/already
 absent, **not completed remote reset or sanitization**.
 
 ### Offline runner validation and live gap
@@ -379,7 +405,7 @@ python -B -m unittest discover -s tests\scripts -p test_w365_auth.py -v
 The PowerShell suite invokes the actual entrypoint with owned, staged fake auth
 and executor fixtures (Windows .NET Framework compiler required). It covers
 pre-auth refusal, unchanged command quoting, private child environments, a
-pre-submission journal, same-ID lifecycle/cleanup failures, missing-ID uncertainty,
+pre-submission journal, fresh-process same-ID reuse and explicit release failures, missing-ID uncertainty,
 release acceptance versus reset, large/live output, EOF, and readiness beyond
 45 seconds. Python tests inject fake MSAL/cache failures and exercise real DPAPI
 and lock persistence in isolated temporary directories using nonsecret fixtures.
@@ -387,9 +413,22 @@ They do not read user credential stores, open a browser, allocate or release.
 
 **No authenticated live calls were run for this runner.** The API 2.0 Local
 checkout/release evidence above does not establish Exec success. Authenticated
-Exec remains unverified after the reported pre-command HTTP 403, including a
-separate header-only WebSocket experiment; this runner does not change native
-transport or accept `Live` as `Ready` to work around that service issue.
+native/SDK Exec remains unverified. A separately authorized standalone client
+has completed the documented HTTP/1.1 GET/Upgrade transport on a supplied
+computer; that is not native executor or public SDK evidence. This runner does
+not change transport or accept `Live` as `Ready` to work around service issues.
+
+## C# public SDK test application
+
+The [repository-backed C# executable](../../../tests/tools/w365/README.md)
+owns MSAL.NET authentication and a separate protected cache. It calls
+`Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle` directly, never the executor,
+PowerShell/Python helpers or an app-level W365 protocol implementation.
+It shares the token-free deployment config, run/reuse/explicit-release model
+and full opaque MXC ID convention with the native runner. Its JSON output includes
+`sessionId`, `sandboxId` and `receiptPath`, including known IDs after failures.
+Build and manual handoff instructions, cache location and recovery limitations
+are in the tool README.
 
 ## Optional live validation: explicit invocation only
 
@@ -519,10 +558,10 @@ From `src\` on Windows:
 # Requires openssl on PATH, or MXC_W365_TEST_OPENSSL set to its executable path.
 cargo build --locked -p wxc --features test-support
 $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
-cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored --skip sdk_fresh_caller_fixture
+cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored --skip sdk_fresh_caller_fixture --skip test_app_fresh_caller_fixture
 ```
 
-The ordinary Rust suite also runs `public_rust_sdk_lifecycle_fixture` through
+The ordinary Rust suite also runs public SDK lifecycle and execution fixtures through
 the public Dev SDK. For actual .NET and Node SDK calls through FFI, run from
 the repository root on Windows with .NET 10 and Node 24 or later:
 
@@ -535,7 +574,10 @@ fresh .NET/Node callers against the existing trusted-TLS fixture. It checks
 Local/bodyless checkout, omitted identity, retained IDs, refreshed caller
 credentials, terminal release metadata, uncertain release and explicit retry,
 rejected checkout cleanup, unknown/no-ID outcomes, experimental/policy refusal,
-and the remaining execution gates. Exact request counts reject automatic
+readiness, captured output, pipe-backed spawn, execution/spawn error details,
+and unsupported-mode gates. It also drives the C# test app with synthetic
+authentication through new/reuse/release in fresh processes and the real SDK.
+Exact request counts reject automatic
 replay, and completion markers reject empty/skipped caller suites.
 The Windows x64 build job runs it in both regular and scheduled validation;
 Rust public SDK coverage runs on all three platforms. These fixtures never

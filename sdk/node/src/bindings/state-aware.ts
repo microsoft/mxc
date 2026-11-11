@@ -26,7 +26,7 @@ export interface BindingStateAwareRequest {
   experimental: boolean;
 }
 
-const AbiStateAwareResultType = koffi.struct('MxcNodeStateAwareResult', {
+export const AbiStateAwareResultType = koffi.struct('MxcNodeStateAwareResult', {
   status: 'int32_t',
   responseJsonUtf8: 'void *',
   error: AbiErrorDetailType,
@@ -78,7 +78,7 @@ function bindStateAwareNativeFacade(
   };
 }
 
-function createStateAwareResult(): StateAwareNativeResult {
+export function createStateAwareResult(): StateAwareNativeResult {
   return {
     status: 0,
     responseJsonUtf8: null,
@@ -102,7 +102,7 @@ function isWireError(value: unknown): value is WireError {
       && typeof value.details === 'object' && !Array.isArray(value.details)));
 }
 
-function decodeStateAwareResult(
+export function decodeStateAwareResult(
   nativeStatus: number,
   result: StateAwareNativeResult,
 ): string {

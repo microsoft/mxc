@@ -14,6 +14,10 @@ import type { OneShotRequest } from '../generated/v1_0_0/wire.js';
 import type { ExecutionMetadata } from '../v1/types.js';
 import { bindNativeFunction } from './native-function.js';
 import {
+  AbiStateAwareResultType, createStateAwareResult, decodeStateAwareResult,
+  type StateAwareNativeResult,
+} from './state-aware.js';
+import {
   createNativeStdioStreams,
   destroyNativeStreams,
   nativeStdioNodeRequirement,
@@ -67,12 +71,18 @@ export interface LifecycleNativeFacade {
   killForTimeout(handle: Pointer): number;
   warningsJson(handle: Pointer, out: Pointer[]): number;
   outputMetadataJson(handle: Pointer, out: Pointer[]): number;
+  errorDetailsJson?(handle: Pointer, out: Pointer[]): number;
   free(handle: Pointer, completion: NativeFreeCompletion): void;
   freeError(error: AbiErrorDetail): void;
   freeString(value: Pointer): void;
 }
 
 export interface StreamingNativeFacade extends LifecycleNativeFacade {
+  stateAwareExecDetailed?: KoffiFunc<(
+    request: string, experimental: number, stdin: number,
+    outHandle: Pointer[], result: StateAwareNativeResult,
+  ) => number>;
+  freeStateAwareResult?(result: StateAwareNativeResult): void;
   spawnSync(
     request: string,
     experimental: number,
@@ -215,6 +225,18 @@ function bindStreamingNativeFacade(
   });
 
   const native: StreamingNativeFacade = {
+    stateAwareExecDetailed: bindNativeFunction<NonNullable<StreamingNativeFacade['stateAwareExecDetailed']>>(handle, {
+      symbol: 'mxc_exec_state_aware_json_with_details',
+      result: 'int32_t',
+      parameters: ['const char *', 'int32_t', 'int32_t',
+        koffi.out(koffi.pointer(AbiSandbox, 2)),
+        koffi.out(koffi.pointer(AbiStateAwareResultType))],
+    }),
+    freeStateAwareResult: bindNativeFunction(handle, {
+      symbol: 'mxc_state_aware_result_free',
+      result: 'void',
+      parameters: [koffi.pointer(AbiStateAwareResultType)],
+    }),
     spawnSync(request, experimental, outHandle, error) {
       return spawnAsyncBinding(request, experimental, outHandle, error);
     },
@@ -302,6 +324,12 @@ function bindStreamingNativeFacade(
       parameters: [sandboxPointer, koffi.out(koffi.pointer('void *'))],
     }),
 
+    errorDetailsJson: bindNativeFunction<(sandbox: Pointer, out: Pointer[]) => number>(handle, {
+      symbol: 'mxc_sandbox_error_details_json',
+      result: 'int32_t',
+      parameters: [sandboxPointer, koffi.out(koffi.pointer('void *'))],
+    }),
+
     free(sandbox, completion) {
       freeAsyncBinding.async(sandbox, completion);
     },
@@ -380,7 +408,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     this.pollExit[0] = 0;
     this.pollRunning[0] = 1;
     this.pollTimedOut[0] = 0;
-    throwIfFailed(
+    this.throwIfFailed(
       this.native.tryWait(
         this.handle,
         this.pollExit,
@@ -406,7 +434,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
           return;
         }
         try {
-          throwIfFailed(status, 'waiting for sandbox process failed');
+          this.throwIfFailed(status, 'waiting for sandbox process failed');
           resolve({
             exitCode: exit[0],
             timedOut: timedOut[0] !== 0,
@@ -429,14 +457,14 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   }
 
   kill(): void {
-    throwIfFailed(
+    this.throwIfFailed(
       this.native.kill(this.handle),
       'killing sandbox process failed',
     );
   }
 
   killForTimeout(): void {
-    throwIfFailed(
+    this.throwIfFailed(
       this.native.killForTimeout(this.handle),
       'killing timed-out sandbox process failed',
     );
@@ -461,6 +489,24 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
       return decodeString(out[0]);
     } finally {
       if (out[0] !== null) this.native.freeString(out[0]);
+    }
+  }
+
+  private throwIfFailed(status: number, message: string): void {
+    if (status === 0) return;
+    const error = nativeStatusError(status, {}, message);
+    if (this.native.errorDetailsJson === undefined) throw error;
+    const out: Pointer[] = [null];
+    throwIfFailed(this.native.errorDetailsJson(this.handle, out), 'reading process error details failed');
+    try {
+    const json = decodeString(out[0]);
+    if (json === undefined) throw error;
+    const details: unknown = JSON.parse(json);
+    if (details === null || typeof details !== 'object' || Array.isArray(details))
+      throw new MxcError('backend_error', 'native process error details are malformed');
+    throw new MxcError(error.code, message, { ...error.details, ...details });
+    } finally {
+    if (out[0] !== null) this.native.freeString(out[0]);
     }
   }
 }
@@ -714,6 +760,16 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
+  const detailed = native.stateAwareExecDetailed;
+  if (detailed !== undefined && native.freeStateAwareResult !== undefined) {
+    const result = createStateAwareResult();
+    const status = detailed(requestJson, experimental ? 1 : 0, 0, outHandle, result);
+    try {
+      if (status !== 0 || result.status !== 0) decodeStateAwareResult(status, result);
+      return createNativeLifecycleDriver(
+        native, factory, takeSpawnedHandle(native, outHandle, result.error, status));
+    } finally { native.freeStateAwareResult(result); }
+  }
   const error = {} as AbiErrorDetail;
   const status = native.stateAwareExec(
     requestJson,
@@ -784,6 +840,20 @@ export async function createStateAwareStreamingDriverAsync(
   stdin = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
+  const detailed = native.stateAwareExecDetailed;
+  if (detailed !== undefined && native.freeStateAwareResult !== undefined) {
+    const result = createStateAwareResult();
+    const status = await new Promise<number>((resolve, reject) => {
+      detailed.async(
+        requestJson, experimental ? 1 : 0, stdin ? 1 : 0, outHandle, result,
+        (error, value) => error === null ? resolve(value) : reject(error));
+    });
+    try {
+      if (status !== 0 || result.status !== 0) decodeStateAwareResult(status, result);
+      return createNativeLifecycleDriver(
+        native, factory, takeSpawnedHandle(native, outHandle, result.error, status));
+    } finally { native.freeStateAwareResult(result); }
+  }
   const error = {} as AbiErrorDetail;
   const exec = stdin
     ? native.stateAwareExecWithStdinAsync.bind(native)

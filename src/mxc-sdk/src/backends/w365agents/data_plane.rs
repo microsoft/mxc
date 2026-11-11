@@ -35,7 +35,7 @@ pub(super) fn client(identity: &Identity) -> Result<Client, MxcError> {
 
 pub(super) fn ready(identity: &Identity) -> Result<ReadyMetadata, MxcError> {
     let client = client(identity)?;
-    poll(identity, &client, READY_BUDGET, POLL_INTERVAL)?;
+    super::service::with_transport_stack(|| poll(identity, &client, READY_BUDGET, POLL_INTERVAL))?;
     Ok(ReadyMetadata {
         status: "Ready",
         capability: "microsoft.exec",

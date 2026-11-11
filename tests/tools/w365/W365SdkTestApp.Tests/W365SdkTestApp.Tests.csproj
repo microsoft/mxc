@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
+    <ProjectReference Include="..\W365SdkTestApp\W365SdkTestApp.csproj" />
+    <Content Include="$(MxcTestPrebuiltNativeLibrary)" Condition="'$(MxcTestPrebuiltNativeLibrary)' != ''"
+             Link="mxc_ffi.dll" CopyToOutputDirectory="Always" />
+  </ItemGroup>
+</Project>
