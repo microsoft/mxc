@@ -61,6 +61,10 @@ Windows agent user account (an opaque, OS-assigned name), launches a per-session
 host process, and exposes the running script as an `IsoSessionProcess` handle
 from which the runner reads pipe handles for I/O.
 
+Create-and-run cleanup uses the same stop and remove-user APIs and has the same
+[companion-profile cleanup limitations](state-aware-rust.md#cleanup-contract-and-profile-limitations)
+as container lifecycle operations.
+
 ## Architecture
 
 This backend follows the existing single-binary, multiple-backend pattern.

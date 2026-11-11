@@ -397,6 +397,36 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 | stop | OS-side dependent | Stopping an already-stopped session surfaces an HRESULT from `StopSessionAsync`; mapped to `backend_error`. The agent user remains — only the running session is gone. |
 | deprovision | becomes `stale_id` | After a successful deprovision, the agent user is gone. A second deprovision on the same `sandboxId` fails the OS-side agent-user lookup (`HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`), which the runner maps to `MxcError::StaleId`. |
 
+## Cleanup contract and profile limitations
+
+The supported caller sequence is to finish and dispose live SDK process handles,
+then stop the container and deprovision it, including on workload failure.
+Node's `runInContainer` disposes its process handle in `finally`; callers using
+that convenience method do not need an additional process-disposal call.
+
+MXC awaits `IsoSessionOps.StopSessionAsync` for stop and
+`IsoSessionOps.RemoveUserAsync` for deprovision, and checks each returned
+`IsoSessionResult.Error`. Transport failures and OS-reported errors propagate
+through the lifecycle error mapping below. Success means these checks passed;
+it is not independent verification that Windows has removed every associated
+profile resource.
+
+MXC does not enumerate or delete companion `Win32_UserProfile` entries,
+`ProfileList` registry keys, or profile directories after `RemoveUserAsync`.
+A successful response with `warnings: []` therefore does not establish that
+those resources are gone. MXC provides no companion-profile reclamation deadline
+or additional SDK cleanup operation. This is a cleanup limitation, not a
+documented policy of intentional retention or a guarantee of deferred removal.
+
+If an unloaded companion profile remains, do not retry a successfully consumed
+container ID or delete profiles based on an account-name pattern. The provision
+metadata's `agentUserSid` identifies the agent user, not a companion profile.
+Record the MXC version, Windows build and any experimental host changes, lifecycle
+results, and before/after profile observations with elapsed time for MXC/Windows
+investigation. Profile observations alone do not establish which component owns
+the defect. Manual profile or registry deletion is not an MXC-supported cleanup
+step.
+
 ## Concurrency
 
 ### Multiple sandboxes
