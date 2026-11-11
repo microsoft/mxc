@@ -521,6 +521,42 @@ probing, force-reclaim, or audit modes. Lifecycle identity comes only from
 supplied the wrong one is told which it wanted. Conflicting options are rejected
 rather than ignored.
 
+#### Held containers
+
+Each `wxc-exec` lifecycle call is its own process. A backend can limit what
+separate processes do at once: a MicroVM serves one host session at a time, so
+an `exec` waits until the process running an earlier `exec` of that container
+exits. `--hold` keeps the whole lifecycle in one process instead:
+
+```text
+wxc-exec.exe provision.json --experimental --operation provision --hold
+```
+
+The executor provisions and starts the container from the provision request,
+then reads requests from stdin and writes events to stdout, one JSON object
+per line, until stdin closes. It then cancels the execs that still run, stops
+and deprovisions the container, and exits with `0`. The container ID never
+leaves the process, and `--hold` takes no `--container-id`, `--dry-run`, or
+command override.
+
+| Request | Effect |
+|---|---|
+| `{"type":"exec","id":"1","request":{...}}` | Runs `request`, an `exec` request in the shape `--operation exec` reads, side by side with the other execs. `id` is the caller's name for it and must not name a running exec. |
+| `{"type":"cancel","id":"1"}` | Cancels that exec if it still runs. The container keeps running. |
+
+| Event | Meaning |
+|---|---|
+| `{"type":"ready"}` | The container started; send requests. |
+| `{"type":"stdout","id":"1","data":"<base64>"}` | Output of an exec, in order; `stderr` likewise. |
+| `{"type":"exit","id":"1","exitCode":0}` | The exec ended. It is the last event of that exec; a cancelled MicroVM exec reports `137`. |
+| `{"type":"timeout","id":"1"}` | The exec's `process.timeout` elapsed and the sandbox ended it. |
+| `{"type":"error","id":"1","error":{...}}` | The exec failed or could not start; `error` has the envelope shape of §7.3. The container keeps running. |
+| `{"type":"error","error":{...}}` | The container failed: provision, start, a malformed request line, or teardown. It is the last event, and the executor exits with that error's status. |
+
+Ctrl-C ends the container as closing stdin does, and the executor exits with
+`130`. Diagnostics go to stderr. Terminating the executor skips teardown and
+can leave the container running, as with any lifecycle call that is cut short.
+
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):
 

@@ -288,7 +288,10 @@ while its registry is unreachable. A third checks that create-and-run
 sandboxes start as clones of the platform snapshot templates, that a streaming
 request captures the templates too, that validation captures none, and that a
 host that cannot capture them cold boots sandboxes. Requests that native
-validation rejects capture no templates.
+validation rejects capture no templates. A held-container scenario runs execs
+side by side in a container that `wxc-exec --operation provision --hold`
+keeps, cancels one, and closes stdin, then checks that the container's VM ended
+and that its ID never left the executor.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

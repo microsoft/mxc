@@ -59,6 +59,7 @@ foreach ($name in @(
     'windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots',
     'windows_x64::signed_bundle_executor_console_interrupt',
     'windows_x64::signed_bundle_executor_stdin_close_cancels',
+    'windows_x64::signed_bundle_executor_holds_a_container',
     'windows_x64::signed_bundle_facade_create_and_run',
     'windows_x64::signed_bundle_sdk_json_capture',
     'windows_x64::signed_bundle_json_image_and_filesystem_policy',
