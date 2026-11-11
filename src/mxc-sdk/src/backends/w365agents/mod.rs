@@ -5,16 +5,38 @@
 
 mod service;
 
-use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use crate::mxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecStdio, ProvisionResult, StartResult, StatefulSandboxBackend,
     StopResult,
 };
 use crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig;
+use crate::mxc_common::validator::validate_network_policy_support;
 use serde::Serialize;
 
 pub(crate) struct Runner;
+
+const CREATE_AND_RUN_UNSUPPORTED: &str =
+    "w365_agents supports container lifecycle operations only; create-and-run execution is not supported";
+
+impl SandboxBackend for Runner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+        Err(ScriptResponse::rejected(CREATE_AND_RUN_UNSUPPORTED))
+    }
+
+    fn spawn(
+        &mut self,
+        _: &ExecutionRequest,
+        _: &mut Logger,
+        _: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        Err(ScriptResponse::rejected(CREATE_AND_RUN_UNSUPPORTED))
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

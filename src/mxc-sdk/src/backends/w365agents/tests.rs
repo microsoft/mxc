@@ -4,6 +4,7 @@
 use crate::mxc_common::{
     config_parser::load_mxc_request_from_json,
     logger::{Logger, Mode},
+    models::{ContainmentBackend, ExecutionRequest},
     mxc_error::{MxcError, MxcErrorCode},
     state_aware_dispatch::DispatchOutcome,
     state_aware_request::MxcRequest,
@@ -299,6 +300,63 @@ fn lifecycle_contract_and_recovery_fixture() {
     let _lock = ENV.lock().unwrap();
     let env = Environment::new();
     let fixture = Fixture::new();
+    for configured in [false, true] {
+        fixture.configure(&env);
+        if !configured {
+            std::env::remove_var("W365A_CONTROLPLANE_URL");
+            std::env::remove_var("W365A_CP_TOKEN");
+        }
+        for experimental_enabled in [false, true] {
+            for dry_run in [false, true] {
+                let execution = ExecutionRequest {
+                    containment: ContainmentBackend::W365Agents,
+                    script_code: "echo must-not-run".into(),
+                    experimental_enabled,
+                    dry_run,
+                    ..Default::default()
+                };
+                let result = crate::mxc_engine::run(&execution, &mut Logger::new(Mode::Buffer));
+                if experimental_enabled {
+                    let response = result.expect("the engine must select the refusing W365 runner");
+                    assert_eq!(response.exit_code, 1);
+                    assert_eq!(
+                        response.failure_phase.error_code(),
+                        MxcErrorCode::PolicyValidation
+                    );
+                    assert!(response
+                        .error_message
+                        .contains("container lifecycle operations only"));
+                    assert!(response.standard_out.is_empty());
+                    assert!(response.standard_err.is_empty());
+                } else {
+                    assert_eq!(result.unwrap_err().code.as_str(), "backend_unavailable");
+                }
+                let error = crate::mxc_engine::spawn_execution_request(&execution, false)
+                    .err()
+                    .expect("create-and-run streaming must never start a process");
+                assert_eq!(
+                    error.code.as_str(),
+                    if !experimental_enabled {
+                        "backend_unavailable"
+                    } else if dry_run {
+                        "malformed_request"
+                    } else {
+                        "policy_validation"
+                    }
+                );
+                if experimental_enabled && !dry_run {
+                    assert!(error
+                        .message
+                        .contains("container lifecycle operations only"));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        fixture.count(),
+        0,
+        "execution refusal must not call the service"
+    );
     fixture.configure(&env);
     for key in ["W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN"] {
         std::env::remove_var(key);

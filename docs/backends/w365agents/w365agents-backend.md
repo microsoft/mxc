@@ -18,6 +18,12 @@ JSON lifecycle access is also deliberately unavailable until cross-SDK
 structured error metadata and public SDK validation are complete.
 Native executor responses retain structured errors and cleanup identities.
 
+At the native engine boundary, create-and-run execution resolves the W365
+runner and is refused by the backend with `policy_validation`, including
+run-to-completion dry runs. It does not read service credentials or make a
+service request. Development MXC request JSON still does not accept W365
+create-and-run requests.
+
 ## Configuration and contract
 
 Use the `1.1.0-alpha` development contract. Provision accepts only these
