@@ -115,7 +115,7 @@ fn emit_active() -> bool {
 
 /// Evaluate authorization for one complete logical emission.
 ///
-/// Development-contract requests emit Required diagnostics: no consent,
+/// Supported-contract requests emit Required diagnostics: no consent,
 /// request opt-in or administrative policy, only build eligibility. Other
 /// requests need consent and policy.
 fn authorization_allows_emission() -> bool {
@@ -132,6 +132,13 @@ fn authorization_allows_emission() -> bool {
 
 fn required_collection_allowed() -> bool {
     crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
+}
+
+pub(super) fn uses_required_events(source_contract: Option<ContractVersion>) -> bool {
+    matches!(
+        source_contract,
+        Some(ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha)
+    )
 }
 
 fn invocation_can_emit(active: bool) -> bool {
@@ -246,7 +253,7 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 
 /// Initialize the provider for one request, selecting the gate by contract.
 ///
-/// Development-contract requests collect Required diagnostics regardless of
+/// Supported-contract requests collect Required diagnostics regardless of
 /// the request's telemetry object, MXC consent or administrative policy, when
 /// the build is eligible. All other requests use [`init`].
 pub fn init_for_request(
@@ -254,7 +261,7 @@ pub fn init_for_request(
     source_contract: Option<ContractVersion>,
     logger: &mut Logger,
 ) -> bool {
-    if source_contract == Some(ContractVersion::V1_1_0Alpha) {
+    if uses_required_events(source_contract) {
         if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
             logger.log_line("telemetry: Required diagnostics are not collected by this build");
             return false;
@@ -1408,21 +1415,28 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_development_end_uses_required_gate_on_a_fresh_thread() {
+    fn out_of_band_contract_end_uses_required_gate_on_a_fresh_thread() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = TelemetryTestEnv::new(tmp.path());
         let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        for emit in [emit_panic as fn(), emit_cancellation as fn()] {
+        for (contract, emit) in [
+            ContractVersion::V0_9_0Alpha,
+            ContractVersion::V1_0_0,
+            ContractVersion::V1_1_0Alpha,
+        ]
+        .into_iter()
+        .flat_map(|contract| {
+            [emit_panic as fn(), emit_cancellation as fn()].map(|emit| (contract, emit))
+        }) {
             reset_for_test();
             events::test_sink::install();
             {
                 let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-                let _scope =
-                    session::start(true, "", Some(ContractVersion::V1_1_0Alpha), &mut logger);
+                let _scope = session::start(true, "", Some(contract), &mut logger);
                 set_process_context(&ContainmentBackend::ProcessContainer);
             }
             // No authorization override: the real gate runs with consent
-            // undetermined, which a development request must not need.
+            // undetermined, which a supported contract must not need.
             let ends = std::thread::spawn(move || {
                 assert!(!session::critical_events());
                 events::test_sink::install();
@@ -1439,31 +1453,47 @@ mod tests {
     }
 
     #[test]
-    fn init_for_request_ignores_request_flag_and_consent_only_for_development() {
+    fn init_for_request_ignores_request_flag_consent_and_policy_for_supported_contracts() {
         let tmp = tempfile::tempdir().unwrap();
-        let _env = TelemetryTestEnv::new(tmp.path());
+        let env = TelemetryTestEnv::new(tmp.path());
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let enabled = TelemetryConfig {
             enabled: Some(true),
             ..Default::default()
         };
 
-        // Published and unattributed requests still need consent.
-        for contract in [None, Some(ContractVersion::V1_0_0)] {
-            assert!(!init_for_request(Some(&enabled), contract, &mut logger));
-            assert!(!init_for_request(None, contract, &mut logger));
+        assert!(!init_for_request(Some(&enabled), None, &mut logger));
+        assert!(!init_for_request(None, None, &mut logger));
+        for consent in [None, Some(false)] {
+            if let Some(granted) = consent {
+                consent::set_consent(granted, "test").unwrap();
+            }
+            for contract in [
+                ContractVersion::V0_9_0Alpha,
+                ContractVersion::V1_0_0,
+                ContractVersion::V1_1_0Alpha,
+            ] {
+                for policy in [0, 1, 7] {
+                    env.set_policy_value(policy);
+                    for config in [
+                        None,
+                        Some(TelemetryConfig::default()),
+                        Some(TelemetryConfig {
+                            enabled: Some(false),
+                            ..Default::default()
+                        }),
+                        Some(enabled.clone()),
+                    ] {
+                        let active = init_for_request(config.as_ref(), Some(contract), &mut logger);
+                        assert_eq!(active, crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                        if active {
+                            crate::mxc_telemetry::shutdown();
+                        }
+                    }
+                }
+            }
         }
-
-        // Development requests need only build eligibility, never consent or
-        // administrative policy.
-        let dev = Some(ContractVersion::V1_1_0Alpha);
-        if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
-            assert!(!init_for_request(None, dev, &mut logger));
-        }
-        assert_eq!(
-            required_collection_allowed(),
-            crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
-        );
     }
 
     #[test]

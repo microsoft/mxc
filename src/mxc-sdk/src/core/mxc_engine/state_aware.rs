@@ -1255,8 +1255,8 @@ mod tests {
         );
         assert_eq!(
             typed.request().source_contract,
-            None,
-            "typed SDK input has no external exact-contract source"
+            exact.request().source_contract,
+            "typed SDK input must retain its selected contract"
         );
         assert_eq!(request_intent(&typed), request_intent(&exact));
     }
@@ -2107,8 +2107,8 @@ mod tests {
 
         let store = tempfile::tempdir().unwrap();
         let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
-        telemetry::consent::set_consent(true, "test").unwrap();
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();
@@ -2123,7 +2123,6 @@ mod tests {
                 Phase::Deprovision,
                 Phase::DeprovisionSession,
             ] {
-                let mut development = false;
                 let succeeded = if typed {
                     let mut input = match phase {
                         Phase::ProvisionSession => SdkStateAwareInput::new(
@@ -2150,7 +2149,7 @@ mod tests {
                         )
                         .unwrap(),
                     };
-                    input.telemetry_opt_in = Some(true);
+                    input.telemetry_opt_in = Some(false);
                     run_typed_state_aware_request(input, true, true).is_ok()
                 } else {
                     let mut request: serde_json::Value = match phase {
@@ -2167,14 +2166,12 @@ mod tests {
                         }),
                         _ => serde_json::from_str(&lifecycle_fixture("wslc", id, phase)).unwrap(),
                     };
-                    request["telemetry"] = serde_json::json!({ "enabled": true });
-                    development = request["version"] == "1.1.0-alpha";
+                    request["telemetry"] = serde_json::json!({ "enabled": false });
                     run_state_aware_json(&request.to_string(), true, true).is_ok()
                 };
                 let starts = test_sink::take_starts();
                 let ends = test_sink::take_executions();
-                let expected =
-                    usize::from(!development || crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
                 assert_eq!(starts.len(), expected, "typed={typed}, phase={phase:?}");
                 assert_eq!(ends.len(), expected, "typed={typed}, phase={phase:?}");
                 if expected == 0 {
@@ -2208,8 +2205,8 @@ mod tests {
 
         let store = tempfile::tempdir().unwrap();
         let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
-        telemetry::consent::set_consent(true, "test").unwrap();
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();
@@ -2218,31 +2215,33 @@ mod tests {
             exec_input(
                 "wslc:00000000000000000000000000000000",
                 "echo synthetic",
-                Some(true),
+                Some(false),
             ),
             true,
             &mut logger,
         )
         .unwrap();
         let mut start = None;
+        let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
         let result = exec_state_aware_process_parsed(parsed, &mut logger, |_| {
             let starts = test_sink::take_starts();
-            assert_eq!(starts.len(), 1);
+            assert_eq!(starts.len(), expected);
             assert!(test_sink::take_executions().is_empty());
             start = starts.first().cloned();
             Err(MxcError::backend_unavailable("synthetic"))
         });
         assert!(result.is_err());
         let ends = test_sink::take_executions();
-        assert_eq!(ends.len(), 1);
-        let start = start.unwrap();
-        assert_eq!(start.session_id, ends[0].session_id);
-        assert_eq!(start.phase, ends[0].phase);
-        assert_eq!(start.correlation_vector, ends[0].correlation_vector);
-        assert_eq!(
-            ends[0].failure_reason,
-            Some(telemetry::FailureReason::InitError)
-        );
+        assert_eq!(ends.len(), expected);
+        if let Some(start) = start {
+            assert_eq!(start.session_id, ends[0].session_id);
+            assert_eq!(start.phase, ends[0].phase);
+            assert_eq!(start.correlation_vector, ends[0].correlation_vector);
+            assert_eq!(
+                ends[0].failure_reason,
+                Some(telemetry::FailureReason::InitError)
+            );
+        }
         test_sink::clear();
     }
 

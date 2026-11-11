@@ -61,12 +61,12 @@ If needed later, it can be added incrementally.
 
 For Windows builds with the WinExt group configured, `MXC.ExecutionStart`, `MXC.ExecutionEnd`,
 `MXC.Error`, and `MXC.ProcessExited` use the Critical Data keyword and the Performance
-privacy tag when the request uses development contract `1.1.0-alpha`.
-Published `0.9.0-alpha` and `1.0.0` requests, and requests without source-contract
-attribution, retain the Measures keyword and the Usage privacy tag.
+privacy tag when the request uses `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`.
+Requests without source-contract attribution retain the Measures keyword and
+the Usage privacy tag.
 The numeric values are not in this repository; they come from the telemetry component.
-Published requests retain Measures and Usage for the other event families.
-Development `1.1.0-alpha` requests emit only those four events, suppressing
+Unattributed requests retain Measures and Usage for the other event families.
+All three supported contracts emit only those four events, suppressing
 VerboseDenials, ProcessTimedOut, ProcessKillFailed, PolicyHash,
 SandboxNetworkPolicyApplied, SandboxTornDown and ConfigRejected.
 Without a group, ordinary local
@@ -75,20 +75,22 @@ builds use keyword `0x1` and privacy tag `0` for both categories.
 The selection travels with request-scoped session context, including streaming
 handles and worker threads. The shared writer selects the keyword and tag
 together. Event names, field order and types are unchanged for every contract.
-Published contracts and requests without source-contract attribution retain the
+Typed SDK lifecycle normalization preserves its selected compatibility contract
+for this decision, without retaining caller JSON or changing operation routing.
+Requests without source-contract attribution retain the
 full inventory, request opt-in, MXC consent and administrative policy gates.
 Excluded verbose telemetry is not read or prepared for transport; caller-requested
 local denial reports and verbose artifacts remain available.
 
-Development `1.1.0-alpha` requests collect the four Required events by default.
+All three supported contracts collect the four Required events by default.
 The request's `telemetry` object (including `enabled: false`) and MXC consent
 are not consulted. Initialization runs for every such request and collection
 requires only a build eligible for Required collection: routed through the internal
 group, or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`).
 Administrative policy is not consulted, so no registry setting disables it.
 
-The gate is selected from the request-scoped contract, so published and
-development requests running concurrently do not share authorization. UTC's
+The gate is selected from the request-scoped contract, so supported-contract and
+unattributed requests running concurrently do not share authorization. UTC's
 Required/Optional controls apply to Windows Diagnostic Data, not to MXC's WinExt
 events.
 Consent-free collection is not implemented by the inventory or metadata selection.
@@ -111,7 +113,7 @@ provider-group input. This test input grants no collection authorization.
 Every MXC telemetry event carries the WinExt-required Common Schema fields
 `PartA_PrivacyProduct` and `PartA_PrivacyDataCategory`. The
 `PartA_PrivTags` field is also always present. Ordinary public and local
-builds use `0`; grouped builds use Performance for the four development
+builds use `0`; grouped builds use Performance for the four Required
 events and Usage otherwise, as described above. The product is
 privacy-approved and registered in the WinExt product list. The provider-group
 identifier and these values come from the telemetry component and must not be
@@ -137,10 +139,10 @@ Disabled invocations suppress backend telemetry even when another request owns
 the provider. See [Correlating a lifecycle](#correlating-a-lifecycle).
 
 Unreleased consent resource version `4` discloses the random lifecycle session
-inventory, pending privacy/release-owner review, and requires
-explicit re-consent for earlier grants. Administrative policy, per-request
-opt-in, emission reauthorization, privacy tags and non-Windows no-ops remain
-unchanged.
+inventory, pending privacy/release-owner review.
+The optional path for unattributed requests requires explicit re-consent for
+earlier grants. Supported-contract Required collection does not consult the
+consent resource or change existing grants. Non-Windows builds remain no-ops.
 
 ## Windows-only M-ETW specification
 
@@ -163,8 +165,9 @@ The M-ETW scope is Windows `process_container` and `isolation_session`.
 Linux/macOS retain no-op telemetry stubs and are not requirement-behavior
 targets for this work.
 
-The following table describes the published-contract inventory. Development
-`1.1.0-alpha` retains only ExecutionStart, ExecutionEnd, Error and ProcessExited.
+The following table describes the optional inventory for unattributed internal
+requests. Supported contracts retain only ExecutionStart, ExecutionEnd, Error
+and ProcessExited.
 
 | Requirement | ETW event | Required fields | Backend coverage |
 |---|---|---|---|
@@ -247,8 +250,9 @@ Streaming SDK calls emit Start before spawn and End on terminal observation,
 confirmed cancellation, timeout, or handle disposal, not when spawn returns.
 Start does not claim the terminal slot or release the provider. End retains
 the existing exactly-once terminal ownership, including best-effort executor
-panic/cancellation reporting. Each emission independently rechecks consent
-and policy, so withdrawal can suppress End after Start.
+panic/cancellation reporting. Each emission independently rechecks authorization.
+For unattributed optional requests, withdrawal or policy can suppress End after
+Start; neither affects supported-contract Required collection.
 
 Hard process termination, native crashes, or collection/delivery loss can leave
 an unmatched Start; absence of End is not proof of a crash. Requests rejected
@@ -378,8 +382,8 @@ documents, general logger text, or free-form error text.
 ### Privacy review status
 
 The current `en-US` consent resource is version 4, which is privacy-reviewed.
-The consent wording applies only to the consent-gated optional events of the
-published contracts. The four Required events of the development contract do
+The consent wording applies only to consent-gated optional events from
+unattributed internal requests. The four Required events of supported contracts do
 not use it. The
 verbose-event inventory, current WinExt classification, retention, access,
 regional processing, deletion, and localization/accessibility decisions
@@ -443,7 +447,7 @@ even when telemetry is disabled. Failed and dry-run deprovision retain it.
 Loads refresh active records; opportunistic pruning removes unrelated records
 older than 30 days and temporary files older than one day, with bounded sweeps.
 Disabling telemetry does not generate new roots; cleanup can remove existing
-state. Withdrawn consent continues to suppress emission.
+state. Withdrawn consent suppresses only unattributed optional emission.
 
 Store unavailability reports a diagnostic and permits a disconnected root
 without changing sandbox results. Cross-process continuity cannot be guaranteed
@@ -495,12 +499,12 @@ free-form text.
 
 ## Consent
 
-The development `1.1.0-alpha` contract emits only the four Required events. MXC
+The `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha` contracts emit only the four Required events. MXC
 moved these events to Required telemetry to keep MXC secure, reliable, and up to
 date, so they are gated by build eligibility and provider availability, not
 by the per-run request, MXC consent or administrative policy.
 
-Published contracts keep the optional model: emission is gated by the per-run
+Unattributed internal requests keep the optional model: emission is gated by the per-run
 request, MXC-owned consent, administrative policy, and provider availability.
 See [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
@@ -830,7 +834,7 @@ or production approval.
 
 | Handle | Private build input | Metadata when configured |
 |---|---|---|
-| `MXC_PROVIDER` | Signed telemetry component | Measures/Usage, or Critical Data/Performance for the four selected development events |
+| `MXC_PROVIDER` | Signed telemetry component | Critical Data/Performance for the four supported-contract events; Measures/Usage for unattributed optional requests |
 
 An unrouted build produces a local-only registration with keyword
 `0x1` and privacy tag `0` for every event. The obsolete
@@ -891,8 +895,9 @@ The private pipeline builds and signs the component DLL; its output is copied
 into `src/mxc-sdk/resources/telemetry-component/`. Do not copy private values
 into repository files or logs.
 
-Published contracts retain their existing registration, Measures/Usage
-metadata, request opt-in, consent and policy gates. Debug builds and builds
+Supported contracts share Required collection and Critical Data/Performance
+metadata. Unattributed requests retain request opt-in, consent and policy gates.
+Ordinary debug builds and builds
 with an empty `MXC_TELEMETRY_COMPONENT_PATH` retain local-only metadata.
 
 The public Windows test artifact explicitly clears the component input. Its
@@ -902,12 +907,12 @@ ingestion.
 ### WinExt routing acceptance
 
 On an approved disposable Windows VM, use a release build with the signed
-component. For published contracts keep MXC's explicit consent, request
-opt-in, and permitting MXC policy satisfied. Development requests need no
-consent or opt-in. Verify actual collection for both, including successful
-process exit and operational failure; verify published suppression after
-consent withdrawal. Development requests keep emitting at every
-administrative policy value, including `0`.
+component. Exercise each supported contract with consent absent, granted, and
+withdrawn, and request telemetry omitted or disabled. Verify actual collection,
+including successful process exit and operational failure, with only the four
+Required events. They keep emitting at every administrative policy value,
+including `0`. Separately verify consent and policy suppression for any
+unattributed optional callers.
 
 Windows Required/Optional settings do not authorize or gate these WinExt
 events. Do not use acceptance at a Windows diagnostic-data level as evidence

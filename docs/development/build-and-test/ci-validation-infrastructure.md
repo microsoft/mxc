@@ -319,8 +319,8 @@ Every scheduled `isolation-session` job runs
 `run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
 the architecture-matched telemetry test executor. That artifact is built with
 an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
-has no UTC routing. Consent is granted only in a temporary test store (needed by
-the published contract; development Required collection ignores it) and policy is
+has no UTC routing. Consent management is exercised only in a temporary test
+store; supported-contract Required collection ignores its state. Policy is
 redirected to an isolated HKCU key; real user consent and HKLM policy are not
 modified. The test mode also makes the build eligible for Required collection.
 
@@ -330,12 +330,12 @@ metadata while remaining local-only without provider-group routing. Release, non
 non-test-support and grouped builds reject this test setting.
 All events use the same `Microsoft.MXC` registration and provider GUID.
 Generated-group and registration tests separately check the shared WinExt
-input, failure/retry, and cleanup. ETW capture verifies both metadata categories,
+input, failure/retry, and cleanup. ETW capture verifies Required event metadata for all supported contracts,
 not Microsoft ingestion or an MXC Required/Optional consent model.
 
 The existing lifecycle suite runs provision, start, two successful execs, stop
-and deprovision twice, once with published `1.0.0` and once with development
-`1.1.0-alpha`, each phase in a separate executor process. The local
+and deprovision three times, once per `0.9.0-alpha`, `1.0.0`, and
+`1.1.0-alpha`, with request telemetry disabled and each phase in a separate executor process. The local
 ETW trace must contain one matching ExecutionStart/ExecutionEnd pair per
 recorded PID, correct phase/backend/mode attribution, one session ID and CV
 root throughout each lifecycle, and fresh attribution after cleanup. Successful
@@ -344,15 +344,14 @@ unsupported hosts, incomplete scenarios and missing events fail the job.
 
 Keyword checks read actual `System/Keywords` from decoded ETW, require
 ProcessExited for each exec, and check Start, End, Error and ProcessExited
-against the request's contract. Separate valid requests for the Windows-
-unsupported Bubblewrap backend require failure pairs and Error for both
-contracts. The same checks read `PartA_PrivTags`: the four development
-events must carry Performance, and published events must retain Usage.
-Development requests must emit only ExecutionStart, ExecutionEnd, Error and
+against the Required classification. Separate valid requests for the Windows-
+unsupported Bubblewrap backend require failure pairs and Error for all three
+contracts, including absent/denied consent and restrictive policy.
+The same checks read `PartA_PrivTags`: the four Required events must carry Performance.
+Supported contracts must emit only ExecutionStart, ExecutionEnd, Error and
 ProcessExited; any other emitted event fails the trace oracle.
-Missing, invalid or combined privacy tags fail. Other published event families
-must retain Measures; combined category masks fail.
-The Windows build job also runs paired create-and-run requests and
+Missing, invalid or combined privacy tags and combined category masks fail.
+The Windows build job also runs create-and-run requests with telemetry omitted and
 these failure cases. Keyword-check mode fails rather than skips without
 Administrator privileges.
 
