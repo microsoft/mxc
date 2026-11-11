@@ -746,7 +746,7 @@ fn exec_state_aware_attached_parsed(
     }
 }
 
-fn run_state_aware_envelope(
+pub(super) fn run_state_aware_envelope(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
     logger: &mut Logger,
@@ -849,7 +849,7 @@ fn run_state_aware_envelope(
     }
 }
 
-fn exec_state_aware_parsed(
+pub(super) fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
     stdin: bool,

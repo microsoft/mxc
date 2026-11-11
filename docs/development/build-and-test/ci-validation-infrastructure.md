@@ -360,6 +360,11 @@ stdin. Each interruption must terminate the OpenVMM processes owned by that
 executor and leave the state directory usable; it never relies on a whole-host
 VM count.
 
+A held-container scenario runs execs side by side in a container that
+`wxc-exec --operation provision --hold` keeps, cancels one, and closes stdin,
+then checks that the container's VM ended and that its ID never left the
+executor.
+
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
 unavailable server cannot be mistaken for a blocked connection. The host needs
