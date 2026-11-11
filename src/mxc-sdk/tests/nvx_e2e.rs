@@ -1139,7 +1139,8 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     }
 
     /// Holds a container with `--hold`, runs execs side by side in it, cancels one, and closes
-    /// stdin, then checks that the executor stopped the container's VM and exited with 0.
+    /// stdin, then checks that the executor stopped the container's VM and exited with 0. Then
+    /// holds another and closes all of its pipes at once, as a caller that exits would.
     #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_holds_a_container() {
@@ -1257,7 +1258,64 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         let events = reader.join().expect("event reader");
         assert!(!events.contains("microvm:"), "{events}");
         assert!(!stderr().contains("microvm:"), "{}", stderr());
-        println!("VM_EXECUTED executor held container side-by-side execs/state/cancel/teardown");
+        drop(guard);
+
+        // A caller that goes away closes stdin, stdout and stderr at once. The executor's events
+        // and diagnostics then fail to write, and it still tears the container down.
+        let mut guard = ExecutorGuard {
+            child: Command::new(executor())
+                .args(["--experimental", "--operation", "provision", "--hold"])
+                .arg(&request_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("held-container executor"),
+            vmm: None,
+        };
+        let mut requests = guard.child.stdin.take().expect("executor stdin");
+        let stdout = guard.child.stdout.take().expect("executor stdout");
+        let (sender, started) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            let mut line = String::new();
+            while line.is_empty() || !(line.contains("\"ready\"") || line.contains("\"error\"")) {
+                line.clear();
+                if stdout.read_line(&mut line).expect("event line") == 0 {
+                    break;
+                }
+            }
+            let _ = sender.send((line, stdout));
+        });
+        let (ready, stdout) = started
+            .recv_timeout(Duration::from_secs(180))
+            .expect("the second held container never reported ready");
+        assert!(ready.contains("\"ready\""), "{ready}");
+        guard.vmm = owned_vmms(guard.child.id()).into_iter().next();
+        assert!(guard.vmm.is_some(), "the second held container has no VM");
+        writeln!(requests, "{}", exec("gone", "sleep 600")).expect("held-container request");
+        requests.flush().expect("flushed request");
+        drop((requests, stdout, guard.child.stderr.take()));
+        let gone = Instant::now();
+        let exit = loop {
+            if let Some(exit) = guard.child.try_wait().expect("held executor status") {
+                break exit;
+            }
+            assert!(
+                gone.elapsed() < Duration::from_secs(120),
+                "teardown after the caller went away hung"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(exit.code(), Some(0));
+        assert_eq!(
+            unsafe { WaitForSingleObject(guard.vmm.as_ref().expect("held VM").get(), 0) },
+            WAIT_OBJECT_0,
+            "the OpenVMM of a container whose caller went away is still running",
+        );
+        println!(
+            "VM_EXECUTED executor held container side-by-side execs/state/cancel/teardown/caller-gone"
+        );
     }
 
     /// Kills an executor, and the VM it started, that a failed test left running.

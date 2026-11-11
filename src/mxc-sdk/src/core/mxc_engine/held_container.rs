@@ -45,7 +45,7 @@ use crate::mxc_common::config_parser::{
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::mxc_error::{ErrorEnvelope, MxcError, MxcErrorCode};
 use crate::mxc_common::sandbox_process::{SandboxProcess, StreamCloser};
-use crate::mxc_common::script_runner::{emit_warning_envelopes, RunCancellation};
+use crate::mxc_common::script_runner::{warning_envelope_lines, RunCancellation};
 use crate::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 
 const POLL: Duration = Duration::from_millis(50);
@@ -201,12 +201,21 @@ fn operation<T>(
 ) -> Result<T, MxcError> {
     let mut logger = sinks.clone_diagnostic_sink();
     let result = run(&mut logger);
-    emit_warning_envelopes(&logger.take_warnings());
-    let buffered = logger.get_buffer();
-    if !buffered.is_empty() {
-        eprint!("{buffered}");
+    let warnings = warning_envelope_lines(&logger.take_warnings());
+    if !warnings.is_empty() {
+        write_diagnostics(&format!("\n{}\n", warnings.join("\n")));
     }
+    write_diagnostics(logger.get_buffer());
     result
+}
+
+/// Writes diagnostics to stderr. A caller that died leaves a broken pipe, and
+/// the container must still be torn down, so a failed write is ignored rather
+/// than panicking as `eprint!` would.
+fn write_diagnostics(text: &str) {
+    if !text.is_empty() {
+        let _ = std::io::stderr().write_all(text.as_bytes());
+    }
 }
 
 /// Parses a request of the executor's lifecycle transport, which carries the
