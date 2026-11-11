@@ -40,14 +40,15 @@ public sealed class ApplicationTests : IDisposable
         return await Invoke(args.ToArray(), auth ?? new FakeAuth(), sdk);
     }
 
-    internal static async Task<(int Exit, JsonObject Result)> Invoke(string[] args, IAuthentication auth, ISdk sdk)
+    internal static async Task<(int Exit, JsonObject Result)> Invoke(string[] args, IAuthentication auth,
+        ISdk sdk, IStatusProbe? statusProbe = null)
     {
         var previous = Console.Out;
         using var output = new StringWriter();
         try
         {
             Console.SetOut(output);
-            var exit = await Application.RunAsync(args, auth, sdk);
+            var exit = await Application.RunAsync(args, auth, sdk, statusProbe);
             var text = output.ToString();
             Assert.DoesNotContain("SYNTHETIC_PRIVATE_TOKEN", text);
             return (exit, JsonNode.Parse(text)!.AsObject());
@@ -234,6 +235,263 @@ public sealed class ApplicationTests : IDisposable
         Assert.False(Application.SafeDetails(document.RootElement)!.ContainsKey("lastState"));
     }
 
+    [Theory]
+    [InlineData("Waiting")]
+    [InlineData("Live")]
+    [InlineData("Ready")]
+    public async Task StatusFetchesOnceWithoutSdkCallsOrReceipt(string state)
+    {
+        config.ControlPlaneHost = "";
+        File.WriteAllText(configPath, JsonSerializer.Serialize(config, Configuration.JsonOptions));
+        var sdk = new FakeSdk();
+        var handler = new StatusHandler(request =>
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Equal($"https://{Pool}.data.example.invalid/computers/{Id.Split(':')[2]}/status?api-version=1.0",
+                request.RequestUri!.AbsoluteUri);
+            Assert.Equal(Id.Split(':')[2], request.Headers.GetValues("x-ms-computerId").Single());
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("SYNTHETIC_PRIVATE_TOKEN", request.Headers.Authorization.Parameter);
+            Assert.True(Guid.TryParse(request.Headers.GetValues("x-ms-client-request-id").Single(), out _));
+            Assert.Null(request.Content);
+            return StatusResponse(200, $$"""{"status":"{{state}}","private":"SYNTHETIC_PRIVATE_TOKEN"}""");
+        });
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), sdk, new StatusProbe(handler));
+        Assert.Equal(0, result.Exit);
+        Assert.Equal(Id, result.Result["sessionId"]!.GetValue<string>());
+        Assert.Equal(state, result.Result["result"]!["status"]!.GetValue<string>());
+        Assert.Equal("fixture-request", result.Result["result"]!["requestId"]!.GetValue<string>());
+        Assert.Null(result.Result["receiptPath"]);
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal(0, sdk.Calls);
+        Assert.False(File.Exists(receiptPath));
+    }
+
+    [Theory]
+    [InlineData(302)]
+    [InlineData(403)]
+    [InlineData(500)]
+    public async Task StatusHttpFailureIsExplicitAndDoesNotReplay(int status)
+    {
+        var handler = new StatusHandler(_ => StatusResponse(status, "SYNTHETIC_PRIVATE_TOKEN"));
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), new FakeSdk(), new StatusProbe(handler));
+        Assert.Equal(1, result.Exit);
+        Assert.Equal("status_http_error", result.Result["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(status, result.Result["error"]!["details"]!["httpStatus"]!.GetValue<int>());
+        Assert.Equal("fixture-request", result.Result["error"]!["details"]!["requestId"]!.GetValue<string>());
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("not-json")]
+    [InlineData("{}")]
+    [InlineData("""{"status":"SYNTHETIC_PRIVATE_TOKEN"}""")]
+    public async Task StatusRejectsInvalidResponsesWithoutLeakingBody(string body)
+    {
+        var handler = new StatusHandler(_ => StatusResponse(200, body));
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), new FakeSdk(), new StatusProbe(handler));
+        Assert.Equal(1, result.Exit);
+        Assert.Equal("invalid_status_response", result.Result["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task StatusDryRunNeverAuthenticatesOrRequests()
+    {
+        var handler = new StatusHandler(_ => throw new InvalidOperationException());
+        var auth = new FakeAuth { Failure = true };
+        var sdk = new FakeSdk();
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath, "--dry-run"],
+            auth, sdk, new StatusProbe(handler));
+        Assert.Equal(0, result.Exit);
+        Assert.Equal(0, auth.Calls);
+        Assert.Equal(0, handler.Calls);
+        Assert.Equal(0, sdk.Calls);
+    }
+
+    [Fact]
+    public async Task StatusDoesNotModifyEarlierFailedReceipt()
+    {
+        Assert.Equal(1, (await Run(new FakeSdk { Failure = "start" })).Exit);
+        var before = File.ReadAllText(receiptPath);
+        var handler = new StatusHandler(_ => StatusResponse(200, """{"status":"Live"}"""));
+        Assert.Equal(0, (await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), new FakeSdk(), new StatusProbe(handler))).Exit);
+        Assert.Equal(before, File.ReadAllText(receiptPath));
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task StatusOwnerMismatchPreventsRequest()
+    {
+        var handler = new StatusHandler(_ => throw new InvalidOperationException());
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath,
+            "--expected-user-object-id", Owner], new FakeAuth { OwnerId = Pool },
+            new FakeSdk(), new StatusProbe(handler));
+        Assert.Equal(1, result.Exit);
+        Assert.Equal("owner_mismatch", result.Result["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData("--receipt-path", "unused.json")]
+    [InlineData("--timeout-ms", "1")]
+    [InlineData("--command", "must-not-run")]
+    public async Task StatusRejectsCommandOrReceiptOptionsBeforeAuth(string option, string value)
+    {
+        var auth = new FakeAuth { Failure = true };
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath, option, value],
+            auth, new FakeSdk());
+        Assert.Equal(1, result.Exit);
+        Assert.Equal("invalid_arguments", result.Result["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(0, auth.Calls);
+    }
+
+    [Fact]
+    public async Task StatusBoundsResponseSize()
+    {
+        var handler = new StatusHandler(_ => StatusResponse(200, new string('x', 1024 * 1024 + 1)));
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), new FakeSdk(), new StatusProbe(handler));
+        Assert.Equal(1, result.Exit);
+        Assert.Equal("status_response", result.Result["error"]!["code"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData(false, "status_transport")]
+    [InlineData(true, "status_timeout")]
+    public async Task StatusTransportFailuresAreSanitized(bool cancelled, string code)
+    {
+        var handler = new StatusHandler(_ => cancelled ? throw new TaskCanceledException("SYNTHETIC_PRIVATE_TOKEN")
+            : throw new HttpRequestException("SYNTHETIC_PRIVATE_TOKEN"));
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), new FakeSdk(), new StatusProbe(handler));
+        Assert.Equal(1, result.Exit);
+        Assert.Equal(code, result.Result["error"]!["code"]!.GetValue<string>());
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task StatusUsesOwnedTlsFixtureAndRequiresTrustedCertificate(bool trusted)
+    {
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        var host = $"{Pool}.data.example.invalid";
+        var certificateRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            $"CN={host}", key, System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+        var names = new System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder();
+        names.AddDnsName(host);
+        certificateRequest.CertificateExtensions.Add(names.Build());
+        using var generated = certificateRequest.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(5));
+        // SChannel needs a reimported key; omitting PersistKeySet keeps disposal responsible for cleanup.
+        using var certificate = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadPkcs12(
+            generated.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx), null,
+            System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.UserKeySet);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.CancelAfter(TimeSpan.FromSeconds(15));
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        var server = Task.Run(async () =>
+        {
+            using var connection = await listener.AcceptTcpClientAsync(cancellation.Token);
+            using var tls = new System.Net.Security.SslStream(connection.GetStream());
+            try
+            {
+                await tls.AuthenticateAsServerAsync(new System.Net.Security.SslServerAuthenticationOptions
+                {
+                    ServerCertificate = certificate,
+                }, cancellation.Token);
+                using var reader = new StreamReader(tls, Encoding.ASCII, leaveOpen: true);
+                var header = new StringBuilder();
+                while (await reader.ReadLineAsync(cancellation.Token) is { Length: > 0 } line)
+                {
+                    header.AppendLine(line);
+                    Assert.True(header.Length < 32768);
+                }
+                var body = """{"status":"Live"}""";
+                var response = Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}");
+                await tls.WriteAsync(response, cancellation.Token);
+                await tls.FlushAsync(cancellation.Token);
+                return header.ToString();
+            }
+            catch (System.Security.Authentication.AuthenticationException) when (!trusted) { return ""; }
+            catch (IOException) when (!trusted) { return ""; }
+        }, cancellation.Token);
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            UseCookies = false,
+            ConnectCallback = async (context, token) =>
+            {
+                Assert.Equal(host, context.DnsEndPoint.Host);
+                var socket = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+                try
+                {
+                    await socket.ConnectAsync(System.Net.IPAddress.Loopback, port, token);
+                    return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+                }
+                catch { socket.Dispose(); throw; }
+            },
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                // This certificate pin is confined to the owned loopback test.
+                RemoteCertificateValidationCallback = (_, peer, _, errors) => trusted && peer is not null &&
+                    (errors is System.Net.Security.SslPolicyErrors.None or
+                        System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors) &&
+                    peer.GetRawCertData().AsSpan().SequenceEqual(certificate.RawData),
+            },
+        };
+        var sdk = new FakeSdk();
+        var result = await Invoke(["status", "--session-id", Id, "--config", configPath],
+            new FakeAuth(), sdk, new StatusProbe(handler));
+        var request = await server;
+        Assert.Equal(0, sdk.Calls);
+        if (trusted)
+        {
+            Assert.Equal(0, result.Exit);
+            Assert.Equal("Live", result.Result["result"]!["status"]!.GetValue<string>());
+            Assert.StartsWith($"GET /computers/{Id.Split(':')[2]}/status?api-version=1.0 HTTP/1.1", request);
+            Assert.Contains("Authorization: Bearer SYNTHETIC_PRIVATE_TOKEN", request);
+            Assert.DoesNotContain("POST ", request);
+        }
+        else
+        {
+            Assert.Equal(1, result.Exit);
+            Assert.Equal("status_transport", result.Result["error"]!["code"]!.GetValue<string>());
+            Assert.Empty(request);
+        }
+    }
+
+    private static HttpResponseMessage StatusResponse(int status, string body)
+    {
+        var response = new HttpResponseMessage((System.Net.HttpStatusCode)status)
+        {
+            Content = new StringContent(body),
+        };
+        response.Headers.Add("x-ms-request-id", "fixture-request");
+        return response;
+    }
+
+    private sealed class StatusHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        internal int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(respond(request));
+        }
+    }
+
     [Fact]
     public async Task PublicSdkAppAgainstTrustedTlsFixture()
     {
@@ -310,10 +568,12 @@ public sealed class ApplicationTests : IDisposable
     private sealed class FakeSdk : ISdk
     {
         internal List<string> Live { get; } = [];
+        internal int Calls;
         internal string? Failure;
         internal int ExitCode;
         public JsonObject Call(string phase, JsonObject request, bool dryRun)
         {
+            Calls++;
             if (dryRun) return new JsonObject();
             Live.Add(phase);
             Assert.Equal("SYNTHETIC_PRIVATE_TOKEN", Environment.GetEnvironmentVariable("W365A_CP_TOKEN"));

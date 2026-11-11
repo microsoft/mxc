@@ -4,7 +4,9 @@ Two independent Windows test tools exercise the same experimental backend:
 `W365SdkTestApp` calls the public .NET Dev SDK directly and owns MSAL.NET
 authentication; `tests\scripts\run_w365_command_manual.ps1` authenticates with
 the existing Python helper and invokes normal `wxc-exec.exe` processes.
-Neither C# nor PowerShell implements the service protocol.
+Neither tool implements checkout, release or Exec service transport. The C#
+app's diagnostic-only `status` command makes one authenticated HTTP GET because
+the SDK has no single-fetch status operation.
 
 ## Build and configure
 
@@ -27,6 +29,9 @@ Alternatively pass `--config <path>`. The same JSON is accepted by the
 PowerShell runner's `-ConfigPath`; its default is beside that script instead.
 Configuration contains only `tenantId`, `clientId`, `poolId`,
 `controlPlaneHost` and `dataPlaneSuffix`. Never add credentials.
+For the C# app, run requires both endpoints; release needs only
+`controlPlaneHost`, and status needs only `dataPlaneSuffix`.
+Tenant, client and pool are always required.
 Endpoints are bare ASCII hostnames, not URLs. No tenant, account, pool or region
 is inferred. The approved public client must support system-browser auth and a
 localhost redirect.
@@ -81,6 +86,28 @@ operator to reconcile; never blindly rerun without an ID. For execution failure,
 assume remote outcome may be unknown and do not replay automatically.
 PTY, create-and-run execution and confirmed remote kill are not supported.
 
+## Fetch session status
+
+```powershell
+.\W365SdkTestApp.exe status --session-id $id
+```
+
+This diagnostic uses the same protected authentication but does not invoke SDK
+lifecycle operations. It sends one GET to the pool-scoped data-plane
+`/computers/{session-guid}/status?api-version=1.0`, without polling or retries.
+It returns the status (`Waiting`, `Live`, or `Ready`), HTTP status, safe request
+IDs and a UTC observation time under `result`. All three recognized states are
+successful status queries; `Live` is still not permission to execute through
+the SDK's Ready-only check.
+
+The request has a 30-second budget, platform TLS validation, no redirect or proxy,
+and a bounded response. HTTP/transport failures and invalid responses produce
+sanitized errors and a nonzero exit. The command never allocates, executes,
+releases, creates/updates a receipt, or clears an earlier uncertain state.
+`--receipt-path`, `--command`, `--working-directory` and `--timeout-ms` are not
+accepted. Use `--dry-run` to validate configuration and identity without auth or
+HTTP access.
+
 ## Authentication
 
 The C# app requests the fixed ARI INT scope
@@ -108,8 +135,9 @@ previous values. Native SDK code does not retain or refresh tokens.
 
 ## Offline validation
 
-`--dry-run` performs SDK validation with synthetic credentials and never accesses
-the real cache, opens a browser or contacts the service:
+`--dry-run` validates locally and never accesses the real cache, opens a browser
+or contacts the service. Run/release also perform SDK validation with synthetic
+credentials; status only checks configuration and identity:
 
 ```powershell
 .\W365SdkTestApp.exe run --config .\w365-test.example.json --command 'cmd.exe /c echo fixture' --dry-run
@@ -120,7 +148,9 @@ test-support libraries and drives real public SDK calls against loopback TLS.
 It also tests the app's run/reuse/release path in fresh processes with injected
 synthetic authentication, preservation of cleanup IDs and request IDs on failed
 checkout, and readiness-timeout diagnostics through the real 120-second wait,
-plus isolated CLI/token/journal regressions.
+plus status CLI/HTTP/TLS and isolated token/journal regressions. Status fixtures
+use synthetic authentication and owned loopback TLS, including rejection of an
+untrusted certificate; no production certificate bypass is provided.
 There is no production auth-bypass or fixture option. Windows x64 regular and
 scheduled build jobs run these checks and the native-runner/auth offline suites.
 No live native/SDK Exec or actual browser/cache workflow is established by these

@@ -422,8 +422,12 @@ not change transport or accept `Live` as `Ready` to work around service issues.
 
 The [repository-backed C# executable](../../../tests/tools/w365/README.md)
 owns MSAL.NET authentication and a separate protected cache. It calls
-`Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle` directly, never the executor,
-PowerShell/Python helpers or an app-level W365 protocol implementation.
+`Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle` directly for lifecycle and execution,
+never the executor, PowerShell/Python helpers or a separate implementation of
+those service operations. Its diagnostic-only `status --session-id` command
+makes a single authenticated data-plane status GET because the SDK does not
+expose a single-fetch status operation. It does not poll, change receipts or
+perform lifecycle operations; `Waiting` and `Live` do not satisfy SDK readiness.
 It shares the token-free deployment config, run/reuse/explicit-release model
 and full opaque MXC ID convention with the native runner. Its JSON output includes
 `sessionId`, `sandboxId` and `receiptPath`, including known IDs after failures.

@@ -10,18 +10,22 @@ namespace W365SdkTestApp;
 
 internal static class Application
 {
-    internal static async Task<int> RunAsync(string[] args, IAuthentication? authentication = null, ISdk? sdk = null)
+    internal static async Task<int> RunAsync(string[] args, IAuthentication? authentication = null,
+        ISdk? sdk = null, IStatusProbe? statusProbe = null)
     {
         if (args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
                 W365SdkTestApp run --command <Windows command line> [--session-id <opaque MXC ID>]
+                W365SdkTestApp status --session-id <opaque MXC ID>
                 W365SdkTestApp release --session-id <opaque MXC ID>
-                Options: --config <path>, --receipt-path <path>, --working-directory <guest path>,
-                         --timeout-ms <integer>, --login-hint <hint>, --expected-user-object-id <guid>,
-                         --force-sign-in, --dry-run
+                Shared options: --config <path>, --login-hint <hint>,
+                                --expected-user-object-id <guid>, --force-sign-in, --dry-run
+                Run/release: --receipt-path <path>
+                Run only: --working-directory <guest path>, --timeout-ms <integer>
                 Run without an ID checks out once. Sessions are retained until explicit release.
-                --dry-run validates with synthetic credentials; no sign-in/cache/service access.
+                Status fetches once without SDK lifecycle calls, polling, or receipt changes.
+                --dry-run validates locally; no sign-in/cache/service access.
                 """);
             return 0;
         }
@@ -38,8 +42,27 @@ internal static class Application
             if (!OperatingSystem.IsWindows())
                 throw new ToolException("windows_required", "The test app requires Windows protected authentication.");
             var options = Arguments.Parse(args);
-            config = Configuration.Read(options.ConfigPath, options.Operation == "release");
+            config = Configuration.Read(options.ConfigPath, options.Operation);
             id = options.SessionId is null ? null : config.Identity(options.SessionId);
+            if (options.Operation == "status")
+            {
+                var statusId = id ?? throw new ToolException("invalid_session_id", "Status requires an MXC session ID.");
+                if (options.DryRun)
+                {
+                    Write(new JsonObject { ["validationOnly"] = true }, id, null);
+                    return 0;
+                }
+                authentication ??= new Authentication();
+                var statusCredentials = await authentication.AcquireAsync(
+                    config, options, options.ExpectedUserObjectId, false).ConfigureAwait(false);
+                if (options.ExpectedUserObjectId is not null &&
+                    statusCredentials.UserObjectId != options.ExpectedUserObjectId)
+                    throw new ToolException("owner_mismatch", "Authenticated owner does not match the operation.");
+                var status = await (statusProbe ?? new StatusProbe())
+                    .FetchAsync(config, statusId, statusCredentials.AccessToken).ConfigureAwait(false);
+                Write(new JsonObject { ["result"] = status }, id, null);
+                return 0;
+            }
             receipt = options.ReceiptPath ?? Path.Combine(Path.GetTempPath(), $"mxc-w365-sdk-{Guid.NewGuid():N}.json");
             sdk ??= new Sdk();
             if (!options.DryRun)
@@ -137,7 +160,12 @@ internal static class Application
         {
             var code = error is ToolException tool ? tool.Code : error is MxcException native
                 ? JsonNamingPolicy.SnakeCaseLower.ConvertName(native.Code.ToString()) : "test_app_failure";
-            var details = error is MxcException sdkError ? SafeDetails(sdkError.Details) : null;
+            var details = error switch
+            {
+                MxcException sdkError => SafeDetails(sdkError.Details),
+                ToolException localError => SafeDetails(localError.Details),
+                _ => null,
+            };
             if (details?["sandboxId"] is JsonValue cleanup && config is not null)
             {
                 try

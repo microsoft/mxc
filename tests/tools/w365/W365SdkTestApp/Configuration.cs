@@ -21,7 +21,7 @@ internal sealed class Configuration
         WriteIndented = true,
     };
 
-    internal static Configuration Read(string path, bool release)
+    internal static Configuration Read(string path, string operation)
     {
         string text;
         try { text = File.ReadAllText(path); }
@@ -34,8 +34,8 @@ internal sealed class Configuration
         config.TenantId = GuidValue(config.TenantId);
         config.ClientId = GuidValue(config.ClientId);
         config.PoolId = GuidValue(config.PoolId);
-        config.ControlPlaneHost = Host(config.ControlPlaneHost);
-        if (!release)
+        if (operation != "status") config.ControlPlaneHost = Host(config.ControlPlaneHost);
+        if (operation != "release")
         {
             config.DataPlaneSuffix = Host(config.DataPlaneSuffix);
             if ($"{config.PoolId}.{config.DataPlaneSuffix}".Length > 253)
@@ -87,8 +87,8 @@ internal sealed class Arguments
     internal static Arguments Parse(string[] args)
     {
         var value = new Arguments();
-        if (args.Length == 0 || args[0] is not ("run" or "release"))
-            throw new ToolException("invalid_arguments", "Use run or release. See --help.");
+        if (args.Length == 0 || args[0] is not ("run" or "release" or "status"))
+            throw new ToolException("invalid_arguments", "Use run, status or release. See --help.");
         value.Operation = args[0];
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 1; index < args.Length; index++)
@@ -119,13 +119,17 @@ internal sealed class Arguments
             }
         }
         if (value.Operation == "run" && value.Command is null ||
-            value.Operation == "release" && (value.SessionId is null || value.Command is not null))
-            throw new ToolException("invalid_arguments", "Run requires --command; release requires --session-id and no command.");
+            value.Operation is "release" or "status" && (value.SessionId is null || value.Command is not null))
+            throw new ToolException("invalid_arguments", "Run requires --command; status/release require --session-id and no command.");
+        if (value.Operation == "status" && (seen.Contains("--receipt-path") ||
+            seen.Contains("--working-directory") || seen.Contains("--timeout-ms")))
+            throw new ToolException("invalid_arguments", "Status does not use receipts or command options.");
         return value;
     }
 }
 
-internal sealed class ToolException(string code, string message) : Exception(message)
+internal sealed class ToolException(string code, string message, JsonElement? details = null) : Exception(message)
 {
     internal string Code { get; } = code;
+    internal JsonElement? Details { get; } = details?.Clone();
 }
