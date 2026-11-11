@@ -185,7 +185,7 @@ fn backend_error_envelope_line(response: &ScriptResponse) -> Option<String> {
 ///
 /// Kept separate from [`emit_warning_envelopes`] so the exact bytes a caller
 /// has to parse are testable without capturing the process's stderr.
-fn warning_envelope_lines(warnings: &[String]) -> Vec<String> {
+pub(crate) fn warning_envelope_lines(warnings: &[String]) -> Vec<String> {
     warnings
         .iter()
         .filter(|warning| !warning.trim().is_empty())

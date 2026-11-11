@@ -774,10 +774,8 @@ fn run_held_container_main(
     let cancelled = console_run.finish();
     #[cfg(not(target_os = "windows"))]
     let cancelled = cancellation.was_cancelled();
-    let buffered = logger.get_buffer();
-    if !buffered.is_empty() {
-        eprint!("{buffered}");
-    }
+    // The caller may be gone, so a failed write must not panic and skip the exit status.
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), logger.get_buffer().as_bytes());
     match result {
         Err(error) => process::exit(error.code.exit_code()),
         Ok(()) if cancelled => process::exit(130),

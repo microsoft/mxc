@@ -363,7 +363,8 @@ VM count.
 A held-container scenario runs execs side by side in a container that
 `wxc-exec --operation provision --hold` keeps, cancels one, and closes stdin,
 then checks that the container's VM ended and that its ID never left the
-executor.
+executor. It also closes all of a second held container's pipes at once, as a
+caller that exits would, and checks that its VM ended.
 
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
