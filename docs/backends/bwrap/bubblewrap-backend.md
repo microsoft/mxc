@@ -177,10 +177,17 @@ Bubblewrap creates a namespace-isolated process by:
    for Unix-domain, IPv4, IPv6, and netlink address families, and disables
    io_uring
 6. Clearing the environment and applying only requested variables
-7. Executing the command via `sh -c`
+7. Dropping all workload capabilities with `--cap-drop ALL`, including for root callers
+8. Executing the command via `sh -c`
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+Capability removal does not change the workload's UID or GID. Run MXC as an
+unprivileged user: a root caller still gives the workload root-owner access
+to visible host files, including secrets in `/etc` and writable policy grants.
+The separate network supervisor retains the namespace capabilities it needs
+to install firewall rules.
 
 `bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
 when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
@@ -877,10 +884,10 @@ shared-host-network behavior.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the
-   rule-bearing network namespace. This relies on Bubblewrap dropping
-   capabilities in the sandboxed process — the runner passes no `--cap-add` —
-   which is what prevents the workload from holding the `CAP_NET_ADMIN` needed
-   to flush the chain.
+   rule-bearing network namespace. MXC passes `--cap-drop ALL` so the workload
+   has no capabilities, regardless of the caller's UID. The supervisor keeps
+   its namespace capabilities; the workload cannot use `CAP_NET_ADMIN` to
+   flush the chain or `CAP_NET_RAW` to create packet sockets.
 4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
    `bwrap --setenv` (caller-supplied values for these keys, including
@@ -1021,11 +1028,10 @@ so a Node caller keeps the first answer it received.
   than creating its own, and the namespace descriptor stays open in the
   workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
   to close it. Re-entering the namespace with `setns` requires
-  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
-  capability bounding set before `exec`, so the workload runs with
-  `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
-  those are zero, because that assumption is what makes the exposed
-  descriptor inert.
+  `CAP_SYS_ADMIN`, which MXC removes with `--cap-drop ALL` before workload
+  execution. The permitted, effective, inheritable, bounding, and ambient
+  capability sets are empty. Functional tests cover root and non-root callers
+  in isolated, firewall, and proxy modes.
 - **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
   and additionally programs a default-DROP egress chain inside the sandbox's

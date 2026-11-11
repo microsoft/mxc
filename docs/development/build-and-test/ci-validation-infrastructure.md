@@ -205,6 +205,12 @@ container in private storage and verify cleanup. The blocked-call hook is test-o
 [filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
 for local commands and watchdog behavior.
 
+Bubblewrap's build and scheduled validation run
+`run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
+isolated, firewall, and proxy cases require empty workload capability sets,
+denied privileged socket creation and read-only bind remounts, and working
+supervisor-provided connectivity for the network-enabled modes.
+
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
 direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
