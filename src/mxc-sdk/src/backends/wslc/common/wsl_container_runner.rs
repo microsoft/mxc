@@ -659,7 +659,7 @@ impl WSLContainerRunner {
             }
         }
 
-        let session = container_steps::create_session(sdk, &mut settings, logger)?;
+        let session = container_steps::create_session(sdk, &mut settings)?;
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
 
         Ok(WslcSessionGuard::from_raw(

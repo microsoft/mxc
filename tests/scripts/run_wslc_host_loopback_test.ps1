@@ -3,7 +3,7 @@
 
 # WSLC host loopback functional test.
 #
-# MXC enables host.wslc.internal on every session (WSL 3.0.5+). A bridged
+# MXC enables host.wslc.internal on every session. A bridged
 # container reaches a service bound only to Windows 127.0.0.1 through it; an
 # isolated container in such a session reaches it neither by name nor by the
 # address the name resolves to. The listener answers with a per-run token, so

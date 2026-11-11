@@ -518,7 +518,7 @@ no separate `--setup-wslc` step is required.
 
 | Exact v0.9 policy | WSLC behavior |
 |---|---|
-| Egress, ingress, and host-loopback defaults all `allow` | Bridged networking without independent directional filtering; reaches [host loopback](#host-loopback) on WSL 3.0.5+ |
+| Egress, ingress, and host-loopback defaults all `allow` | Bridged networking without independent directional filtering; reaches [host loopback](#host-loopback) |
 | All three defaults `deny` (also the omitted defaults) | No networking (isolated) |
 | Mixed allow/deny directions or egress rules | Rejected; WSLC cannot enforce that combination |
 
@@ -529,8 +529,7 @@ no separate `--setup-wslc` step is required.
 
 ### Host loopback
 
-On WSL 3.0.5 or later, MXC enables WSL host loopback on every session it
-creates. A bridged container reaches a service bound to Windows `127.0.0.1`
+MXC enables WSL host loopback on every session it creates. A bridged container reaches a service bound to Windows `127.0.0.1`
 through the hostname `host.wslc.internal`:
 
 ```sh
@@ -539,11 +538,8 @@ wget -qO- http://host.wslc.internal:8080/
 
 - Every Windows loopback TCP port is reachable; there is no per-port filter.
 
-- On WSL older than 3.0.5, the name doesn't resolve and containers can't
-  reach Windows loopback.
-
-- **Behavior change:** after updating to WSL 3.0.5, existing all-`allow`
-  configs gain outbound access to Windows loopback services.
+- **Behavior change:** existing all-`allow` configs gain outbound access to
+  Windows loopback services.
 
 - Inbound connections from Windows still need declared port mappings.
 
@@ -574,9 +570,8 @@ variables that well-behaved clients honor.
 **The runtime field contains a URL string.** A WSLC container runs in its own
 network namespace (a separate WSL system VM). Its own `127.0.0.1` loopback is
 valid for a proxy running inside that container, as in the test fixture below.
-The host's or WSL distro's `127.0.0.1` is **not reachable** at that address; on
-WSL 3.0.5 or later, a proxy on Windows loopback is reachable through
-`host.wslc.internal` (see [Host loopback](#host-loopback)). An external
+The host's or WSL distro's `127.0.0.1` is **not reachable** at that address; a
+proxy on Windows loopback is reachable through `host.wslc.internal` (see [Host loopback](#host-loopback)). An external
 proxy must have an address routable from the container:
 
 ```json
