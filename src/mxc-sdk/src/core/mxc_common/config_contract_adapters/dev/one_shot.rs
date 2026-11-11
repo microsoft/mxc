@@ -244,15 +244,29 @@ fn convert_seatbelt_custom_posix_shm(
         default,
         read,
         read_write,
+        create,
         own,
         deny,
     } = value;
     wire::SeatbeltCustomPosixShm {
-        default: default.into_option().map(convert_seatbelt_custom_default),
+        default: default.into_option().map(convert_seatbelt_posix_shm_access),
         read: read.into_option(),
         read_write: read_write.into_option(),
+        create: create.into_option(),
         own: own.into_option(),
         deny: deny.into_option(),
+    }
+}
+
+fn convert_seatbelt_posix_shm_access(
+    value: contract::SeatbeltPosixShmAccess,
+) -> wire::SeatbeltPosixShmAccess {
+    match value {
+        contract::SeatbeltPosixShmAccess::Deny => wire::SeatbeltPosixShmAccess::Deny,
+        contract::SeatbeltPosixShmAccess::Read => wire::SeatbeltPosixShmAccess::Read,
+        contract::SeatbeltPosixShmAccess::ReadWrite => wire::SeatbeltPosixShmAccess::ReadWrite,
+        contract::SeatbeltPosixShmAccess::Create => wire::SeatbeltPosixShmAccess::Create,
+        contract::SeatbeltPosixShmAccess::Own => wire::SeatbeltPosixShmAccess::Own,
     }
 }
 

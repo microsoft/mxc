@@ -243,6 +243,7 @@ fn accepts_seatbelt_custom_rules() {
         r#""customMachRegisters": {"global": {"allow": ["com.example.a"]}, "local": {"default": "allow"}}"#,
         r#""customPosixShm": {}"#,
         r#""customPosixShm": {"default": "deny", "read": ["apple.shm.*"], "readWrite": ["/app.rw"], "own": ["/app.*"], "deny": ["/app.secret"]}"#,
+        r#""customPosixShm": {"default": "readWrite", "create": ["/app.c*"]}"#,
     ] {
         let json = format!(
             r#"{{
@@ -268,6 +269,7 @@ fn rejects_invalid_seatbelt_custom_rules() {
         r#""customPosixShm": true"#,
         r#""customPosixShm": {"allow": ["/app"]}"#,
         r#""customPosixShm": {"readWrite": "/app"}"#,
+        r#""customPosixShm": {"default": "allow"}"#,
     ] {
         let json = format!(
             r#"{{

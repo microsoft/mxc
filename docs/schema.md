@@ -306,12 +306,12 @@ that can be executed independently.
         },
         "customPosixShm": {                // 1.1.0-alpha: POSIX shared memory names (max 31 bytes).
                                            // Replaces guiAccess's shared memory grant when present.
-            "default": "deny",             // "deny" (default) or "allow" (read, write, and create
-                                           // all except deny; never delete)
-            "read": [],                    // Open read-only. A trailing * matches a prefix
-            "readWrite": [],               // Open read-write
+            "default": "deny",             // "deny" (default), "read", "readWrite", "create", or "own"
+            "read": [],                    // Only read. A trailing * matches a prefix
+            "readWrite": [],               // Only read and write
+            "create": [],                  // Only read, write, and create
             "own": ["/com.example.MyApp.*"], // Read, write, create, and delete
-            "deny": []                     // Always blocked, even with default "allow"
+            "deny": []                     // Always blocked
         },
         "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
                                            // Not combinable with profileOverride.

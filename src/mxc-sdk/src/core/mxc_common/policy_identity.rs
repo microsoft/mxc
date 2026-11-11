@@ -332,6 +332,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         if let Some(Value::Object(cd)) = seatbelt_map.get_mut("captureDenials") {
             cd.remove("output_path");
         }
+        hash_omitted_custom_defaults_as_deny(seatbelt_map);
         // In allow mode, an omitted setting reports instead of denying.
         if seatbelt_capture_allows(seatbelt) {
             let ui = policy.ui_fields_specified;
@@ -367,6 +368,27 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     }
 
     Value::Object(root)
+}
+
+/// An omitted Seatbelt custom-list `default` denies, so hash it like `"deny"`.
+fn hash_omitted_custom_defaults_as_deny(seatbelt: &mut serde_json::Map<String, Value>) {
+    let mut blocks = Vec::new();
+    for (key, value) in seatbelt.iter_mut() {
+        match key.as_str() {
+            "customIoKits" | "customMachLookups" | "customPosixShm" => blocks.push(value),
+            "customMachRegisters" => {
+                if let Some(scopes) = value.as_object_mut() {
+                    blocks.extend(scopes.values_mut());
+                }
+            }
+            _ => {}
+        }
+    }
+    for block in blocks {
+        if let Some(default) = block.get_mut("default").filter(|d| d.is_null()) {
+            *default = Value::from("Deny");
+        }
+    }
 }
 
 fn seatbelt_capture_allows(seatbelt: &Option<crate::mxc_common::models::SeatbeltConfig>) -> bool {
@@ -825,6 +847,41 @@ mod tests {
             hash(CaptureDenialsMode::Block, false, false),
             hash(CaptureDenialsMode::Block, true, true)
         );
+    }
+
+    #[test]
+    fn seatbelt_omitted_custom_default_hashes_like_deny() {
+        use crate::mxc_common::models::{
+            SeatbeltConfig, SeatbeltCustomDefault, SeatbeltCustomMachRegisters,
+            SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
+        };
+
+        let hash = |rules: Option<SeatbeltCustomDefault>, shm| {
+            let rules = SeatbeltCustomRules {
+                default: rules,
+                ..Default::default()
+            };
+            let mut r = request();
+            r.seatbelt = Some(SeatbeltConfig {
+                custom_io_kits: Some(rules.clone()),
+                custom_mach_lookups: Some(rules.clone()),
+                custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                    global: Some(rules.clone()),
+                    local: Some(rules),
+                }),
+                custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                    default: shm,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let omitted = hash(None, None);
+        let deny = Some(SeatbeltCustomDefault::Deny);
+        assert_eq!(omitted, hash(deny, Some(SeatbeltPosixShmAccess::Deny)));
+        assert_ne!(omitted, hash(Some(SeatbeltCustomDefault::Allow), None));
+        assert_ne!(omitted, hash(None, Some(SeatbeltPosixShmAccess::Read)));
     }
 
     #[test]

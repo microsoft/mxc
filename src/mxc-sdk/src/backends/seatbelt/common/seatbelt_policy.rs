@@ -13,7 +13,7 @@
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkAction, SeatbeltConfig,
-    SeatbeltCustomRules,
+    SeatbeltCustomDefault, SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
@@ -82,6 +82,34 @@ pub const PASTEBOARD_SERVICE_PREFIX: &str = "com.apple.pasteboard.";
 pub const HID_USER_CLIENT_CLASS: &str = "IOHIDLibUserClient";
 /// Longest POSIX shared memory name macOS accepts (`PSHMNAMLEN`).
 const POSIX_SHM_NAME_MAX: usize = 31;
+
+/// Whether a custom list allows names it does not list. An omitted
+/// `default` denies them.
+pub fn custom_default_allows(rules: &SeatbeltCustomRules) -> bool {
+    rules.default == Some(SeatbeltCustomDefault::Allow)
+}
+
+/// Access for shared memory names no entry lists. An omitted `default`
+/// denies them.
+pub fn posix_shm_default(shm: &SeatbeltCustomPosixShm) -> SeatbeltPosixShmAccess {
+    shm.default.unwrap_or(SeatbeltPosixShmAccess::Deny)
+}
+
+/// The `customPosixShm` lists that grant access, with their JSON names.
+pub fn posix_shm_access_lists(
+    shm: &SeatbeltCustomPosixShm,
+) -> [(&'static str, SeatbeltPosixShmAccess, &[String]); 4] {
+    [
+        ("read", SeatbeltPosixShmAccess::Read, &shm.read),
+        (
+            "readWrite",
+            SeatbeltPosixShmAccess::ReadWrite,
+            &shm.read_write,
+        ),
+        ("create", SeatbeltPosixShmAccess::Create, &shm.create),
+        ("own", SeatbeltPosixShmAccess::Own, &shm.own),
+    ]
+}
 
 /// One entry of a Seatbelt custom rule list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,14 +318,21 @@ fn check_setting_conflicts(
     Ok(())
 }
 
-fn validate_custom_entry(list: &str, entry: &str, kind: CustomNameKind) -> Result<(), String> {
+/// Validate one list entry. `all_names` says how to cover every name, for
+/// the error on a bare `*`.
+fn validate_custom_entry(
+    list: &str,
+    entry: &str,
+    kind: CustomNameKind,
+    all_names: &str,
+) -> Result<(), String> {
     let name = match NamePattern::parse(entry) {
         NamePattern::Exact(name) | NamePattern::Prefix(name) => name,
     };
     if name.is_empty() {
         return Err(format!(
             "Seatbelt: {list} entries must be non-empty names; a bare '*' is not \
-             supported. Set 'default' to \"allow\" to allow every name."
+             supported. {all_names}"
         ));
     }
     if name.contains('*') {
@@ -364,10 +399,20 @@ pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), 
         let allow_list = format!("seatbelt.{field}.allow");
         let deny_list = format!("seatbelt.{field}.deny");
         for entry in &rules.allow {
-            validate_custom_entry(&allow_list, entry, kind)?;
+            validate_custom_entry(
+                &allow_list,
+                entry,
+                kind,
+                "Set 'default' to \"allow\" to allow every name.",
+            )?;
         }
         for entry in &rules.deny {
-            validate_custom_entry(&deny_list, entry, kind)?;
+            validate_custom_entry(
+                &deny_list,
+                entry,
+                kind,
+                "Names not in 'allow' are already denied unless 'default' is \"allow\".",
+            )?;
         }
         check_setting_conflicts(
             request,
@@ -377,15 +422,36 @@ pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), 
         )?;
     }
     if let Some(shm) = config.custom_posix_shm.as_ref() {
-        for (list, entries) in [
-            ("read", &shm.read),
-            ("readWrite", &shm.read_write),
-            ("own", &shm.own),
-            ("deny", &shm.deny),
-        ] {
-            let list = format!("seatbelt.customPosixShm.{list}");
-            for entry in entries {
-                validate_custom_entry(&list, entry, CustomNameKind::PosixShm)?;
+        validate_posix_shm_rules(shm)?;
+    }
+    Ok(())
+}
+
+fn validate_posix_shm_rules(shm: &SeatbeltCustomPosixShm) -> Result<(), String> {
+    let lists = posix_shm_access_lists(shm);
+    for (list, _, entries) in lists {
+        let field = format!("seatbelt.customPosixShm.{list}");
+        let all_names = format!("Set 'default' to \"{list}\" to give every name this access.");
+        for entry in entries {
+            validate_custom_entry(&field, entry, CustomNameKind::PosixShm, &all_names)?;
+        }
+    }
+    for entry in &shm.deny {
+        validate_custom_entry(
+            "seatbelt.customPosixShm.deny",
+            entry,
+            CustomNameKind::PosixShm,
+            "Names no other list names are already denied unless 'default' grants them.",
+        )?;
+    }
+    // Each name needs one access level; deny entries override any level.
+    for (i, (list, _, entries)) in lists.iter().enumerate() {
+        for (other, _, other_entries) in &lists[i + 1..] {
+            if let Some(entry) = entries.iter().find(|e| other_entries.contains(e)) {
+                return Err(format!(
+                    "Seatbelt: seatbelt.customPosixShm entry '{entry}' is in both '{list}' \
+                     and '{other}'. List each name once, with the access it needs."
+                ));
             }
         }
     }
@@ -771,6 +837,7 @@ mod tests {
             let target = match list {
                 "read" => &mut shm.read,
                 "readWrite" => &mut shm.read_write,
+                "create" => &mut shm.create,
                 "own" => &mut shm.own,
                 _ => &mut shm.deny,
             };
@@ -794,7 +861,9 @@ mod tests {
                 format!("{multibyte}\u{e9}"),
                 "longer than 31 bytes",
             ),
-            ("own", "*".to_string(), "bare '*'"),
+            ("own", "*".to_string(), "Set 'default' to \"own\""),
+            ("create", "*".to_string(), "Set 'default' to \"create\""),
+            ("deny", "*".to_string(), "already denied"),
             ("deny", "/app*.x".to_string(), "not at the end"),
         ] {
             let msg = validate_seatbelt_custom_rules(&shm(list, &entry)).unwrap_err();
@@ -804,6 +873,23 @@ mod tests {
             );
             assert!(msg.contains(expected), "{entry}: {msg}");
         }
+    }
+
+    #[test]
+    fn rejects_a_posix_shm_name_in_two_access_lists() {
+        let msg = custom_error(SeatbeltConfig {
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                read: vec!["/app.*".into()],
+                own: vec!["/app.*".into()],
+                deny: vec!["/app.*".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(
+            msg.contains("'/app.*' is in both 'read' and 'own'"),
+            "{msg}"
+        );
     }
 
     #[test]

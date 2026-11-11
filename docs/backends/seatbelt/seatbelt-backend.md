@@ -420,7 +420,7 @@ the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
 
 | Field | Default | Meaning |
 |---|---|---|
-| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Settings left out of the config, such as `keychainAccess` or `ui.clipboard`, also don't block. `deniedPaths`, custom `deny` entries, and settings written in the config are still enforced. |
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. This includes a written `egress` or `ingress` `default: "deny"` and custom list defaults. Settings left out of the config, such as `keychainAccess` or `ui.clipboard`, also don't block. Still enforced: `deniedPaths`, `ingress.hostLoopback: "deny"`, `nestedPty`, customMach/IoKit/POSIX `deny` entries, `customPosixShm` list levels, and explicit `keychainAccess` and `ui` settings.|
 | `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
 | `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
 
@@ -574,7 +574,7 @@ classes, and POSIX shared memory regions an app needs.
 
 | Field | Meaning |
 |---|---|
-| `default` | `"deny"` (default) grants only the `allow` list. `"allow"` grants every name except the `deny` list; avoid it unless absolutely necessary. |
+| `default` | `"deny"` (default) denies names not in `allow`. MXC's built-in grants and enabled settings still apply. `"allow"` grants every name except the `deny` list; avoid it unless absolutely necessary. |
 | `allow` | Names to grant. An entry ending in `*` matches every name with that prefix. A bare `*` is rejected; use `default: "allow"`. |
 | `deny` | Names to block. Deny entries win over `allow`, over `default: "allow"`, and over MXC's built-in grants. |
 
@@ -583,17 +583,22 @@ through launchd for other processes to look up. `local` covers names visible
 only inside the process; denial reports show them as `(per-pid)`.
 `customIoKits` entries must be class names (letters, digits, and `_`).
 
-`customPosixShm` replaces `allow` with three lists:
+`customPosixShm` replaces `allow` with four access lists. Its `default` is
+`"deny"` or one of the same access levels:
 
 | List | Grants |
 |---|---|
 | `read` | Open read-only. |
-| `readWrite` | Open read-write. Opening with `O_CREAT` needs `own`, even if the region exists. |
+| `readWrite` | Open read-write. Opening with `O_CREAT` needs `create`, even if the region exists. |
+| `create` | Read, write, and create. |
 | `own` | Read, write, create, and delete. |
 
-Its `default: "allow"` grants read, write, and create for every name, but not
-delete. Write each name exactly as the app passes it to `shm_open`, including
-any leading `/`. Names are limited to 31 bytes.
+Each listed name gets exactly its list's access, even under a broader
+`default`. When entries overlap, the longer one wins: with `own: ["/app.*"]`
+and `read: ["/app.config"]`, `/app.config` is read-only. An entry can be in
+only one access list; `deny` wins over all of them. Write each name exactly as
+the app passes it to `shm_open`, including any leading `/`. Names are limited
+to 31 bytes.
 
 MXC rejects a config when:
 
@@ -601,7 +606,8 @@ MXC rejects a config when:
 - `customMachLookups` is combined with `extraMachLookups`;
 - a `customMachLookups` entry starts with `com.microsoft.mxc.run.`, which MXC
   reserves for [process cleanup](#process-cleanup);
-- an `allow` entry names only something an explicit setting denies (for
+- an `allow` entry names only something a setting denies, whether set or
+  omitted (for
   example `com.apple.SecurityServer` without `keychainAccess`, or
   `IOHIDLibUserClient` with `ui.injection: false`). Change that setting instead.
   This check also applies to `extraMachLookups`;
@@ -612,8 +618,9 @@ MXC rejects a config when:
 
 To find the names an app needs, run it once with
 [`captureDenials`](#learning-mode-capturedenials) in `"allow"` mode. In that
-mode every custom list acts as `default: "allow"`, so the app isn't blocked,
-while `deny` entries and settings written in the config still apply. The report lists each
+mode names the custom lists don't cover are allowed, so the app isn't blocked,
+while `deny` entries, `customPosixShm` list levels, and settings written in the
+config still apply. The report lists each
 name the lists don't grant, such as `mach-lookup:com.apple.CARenderServer` or
 `ipc-posix-shm-read-data:apple.shm.notification_center`. Add those names to the
 matching list.

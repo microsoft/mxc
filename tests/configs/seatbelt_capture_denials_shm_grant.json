@@ -13,10 +13,7 @@
     },
     "seatbelt": {
         "customPosixShm": {
-            "default": "allow",
-            "own": [
-                "/{{SHM}}"
-            ]
+            "default": "own"
         },
         "captureDenials": {
             "outputPath": "{{OUTPUT}}"

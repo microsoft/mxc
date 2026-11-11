@@ -35,7 +35,7 @@ use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     CaptureDenialsMode, ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress,
-    SeatbeltCustomDefault, SeatbeltCustomRules,
+    SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
 use crate::seatbelt_common::seatbelt_policy::{self, NamePattern};
 use std::fmt::Write as _;
@@ -579,6 +579,14 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest, capture: Option<
             if seatbelt.is_none_or(|c| c.custom_io_kits.is_none()) {
                 out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
                 let _ = writeln!(out, "(allow iokit-open{report})");
+            } else if ui.injection {
+                // customIoKits replaces the grant above, which covered HID.
+                out.push_str(";; --- ui.injection: allow HID input ---\n");
+                let _ = writeln!(
+                    out,
+                    "(allow iokit-open{report} (iokit-user-client-class {}))",
+                    quote_scheme(seatbelt_policy::HID_USER_CLIENT_CLASS)
+                );
             }
 
             if seatbelt.is_none_or(|c| c.custom_posix_shm.is_none()) {
@@ -881,9 +889,31 @@ const LOCAL_REGISTER_TARGET: CustomRuleTarget = CustomRuleTarget {
     prefix: "local-name-prefix",
 };
 
-/// guiAccess's shared memory grant, and `customPosixShm` `default: "allow"`.
+/// guiAccess's shared memory grant.
 const GUI_POSIX_SHM_OPERATIONS: &str =
     "ipc-posix-shm-read-data ipc-posix-shm-write-data ipc-posix-shm-write-create";
+
+/// Each shared memory operation and the lowest access level that grants it.
+const POSIX_SHM_OPERATIONS: [(&str, SeatbeltPosixShmAccess); 5] = [
+    ("ipc-posix-shm-read-data", SeatbeltPosixShmAccess::Read),
+    ("ipc-posix-shm-read-metadata", SeatbeltPosixShmAccess::Read),
+    (
+        "ipc-posix-shm-write-data",
+        SeatbeltPosixShmAccess::ReadWrite,
+    ),
+    ("ipc-posix-shm-write-create", SeatbeltPosixShmAccess::Create),
+    ("ipc-posix-shm-write-unlink", SeatbeltPosixShmAccess::Own),
+];
+
+/// Shared memory operations whose level satisfies `include`.
+fn posix_shm_operations(include: impl Fn(SeatbeltPosixShmAccess) -> bool) -> String {
+    POSIX_SHM_OPERATIONS
+        .iter()
+        .filter(|(_, level)| include(*level))
+        .map(|(operation, _)| *operation)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 const fn posix_shm_target(field: &'static str, operation: &'static str) -> CustomRuleTarget {
     CustomRuleTarget {
@@ -895,16 +925,9 @@ const fn posix_shm_target(field: &'static str, operation: &'static str) -> Custo
     }
 }
 
-const SHM_READ_TARGET: CustomRuleTarget =
-    posix_shm_target("customPosixShm.read", "ipc-posix-shm-read*");
-const SHM_READ_WRITE_TARGET: CustomRuleTarget = posix_shm_target(
-    "customPosixShm.readWrite",
-    "ipc-posix-shm-read* ipc-posix-shm-write-data",
-);
-// Also covers create and delete.
-const SHM_OWN_TARGET: CustomRuleTarget = posix_shm_target("customPosixShm.own", "ipc-posix-shm*");
+const SHM_LIST_TARGET: CustomRuleTarget = posix_shm_target("customPosixShm", "");
 // Seatbelt prefers a rule that names an operation over a wildcard, so the
-// deny names each one to win over `default: "allow"` and `readWrite`.
+// deny names each one to win over every other shared memory rule.
 const SHM_DENY_TARGET: CustomRuleTarget = posix_shm_target(
     "customPosixShm.deny",
     "ipc-posix-shm* ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
@@ -942,7 +965,17 @@ fn write_custom_rule(
     target: &CustomRuleTarget,
     entries: &[String],
 ) {
-    let _ = writeln!(out, "({action} {}", target.operation);
+    write_name_rule(out, action, target.operation, target, entries);
+}
+
+fn write_name_rule(
+    out: &mut String,
+    action: &str,
+    operation: &str,
+    target: &CustomRuleTarget,
+    entries: &[String],
+) {
+    let _ = writeln!(out, "({action} {operation}");
     for entry in entries {
         let _ = match NamePattern::parse(entry) {
             NamePattern::Exact(name) => {
@@ -960,18 +993,19 @@ fn write_custom_rule(
     out.push_str(")\n");
 }
 
-/// Emit custom `default: "allow"` grants and `allow` lists. Under
-/// captureDenials, a default grant reports each use like guiAccess's grants.
+/// Emit custom `default` grants, `allow` lists, and the shared memory access
+/// lists. Under captureDenials, a default grant reports each use like
+/// guiAccess's grants.
 fn write_custom_allows(
     out: &mut String,
     request: &ExecutionRequest,
     capture: Option<&CaptureRules>,
 ) {
+    let report = capture
+        .map(CaptureRules::grant_modifier)
+        .unwrap_or_default();
     for (target, rules) in custom_rule_targets(request) {
-        if rules.default == SeatbeltCustomDefault::Allow {
-            let report = capture
-                .map(CaptureRules::grant_modifier)
-                .unwrap_or_default();
+        if seatbelt_policy::custom_default_allows(rules) {
             let _ = writeln!(out, ";; --- {}: default allow ---", target.field);
             let _ = writeln!(out, "(allow {}{report}{})", target.operation, target.scope);
         }
@@ -987,21 +1021,35 @@ fn write_custom_allows(
     else {
         return;
     };
-    if shm.default == SeatbeltCustomDefault::Allow {
-        let report = capture
-            .map(CaptureRules::grant_modifier)
-            .unwrap_or_default();
-        out.push_str(";; --- customPosixShm: default allow ---\n");
-        let _ = writeln!(out, "(allow {GUI_POSIX_SHM_OPERATIONS}{report})");
+    let default = seatbelt_policy::posix_shm_default(shm);
+    if default != SeatbeltPosixShmAccess::Deny {
+        out.push_str(";; --- customPosixShm: default grant ---\n");
+        let operations = posix_shm_operations(|level| level <= default);
+        let _ = writeln!(out, "(allow {operations}{report})");
     }
-    for (target, entries) in [
-        (&SHM_READ_TARGET, &shm.read),
-        (&SHM_READ_WRITE_TARGET, &shm.read_write),
-        (&SHM_OWN_TARGET, &shm.own),
-    ] {
-        if !entries.is_empty() {
-            let _ = writeln!(out, ";; --- {} ---", target.field);
-            write_custom_rule(out, "allow", target, entries);
+    write_posix_shm_access_lists(out, shm);
+}
+
+/// Give each listed shared memory name exactly its list's access. When two
+/// rules name the same operations, Seatbelt applies the later one, so
+/// broader prefixes go first and longer names override them.
+fn write_posix_shm_access_lists(out: &mut String, shm: &SeatbeltCustomPosixShm) {
+    let mut entries: Vec<_> = seatbelt_policy::posix_shm_access_lists(shm)
+        .into_iter()
+        .flat_map(|(list, level, entries)| entries.iter().map(move |e| (list, level, e)))
+        .collect();
+    entries.sort_by_key(|(_, _, entry)| match NamePattern::parse(entry) {
+        NamePattern::Prefix(prefix) => (false, prefix.len()),
+        NamePattern::Exact(_) => (true, 0),
+    });
+    for (list, level, entry) in entries {
+        let entry = std::slice::from_ref(entry);
+        let _ = writeln!(out, ";; --- customPosixShm.{list} ---");
+        let granted = posix_shm_operations(|op| op <= level);
+        write_name_rule(out, "allow", &granted, &SHM_LIST_TARGET, entry);
+        let above = posix_shm_operations(|op| op > level);
+        if !above.is_empty() {
+            write_name_rule(out, "deny", &above, &SHM_LIST_TARGET, entry);
         }
     }
 }
@@ -1052,9 +1100,15 @@ fn escape_for_quotes(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        NetworkAction, SeatbeltConfig, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
-        UiPolicy,
+        NetworkAction, SeatbeltConfig, SeatbeltCustomDefault, SeatbeltCustomMachRegisters,
+        SeatbeltCustomPosixShm, UiPolicy,
     };
+
+    /// Whether some shared memory operation is granted for every name.
+    fn grants_all_shm(p: &str) -> bool {
+        p.lines()
+            .any(|l| l.starts_with("(allow ipc-posix-shm") && l.ends_with(')'))
+    }
 
     fn build_profile(request: &ExecutionRequest) -> Result<String, ProfileError> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
@@ -1608,7 +1662,7 @@ mod tests {
         r.seatbelt = Some(SeatbeltConfig {
             gui_access: true,
             custom_mach_lookups: Some(SeatbeltCustomRules {
-                default: SeatbeltCustomDefault::Allow,
+                default: Some(SeatbeltCustomDefault::Allow),
                 allow: vec!["com.apple.*".into()],
                 deny: Vec::new(),
             }),
@@ -2397,7 +2451,7 @@ mod tests {
         deny: &[&str],
     ) -> SeatbeltCustomRules {
         SeatbeltCustomRules {
-            default,
+            default: Some(default),
             allow: allow.iter().map(|s| s.to_string()).collect(),
             deny: deny.iter().map(|s| s.to_string()).collect(),
         }
@@ -2443,10 +2497,10 @@ mod tests {
             "(allow mach-register)",
             "(allow mach-register (",
             "(allow iokit-open)",
-            "(allow ipc-posix-shm-read-data",
         ] {
             assert!(!p.contains(broad), "{broad}: {p}");
         }
+        assert!(!grants_all_shm(&p), "{p}");
         for rule in [
             "(allow iokit-open\n    (iokit-user-client-class \"AGXDeviceUserClient\")\n    \
              (iokit-user-client-class-regex #\"^IOSurface\")\n)",
@@ -2459,10 +2513,17 @@ mod tests {
             "(deny iokit-open\n    (iokit-user-client-class-regex #\"^AppleUSB\")\n)",
             "(deny mach-lookup\n    (global-name \"com.example.blocked\")\n)",
             "(deny mach-register\n    (local-name \"com.example.local.no\")\n)",
-            "(allow ipc-posix-shm-read*\n    (ipc-posix-name \"apple.shm.notification_center\")\n)",
-            "(allow ipc-posix-shm-read* ipc-posix-shm-write-data\n    \
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata\n    \
+             (ipc-posix-name \"apple.shm.notification_center\")\n)\n\
+             (deny ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"apple.shm.notification_center\")\n)",
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data\n    \
+             (ipc-posix-name \"/example.rw\")\n)\n\
+             (deny ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
              (ipc-posix-name \"/example.rw\")\n)",
-            "(allow ipc-posix-shm*\n    (ipc-posix-name-prefix \"/example.app.\")\n)",
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data \
+             ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name-prefix \"/example.app.\")\n)\n;; ---",
             "(deny ipc-posix-shm* ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
              ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
              (ipc-posix-name \"/example.app.secret\")\n)",
@@ -2506,8 +2567,8 @@ mod tests {
         );
     }
 
-    /// Custom lists apply without guiAccess too, and `default: "allow"`
-    /// grants the whole operation in that scope.
+    /// Custom lists apply without guiAccess too, and `default` grants the
+    /// whole operation in that scope.
     #[test]
     fn custom_default_allow_grants_the_scope() {
         let mut r = req();
@@ -2518,7 +2579,7 @@ mod tests {
                 local: Some(custom_rules(SeatbeltCustomDefault::Allow, &[], &[])),
             }),
             custom_posix_shm: Some(SeatbeltCustomPosixShm {
-                default: SeatbeltCustomDefault::Allow,
+                default: Some(SeatbeltPosixShmAccess::Create),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2526,7 +2587,10 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow iokit-open)\n"), "{p}");
         assert!(
-            p.contains(&format!("(allow {GUI_POSIX_SHM_OPERATIONS})\n")),
+            p.contains(
+                "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
+                 ipc-posix-shm-write-data ipc-posix-shm-write-create)\n"
+            ),
             "{p}"
         );
         assert!(
@@ -2534,6 +2598,71 @@ mod tests {
             "{p}"
         );
         assert!(!p.contains("(allow mach-lookup)"), "{p}");
+    }
+
+    /// Each shared memory entry gets exactly its list's access, and longer
+    /// names come later so they override shorter prefixes.
+    #[test]
+    fn posix_shm_entries_set_exact_levels_broadest_first() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                default: Some(SeatbeltPosixShmAccess::Own),
+                read: strings(&["/app.*"]),
+                read_write: strings(&["/app.cache"]),
+                create: strings(&["/app.c*"]),
+                own: strings(&["/a*"]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r).unwrap();
+        let p = build_profile(&r).unwrap();
+        let all = "ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data \
+                   ipc-posix-shm-write-create ipc-posix-shm-write-unlink";
+        let rules = [
+            format!("(allow {all})\n"),
+            format!("(allow {all}\n    (ipc-posix-name-prefix \"/a\")\n)\n;; ---"),
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata\n    \
+             (ipc-posix-name-prefix \"/app.\")\n)\n\
+             (deny ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name-prefix \"/app.\")\n)\n"
+                .to_string(),
+            "(deny ipc-posix-shm-write-unlink\n    (ipc-posix-name-prefix \"/app.c\")\n)\n".to_string(),
+            "(deny ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"/app.cache\")\n)\n"
+                .to_string(),
+        ];
+        let mut last = 0;
+        for rule in &rules {
+            let at = p
+                .find(rule.as_str())
+                .unwrap_or_else(|| panic!("{rule}\n{p}"));
+            assert!(at > last, "{rule}\n{p}");
+            last = at;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let output = sandbox_exec(&p, &["/usr/bin/true"]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// customIoKits replaces guiAccess's IOKit grant, but `ui.injection`
+    /// still grants HID input.
+    #[test]
+    fn custom_io_kits_keep_the_injection_hid_grant() {
+        let mut r = custom_request();
+        let hid = "(allow iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))";
+        r.policy.ui.injection = true;
+        assert!(build_profile(&r).unwrap().contains(hid));
+        r.policy.ui.injection = false;
+        assert!(!build_profile(&r).unwrap().contains(hid));
     }
 
     /// Custom denies follow the allows from explicit settings, and those
@@ -2579,11 +2708,12 @@ mod tests {
         let mut allow_all = custom_request();
         let config = allow_all.seatbelt.as_mut().unwrap();
         config.gui_access = false;
-        config.custom_io_kits.as_mut().unwrap().default = SeatbeltCustomDefault::Allow;
+        let allow = Some(SeatbeltCustomDefault::Allow);
+        config.custom_io_kits.as_mut().unwrap().default = allow;
         let registers = config.custom_mach_registers.as_mut().unwrap();
-        registers.global.as_mut().unwrap().default = SeatbeltCustomDefault::Allow;
-        registers.local.as_mut().unwrap().default = SeatbeltCustomDefault::Allow;
-        config.custom_posix_shm.as_mut().unwrap().default = SeatbeltCustomDefault::Allow;
+        registers.global.as_mut().unwrap().default = allow;
+        registers.local.as_mut().unwrap().default = allow;
+        config.custom_posix_shm.as_mut().unwrap().default = Some(SeatbeltPosixShmAccess::Own);
         for request in [custom_request(), allow_all] {
             let profile = build_profile(&request).unwrap();
             let output = std::process::Command::new("/usr/bin/sandbox-exec")
@@ -2655,9 +2785,7 @@ mod tests {
                     for clipboard in [ClipboardPolicy::None, ClipboardPolicy::All] {
                         for injection in [false, true] {
                             for capture in captures {
-                                for default in
-                                    [SeatbeltCustomDefault::Deny, SeatbeltCustomDefault::Allow]
-                                {
+                                for default in [None, Some(SeatbeltCustomDefault::Allow)] {
                                     let mut r = custom_request();
                                     r.policy.ui.clipboard = clipboard.clone();
                                     r.policy.ui.injection = injection;
@@ -2682,7 +2810,8 @@ mod tests {
                                     let registers = config.custom_mach_registers.as_mut().unwrap();
                                     registers.global.as_mut().unwrap().default = default;
                                     registers.local.as_mut().unwrap().default = default;
-                                    config.custom_posix_shm.as_mut().unwrap().default = default;
+                                    config.custom_posix_shm.as_mut().unwrap().default =
+                                        default.map(|_| SeatbeltPosixShmAccess::Own);
                                     let label = format!(
                                     "written={written} gui={gui_access} keychain={keychain_access} \
                                      clipboard={clipboard:?} injection={injection} \
@@ -2700,7 +2829,7 @@ mod tests {
                                     let p = super::build_profile_with_proxy(&r, None, &inputs)
                                         .unwrap_or_else(|e| panic!("{label}: {e}"));
 
-                                    if default == SeatbeltCustomDefault::Deny {
+                                    if default.is_none() {
                                         for op in ["mach-lookup", "iokit-open"] {
                                             for broad in [
                                                 format!("(allow {op})"),
@@ -2719,10 +2848,7 @@ mod tests {
                                             !p.contains("(allow mach-register ("),
                                             "{label}\n{p}"
                                         );
-                                        assert!(
-                                            !p.contains("(allow ipc-posix-shm-read-data"),
-                                            "{label}\n{p}"
-                                        );
+                                        assert!(!grants_all_shm(&p), "{label}\n{p}");
                                     }
                                     let last_allow = *custom_lines(&p, false).last().unwrap();
                                     let denies = custom_lines(&p, true);
@@ -2801,8 +2927,6 @@ mod tests {
             }),
             custom_posix_shm: Some(SeatbeltCustomPosixShm {
                 read: names.clone(),
-                read_write: names.clone(),
-                own: names.clone(),
                 deny: names,
                 ..Default::default()
             }),
@@ -2877,9 +3001,6 @@ mod tests {
                 local: Some(mach("local")),
             }),
             custom_posix_shm: Some(SeatbeltCustomPosixShm {
-                read: strings(&["/r.one", "/r.two", "/r.pre.*"]),
-                read_write: strings(&["/w.one", "/w.two", "/w.pre.*"]),
-                own: strings(&["/o.one", "/o.two", "/o.pre.*"]),
                 deny: strings(&["/o.pre.no", "/w.pre.no", "/d.pre.*"]),
                 ..Default::default()
             }),
@@ -2921,34 +3042,11 @@ mod tests {
                  ({exact} \"org.other.{scope}.no\")\n)\n"
             ));
         }
-        for (action, ops, list) in [
-            (
-                "allow",
-                SHM_READ_TARGET.operation,
-                ["/r.one", "/r.two", "/r.pre."],
-            ),
-            (
-                "allow",
-                SHM_READ_WRITE_TARGET.operation,
-                ["/w.one", "/w.two", "/w.pre."],
-            ),
-            (
-                "allow",
-                SHM_OWN_TARGET.operation,
-                ["/o.one", "/o.two", "/o.pre."],
-            ),
-            (
-                "deny",
-                SHM_DENY_TARGET.operation,
-                ["/o.pre.no", "/w.pre.no", "/d.pre."],
-            ),
-        ] {
-            let [one, two, pre] = list;
-            expected.push(format!(
-                "({action} {ops}\n    (ipc-posix-name \"{one}\")\n    (ipc-posix-name \"{two}\")\n    \
-                 (ipc-posix-name-prefix \"{pre}\")\n)\n"
-            ));
-        }
+        expected.push(format!(
+            "(deny {}\n    (ipc-posix-name \"/o.pre.no\")\n    (ipc-posix-name \"/w.pre.no\")\n    \
+             (ipc-posix-name-prefix \"/d.pre.\")\n)\n",
+            SHM_DENY_TARGET.operation
+        ));
         let mut last_allow = 0;
         let mut first_deny = usize::MAX;
         for rule in &expected {
@@ -2973,9 +3071,9 @@ mod tests {
         }
     }
 
-    /// Duplicates, nested prefixes, a name in both allow and deny, and one
-    /// shared memory name in every list are accepted as written. Allows
-    /// add up, and each deny rule follows every allow so it wins.
+    /// Duplicates, nested prefixes, and a name in both allow and deny are
+    /// accepted as written. Allows add up, and each deny rule follows every
+    /// allow so it wins.
     #[test]
     fn overlapping_and_duplicate_entries_are_kept_and_deny_comes_last() {
         let overlap = || {
@@ -3009,11 +3107,11 @@ mod tests {
                 local: Some(overlap()),
             }),
             custom_posix_shm: Some(SeatbeltCustomPosixShm {
-                default: SeatbeltCustomDefault::Allow,
-                read: strings(&["/x.a", "/x.a", "/x.*"]),
-                read_write: strings(&["/x.a", "/x.*"]),
-                own: strings(&["/x.a", "/x.*"]),
+                default: Some(SeatbeltPosixShmAccess::Create),
+                read: strings(&["/x.a", "/x.a"]),
+                own: strings(&["/x.*"]),
                 deny: strings(&["/x.a", "/x.a"]),
+                ..Default::default()
             }),
             ..Default::default()
         });
@@ -3039,9 +3137,10 @@ mod tests {
             2 * 2,
             "{p}"
         );
+        // Each read entry gets an allow and a deny rule.
         assert_eq!(
             p.matches("(ipc-posix-name \"/x.a\")").count(),
-            2 + 1 + 1 + 2,
+            2 * 2 + 2,
             "{p}"
         );
         assert!(p.contains(

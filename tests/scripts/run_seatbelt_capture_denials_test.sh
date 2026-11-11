@@ -579,6 +579,43 @@ EOF
 pass "allow mode with nestedPty=false reports the pty"
 rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 
+# Same for ui.disable, probed through CGMainDisplayID (0 when blocked).
+for disable in true omitted; do
+    config="$(render seatbelt_ui_disabled.json)"
+    [ "$disable" = omitted ] && edit_config "$config" 'del config["ui"]'
+    run_config "$config" --audit
+    expect_marker "allow mode with ui.disable $disable ran" "DISPLAY_ID="
+    if [ "$disable" = true ]; then
+        expect_ok "allow mode keeps WindowServer blocked with ui.disable=true" "DISPLAY_ID=0"
+    else
+        grep -qF "DISPLAY_ID=0" <<<"$OUT" &&
+            fail "allow mode should reach WindowServer when ui.disable is omitted" "$OUT"
+        pass "allow mode reaches WindowServer when ui.disable is omitted"
+    fi
+    read_pointer "allow mode with ui.disable $disable writes a report"
+    rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+done
+
+# No HID device is guaranteed on CI hosts, so ui.injection is checked in the
+# generated profile.
+for injection in false omitted; do
+    config="$(render seatbelt_ui_disabled.json)"
+    [ "$injection" = false ] && edit_config "$config" 'config["ui"]["injection"] = False'
+    run_config "$config" --audit --debug
+    if [ "$injection" = false ]; then
+        grep -q '^(deny iokit-open .*IOHIDLibUserClient' <<<"$OUT" ||
+            fail "allow mode should deny HID input with ui.injection=false" "$OUT"
+        pass "allow mode keeps HID input denied with ui.injection=false"
+    else
+        grep -q '^(allow iokit-open (with report).*IOHIDLibUserClient' <<<"$OUT" &&
+            ! grep -q '^(deny iokit-open .*IOHIDLibUserClient' <<<"$OUT" ||
+            fail "allow mode should allow and report HID input when ui.injection is omitted" "$OUT"
+        pass "allow mode allows and reports HID input when ui.injection is omitted"
+    fi
+    read_pointer "allow mode with ui.injection $injection writes a report"
+    rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+done
+
 # --- a real GUI app: which Mach services and IOKit drivers it needs ----------
 
 # A minimal AppKit app (JavaScript for Automation) that opens a window. Only
@@ -649,7 +686,8 @@ expect_listed "allow mode lists the shared memory to grant" other \
     "ipc-posix-shm-read-data:apple.shm.notification_center" read
 
 # Shared memory names start with "/" but are not paths, so the verbose report
-# keeps them for customPosixShm. `own` lets the workload delete its region.
+# keeps them for customPosixShm. Only a `default` grant is reported, and `own`
+# lets the workload delete its region.
 SHM="mxc-capture-shm.$$"
 cat >"$TESTDIR/app/shm.py" <<'EOF'
 import sys

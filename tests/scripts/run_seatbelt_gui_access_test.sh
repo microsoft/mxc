@@ -77,13 +77,16 @@ expect_ok "nestedPty=false blocks pty allocation under guiAccess" "PTY_BLOCKED"
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-gui.XXXXXX)"
 # POSIX shared memory names are limited to 31 bytes.
 SHM="/mxc$$"
+SHM_LEVEL_NAMES=(.x .b .a.r .a.w .a.c.x .a.c.o .a.c.no)
+# The level probe creates these itself, so the host must not.
+SHM_NEW_NAMES=(.x.new .a.r.new .a.c.new)
 shm_cleanup() {
     /usr/bin/python3 -c '
 import _posixshmem as s, sys
 for n in sys.argv[2:]:
     try: s.shm_unlink(sys.argv[1] + n)
     except OSError: pass' "$SHM" .ro .rw .c.a .c.no .other \
-        .r1 .r2 .w1 .wp.a .wp.no .o1 .op.a .op.no
+        .r1 .r2 .w1 .wp.a .wp.no .o1 .op.a .op.no "${SHM_LEVEL_NAMES[@]}" "${SHM_NEW_NAMES[@]}"
 }
 trap 'shm_cleanup; rm -rf "$TESTDIR" "$SEATBELT_TMP"' EXIT
 mkdir -p "$TESTDIR/ro"
@@ -158,19 +161,69 @@ expect_ok "customPosixShm.readWrite works without guiAccess" "RW_WRITE_OK"
 expect_ok "customPosixShm.own works without guiAccess" "UNLINK_OK"
 expect_ok "customPosixShm.deny applies without guiAccess" "DENY_BLOCKED"
 
-# default "allow" grants read, write, and create for every name, but not delete.
-shm_setup
-run_config "$(shm_config 'config["seatbelt"]["customPosixShm"] = {"default": "allow", "deny": ["'"$SHM"'.c.no"]}')"
-expect_ok "customPosixShm default allow grants write" "RO_WRITE_OK"
-expect_ok "customPosixShm default allow grants create" "UNLISTED_OK"
-expect_ok "customPosixShm default allow does not grant delete" "UNLINK_BLOCKED"
-expect_ok "customPosixShm.deny wins over default allow" "DENY_BLOCKED"
+# For each name the level probe prints read-only open, read-write open, open
+# with O_CREAT, and delete (R, W, C, D, or "-" when blocked), each tried on a
+# region the host already created. For a ".new" name it prints whether a new
+# region could be created (C or "-").
+cat >"$TESTDIR/shm_levels.py" <<'PROBE'
+import _posixshmem as s, os, sys
 
-# In captureDenials "allow" mode unlisted names are allowed; deny still applies.
-shm_setup
-run_config "$(shm_config 'config["seatbelt"]["captureDenials"] = {"mode": "allow", "outputPath": "'"$SEATBELT_TMP"'/shm.json"}')"
-expect_ok "captureDenials allow mode lets unlisted shared memory through" "UNLISTED_OK"
-expect_ok "customPosixShm.deny still blocks in captureDenials allow mode" "DENY_BLOCKED"
+
+def allowed(action):
+    try:
+        action()
+        return True
+    except OSError:
+        return False
+
+
+for name in sys.argv[2:]:
+    path = sys.argv[1] + name
+    if name.endswith(".new"):
+        created = allowed(lambda: os.close(s.shm_open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)))
+        print("NEW" + name + "=" + ("C" if created else "-"))
+        continue
+    opens = [os.O_RDONLY, os.O_RDWR, os.O_RDWR | os.O_CREAT]
+    access = [allowed(lambda f=f: os.close(s.shm_open(path, f, 0o600))) for f in opens]
+    access.append(allowed(lambda: s.shm_unlink(path)))
+    print("LEVEL" + name + "=" + "".join(c if ok else "-" for c, ok in zip("RWCD", access)))
+PROBE
+chmod a+r "$TESTDIR/shm_levels.py"
+# Run the level probe with the given config edit.
+shm_levels() {
+    shm_cleanup
+    /usr/bin/python3 -c '
+import _posixshmem as s, os, sys
+for n in sys.argv[2:]: os.close(s.shm_open(sys.argv[1] + n, os.O_RDWR | os.O_CREAT, 0o600))' \
+        "$SHM" "${SHM_LEVEL_NAMES[@]}" || fail "could not create the host shared memory regions"
+    run_config "$(shm_config "config['process']['commandLine'] = '/usr/bin/python3 $TESTDIR/shm_levels.py $SHM ${SHM_LEVEL_NAMES[*]} ${SHM_NEW_NAMES[*]} </dev/null'; $1")"
+}
+
+for level in deny:----:- read:R---:- readWrite:RW--:- create:RWC-:C own:RWCD:C; do
+    IFS=: read -r name access new <<<"$level"
+    shm_levels 'config["seatbelt"]["customPosixShm"] = {"default": "'"$name"'"}'
+    expect_ok "customPosixShm default $name gives unlisted names exactly that access" "LEVEL.x=$access"
+    if [ "$new" = C ]; then verb=allows; else verb=blocks; fi
+    expect_ok "customPosixShm default $name $verb creating a new region" "NEW.x.new=$new"
+done
+
+# Each name gets exactly the access of the longest entry that matches it.
+shm_levels 'config["seatbelt"]["customPosixShm"] = {"default": "own",
+    "read": ["'"$SHM"'.a*"], "readWrite": ["'"$SHM"'.a.w"], "create": ["'"$SHM"'.a.c*"],
+    "own": ["'"$SHM"'.a.c.o"], "deny": ["'"$SHM"'.a.c.no"]}'
+for expected in .b=RWCD .a.r=R--- .a.w=RW-- .a.c.x=RWC- .a.c.o=RWCD .a.c.no=----; do
+    expect_ok "customPosixShm gives ${expected%=*} access ${expected#*=}" "LEVEL$expected"
+done
+expect_ok "a create entry lets the workload create a new region" "NEW.a.c.new=C"
+expect_ok "a read entry blocks creating a new region" "NEW.a.r.new=-"
+
+# In captureDenials "allow" mode unlisted names are allowed, but list levels
+# and deny entries still apply.
+shm_levels 'config["seatbelt"]["customPosixShm"] = {"read": ["'"$SHM"'.a.r"], "deny": ["'"$SHM"'.a.c.no"]};
+config["seatbelt"]["captureDenials"] = {"mode": "allow", "outputPath": "'"$SEATBELT_TMP"'/shm.json"}'
+expect_ok "captureDenials allow mode lets unlisted shared memory through" "LEVEL.x=RWCD"
+expect_ok "a read entry stays read-only in captureDenials allow mode" "LEVEL.a.r=R---"
+expect_ok "customPosixShm.deny still blocks in captureDenials allow mode" "LEVEL.a.c.no=----"
 
 # --- all four custom blocks together, several entries per list ---------------
 
@@ -312,7 +365,8 @@ for marker in \
 done
 
 # In captureDenials "allow" mode the same lists let unlisted names through and
-# record them; deny entries still block, and granted names aren't recorded.
+# record them; deny entries and shared memory list levels still block, and
+# granted names aren't recorded.
 shm_cleanup
 /usr/bin/python3 -c '
 import _posixshmem as s, os, sys
@@ -326,7 +380,7 @@ for marker in \
     REGISTER_GLOBAL_ONE_OK REGISTER_GLOBAL_DENY_BLOCKED REGISTER_GLOBAL_DENY_PREFIX_BLOCKED REGISTER_GLOBAL_UNLISTED_OK \
     REGISTER_LOCAL_ONE_OK REGISTER_LOCAL_DENY_BLOCKED REGISTER_LOCAL_DENY_PREFIX_BLOCKED REGISTER_LOCAL_UNLISTED_OK \
     IOKIT_EXACT_OK IOKIT_DENY_BLOCKED IOKIT_UNLISTED_OK \
-    SHM_READ_WRITE_OK SHM_RW_DENY_BLOCKED SHM_OWN_DENY_BLOCKED SHM_UNLISTED_OK SHM_UNLINK_ONE_OK; do
+    SHM_READ_WRITE_BLOCKED SHM_RW_DENY_BLOCKED SHM_OWN_DENY_BLOCKED SHM_UNLISTED_OK SHM_UNLINK_ONE_OK; do
     expect_ok "allow mode with all custom blocks: $marker" "$marker"
 done
 REPORT="$(/usr/bin/python3 -c 'import json,sys

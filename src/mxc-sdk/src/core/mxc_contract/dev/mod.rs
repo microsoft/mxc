@@ -248,7 +248,7 @@ pub use stable::{
     ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation,
     ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, SeatbeltCaptureDenials,
     SeatbeltCustomDefault, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
-    SeatbeltCustomRules, Telemetry, Ui, UiClipboard,
+    SeatbeltCustomRules, SeatbeltPosixShmAccess, Telemetry, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

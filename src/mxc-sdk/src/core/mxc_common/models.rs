@@ -237,12 +237,11 @@ impl Default for SeatbeltConfig {
 }
 
 /// Access for names that no Seatbelt custom rule entry matches.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeatbeltCustomDefault {
     /// Every name not denied is allowed.
     Allow,
-    /// Only listed names are allowed.
-    #[default]
+    /// Unlisted names are denied.
     Deny,
 }
 
@@ -251,7 +250,8 @@ pub enum SeatbeltCustomDefault {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeatbeltCustomRules {
-    pub default: SeatbeltCustomDefault,
+    /// `None` when the request omitted it; the backend applies the default.
+    pub default: Option<SeatbeltCustomDefault>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
 }
@@ -264,16 +264,27 @@ pub struct SeatbeltCustomMachRegisters {
     pub local: Option<SeatbeltCustomRules>,
 }
 
-/// Seatbelt POSIX shared memory rules. Each list grants more than the one
-/// before it; `deny` entries win.
+/// Access to a Seatbelt POSIX shared memory name. Each level includes the
+/// ones before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SeatbeltPosixShmAccess {
+    Deny,
+    Read,
+    ReadWrite,
+    Create,
+    Own,
+}
+
+/// Seatbelt POSIX shared memory rules. Each list sets the access for its
+/// names; `deny` entries win.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SeatbeltCustomPosixShm {
-    /// `Allow` grants read, write, and create, but not delete.
-    pub default: SeatbeltCustomDefault,
+    /// `None` when the request omitted it; the backend applies the default.
+    pub default: Option<SeatbeltPosixShmAccess>,
     pub read: Vec<String>,
     pub read_write: Vec<String>,
-    /// Also grants delete.
+    pub create: Vec<String>,
     pub own: Vec<String>,
     pub deny: Vec<String>,
 }

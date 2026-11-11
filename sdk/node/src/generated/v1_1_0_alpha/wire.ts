@@ -783,13 +783,17 @@ export interface SeatbeltCustomMachRegisters {
 }
 
 /**
- * POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. `deny` entries win over every other list.
+ * POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. Each listed name gets exactly its list's access; a longer entry wins over a shorter prefix. `deny` entries win over every other list.
  */
 export interface SeatbeltCustomPosixShm {
   /**
-   * Access for unlisted names. Defaults to `deny`. `allow` grants read, write, and create.
+   * Names the process may read, write, and create.
    */
-  default?: SeatbeltCustomDefault;
+  create?: string[];
+  /**
+   * Access for unlisted names. Defaults to `deny`.
+   */
+  default?: SeatbeltPosixShmAccess;
   /**
    * Names to deny.
    */
@@ -799,7 +803,7 @@ export interface SeatbeltCustomPosixShm {
    */
   own?: string[];
   /**
-   * Names the process may read.
+   * Names the process may only read.
    */
   read?: string[];
   /**
@@ -825,6 +829,8 @@ export interface SeatbeltCustomRules {
    */
   deny?: string[];
 }
+
+export type SeatbeltPosixShmAccess = "deny" | "read" | "readWrite" | "create" | "own";
 
 export type StartPhase = "start";
 

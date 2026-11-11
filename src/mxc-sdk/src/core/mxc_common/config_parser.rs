@@ -10,8 +10,8 @@ use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
     SeatbeltCustomDefault, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
-    SeatbeltCustomRules, TelemetryConfig, TestFeatureConfig, UiFieldsSpecified, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    SeatbeltCustomRules, SeatbeltPosixShmAccess, TelemetryConfig, TestFeatureConfig,
+    UiFieldsSpecified, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -1315,26 +1315,25 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
                  default,
                  read,
                  read_write,
+                 create,
                  own,
                  deny,
              }| SeatbeltCustomPosixShm {
-                default: make_seatbelt_custom_default(default),
+                default: default.map(|access| match access {
+                    wire::SeatbeltPosixShmAccess::Deny => SeatbeltPosixShmAccess::Deny,
+                    wire::SeatbeltPosixShmAccess::Read => SeatbeltPosixShmAccess::Read,
+                    wire::SeatbeltPosixShmAccess::ReadWrite => SeatbeltPosixShmAccess::ReadWrite,
+                    wire::SeatbeltPosixShmAccess::Create => SeatbeltPosixShmAccess::Create,
+                    wire::SeatbeltPosixShmAccess::Own => SeatbeltPosixShmAccess::Own,
+                }),
                 read: read.unwrap_or_default(),
                 read_write: read_write.unwrap_or_default(),
+                create: create.unwrap_or_default(),
                 own: own.unwrap_or_default(),
                 deny: deny.unwrap_or_default(),
             },
         ),
         capture_denials,
-    }
-}
-
-fn make_seatbelt_custom_default(
-    default: Option<wire::SeatbeltCustomDefault>,
-) -> SeatbeltCustomDefault {
-    match default {
-        Some(wire::SeatbeltCustomDefault::Allow) => SeatbeltCustomDefault::Allow,
-        Some(wire::SeatbeltCustomDefault::Deny) | None => SeatbeltCustomDefault::Deny,
     }
 }
 
@@ -1345,7 +1344,10 @@ fn make_seatbelt_custom_rules(rules: wire::SeatbeltCustomRules) -> SeatbeltCusto
         deny,
     } = rules;
     SeatbeltCustomRules {
-        default: make_seatbelt_custom_default(default),
+        default: default.map(|default| match default {
+            wire::SeatbeltCustomDefault::Allow => SeatbeltCustomDefault::Allow,
+            wire::SeatbeltCustomDefault::Deny => SeatbeltCustomDefault::Deny,
+        }),
         allow: allow.unwrap_or_default(),
         deny: deny.unwrap_or_default(),
     }
@@ -2457,7 +2459,7 @@ mod tests {
                 "customIoKits": {"default": "deny", "allow": ["AGXDeviceUserClient"]},
                 "customMachLookups": {"default": "allow", "deny": ["com.example.*"]},
                 "customMachRegisters": {"local": {}},
-                "customPosixShm": {"default": "allow", "readWrite": ["/myapp.*"], "own": ["/myapp.tmp"]}
+                "customPosixShm": {"default": "readWrite", "create": ["/myapp.*"], "own": ["/myapp.tmp"]}
             },
             "process": {"commandLine": "echo dev"}
         }"#;
@@ -2466,22 +2468,20 @@ mod tests {
         };
         let seatbelt = request.seatbelt.unwrap();
         let io_kits = seatbelt.custom_io_kits.unwrap();
-        assert_eq!(io_kits.default, SeatbeltCustomDefault::Deny);
+        assert_eq!(io_kits.default, Some(SeatbeltCustomDefault::Deny));
         assert_eq!(io_kits.allow, ["AGXDeviceUserClient"]);
         assert!(io_kits.deny.is_empty());
         let lookups = seatbelt.custom_mach_lookups.unwrap();
-        assert_eq!(lookups.default, SeatbeltCustomDefault::Allow);
+        assert_eq!(lookups.default, Some(SeatbeltCustomDefault::Allow));
         assert_eq!(lookups.deny, ["com.example.*"]);
         let registers = seatbelt.custom_mach_registers.unwrap();
         assert!(registers.global.is_none());
-        assert_eq!(
-            registers.local.unwrap().default,
-            SeatbeltCustomDefault::Deny
-        );
+        // An omitted default stays unset; the backend applies it.
+        assert_eq!(registers.local.unwrap().default, None);
         let shm = seatbelt.custom_posix_shm.unwrap();
-        assert_eq!(shm.default, SeatbeltCustomDefault::Allow);
-        assert!(shm.read.is_empty());
-        assert_eq!(shm.read_write, ["/myapp.*"]);
+        assert_eq!(shm.default, Some(SeatbeltPosixShmAccess::ReadWrite));
+        assert!(shm.read.is_empty() && shm.read_write.is_empty());
+        assert_eq!(shm.create, ["/myapp.*"]);
         assert_eq!(shm.own, ["/myapp.tmp"]);
         assert!(shm.deny.is_empty());
 
@@ -2526,6 +2526,16 @@ mod tests {
             }
         );
         assert!(written.seatbelt.unwrap().keychain_access_specified);
+
+        let lockdown = parse(r#""ui": {"disable": true, "injection": false}, "seatbelt": {},"#);
+        assert_eq!(
+            lockdown.policy.ui_fields_specified,
+            UiFieldsSpecified {
+                disable: true,
+                clipboard: false,
+                injection: true,
+            }
+        );
 
         let omitted = parse(r#""seatbelt": {},"#);
         assert_eq!(

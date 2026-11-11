@@ -456,14 +456,26 @@ pub struct SeatbeltCustomMachRegisters {
     pub local: Option<SeatbeltCustomRules>,
 }
 
+/// Access to a Seatbelt POSIX shared memory name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SeatbeltPosixShmAccess {
+    Deny,
+    Read,
+    ReadWrite,
+    Create,
+    Own,
+}
+
 /// Seatbelt POSIX shared memory rules, by access.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SeatbeltCustomPosixShm {
     /// Defaults to `deny` when omitted.
-    pub default: Option<SeatbeltCustomDefault>,
+    pub default: Option<SeatbeltPosixShmAccess>,
     pub read: Option<Vec<String>>,
     pub read_write: Option<Vec<String>>,
+    pub create: Option<Vec<String>>,
     pub own: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
 }

@@ -1533,11 +1533,18 @@
     },
     "SeatbeltCustomPosixShm": {
       "additionalProperties": false,
-      "description": "POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. `deny` entries win over every other list.",
+      "description": "POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. Each listed name gets exactly its list's access; a longer entry wins over a shorter prefix. `deny` entries win over every other list.",
       "properties": {
+        "create": {
+          "description": "Names the process may read, write, and create.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "default": {
-          "$ref": "#/definitions/SeatbeltCustomDefault",
-          "description": "Access for unlisted names. Defaults to `deny`. `allow` grants read, write, and create."
+          "$ref": "#/definitions/SeatbeltPosixShmAccess",
+          "description": "Access for unlisted names. Defaults to `deny`."
         },
         "deny": {
           "description": "Names to deny.",
@@ -1554,7 +1561,7 @@
           "type": "array"
         },
         "read": {
-          "description": "Names the process may read.",
+          "description": "Names the process may only read.",
           "items": {
             "type": "string"
           },
@@ -1594,6 +1601,45 @@
         }
       },
       "type": "object"
+    },
+    "SeatbeltPosixShmAccess": {
+      "oneOf": [
+        {
+          "description": "Deny",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "ReadWrite",
+          "enum": [
+            "readWrite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create",
+          "enum": [
+            "create"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Own",
+          "enum": [
+            "own"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StartPhase": {
       "enum": [

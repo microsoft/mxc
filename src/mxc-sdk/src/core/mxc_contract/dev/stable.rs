@@ -411,8 +411,27 @@ string_enum! {
     pub enum SeatbeltCustomDefault {
         /// Allow every name not denied. Use only for compatibility.
         Allow => ["allow"],
-        /// Allow only listed names.
+        /// Deny unlisted names. MXC's built-in grants and enabled settings
+        /// still apply.
         Deny => ["deny"],
+    }
+}
+
+string_enum! {
+    /// Access to a POSIX shared memory name. Each level includes the ones
+    /// before it.
+    #[derive(Debug)]
+    pub enum SeatbeltPosixShmAccess {
+        /// No access.
+        Deny => ["deny"],
+        /// Open and read existing regions.
+        Read => ["read"],
+        /// Also write existing regions.
+        ReadWrite => ["readWrite"],
+        /// Also create regions.
+        Create => ["create"],
+        /// Also delete regions.
+        Own => ["own"],
     }
 }
 
@@ -447,21 +466,25 @@ pub struct SeatbeltCustomMachRegisters {
 }
 
 /// POSIX shared memory rules, by access. An entry ending in `*` matches every
-/// name with that prefix. `deny` entries win over every other list.
+/// name with that prefix. Each listed name gets exactly its list's access; a
+/// longer entry wins over a shorter prefix. `deny` entries win over every
+/// other list.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SeatbeltCustomPosixShm {
-    /// Access for unlisted names. Defaults to `deny`. `allow` grants read,
-    /// write, and create.
+    /// Access for unlisted names. Defaults to `deny`.
     #[serde(default)]
-    pub default: OptionalField<SeatbeltCustomDefault>,
-    /// Names the process may read.
+    pub default: OptionalField<SeatbeltPosixShmAccess>,
+    /// Names the process may only read.
     #[serde(default)]
     pub read: OptionalField<Vec<String>>,
     /// Existing names the process may read and write.
     #[serde(default)]
     pub read_write: OptionalField<Vec<String>>,
+    /// Names the process may read, write, and create.
+    #[serde(default)]
+    pub create: OptionalField<Vec<String>>,
     /// Names the process may read, write, create, and delete.
     #[serde(default)]
     pub own: OptionalField<Vec<String>>,
