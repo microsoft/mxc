@@ -1178,10 +1178,12 @@ try {
 # exec injects HTTP(S)_PROXY from runtimeConfig.networkProxy without restating
 # the immutable network posture. Asserts the
 # proxy env reaches the container (the full functional proxy round-trip is
-# covered by the one-shot run_wslc_proxy_test.ps1).
+# covered by the one-shot run_wslc_proxy_test.ps1). An isolated peer started
+# in the same session checks that host loopback stays bridged-only.
 $script:netSandboxId = $null
-$script:hostLoopbackAddr = $null
+$script:peerSandboxId = $null
 $netDeprovisionedOk = $false
+$peerDeprovisionedOk = $false
 try {
     $netProvisionedOk = Run-StateAwareTest "C: provision (bridged network)" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_bridged.json'
@@ -1207,13 +1209,26 @@ try {
                 "https_proxy injected into the container"
         } | Out-Null
 
-        # The daemon's shared session enables host loopback, so a bridged
-        # container reaches a service bound only to Windows 127.0.0.1. The
-        # resolved address is kept for the isolated check in Lifecycle F.
-        Run-StateAwareTest "C: exec reaches Windows loopback through host.wslc.internal" {
+        $peerStartedOk = Run-StateAwareTest "C: start an isolated peer in the same session" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+            $envObj = Assert-ResultEnvelope $r "isolated peer provision"
+            if ($null -eq $envObj) { return }
+            $script:peerSandboxId = [string]$envObj.result.sandboxId
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:peerSandboxId
+            if ($null -eq (Assert-ResultEnvelope $r "isolated peer start")) { return }
+            $netBootId = Get-SandboxBootId -SandboxId $script:netSandboxId -What 'bridged sandbox'
+            $peerBootId = Get-SandboxBootId -SandboxId $script:peerSandboxId -What 'isolated peer'
+            Assert-True (-not [string]::IsNullOrEmpty($netBootId) -and $netBootId -ceq $peerBootId) `
+                "both sandboxes run in the same session VM"
+        }
+
+        # The session enables host loopback, so the bridged container reaches a
+        # service bound only to Windows 127.0.0.1. The isolated peer must not,
+        # by name or by the resolved address, while the bridged one still does.
+        Run-StateAwareTest "C: only the bridged sandbox reaches Windows loopback" {
             $server = Start-LoopbackTokenServer
             try {
-                $r = Invoke-StateAware -Request @{
+                $bridgedProbe = @{
                     phase = 'exec'
                     sandboxId = $script:netSandboxId
                     process = @{
@@ -1221,15 +1236,39 @@ try {
                         timeout = 60000
                     }
                 }
+                $r = Invoke-StateAware -Request $bridgedProbe
+                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+                Assert-True ($r.Stdout.Contains("HOST_LOOPBACK_GOT=[$($server.Token)]")) `
+                    "bridged container received the Windows listener's token ($($r.Stdout.Trim()))"
+                $addr = if ($r.Stdout -match 'HOST_LOOPBACK_ADDR=\[([0-9.]+)\]') { $Matches[1] }
+                Assert-True ([bool]$addr) "host.wslc.internal resolved to an address"
+                if (-not $peerStartedOk -or -not $addr) { return }
+
+                $r = Invoke-StateAware -Request @{
+                    phase = 'exec'
+                    sandboxId = $script:peerSandboxId
+                    process = @{
+                        commandLine = "sh -c 'for T in host.wslc.internal $addr; do echo HOST_LOOPBACK_GOT `$T=[`$(wget -q -T 5 -O - http://`$T:$($server.Port)/ 2>&1)]; done; echo HOST_LOOPBACK_PROBE_DONE'"
+                        timeout = 60000
+                    }
+                }
+                Assert-True ($r.Stdout -match 'HOST_LOOPBACK_PROBE_DONE') "isolated probe completed ($($r.Stdout.Trim()))"
+                Assert-True (-not $r.Stdout.Contains($server.Token)) "isolated peer did not receive the token"
+
+                $r = Invoke-StateAware -Request $bridgedProbe
+                Assert-True ($r.Stdout.Contains("HOST_LOOPBACK_GOT=[$($server.Token)]")) `
+                    "bridged container still receives the token ($($r.Stdout.Trim()))"
             } finally {
                 Stop-LoopbackTokenServer $server
             }
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Assert-True ($r.Stdout.Contains("HOST_LOOPBACK_GOT=[$($server.Token)]")) `
-                "container received the Windows listener's token ($($r.Stdout.Trim()))"
-            if ($r.Stdout -match 'HOST_LOOPBACK_ADDR=\[([0-9.]+)\]') { $script:hostLoopbackAddr = $Matches[1] }
-            Assert-True ([bool]$script:hostLoopbackAddr) "host.wslc.internal resolved to an address"
         } | Out-Null
+    }
+
+    if ($script:peerSandboxId) {
+        $peerDeprovisionedOk = Run-StateAwareTest "C: deprovision isolated peer" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:peerSandboxId
+            $null = Assert-ResultEnvelope $r "isolated peer deprovision"
+        }
     }
 
     if ($netProvisionedOk) {
@@ -1244,6 +1283,11 @@ try {
         if ($netDeprovPassed) { $netDeprovisionedOk = $true }
     }
 } finally {
+    if ($script:peerSandboxId -and -not $peerDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:peerSandboxId" -ForegroundColor DarkGray
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:peerSandboxId } catch { }
+    }
     if ($null -ne $script:netSandboxId -and -not $netDeprovisionedOk) {
         Write-Host ""
         Write-Host "[cleanup] best-effort deprovision of $script:netSandboxId" -ForegroundColor DarkGray
@@ -1748,29 +1792,6 @@ try {
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
             Assert-True ($r.Stdout -match '(^|\s)/tmp\s*$') "pwd reports the requested cwd (/tmp) ($($r.Stdout.Trim()))"
-        } | Out-Null
-    }
-
-    # The shared session has host loopback enabled, but an isolated container
-    # has no route to it by name or by the address Lifecycle C resolved.
-    if ($edgeStartedOk) {
-        Run-StateAwareTest "F: isolated exec cannot reach Windows loopback" {
-            Assert-True ([bool]$script:hostLoopbackAddr) "Lifecycle C resolved the host loopback address"
-            $server = Start-LoopbackTokenServer
-            try {
-                $r = Invoke-StateAware -Request @{
-                    phase = 'exec'
-                    sandboxId = $script:edgeSandboxId
-                    process = @{
-                        commandLine = "sh -c 'for T in host.wslc.internal $script:hostLoopbackAddr; do echo HOST_LOOPBACK_GOT `$T=[`$(wget -q -T 5 -O - http://`$T:$($server.Port)/ 2>&1)]; done; echo HOST_LOOPBACK_PROBE_DONE'"
-                        timeout = 60000
-                    }
-                }
-            } finally {
-                Stop-LoopbackTokenServer $server
-            }
-            Assert-True ($r.Stdout -match 'HOST_LOOPBACK_PROBE_DONE') "probe completed ($($r.Stdout.Trim()))"
-            Assert-True (-not $r.Stdout.Contains($server.Token)) "container did not receive the Windows listener's token"
         } | Out-Null
     }
 
