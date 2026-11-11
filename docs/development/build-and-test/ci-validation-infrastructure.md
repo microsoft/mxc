@@ -291,7 +291,9 @@ host that cannot capture them cold boots sandboxes. Requests that native
 validation rejects capture no templates. A held-container scenario runs execs
 side by side in a container that `wxc-exec --operation provision --hold`
 keeps, cancels one, and closes stdin, then checks that the container's VM ended
-and that its ID never left the executor.
+and that its ID never left the executor. It also closes all of a second held
+container's pipes at once, as a caller that exits would, and checks that its
+VM ended.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

@@ -554,8 +554,13 @@ command override.
 | `{"type":"error","error":{...}}` | The container failed: provision, start, a malformed request line, or teardown. It is the last event, and the executor exits with that error's status. |
 
 Ctrl-C ends the container as closing stdin does, and the executor exits with
-`130`. Diagnostics go to stderr. Terminating the executor skips teardown and
-can leave the container running, as with any lifecycle call that is cut short.
+`130`. Diagnostics go to stderr. A caller that exits closes stdin, and the
+executor tears the container down even though its events and diagnostics can
+no longer be written. Terminating the executor skips teardown and can leave
+the container running, as with any lifecycle call that is cut short. On
+Windows, Node.js and Bun put the processes they spawn in a job object that
+terminates them when the spawning process exits, so a caller that may exit
+before the container ends should spawn the executor detached from it.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):

@@ -270,12 +270,15 @@ To run execs side by side from the executor, hold the container in one
 process with `wxc-exec --experimental --operation provision --hold`. It
 provisions and starts the container, reads exec and cancel requests from
 stdin as JSON lines, streams each exec's output and outcome to stdout, and
-stops and deprovisions the container when stdin closes. Cancelling one exec
+stops and deprovisions the container when stdin closes, including when the
+caller exits. Cancelling one exec
 leaves the container and its other execs running. The container ID stays in
 the executor. The [lifecycle transport](../../development/architecture/container-lifecycle.md#held-containers)
 describes the requests and events. Each exec runs as its own process tree in
 the guest: files persist between execs, but a process an exec started in the
-background ends with that exec.
+background ends with that exec. The executor starts the container's OpenVMM
+process, which outlives an executor that is terminated, so terminating the
+executor leaves the container running.
 
 ### Agent state directory
 
@@ -359,7 +362,9 @@ the executor started have terminated and that a later request succeeds with
 the same agent state directory. A held-container scenario runs execs side by
 side in a container held with `--hold`, checks that files persist between them,
 cancels one while the container keeps running, and closes stdin, then checks
-that the executor stopped the container's VM and never reported its ID.
+that the executor stopped the container's VM and never reported its ID. It
+then holds another container and closes all of the executor's pipes at once,
+as a caller that exits would, and checks that its VM still ends.
 Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
 later concurrent requests boot it while its registry is unreachable. A third
