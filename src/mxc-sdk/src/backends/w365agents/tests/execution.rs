@@ -142,12 +142,14 @@ fn test_app_fresh_caller_fixture() {
     let directory = tempfile::tempdir().unwrap();
     let receipt = directory.path().join("session.json");
     for (mode, expected) in [
-        ("new", 3),
-        ("reuse", 5),
-        ("release", 6),
-        ("checkout-error", 7),
+        ("new", Some(3)),
+        ("reuse", Some(5)),
+        ("release", Some(6)),
+        ("checkout-error", Some(7)),
+        ("readiness-timeout", None),
     ] {
-        if mode == "new" {
+        let before = fixture.fixture.count();
+        if mode == "new" || mode == "readiness-timeout" {
             fixture.fixture.reply(
                 200,
                 &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
@@ -159,6 +161,10 @@ fn test_app_fresh_caller_fixture() {
             fixture
                 .fixture
                 .reply(500, &json!({"sessionId":A}).to_string());
+        } else if mode == "readiness-timeout" {
+            for _ in 0..140 {
+                fixture.fixture.reply(200, r#"{"status":"Waiting"}"#);
+            }
         } else {
             fixture.fixture.reply(200, r#"{"status":"Ready"}"#);
             fixture.script(|stream| {
@@ -174,8 +180,8 @@ fn test_app_fresh_caller_fixture() {
             .env("MXC_W365_TEST_APP_MODE", mode)
             .env(
                 "MXC_W365_TEST_APP_RECEIPT",
-                if mode == "checkout-error" {
-                    directory.path().join("failed.json")
+                if matches!(mode, "checkout-error" | "readiness-timeout") {
+                    directory.path().join(format!("{mode}.json"))
                 } else {
                     receipt.clone()
                 },
@@ -185,7 +191,8 @@ fn test_app_fresh_caller_fixture() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(90);
+        let until = Instant::now()
+            + Duration::from_secs(if mode == "readiness-timeout" { 180 } else { 90 });
         while child.try_wait().unwrap().is_none() {
             if Instant::now() >= until {
                 child.kill().unwrap();
@@ -201,11 +208,23 @@ fn test_app_fresh_caller_fixture() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(std::fs::read_to_string(marker).unwrap(), mode);
-        assert_eq!(
-            fixture.fixture.count(),
-            expected,
-            "reuse/release must never allocate"
-        );
+        if let Some(expected) = expected {
+            assert_eq!(
+                fixture.fixture.count(),
+                expected,
+                "reuse/release must never allocate"
+            );
+        } else {
+            let requests = fixture.fixture.requests.lock().unwrap();
+            assert!(requests.len() >= before + 2);
+            assert!(requests[before].starts_with("POST "));
+            assert!(
+                requests[before + 1..]
+                    .iter()
+                    .all(|request| request.starts_with(&format!("GET /computers/{A}/status?"))),
+                "readiness timeout must not execute, release, or replay checkout"
+            );
+        }
     }
     let requests = fixture.fixture.requests.lock().unwrap();
     assert_eq!(
@@ -213,7 +232,7 @@ fn test_app_fresh_caller_fixture() {
             .iter()
             .filter(|request| request.starts_with("POST "))
             .count(),
-        2
+        3
     );
     assert_eq!(
         requests

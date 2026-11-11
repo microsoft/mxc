@@ -193,7 +193,7 @@ internal static class Application
         return value;
     }
 
-    private static JsonObject? SafeDetails(JsonElement? details)
+    internal static JsonObject? SafeDetails(JsonElement? details)
     {
         if (details is not { ValueKind: JsonValueKind.Object } source) return null;
         var safe = new JsonObject();
@@ -207,6 +207,10 @@ internal static class Application
             safe["httpStatus"] = number;
         if (source.TryGetProperty("possiblySucceeded", out var uncertain) && uncertain.ValueKind is JsonValueKind.True or JsonValueKind.False)
             safe["possiblySucceeded"] = uncertain.GetBoolean();
+        if (source.TryGetProperty("lastState", out var lastState) &&
+            (lastState.ValueKind == JsonValueKind.Null ||
+                lastState.ValueKind == JsonValueKind.String && lastState.GetString() is "Waiting" or "Live" or "Ready"))
+            safe["lastState"] = lastState.ValueKind == JsonValueKind.Null ? null : lastState.GetString();
         return safe;
     }
 

@@ -72,6 +72,9 @@ uncertainty, another caller's operations or terminal state. Do not discard a
 receipt to evade those guards. The app does not search for active reservations.
 Failure receipts retain the SDK's sanitized error code, request IDs and known
 session ID when available, so an operator can reconcile an uncertain outcome.
+Readiness timeouts also preserve the SDK's `lastState`, when supplied, in both
+the error output and receipt (`Waiting`, `Live`, `Ready`, or null when no state was recorded).
+The readiness budget is 120 seconds; `--timeout-ms` controls the command only.
 
 For unknown allocation without an ID, stop and ask the authorized service
 operator to reconcile; never blindly rerun without an ID. For execution failure,
@@ -116,7 +119,8 @@ From the repository root, `tests\scripts\run_w365_sdk_fixtures.ps1` builds isola
 test-support libraries and drives real public SDK calls against loopback TLS.
 It also tests the app's run/reuse/release path in fresh processes with injected
 synthetic authentication, preservation of cleanup IDs and request IDs on failed
-checkout, plus isolated CLI/token/journal regressions.
+checkout, and readiness-timeout diagnostics through the real 120-second wait,
+plus isolated CLI/token/journal regressions.
 There is no production auth-bypass or fixture option. Windows x64 regular and
 scheduled build jobs run these checks and the native-runner/auth offline suites.
 No live native/SDK Exec or actual browser/cache workflow is established by these

@@ -208,6 +208,32 @@ public sealed class ApplicationTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("Waiting")]
+    [InlineData("Live")]
+    [InlineData("Ready")]
+    [InlineData(null)]
+    public void ReadinessStateSurvivesSanitization(string? state)
+    {
+        var source = new JsonObject { ["lastState"] = state, ["accessToken"] = "SYNTHETIC_PRIVATE_TOKEN" };
+        using var document = JsonDocument.Parse(source.ToJsonString());
+        var safe = Application.SafeDetails(document.RootElement)!;
+        Assert.True(safe.ContainsKey("lastState"));
+        Assert.Equal(state, safe["lastState"]?.GetValue<string>());
+        Assert.DoesNotContain("SYNTHETIC_PRIVATE_TOKEN", safe.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData("\"SYNTHETIC_PRIVATE_TOKEN\"")]
+    [InlineData("\"Waiting\\r\\nprivate\"")]
+    [InlineData("123")]
+    [InlineData("{}")]
+    public void InvalidReadinessStateIsNotLogged(string json)
+    {
+        using var document = JsonDocument.Parse("{\"lastState\":" + json + "}");
+        Assert.False(Application.SafeDetails(document.RootElement)!.ContainsKey("lastState"));
+    }
+
     [Fact]
     public async Task PublicSdkAppAgainstTrustedTlsFixture()
     {
@@ -219,15 +245,32 @@ public sealed class ApplicationTests : IDisposable
         var receipt = Environment.GetEnvironmentVariable("MXC_W365_TEST_APP_RECEIPT")!;
         var args = new List<string> { mode == "release" ? "release" : "run", "--config", configPath, "--receipt-path", receipt };
         if (mode != "release") args.AddRange(["--command", "cmd.exe /c echo fixture"]);
-        if (mode is not ("new" or "checkout-error"))
+        if (mode is not ("new" or "checkout-error" or "readiness-timeout"))
         {
             var id = JsonNode.Parse(File.ReadAllText(receipt))!["sessionId"]!.GetValue<string>();
             args.AddRange(["--session-id", id]);
         }
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         var result = await Invoke(args.ToArray(), new FakeAuth(), new Sdk());
-        Assert.Equal(mode == "checkout-error" ? 1 : 0, result.Exit);
+        Assert.Equal(mode is "checkout-error" or "readiness-timeout" ? 1 : 0, result.Exit);
         Assert.Equal(Id, result.Result["sessionId"]!.GetValue<string>());
-        if (mode == "checkout-error")
+        if (mode == "readiness-timeout")
+        {
+            Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(120));
+            Assert.Equal("attach_timeout", result.Result["error"]!["details"]!["code"]!.GetValue<string>());
+            Assert.Equal("Waiting", result.Result["error"]!["details"]!["lastState"]!.GetValue<string>());
+            var journal = JsonNode.Parse(File.ReadAllText(receipt))!;
+            Assert.Equal("Waiting", journal["errorDetails"]!["lastState"]!.GetValue<string>());
+            Assert.Equal(Id, journal["sessionId"]!.GetValue<string>());
+            Assert.Equal("FailedOrUnknown", journal["state"]!.GetValue<string>());
+            Assert.False(journal["releaseAccepted"]!.GetValue<bool>());
+            Assert.Equal(new[] { "provision" }, journal["operations"]!.AsArray().Select(value => value!.GetValue<string>()));
+            args.AddRange(["--session-id", Id]);
+            var replay = await Invoke(args.ToArray(), new FakeAuth { Failure = true }, new Sdk());
+            Assert.Equal(1, replay.Exit);
+            Assert.Equal("reconciliation_required", replay.Result["error"]!["code"]!.GetValue<string>());
+        }
+        else if (mode == "checkout-error")
         {
             var journal = JsonNode.Parse(File.ReadAllText(receipt))!;
             Assert.Equal(Id, journal["sessionId"]!.GetValue<string>());
