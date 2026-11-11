@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{PortMapping, ScriptResponse};
+use crate::mxc_common::mxc_error::ApiFailure;
 use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::wslc_common::daemon_protocol::ExecTerminal;
@@ -1323,6 +1324,23 @@ fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> 
     }
 }
 
+fn unconfirmed_api_failure(
+    completion: ProcessCompletion,
+    kill_hr: HRESULT,
+    exit_code_hr: HRESULT,
+) -> Option<Box<ApiFailure>> {
+    if completion != ProcessCompletion::TerminationUnconfirmed {
+        return None;
+    }
+    [
+        ("WslcSignalProcess", kill_hr),
+        ("WslcGetProcessExitCode", exit_code_hr),
+    ]
+    .into_iter()
+    .find(|&(_, hr)| hr != S_OK)
+    .map(|(operation, hr)| Box::new(sdk_api_failure(operation, hr)))
+}
+
 /// Result of a daemon `exec`, including captured output retained by callbacks.
 #[derive(Debug)]
 pub struct ExecOutcome {
@@ -1332,6 +1350,10 @@ pub struct ExecOutcome {
     /// Specific post-process-creation failure that made termination
     /// unobservable. The daemon uses this context when quarantining.
     pub post_launch_error: Option<WslcStepError>,
+
+    /// For an unconfirmed termination, the first SDK call that failed while
+    /// stopping the process or reading its exit code.
+    pub unconfirmed_api_failure: Option<Box<ApiFailure>>,
 
     /// The process's stdin, still open because its termination was not
     /// confirmed.
@@ -1405,16 +1427,18 @@ pub unsafe fn exec_in_container(
             Err(error) => {
                 // A process holding a stdin nobody writes or closes would never
                 // see end-of-file, so it is killed rather than left to run.
-                let _ =
+                let kill_hr =
                     sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
                 if wait_for_exit_callback(process_settings.io_ctx()) {
                     return Err(error);
                 }
+                let completion = ProcessCompletion::TerminationUnconfirmed;
                 return Ok(ExecOutcome {
-                    completion: ProcessCompletion::TerminationUnconfirmed,
+                    completion,
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                     post_launch_error: Some(error),
+                    unconfirmed_api_failure: unconfirmed_api_failure(completion, kill_hr, S_OK),
                     held_stdin: None,
                 });
             }
@@ -1429,6 +1453,7 @@ pub unsafe fn exec_in_container(
             stdout: Vec::new(),
             stderr: Vec::new(),
             post_launch_error: Some(sdk_step_error("WslcGetProcessExitEvent", hr, "")),
+            unconfirmed_api_failure: None,
             held_stdin: Some(stdin_guard),
         });
     }
@@ -1454,6 +1479,7 @@ pub unsafe fn exec_in_container(
         ExitWait::Interrupted(interruption) => Some(interruption),
         _ => None,
     };
+    let mut kill_hr = S_OK;
     if let Some(interruption) = interruption {
         if forwards_stdin {
             stdin_guard.freeze();
@@ -1474,7 +1500,7 @@ pub unsafe fn exec_in_container(
             );
 
             // Kill only this process; the keepalive init keeps the container up.
-            let kill_hr =
+            kill_hr =
                 sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
             if kill_hr != S_OK {
                 let _ = writeln!(
@@ -1505,16 +1531,16 @@ pub unsafe fn exec_in_container(
     }
 
     let mut exit_code: i32 = -1;
-    let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
-    if hr != S_OK {
+    let exit_code_hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+    if exit_code_hr != S_OK {
         if natural_exit_confirmed(exit_wait, confirmed) {
-            return Err(sdk_step_error("WslcGetProcessExitCode", hr, ""));
+            return Err(sdk_step_error("WslcGetProcessExitCode", exit_code_hr, ""));
         }
         let _ = writeln!(
             logger,
             "[WSLC][daemon] Warning: WslcGetProcessExitCode failed while termination was \
              unconfirmed (hr=0x{:08X})",
-            hr as u32
+            exit_code_hr as u32
         );
     }
 
@@ -1580,6 +1606,7 @@ pub unsafe fn exec_in_container(
         stdout,
         stderr,
         post_launch_error: None,
+        unconfirmed_api_failure: unconfirmed_api_failure(completion, kill_hr, exit_code_hr),
         held_stdin,
     })
 }
@@ -1990,6 +2017,34 @@ mod tests {
         assert_eq!(
             classify_completion(ExitWait::NoEvent, false, -1),
             ProcessCompletion::TerminationUnconfirmed
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_run_names_its_first_failed_kill_or_exit_code_call() {
+        let unconfirmed = ProcessCompletion::TerminationUnconfirmed;
+        let kill_failed = 0x8007_001f_u32 as HRESULT;
+        let kill_failure = ApiFailure::new("WslcSignalProcess").with_native_code("0x8007001f");
+        let exit_code_failure =
+            ApiFailure::new("WslcGetProcessExitCode").with_native_code("0x80004005");
+
+        assert_eq!(
+            unconfirmed_api_failure(unconfirmed, kill_failed, E_FAIL).as_deref(),
+            Some(&kill_failure)
+        );
+        assert_eq!(
+            unconfirmed_api_failure(unconfirmed, S_OK, E_FAIL).as_deref(),
+            Some(&exit_code_failure)
+        );
+        assert_eq!(unconfirmed_api_failure(unconfirmed, S_OK, S_OK), None);
+        assert_eq!(
+            unconfirmed_api_failure(
+                ProcessCompletion::Confirmed(ExecTerminal::TimedOut),
+                kill_failed,
+                E_FAIL,
+            ),
+            None,
+            "a confirmed timeout must stay a timeout"
         );
     }
 

@@ -986,14 +986,13 @@ mod tests {
     }
 
     fn sdk_worker_error() -> WorkerError {
-        WorkerError::Step {
-            kind: ErrKind::Backend,
-            error: anyhow::anyhow!("start failed"),
-            api_failure: Some(Box::new(
+        WorkerError::backend_with_api_failure(
+            anyhow::anyhow!("start failed"),
+            Some(Box::new(
                 mxc_sdk::mxc_common::mxc_error::ApiFailure::new("WslcStartContainer")
                     .with_native_code("0x80072740"),
             )),
-        }
+        )
     }
 
     #[test]
@@ -1716,7 +1715,7 @@ mod tests {
         retry_undelivered_release("wslcsess:abc", |_| {
             attempts.set(attempts.get() + 1);
             std::future::ready(if attempts.get() < 2 {
-                Err(WorkerError::Backend(anyhow::anyhow!("busy")))
+                Err(WorkerError::backend(anyhow::anyhow!("busy")))
             } else {
                 Ok(())
             })
@@ -1737,7 +1736,7 @@ mod tests {
 
         retry_undelivered_release("wslcsess:abc", |_| {
             attempts.set(attempts.get() + 1);
-            std::future::ready(Err(WorkerError::Backend(anyhow::anyhow!("gone"))))
+            std::future::ready(Err(WorkerError::backend(anyhow::anyhow!("gone"))))
         })
         .await;
 
