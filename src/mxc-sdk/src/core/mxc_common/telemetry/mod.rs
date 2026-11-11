@@ -1467,7 +1467,12 @@ mod tests {
         assert!(!init_for_request(None, None, &mut logger));
         for consent in [None, Some(false)] {
             if let Some(granted) = consent {
-                consent::set_consent(granted, "test").unwrap();
+                let result = consent::set_consent(granted, "test");
+                if cfg!(target_os = "windows") {
+                    result.unwrap();
+                } else {
+                    assert!(result.is_err());
+                }
             }
             for contract in [
                 ContractVersion::V0_9_0Alpha,
