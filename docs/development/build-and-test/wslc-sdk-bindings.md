@@ -76,10 +76,7 @@ match the pinned SDK.
    ```
 
    This extracts `include/wslcsdk.h` from the new `.nupkg` and rewrites
-   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`. For an SDK version
-   that is not yet published, pass the header directly with
-   `-HeaderPath <WSL repo>\src\windows\WslcSDK\wslcsdk.h`, and regenerate from
-   the published package once it ships.
+   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`.
 
    If the new header adds an enum, add it to `$bitfieldEnums` (OR-able
    `Wslc*Flags` masks) or `$newtypeEnums` (exclusive values) in the script and
@@ -111,6 +108,8 @@ match the pinned SDK.
    cargo test -p mxc-sdk --features wslc --lib wslc::common   # includes ABI size/enum asserts
    cargo fmt --all -- --check
    cargo clippy -p mxc-sdk --features wslc --all-targets -- -D warnings
+   cd ..
+   .\scripts\generate-wslc-bindings.ps1 -Check
    ```
 
 7. **Run the WSLC E2E suite on a live WSL host** (cannot run in GitHub Actions —
