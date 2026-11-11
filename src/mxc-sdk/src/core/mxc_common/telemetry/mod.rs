@@ -1460,7 +1460,6 @@ mod tests {
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let enabled = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
 
         assert!(!init_for_request(Some(&enabled), None, &mut logger));
@@ -1486,7 +1485,6 @@ mod tests {
                         Some(TelemetryConfig::default()),
                         Some(TelemetryConfig {
                             enabled: Some(false),
-                            ..Default::default()
                         }),
                         Some(enabled.clone()),
                     ] {
@@ -1510,7 +1508,6 @@ mod tests {
         let _env = TelemetryTestEnv::new(tmp.path());
         let config = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
     }
@@ -1537,7 +1534,6 @@ mod tests {
         );
         let config = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
@@ -1553,7 +1549,6 @@ mod tests {
         // An explicit opt-in is required in addition to consent.
         assert!(is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1569,7 +1564,6 @@ mod tests {
 
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1586,7 +1580,6 @@ mod tests {
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1606,7 +1599,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "denied consent must win over explicit enable under policy {policy_value:?}"
             );
@@ -1631,7 +1623,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "undetermined consent must block an explicit enable under policy {policy_value:?}"
             );
@@ -1647,7 +1638,6 @@ mod tests {
         consent::set_consent(true, "cli").unwrap();
         let config = TelemetryConfig {
             enabled: Some(false),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
     }
@@ -1675,10 +1665,7 @@ mod tests {
         assert_eq!(consent::get_consent(), consent::ConsentState::Granted);
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         // Every other gate is open; only the omitted opt-in keeps it off.
-        assert!(!is_enabled(&TelemetryConfig {
-            enabled: None,
-            ..Default::default()
-        }));
+        assert!(!is_enabled(&TelemetryConfig { enabled: None }));
     }
 
     #[test]

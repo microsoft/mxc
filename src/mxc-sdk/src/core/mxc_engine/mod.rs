@@ -238,10 +238,7 @@ fn invoke_execution_request(
         telemetry::LearningMode::for_request(request),
         &mut logger,
     );
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
@@ -1152,7 +1149,6 @@ mod telemetry_process_tests {
         let mut request = ExecutionRequest {
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1496,7 +1492,6 @@ mod telemetry_process_tests {
             containment: ContainmentBackend::MicroVm,
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };

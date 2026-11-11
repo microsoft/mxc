@@ -685,8 +685,6 @@ pub(crate) struct PreparedContainerRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
-    #[cfg(test)]
-    requested_sandbox_kind: &'static str,
 }
 
 #[cfg(test)]
@@ -778,7 +776,6 @@ impl PreparedContainerRequest {
     pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
-            requested_sandbox_kind: Some(self.requested_sandbox_kind),
         });
         self
     }
@@ -872,7 +869,6 @@ pub(crate) fn prepare_creation_request(
     if let Some(telemetry) = telemetry {
         prepared.inner.telemetry = Some(TelemetryConfig {
             enabled: telemetry.enabled,
-            requested_sandbox_kind: Some(request.containment.telemetry_kind()),
         });
     }
     Ok(prepared)
@@ -921,12 +917,11 @@ mod tests {
                 prepared.inner.telemetry.as_ref().and_then(|t| t.enabled),
                 enabled
             );
-            if let Some(telemetry) = prepared.inner.telemetry {
-                assert_eq!(
-                    telemetry.requested_sandbox_kind,
-                    Some(request.containment.telemetry_kind())
-                );
-            }
+            assert_eq!(prepared.inner.telemetry.is_some(), enabled.is_some());
+            assert_eq!(
+                prepared.inner.requested_sandbox_kind,
+                Some(request.containment.telemetry_kind())
+            );
         }
         assert!(super::prepare_request(&request)
             .unwrap()
@@ -1767,14 +1762,7 @@ mod tests {
 
         request.set_telemetry_opt_in(true);
         assert_eq!(request.telemetry_enabled(), Some(true));
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.requested_sandbox_kind),
-            Some("process")
-        );
+        assert_eq!(request.inner.requested_sandbox_kind, Some("process"));
         assert!(
             !request.inner.experimental_enabled,
             "stable telemetry enablement must not opt into experimental features"
@@ -1799,11 +1787,7 @@ mod tests {
         request.set_telemetry_opt_in(true);
 
         assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            request.inner.requested_sandbox_kind,
             Some("processcontainer")
         );
     }

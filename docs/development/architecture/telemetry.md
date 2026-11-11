@@ -77,6 +77,9 @@ handles and worker threads. The shared writer selects the keyword and tag
 together. Event names, field order and types are unchanged for every contract.
 Typed SDK creation and lifecycle normalization preserve their selected compatibility contract
 for this decision, without retaining caller JSON or changing operation routing.
+Caller-requested containment is retained independently of the optional `telemetry`
+preference. For example, `"process"` remains the sandbox kind when it resolves
+to the ProcessContainer backend, whether telemetry is omitted or explicitly disabled.
 Requests without source-contract attribution retain the
 full inventory, request opt-in, MXC consent and administrative policy gates.
 Excluded verbose telemetry is not read or prepared for transport; caller-requested

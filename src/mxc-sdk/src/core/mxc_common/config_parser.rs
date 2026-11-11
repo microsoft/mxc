@@ -1673,7 +1673,6 @@ fn normalize_common_request_ir(
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
-        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
     });
 
     // UI section. Capture presence before the typed mapping consumes `ui`:
@@ -1693,6 +1692,7 @@ fn normalize_common_request_ir(
 
     Ok(ExecutionRequest {
         source_contract: Some(source_contract),
+        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
         container_id,
         env,
         inherit_default_env,
@@ -1962,6 +1962,40 @@ mod tests {
         parse_exact_mxc_request_json(json, &mut test_logger())
     }
 
+    #[test]
+    fn requested_containment_does_not_depend_on_telemetry_presence() {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+            for telemetry in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"enabled": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": "process",
+                    "process": {"commandLine": "echo hello"}
+                });
+                if let Some(telemetry) = &telemetry {
+                    json["telemetry"] = telemetry.clone();
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                assert_eq!(request.requested_sandbox_kind, Some("process"));
+                assert_eq!(request.telemetry.is_some(), telemetry.is_some());
+                assert_eq!(
+                    request.telemetry.as_ref().and_then(|value| value.enabled),
+                    telemetry
+                        .as_ref()
+                        .and_then(|value| value.get("enabled"))
+                        .and_then(serde_json::Value::as_bool)
+                );
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct ProxySnapshot {
         address: Option<String>,
@@ -1997,10 +2031,7 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
-                requested_sandbox_kind: request
-                    .telemetry
-                    .as_ref()
-                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
+                requested_sandbox_kind: request.requested_sandbox_kind,
             }
         }
     }

@@ -870,9 +870,6 @@ pub struct TelemetryConfig {
     /// Compatibility preference ignored by supported-contract Required collection.
     /// Unattributed requests require `Some(true)`, consent, and permitting policy.
     pub enabled: Option<bool>,
-    /// Caller-requested containment kind, retained for telemetry attribution.
-    #[serde(skip)]
-    pub requested_sandbox_kind: Option<&'static str>,
 }
 
 /// Guest runtime for the Hyperlight backend: what `process.commandLine`
@@ -954,6 +951,9 @@ pub struct ExecutionRequest {
     /// Direct internal construction may omit contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
+    /// Caller-requested containment kind, independent of telemetry preferences.
+    #[serde(skip)]
+    pub requested_sandbox_kind: Option<&'static str>,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).

@@ -649,11 +649,7 @@ fn exec_state_aware_attached_parsed(
     exec_attached_gate(host_is_interactive)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -737,11 +733,7 @@ fn run_state_aware_envelope(
     let phase = parsed.phase();
     let phase_name = phase.as_str();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -860,11 +852,7 @@ fn exec_state_aware_process_parsed(
     }
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -943,11 +931,7 @@ pub fn run_typed_state_aware_request(
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
