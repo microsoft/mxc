@@ -48,7 +48,8 @@ fn assert_rejected(value: &Value) {
 #[test]
 fn w365_agents_contract_acceptance_never_enables_execution() {
     for phase in PHASES {
-        let baseline = request(phase);
+        let mut baseline = request(phase);
+        baseline["telemetry"] = json!({"enabled":false});
         for wrapper in [None, Some(json!({})), Some(json!({phase: settings(phase)}))] {
             if phase != "provision" && wrapper.is_some() {
                 continue;
@@ -69,6 +70,13 @@ fn w365_agents_contract_acceptance_never_enables_execution() {
                     panic!("expected lifecycle request");
                 };
                 assert!(!parsed.request().experimental_enabled);
+                assert_eq!(
+                    parsed.request().containment,
+                    mxc_sdk::mxc_common::models::ContainmentBackend::W365Agents,
+                );
+                let telemetry = parsed.request().telemetry.as_ref().unwrap();
+                assert_eq!(telemetry.enabled, Some(false));
+                assert_eq!(telemetry.requested_sandbox_kind, Some("w365_agents"));
                 if phase != "provision" { assert_eq!(parsed.sandbox_id(), Some(ID)); }
                 assert_eq!(
                     mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),

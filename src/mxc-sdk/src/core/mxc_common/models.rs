@@ -132,6 +132,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
+            W::W365Agents => Self::W365Agents,
         }
     }
 }
