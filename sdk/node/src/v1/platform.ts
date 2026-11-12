@@ -159,10 +159,9 @@ function isWindowsSandboxAvailable(): boolean {
  * populate `bubblewrapNetwork`. macOS currently does not expose native probe
  * data. `uiCapabilities` is omitted outside Windows.
  *
- * **Synchronous; successful discovery is cached for the module's lifetime.** The first call blocks
- * on the native probes above, which on Linux spawn subprocesses and can take
- * seconds on a slow host; later calls reuse a successfully read answer.
- * Failed Windows probes are reported in `unavailableReasons` and retried.
+ * **Synchronous.** Successful platform probes are cached, but Windows native
+ * backend discovery is refreshed on each call. Failed Windows probes are
+ * reported in `unavailableReasons` and retried.
  *
  * `bubblewrapNetwork` is the one field whose subject can change under a
  * running process, so a cached `proxyEnforcement: 'supported'` can go stale.
@@ -173,6 +172,11 @@ function isWindowsSandboxAvailable(): boolean {
  */
 export function getPlatformSupport(): PlatformSupport {
   if (cachedSupport !== null) {
+    if (os.platform() === 'win32') {
+      const { support, transientFailure } = refreshWindowsBackends(cachedSupport);
+      if (!transientFailure) cachedSupport = support;
+      return support;
+    }
     return cachedSupport;
   }
   const { support, transientFailure } = computeSupport();
@@ -498,26 +502,51 @@ function computeSupport(windowsProbe: ProbeRunner = probeRunner): { support: Pla
     support.availableMethods.push('windows_sandbox');
   }
   const probeFailure = populateIsolationFromProbe(support, windowsProbe);
-  const probeFailures = probeFailure === undefined ? [] : [probeFailure];
-  let transientFailure = probeFailure !== undefined;
+  const refreshed = refreshWindowsBackends(support);
+  return {
+    support: refreshed.support,
+    transientFailure: probeFailure !== undefined || refreshed.transientFailure,
+  };
+}
+
+function refreshWindowsBackends(previous: PlatformSupport): { support: PlatformSupport; transientFailure: boolean } {
+  const support: PlatformSupport = {
+    ...previous,
+    availableMethods: previous.availableMethods.filter(method => method !== 'wslc' && method !== 'microvm'),
+  };
+  const { wslc: _wslc, microvm: _microvm, ...remainingReasons } = previous.unavailableReasons ?? {};
+  if (Object.keys(remainingReasons).length > 0) support.unavailableReasons = remainingReasons;
+  else delete support.unavailableReasons;
+  let transientFailure = false;
+  let backends: AvailableBackend[];
   try {
-    if (windowsBackendsReader().some((backend) => backend.backend === 'wslc')) {
-      support.availableMethods.push('wslc');
-    }
+    backends = windowsBackendsReader();
   } catch (error) {
     transientFailure = true;
-    const message = `WSLC availability probe failed: ${error instanceof Error ? error.message : String(error)}`;
-    probeFailures.push(message);
+    const message = `Native backend discovery failed: ${error instanceof Error ? error.message : String(error)}`;
     platformDiagnosticLogger(message);
-    support.unavailableReasons = { ...support.unavailableReasons, wslc: message };
+    support.unavailableReasons = { ...support.unavailableReasons, microvm: message, wslc: message };
+    backends = [];
+  }
+  for (const method of ['wslc', 'microvm'] as const) {
+    if (backends.some(backend => backend.backend === method)) support.availableMethods.push(method);
   }
   support.isSupported = support.availableMethods.length > 0;
+  support.reason = '';
   if (!support.isSupported) {
-    support.reason = probeFailures.length > 0
-      ? probeFailures.join('; ')
+    const failures = [
+      support.unavailableReasons?.processcontainer,
+      support.unavailableReasons?.microvm,
+      support.unavailableReasons?.wslc,
+    ].filter((message): message is string => message !== undefined);
+    support.reason = failures.length > 0
+      ? failures.join('; ')
       : 'No supported Windows containment backend is available; ProcessContainer requires PSEC';
   }
-  return { support, transientFailure };
+  return {
+    support: JSON.stringify(previous) === JSON.stringify(support) ? previous : support,
+    transientFailure,
+  };
 }
 
 let windowsBackendsReader: () => AvailableBackend[] = getAvailableBackends;

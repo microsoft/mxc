@@ -66,3 +66,9 @@ Captured output is lossy UTF-8 text. Callers own and dispose live handles;
 existing-container execution leaves the container caller-owned.
 A descendant holding an output pipe open can delay captured execution
 completion after a workload timeout.
+
+MicroVM lifecycle capture in .NET does not enforce the 64 MiB combined output
+limit; large output can consume significant memory. See
+[huzaifa-d/mxc#17](https://github.com/huzaifa-d/mxc/issues/17).
+If provision succeeds but cleanup fails, .NET does not expose the retained
+container ID needed for recovery. See [huzaifa-d/mxc#16](https://github.com/huzaifa-d/mxc/issues/16).

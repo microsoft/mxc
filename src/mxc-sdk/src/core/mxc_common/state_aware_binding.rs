@@ -106,6 +106,11 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
         }
     }
 
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    pub(crate) fn operation(&self) -> &BoundStateAwareOperation<B> {
+        &self.operation
+    }
+
     pub(crate) fn into_parts(self) -> (ExecutionRequest, BoundStateAwareOperation<B>) {
         (self.request, self.operation)
     }

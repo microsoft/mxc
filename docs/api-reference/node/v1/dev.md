@@ -49,3 +49,8 @@ combined terminal output and the exit code. Structured warnings and output
 metadata are unavailable on this route. The executor enforces
 `process.timeout`, but `wait().timedOut` is `false`: the terminal channel
 reports only an exit code.
+
+MicroVM lifecycle capture limits stdout and stderr together to 64 MiB
+(67,108,864 bytes). Overflow returns `backend_error` and preserves the container.
+If provision succeeds but cleanup fails, Node does not expose the retained
+container ID needed for recovery. See [huzaifa-d/mxc#16](https://github.com/huzaifa-d/mxc/issues/16).

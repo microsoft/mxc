@@ -336,20 +336,13 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
     for rejected in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
         let state = tempfile::tempdir().expect("isolated invalid runtime");
-        std::fs::create_dir(state.path().join("bin")).unwrap();
-        std::fs::copy(
-            bundle.directory().join("SOURCE-MANIFEST.json"),
-            state.path().join("SOURCE-MANIFEST.json"),
+        let local_app_data = tempfile::tempdir().expect("isolated NVX state");
+        copy_bundle(bundle.directory(), state.path());
+        std::fs::write(
+            state.path().join("bin").join(rejected),
+            b"unsigned runtime replacement",
         )
         .unwrap();
-        for name in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
-            let destination = state.path().join("bin").join(name);
-            if name == rejected {
-                std::fs::write(destination, b"unsigned runtime replacement").unwrap();
-            } else {
-                std::fs::copy(bundle.directory().join("bin").join(name), destination).unwrap();
-            }
-        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -357,6 +350,7 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
                 "--nocapture",
             ])
             .env(CHILD, rejected)
+            .env("LOCALAPPDATA", local_app_data.path())
             .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("DEP_ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("CARGO_FEATURE_MICROVM", "1")

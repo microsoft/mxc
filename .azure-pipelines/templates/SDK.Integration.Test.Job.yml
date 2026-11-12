@@ -119,6 +119,8 @@ jobs:
           env:
             MXC_DEBUG: ${{ parameters.debug }}
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+            MXC_SDK_PACKAGE_DIR: $(sdkPkgDirectory)
+            MXC_NVX_PACKAGE_DIR: $(sdkPkgDirectory)/nvx
 
       - ${{ if eq(target.os, 'macos') }}:
         # Restore execute bit on the mac binary; pipeline artifact

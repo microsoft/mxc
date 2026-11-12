@@ -389,11 +389,90 @@ pub mod v1 {
     }
 }
 
+mod lifecycle_thread_context {
+    /// Context carried onto the C ABI lifecycle worker.
+    #[doc(hidden)]
+    pub struct LifecycleThreadContext {
+        #[cfg(target_os = "windows")]
+        token: Option<crate::mxc_common::process_util::SendOwnedHandle>,
+        telemetry: crate::mxc_common::telemetry::session::SessionContext,
+        sink: Option<crate::mxc_common::logger::Logger>,
+    }
+
+    impl LifecycleThreadContext {
+        /// Capture the caller's security and diagnostic context before spawning.
+        pub fn capture() -> Result<Self, String> {
+            #[cfg(target_os = "windows")]
+            let token =
+                crate::mxc_common::process_util::duplicate_thread_token().map_err(|error| {
+                    format!("could not preserve the calling thread's impersonation: {error}")
+                })?;
+            let sink = crate::mxc_common::logger::Logger::inherit_thread_diagnostic_sink();
+            Ok(Self {
+                #[cfg(target_os = "windows")]
+                token,
+                telemetry: crate::mxc_common::telemetry::session::capture(),
+                sink: sink.has_diagnostic_sink().then_some(sink),
+            })
+        }
+
+        /// Run under the captured context, refusing to execute if impersonation fails.
+        pub fn run<T>(self, f: impl FnOnce() -> T) -> Result<T, String> {
+            #[cfg(target_os = "windows")]
+            if let Some(token) = &self.token {
+                // SAFETY: token is a live impersonation token and None selects this thread.
+                unsafe {
+                    windows::Win32::System::Threading::SetThreadToken(None, Some(token.get()))
+                }
+                .map_err(|error| {
+                    format!("could not impersonate on the lifecycle worker: {error}")
+                })?;
+            }
+            let _session = crate::mxc_common::telemetry::session::resume(self.telemetry);
+            let _sink = self
+                .sink
+                .as_ref()
+                .map(crate::mxc_common::logger::Logger::install_thread_diagnostic_sink);
+            Ok(f())
+        }
+    }
+}
+
 /// Internal adapters for the C ABI and native contract tests, not SDK authoring APIs.
 #[doc(hidden)]
 pub mod __ffi {
     use super::*;
     use crate::sandbox::WaitResult;
+
+    /// Whether this build contains the Windows x64 MicroVM runtime adapter.
+    #[doc(hidden)]
+    pub const MICROVM_RUNTIME_COMPILED: bool = cfg!(all(
+        target_os = "windows",
+        target_arch = "x86_64",
+        feature = "microvm"
+    ));
+
+    /// Register the runtime directory used by the MicroVM backend in this process.
+    pub fn register_runtime_directory(backend: &str, directory: &str) -> Result<(), Error> {
+        if backend != "microvm" {
+            return Err(Error::new(
+                ErrorCode::UnsupportedContainment,
+                "unknown runtime backend",
+            ));
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        {
+            crate::backend_modules::nvx::register_runtime_directory(directory).map_err(Error::from)
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+        {
+            let _ = directory;
+            Err(Error::new(
+                ErrorCode::BackendUnavailable,
+                "MicroVM runtime is unavailable on this platform",
+            ))
+        }
+    }
 
     /// Spawn a raw exact-version JSON container request as a live process.
     ///
@@ -446,6 +525,9 @@ pub mod __ffi {
             }
         }
     }
+
+    #[doc(hidden)]
+    pub use crate::lifecycle_thread_context::LifecycleThreadContext;
 
     /// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and return its JSON response envelope.
     pub fn run_lifecycle_json(

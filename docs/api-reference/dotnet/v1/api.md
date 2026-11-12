@@ -382,6 +382,8 @@ Probe whether the public SDK can launch containers on this host and which backen
 
 On Windows, ProcessContainer requires native PSEC support. Other supported
 backends are detected independently; the host is unsupported when none are available.
+MicroVM is reported when available, but execution requires the development
+JSON API; typed V1 requests cannot select it. Availability is advisory.
 
 ```csharp
 public static PlatformSupport GetPlatformSupport();

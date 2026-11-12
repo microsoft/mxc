@@ -114,7 +114,7 @@ it('state-aware execution captures streams and preserves container ownership', a
     return proc;
   });
   const output = await dev.runInContainerJson(json, { experimental: true });
-  assert.deepStrictEqual(received, [json, true, 250, false]);
+  assert.deepStrictEqual(received, [json, true, 250, false, 'capture']);
   assert.deepStrictEqual(output, {
     stdout: 'out', stderr: 'err', exitCode: 7, timedOut: false, warnings: ['warning'],
   });
@@ -351,7 +351,7 @@ it('state-aware pipe and PTY spawns forward exact JSON and terminal controls', a
     experimental: true,
     size: { rows: 25, columns: 100 },
   });
-  assert.deepStrictEqual(pipeArgs, [json, true, 300, false]);
+  assert.deepStrictEqual(pipeArgs, [json, true, 300, false, 'stream']);
   assert.deepStrictEqual(ptyArgs, [json, true, 25, 100, 300]);
   proc.dispose();
   pty.dispose();
