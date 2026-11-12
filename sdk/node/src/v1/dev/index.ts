@@ -80,9 +80,12 @@ function requestInfo(
     );
   }
   const timeout = isRecord(request.process) ? request.process.timeout : undefined;
+  // W365's native deadline includes output drain; a managed kill would cut it short.
+  const backendOwnsTimeout = phase === 'exec'
+    && typeof request.sandboxId === 'string' && request.sandboxId.startsWith('w365:');
   return {
     containment: request.containment,
-    timeoutMs: typeof timeout === 'number' && Number.isInteger(timeout)
+    timeoutMs: !backendOwnsTimeout && typeof timeout === 'number' && Number.isInteger(timeout)
       && timeout >= 0 && timeout <= 0xffff_ffff ? timeout : undefined,
   };
 }

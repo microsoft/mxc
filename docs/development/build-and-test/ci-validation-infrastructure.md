@@ -37,15 +37,21 @@ preserve compatibility with the older supported host.
 
 ### Offline TLS fixtures
 
-W365 checkout/release fixtures use local HTTPS services with test-only
+W365 lifecycle and execution fixtures use local TLS services with test-only
 certificate trust, not a production TLS verification bypass. The
 `mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
 isolated Cargo target directory so its artifacts cannot replace shipping builds.
 Its engine fixtures
-run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
-Windows also runs checkout/release through fresh executor processes.
+run in GitHub Actions and Azure build jobs on Windows, Linux and macOS.
+Windows additionally runs checkout/release and exec through fresh executor
+processes, plus the execution example's early-exit, input-error and capture cases.
+Linux and macOS retain SDK/native-engine coverage; their shipping
+executors do not expose W365 lifecycle commands.
 The .NET SDK test suite and Node SDK integration jobs exercise the public
-Dev JSON APIs.
+Dev JSON lifecycle, readiness, captured and streaming APIs, including stdin EOF,
+binary live output, nonzero exits and remote failure without partial success.
+They also check output and Exit arriving after the guest timeout, and native
+deadline failure when the service does not complete.
 
 Test-support native libraries and executors are kept separate from shipping
 artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build

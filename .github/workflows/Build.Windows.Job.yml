@@ -167,16 +167,26 @@ jobs:
             -BinaryDirectory 'src/target/${{ matrix.target }}/release' `
             -Features '${{ matrix.features }}'
 
-      - name: Test W365 checkout and release with trusted TLS fixtures
+      - name: Test W365 lifecycle and execution with trusted TLS fixtures
         shell: pwsh
         run: |
           cargo build --locked -p wxc --target '${{ matrix.target }}' `
             --target-dir target/w365-fixture --features test-support
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked -p mxc-sdk --example w365_execution --target '${{ matrix.target }}' `
+            --target-dir target/w365-fixture --features test-support
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path 'target/w365-fixture/${{ matrix.target }}/debug/wxc-exec.exe').Path
           $names = @(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target '${{ matrix.target }}' --target-dir target/w365-fixture -- --list)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($case in @('lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture', 'lifecycle_fresh_executor_fixture')) {
+          foreach ($case in @(
+            'lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture', 'lifecycle_fresh_executor_fixture',
+            'readiness_contract_fixture', 'execution::native_execution_streams_fixture',
+            'execution::native_execution_backpressure_fixture',
+            'execution::native_execution_failure_and_disposal_fixture',
+            'execution::execution_upgrade_validation_fixture',
+            'execution::execution_fresh_executor_fixture'
+          )) {
             if (-not ($names -match "^${case}: test")) {
               throw "Missing required W365 fixture: $case"
             }

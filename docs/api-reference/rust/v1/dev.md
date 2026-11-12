@@ -58,3 +58,6 @@ for the 64 MiB capture limit, caller-owned streams, and sensitive
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail
 rather than switching to another I/O mode.
+
+Captured existing-container execution closes unused stdin automatically.
+With live execution, drop any stdin writer you take when the workload needs EOF.

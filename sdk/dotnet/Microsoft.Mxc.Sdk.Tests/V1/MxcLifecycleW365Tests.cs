@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -38,16 +40,17 @@ public class MxcLifecycleW365Tests
         Assert.Equal(ErrorCode.BackendUnavailable, denied.Code);
         Dev.MxcLifecycle.ValidateProvisionJson(Provision, options);
         var start = Assert.Throws<MxcException>(
-            () => Dev.MxcLifecycle.StartContainerJson(Request("start"), options));
-        Assert.Equal(ErrorCode.UnsupportedPhase, start.Code);
-        var exec = $$$"""{"version":"1.1.0-alpha","phase":"exec","sandboxId":"{{{Id}}}","process":{"commandLine":"echo must-not-run"}}""";
+            () => Dev.MxcLifecycle.StartContainerJson(
+                Request("start").Replace(Id, "w365:invalid"), options));
+        Assert.Equal(ErrorCode.MalformedId, start.Code);
+        const string exec = """{"version":"1.1.0-alpha","phase":"exec","sandboxId":"w365:invalid","process":{"commandLine":"echo must-not-run"}}""";
         var execution = await Assert.ThrowsAsync<MxcException>(
             () => Dev.MxcLifecycle.RunInContainerJsonAsync(
                 exec, options, TestContext.Current.CancellationToken));
-        Assert.Equal(ErrorCode.UnsupportedPhase, execution.Code);
+        Assert.Equal(ErrorCode.MalformedId, execution.Code);
         execution = Assert.Throws<MxcException>(
             () => Dev.MxcLifecycle.SpawnInContainerJson(exec, options));
-        Assert.Equal(ErrorCode.UnsupportedPhase, execution.Code);
+        Assert.Equal(ErrorCode.MalformedId, execution.Code);
         Assert.Empty(fixture.Requests);
 
         fixture.Reply(200, $$"""{"sessionId":"{{Session}}","status":"Succeeded"}""");
@@ -94,6 +97,119 @@ public class MxcLifecycleW365Tests
         Assert.Contains("Bearer renewed-fixture-token", requests[^1]);
     }
 
+    [Fact]
+    public async Task DevJsonStartsCapturesAndStreamsOnTheSameReservation()
+    {
+        await using var fixture = new Fixture(TimeSpan.FromSeconds(60));
+        var options = new Dev.JsonOptions { Experimental = true };
+        var ct = TestContext.Current.CancellationToken;
+        fixture.Reply(200, """{"status":"Live"}""");
+        fixture.Reply(200, """{"status":"Ready"}""");
+        using var ready = JsonDocument.Parse(
+            await Dev.MxcLifecycle.StartContainerJsonAsync(Request("start"), options));
+        Assert.Equal("Ready", ready.RootElement.GetProperty("result").GetProperty("metadata")
+            .GetProperty("status").GetString());
+        var exec = $$$"""{"version":"1.1.0-alpha","phase":"exec","sandboxId":"{{{Id}}}","process":{"commandLine":"cmd.exe /c fixture","timeout":30000}}""";
+
+        fixture.Exec(async stream =>
+        {
+            Assert.Empty(await Fixture.ReadStdin(stream, ct));
+            await Fixture.Frame(stream, 0x12, Encoding.UTF8.GetBytes("captured-output"), ct);
+            await Fixture.Frame(stream, 0x13, Encoding.UTF8.GetBytes("captured-error"), ct);
+            await Fixture.Frame(stream, 0x14, """{"code":-1}"""u8.ToArray(), ct);
+        });
+        var captured = await Dev.MxcLifecycle.RunInContainerJsonAsync(exec, options, ct);
+        Assert.Equal(-1, captured.ExitCode);
+        Assert.Equal("captured-output", captured.Stdout);
+        Assert.Equal("captured-error", captured.Stderr);
+
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Exec(async stream =>
+        {
+            Assert.Equal(new byte[] { 0, 255, 65 }, await Fixture.ReadStdin(stream, ct));
+            await release.Task.WaitAsync(ct);
+            await Fixture.Frame(stream, 0x12, new byte[] { 255, 0, 66 }, ct);
+            await Fixture.Frame(stream, 0x13, new byte[] { 128, 0, 67 }, ct);
+            await Fixture.Frame(stream, 0x14, """{"code":7}"""u8.ToArray(), ct);
+        });
+        using (var pipe = await Dev.MxcLifecycle.SpawnInContainerJsonAsync(exec, options, ct))
+        {
+            Assert.False(pipe.TryGetExitCode(out _), "spawn must return before Exit");
+            using (var stdin = pipe.StandardInput!)
+                await stdin.WriteAsync(new byte[] { 0, 255, 65 }, ct);
+            var output = pipe.WaitForExitWithOutputAsync(ct);
+            release.SetResult();
+            var (outcome, stdout, stderr) = await output;
+            Assert.Equal(7, outcome.ExitCode);
+            Assert.Equal(new byte[] { 255, 0, 66 }, stdout);
+            Assert.Equal(new byte[] { 128, 0, 67 }, stderr);
+        }
+        fixture.Exec(async stream =>
+        {
+            Assert.Empty(await Fixture.ReadStdin(stream, ct));
+            await Fixture.Frame(stream, 0x12, "partial"u8.ToArray(), ct);
+            await Fixture.Frame(stream, 0x15, """{"code":"failed","message":"fixture failure"}"""u8.ToArray(), ct);
+        });
+        var error = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcLifecycle.RunInContainerJsonAsync(exec, options, ct));
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.False(string.IsNullOrWhiteSpace(error.Message));
+
+        var timedExec = exec.Replace("\"timeout\":30000", "\"timeout\":1000");
+        foreach (var live in new[] { false, true })
+        {
+            fixture.Exec(async stream =>
+            {
+                Assert.Empty(await Fixture.ReadStdin(stream, ct));
+                // The service drains output after enforcing the guest runtime limit.
+                await Task.Delay(1200, ct);
+                await Fixture.Frame(stream, 0x12, "drained-output"u8.ToArray(), ct);
+                await Fixture.Frame(stream, 0x13, "drained-error"u8.ToArray(), ct);
+                await Fixture.Frame(stream, 0x14, """{"code":124}"""u8.ToArray(), ct);
+            }, expectedTimeoutMs: 1000);
+            if (live)
+            {
+                using var pipe = await Dev.MxcLifecycle.SpawnInContainerJsonAsync(timedExec, options, ct);
+                pipe.StandardInput!.Dispose();
+                var (outcome, stdout, stderr) = await pipe.WaitForExitWithOutputAsync(ct);
+                Assert.Equal(124, outcome.ExitCode);
+                Assert.False(outcome.TimedOut);
+                Assert.Equal("drained-output", Encoding.UTF8.GetString(stdout));
+                Assert.Equal("drained-error", Encoding.UTF8.GetString(stderr));
+            }
+            else
+            {
+                var result = await Dev.MxcLifecycle.RunInContainerJsonAsync(timedExec, options, ct);
+                Assert.Equal(124, result.ExitCode);
+                Assert.False(result.TimedOut);
+                Assert.Equal("drained-output", result.Stdout);
+                Assert.Equal("drained-error", result.Stderr);
+            }
+        }
+
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Exec(async stream =>
+        {
+            Assert.Empty(await Fixture.ReadStdin(stream, ct));
+            await finish.Task.WaitAsync(ct);
+        }, expectedTimeoutMs: 1000);
+        var started = Stopwatch.StartNew();
+        try
+        {
+            error = await Assert.ThrowsAsync<MxcException>(
+                () => Dev.MxcLifecycle.RunInContainerJsonAsync(timedExec, options, ct));
+            Assert.Equal(ErrorCode.BackendError, error.Code);
+            Assert.InRange(started.Elapsed, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(45));
+        }
+        finally
+        {
+            finish.SetResult();
+        }
+        Assert.Equal(8, fixture.Requests.Count);
+        Assert.All(fixture.Requests, request =>
+            Assert.StartsWith($"GET /computers/{Session}/", request));
+    }
+
     // On Unix, .NET caches environment updates without changing libc's environment.
     private static void SetEnvironmentVariable(string name, string? value)
     {
@@ -127,14 +243,17 @@ public class MxcLifecycleW365Tests
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"mxc-w365-{Guid.NewGuid():N}");
         private readonly X509Certificate2 certificate;
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
-        private readonly CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(30));
+        private readonly CancellationTokenSource cancellation;
         private readonly ConcurrentQueue<(int Status, string Body)> replies = new();
+        private readonly ConcurrentQueue<(Func<SslStream, Task> Script, uint? TimeoutMs)> executions = new();
         private readonly Task worker;
         public ConcurrentQueue<string> Requests { get; } = new();
 
-        public Fixture()
+        public Fixture(TimeSpan? timeout = null)
         {
+            cancellation = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(30));
             environment = new[] { "W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN",
+                "W365A_DP_SUFFIX", "W365A_DP_TOKEN",
                 "MXC_W365_TEST_CA", "MXC_W365_TEST_PORT" }
                 .ToDictionary(key => key, key => (
                     Managed: Environment.GetEnvironmentVariable(key),
@@ -166,6 +285,8 @@ public class MxcLifecycleW365Tests
             listener.Start();
             SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
             SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
+            SetEnvironmentVariable("W365A_DP_SUFFIX", "localhost");
+            SetEnvironmentVariable("W365A_DP_TOKEN", "synthetic-data-plane-token");
             SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
             SetEnvironmentVariable("MXC_W365_TEST_PORT",
                 ((IPEndPoint)listener.LocalEndpoint).Port.ToString());
@@ -173,6 +294,45 @@ public class MxcLifecycleW365Tests
         }
 
         public void Reply(int status, string body) => replies.Enqueue((status, body));
+        public void Exec(Func<SslStream, Task> script, uint? expectedTimeoutMs = null) =>
+            executions.Enqueue((script, expectedTimeoutMs));
+
+        public static async Task Frame(SslStream stream, byte kind, byte[] payload, CancellationToken ct)
+        {
+            var header = new byte[5];
+            header[0] = kind;
+            BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(1), (uint)payload.Length);
+            await stream.WriteAsync(header, ct);
+            await stream.WriteAsync(payload, ct);
+            await stream.FlushAsync(ct);
+        }
+
+        private static async Task<(byte Kind, byte[] Payload)> ReadFrame(SslStream stream, CancellationToken ct)
+        {
+            var header = new byte[5];
+            await stream.ReadExactlyAsync(header, ct);
+            var length = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(1));
+            Assert.True(length <= 65536);
+            var payload = new byte[length];
+            await stream.ReadExactlyAsync(payload, ct);
+            return (header[0], payload);
+        }
+
+        public static async Task<byte[]> ReadStdin(SslStream stream, CancellationToken ct)
+        {
+            using var bytes = new MemoryStream();
+            while (true)
+            {
+                var (kind, payload) = await ReadFrame(stream, ct);
+                if (kind == 3)
+                {
+                    Assert.Empty(payload);
+                    return bytes.ToArray();
+                }
+                Assert.Equal(2, kind);
+                bytes.Write(payload);
+            }
+        }
 
         private async Task Serve()
         {
@@ -189,6 +349,23 @@ public class MxcLifecycleW365Tests
                 while (await reader.ReadLineAsync(cancellation.Token) is { Length: > 0 } line)
                     headers.AppendLine(line);
                 Requests.Enqueue(headers.ToString());
+                if (headers.ToString().Contains("/microsoft.exec?api-version=1.0", StringComparison.Ordinal))
+                {
+                    Assert.Contains("Upgrade: exec", headers.ToString(), StringComparison.OrdinalIgnoreCase);
+                    Assert.True(executions.TryDequeue(out var execution), "unexpected Exec request");
+                    await stream.WriteAsync("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\n\r\n"u8.ToArray(), cancellation.Token);
+                    await stream.FlushAsync(cancellation.Token);
+                    var (kind, payload) = await ReadFrame(stream, cancellation.Token);
+                    Assert.Equal(1, kind);
+                    using var start = JsonDocument.Parse(payload);
+                    Assert.Equal("raw", start.RootElement.GetProperty("shell").GetString());
+                    Assert.Equal("pipe", start.RootElement.GetProperty("mode").GetString());
+                    if (execution.TimeoutMs is { } timeoutMs)
+                        Assert.Equal(timeoutMs, start.RootElement.GetProperty("timeoutMs").GetUInt32());
+                    await Frame(stream, 0x11, """{"pid":123}"""u8.ToArray(), cancellation.Token);
+                    await execution.Script(stream);
+                    continue;
+                }
                 Assert.True(replies.TryDequeue(out var reply), "unexpected W365 service request");
                 var response = Encoding.UTF8.GetBytes(
                     $"HTTP/1.1 {reply.Status} Fixture\r\nContent-Length: {Encoding.UTF8.GetByteCount(reply.Body)}\r\nx-ms-request-id: fixture-request\r\nConnection: close\r\n\r\n{reply.Body}");

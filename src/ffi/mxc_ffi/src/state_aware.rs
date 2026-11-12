@@ -660,7 +660,7 @@ mod tests {
                         "w365:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
                     );
                 }
-                if matches!(phase, "stop" | "deprovision") {
+                if phase != "provision" {
                     value["sandboxId"] = serde_json::json!("w365:invalid");
                 }
                 if phase == "provision" {
@@ -668,8 +668,6 @@ mod tests {
                 }
                 let expected = if !experimental {
                     crate::MXC_STATUS_BACKEND_UNAVAILABLE
-                } else if matches!(phase, "start" | "exec") {
-                    crate::MXC_STATUS_UNSUPPORTED_PHASE
                 } else if phase == "provision" {
                     crate::MXC_STATUS_POLICY_VALIDATION
                 } else {

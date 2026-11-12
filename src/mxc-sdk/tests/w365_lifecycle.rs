@@ -13,14 +13,110 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
-#[cfg(target_os = "windows")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const POOL: &str = "11111111-1111-1111-1111-111111111111";
 const A: &str = "22222222-2222-2222-2222-222222222222";
 const B: &str = "33333333-3333-3333-3333-333333333333";
 static ENV: Mutex<()> = Mutex::new(());
+
+#[path = "w365_lifecycle/execution.rs"]
+mod execution;
+
+#[test]
+fn readiness_contract_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = Fixture::new();
+    fixture.configure(&env);
+    env.set("W365A_DP_SUFFIX", "localhost");
+    env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
+    for state in ["Waiting", "Live", "Ready"] {
+        fixture.reply(
+            200,
+            &json!({"status":state, "computerUrl":"https://invalid/?ticket=secret"}).to_string(),
+        );
+    }
+    let result = invoke(&request("start", A), true).unwrap();
+    assert_eq!(result["result"]["metadata"]["status"], "Ready");
+    assert!(!result.to_string().contains("ticket"));
+    assert_eq!(fixture.count(), 3);
+    for n in 0..3 {
+        let sent = fixture.request(n);
+        assert!(sent.starts_with(&format!("GET /computers/{A}/status?api-version=1.0")));
+        assert!(sent
+            .to_ascii_lowercase()
+            .contains(&format!("x-ms-computerid: {A}")));
+    }
+    fixture.reply(200, r#"{"status":"Deleting"}"#);
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "unknown_device_status"
+    );
+    for status in [401, 403, 404, 410, 429, 500, 302] {
+        fixture.reply(status, "{}");
+        let error = invoke(&request("start", A), true).unwrap_err();
+        assert_eq!(error.details.unwrap()["httpStatus"], status);
+    }
+    fixture.reply(200, "{bad");
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "unparsable_response"
+    );
+    fixture.drop_reply();
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "status_transport"
+    );
+
+    let n = fixture.count();
+    env.set("MXC_W365_TEST_READY_BUDGET_MS", "0");
+    let error = invoke(&request("start", A), true).unwrap_err();
+    assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+    assert_eq!(fixture.count(), n, "zero budget must not dial");
+    env.set("MXC_W365_TEST_READY_BUDGET_MS", "100");
+    fixture.reply(200, r#"{"status":"Waiting"}"#);
+    let began = Instant::now();
+    let error = invoke(&request("start", A), true).unwrap_err();
+    assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!(fixture.count(), n + 1);
+    std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
+    fixture.reply(200, r#"{"status":"Ready"}"#);
+    let ready = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("small-foreign-stack".into())
+            .stack_size(128 * 1024)
+            .spawn_scoped(scope, || {
+                mxc_sdk::v1::dev::start_container_json(
+                    &request("start", A).to_string(),
+                    mxc_sdk::v1::dev::JsonOptions { experimental: true },
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let ready: Value = serde_json::from_str(&ready).unwrap();
+    assert_eq!(ready["result"]["metadata"]["status"], "Ready");
+    assert_eq!(fixture.count(), n + 2);
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.starts_with("GET ")));
+}
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 const FIXTURE_IDENTITY_PASSWORD: &str = "fixture-only";
@@ -127,15 +223,19 @@ impl Environment {
             [
                 "W365A_CONTROLPLANE_URL",
                 "W365A_CP_TOKEN",
+                "W365A_DP_SUFFIX",
+                "W365A_DP_TOKEN",
                 "MXC_W365_TEST_CA",
                 "MXC_W365_TEST_PORT",
                 "MXC_W365_TEST_TIMEOUT_MS",
+                "MXC_W365_TEST_READY_BUDGET_MS",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
             .collect(),
         );
         std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
+        std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
         environment
     }
     fn set(&self, key: &str, value: &str) {
@@ -176,7 +276,7 @@ struct Fixture {
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
-    _key: FixtureKey,
+    _key: Option<FixtureKey>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -266,7 +366,7 @@ impl Fixture {
             stop,
             worker: Some(worker),
             #[cfg(target_os = "windows")]
-            _key: key,
+            _key: Some(key),
         }
     }
     fn configure(&self, env: &Environment) {
@@ -312,7 +412,9 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
     }
 }
 
@@ -515,10 +617,13 @@ fn lifecycle_contract_and_recovery_fixture() {
             );
         }
     }
+    for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN"] {
+        std::env::remove_var(key);
+    }
     for phase in ["start", "exec"] {
         assert_eq!(
             invoke(&request(phase, A), true).unwrap_err().code,
-            MxcErrorCode::UnsupportedPhase
+            MxcErrorCode::PolicyValidation
         );
     }
     for phase in ["stop", "deprovision"] {
@@ -669,7 +774,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         ] {
             assert_eq!(
                 error.unwrap().code,
-                mxc_sdk::v1::ErrorCode::UnsupportedPhase
+                mxc_sdk::v1::ErrorCode::PolicyValidation
             );
         }
         assert_eq!(
@@ -1007,7 +1112,7 @@ fn lifecycle_contract_and_recovery_fixture() {
 }
 
 // CI explicitly supplies a test-support executor. This never uses a live service.
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 #[test]
 #[ignore = "requires a separately built test-support native executor"]
 fn lifecycle_fresh_executor_fixture() {
@@ -1065,6 +1170,8 @@ fn lifecycle_fresh_executor_fixture() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = value["result"]["sandboxId"].as_str().unwrap();
     assert_eq!(id, format!("w365:{POOL}:{A}"));
+    std::env::remove_var("W365A_DP_SUFFIX");
+    std::env::remove_var("W365A_DP_TOKEN");
     assert!(!run(request("start", A), true).status.success());
     assert!(!run(request("exec", A), true).status.success());
     assert_eq!(fixture.count(), 1);

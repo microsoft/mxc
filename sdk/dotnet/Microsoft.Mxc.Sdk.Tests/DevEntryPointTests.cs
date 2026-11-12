@@ -56,6 +56,25 @@ public class DevEntryPointTests
         Assert.Contains("RunInContainerJson requires phase 'exec'", error.Message);
     }
 
+    [Fact]
+    public async Task W365CaptureAndPipeValidateIdentityBeforeServiceWork()
+    {
+        const string exec = """
+            {"version":"1.1.0-alpha","phase":"exec",
+             "sandboxId":"w365:invalid",
+             "process":{"commandLine":"cmd.exe /c echo must-not-run"}}
+            """;
+        var options = new Dev.JsonOptions { Experimental = true };
+        var captured = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcLifecycle.RunInContainerJsonAsync(
+                exec, options, TestContext.Current.CancellationToken));
+        Assert.Equal(ErrorCode.MalformedId, captured.Code);
+        var piped = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcLifecycle.SpawnInContainerJsonAsync(
+                exec, options, TestContext.Current.CancellationToken));
+        Assert.Equal(ErrorCode.MalformedId, piped.Code);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("exec")]

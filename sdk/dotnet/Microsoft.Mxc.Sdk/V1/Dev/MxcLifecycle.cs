@@ -24,7 +24,8 @@ public static class MxcLifecycle
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(RunInContainerJson), "exec");
         using var process = await Microsoft.Mxc.Sdk.V1.MxcLifecycle.RunBlockingOperationAsync(
-            () => SpawnInContainer(request, timeout, options), late => late.Dispose(), cancellationToken)
+            () => SpawnInContainer(request, timeout, options, waitClosesUntakenStdin: true),
+            late => late.Dispose(), cancellationToken)
             .ConfigureAwait(false);
         var (outcome, stdout, stderr) = await process
             .WaitForExitWithOutputAsync(cancellationToken).ConfigureAwait(false);
@@ -46,7 +47,7 @@ public static class MxcLifecycle
     }
 
     private static MxcProcess SpawnInContainer(
-        byte[] request, uint? timeout, JsonOptions? options)
+        byte[] request, uint? timeout, JsonOptions? options, bool waitClosesUntakenStdin = false)
     {
         unsafe
         {
@@ -67,7 +68,7 @@ public static class MxcLifecycle
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout, waitClosesUntakenStdin);
             }
         }
     }

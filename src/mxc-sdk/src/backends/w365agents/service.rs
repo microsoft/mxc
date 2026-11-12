@@ -11,6 +11,24 @@ use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
+pub(super) const USER_AGENT: &str = concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)");
+
+pub(super) fn with_transport_stack<T: Send>(
+    operation: impl FnOnce() -> Result<T, MxcError> + Send,
+) -> Result<T, MxcError> {
+    // TLS must not run on a foreign FFI caller's small stack. Join before returning.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("mxc-w365-transport".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn_scoped(scope, operation)
+            .map_err(|error| {
+                MxcError::backend_error(format!("could not start W365 transport: {error}"))
+            })?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
 
 fn guid(value: &str) -> bool {
     // UUID parsing also accepts simple, braced and URN forms; the contract does not.
@@ -18,8 +36,8 @@ fn guid(value: &str) -> bool {
 }
 
 pub(super) struct Identity {
-    pool_id: String,
-    session_id: String,
+    pub(super) pool_id: String,
+    pub(super) session_id: String,
 }
 
 impl Identity {
@@ -36,7 +54,7 @@ impl Identity {
         })
     }
 
-    fn encode(&self) -> String {
+    pub(super) fn encode(&self) -> String {
         format!("w365:{}:{}", self.pool_id, self.session_id)
     }
 }
@@ -62,12 +80,16 @@ pub(super) fn validate_provision(
 
 // Deliberately no Debug: the client owns the caller's bearer token.
 pub(super) struct Client {
-    host: String,
-    token: String,
+    pub(super) host: String,
+    pub(super) token: String,
 }
 
 impl Client {
     pub(super) fn from_env() -> Result<Self, MxcError> {
+        Self::from_env_keys("W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN")
+    }
+
+    pub(super) fn from_env_keys(host_key: &str, token_key: &str) -> Result<Self, MxcError> {
         let read = |name: &str| {
             std::env::var(name).map_err(|_| {
                 MxcError::policy_validation(format!(
@@ -75,8 +97,8 @@ impl Client {
                 ))
             })
         };
-        let host = read("W365A_CONTROLPLANE_URL")?;
-        let token = read("W365A_CP_TOKEN")?;
+        let host = read(host_key)?;
+        let token = read(token_key)?;
         let valid_host = host.len() <= 253
             && host.split('.').all(|label| {
                 !label.is_empty()
@@ -88,19 +110,19 @@ impl Client {
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
             });
         if !valid_host {
-            return Err(MxcError::policy_validation(
-                "W365A_CONTROLPLANE_URL must be a bare ASCII DNS hostname (no URL, port or path)",
-            ));
+            return Err(MxcError::policy_validation(format!(
+                "{host_key} must be a bare ASCII DNS hostname (no URL, port or path)"
+            )));
         }
         if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(MxcError::policy_validation(
-                "W365A_CP_TOKEN must be nonempty ASCII without whitespace or control characters",
-            ));
+            return Err(MxcError::policy_validation(format!(
+                "{token_key} must be nonempty ASCII without whitespace or control characters"
+            )));
         }
         Ok(Self { host, token })
     }
 
-    fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
+    pub(super) fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
         #[cfg(feature = "test-support")]
         let timeout = match std::env::var_os("MXC_W365_TEST_TIMEOUT_MS") {
             None => timeout,
@@ -126,7 +148,7 @@ impl Client {
         #[cfg(not(feature = "test-support"))]
         let port = 443;
         let config = ureq::Agent::config_builder()
-            .user_agent(concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)"))
+            .user_agent(USER_AGENT)
             .tls_config(tls.build())
             .timeout_global(Some(timeout))
             .max_redirects(0)
@@ -141,7 +163,7 @@ impl Client {
         &self,
         config: &W365AgentsProvisionConfig,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
-        service_call(|| self.checkout_once(config)).map_err(|mut error| {
+        with_transport_stack(|| self.checkout_once(config)).map_err(|mut error| {
             if let Some(details) = error.details.as_mut() {
                 details["poolId"] = json!(config.pool_id.to_ascii_lowercase());
             }
@@ -281,7 +303,7 @@ impl Client {
     }
 
     pub(super) fn release(&self, identity: &Identity) -> Result<(), MxcError> {
-        service_call(|| self.release_once(identity))
+        with_transport_stack(|| self.release_once(identity))
     }
 
     fn release_once(&self, identity: &Identity) -> Result<(), MxcError> {
@@ -328,23 +350,7 @@ impl Client {
     }
 }
 
-fn service_call<T: Send>(call: impl FnOnce() -> Result<T, MxcError> + Send) -> Result<T, MxcError> {
-    // Platform TLS can exceed SDK callers' small native stacks (Koffi uses 128 KiB).
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("mxc-w365-service".to_string())
-            .stack_size(1024 * 1024)
-            .spawn_scoped(scope, call)
-            .map_err(|error| {
-                MxcError::backend_error(format!("cannot start W365 service thread: {error}"))
-            })?;
-        worker
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
-}
-
-fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
+pub(super) fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
     response
         .headers()
         .get("x-ms-request-id")
@@ -357,7 +363,7 @@ fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String
         .map(str::to_owned)
 }
 
-fn failure(
+pub(super) fn failure(
     code: &str,
     operation: &str,
     status: Option<u16>,

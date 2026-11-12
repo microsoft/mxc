@@ -12,6 +12,8 @@ for terminology.
 Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
+W365 Dev JSON execution uses the native runtime and output-drain deadline,
+without a second SDK timeout that interrupts service completion.
 
 ```bash
 npm install @microsoft/mxc-sdk
