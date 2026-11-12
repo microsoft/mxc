@@ -36,6 +36,22 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
 
+      - name: Configure unprivileged LXC
+        run: |
+          set -euo pipefail
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            sudo cp -a "$file" "$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
+          done
+          sudo bash -c 'echo "root:100000:65536" >> /etc/subuid'
+          sudo bash -c 'echo "root:100000:65536" >> /etc/subgid'
+
+          # Remove existing mappings before adding the test-only UID/GID range.
+          sudo sed -i '/idmap/d' /etc/lxc/default.conf
+          sudo bash -c 'echo "lxc.idmap = u 0 100000 65536" >> /etc/lxc/default.conf'
+          sudo bash -c 'echo "lxc.idmap = g 0 100000 65536" >> /etc/lxc/default.conf'
+
+
+
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.
       #
@@ -122,6 +138,18 @@ jobs:
         env:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test streaming_lxc --test sdk_helpers
+
+      - name: Restore LXC configuration
+        if: always()
+        run: |
+          set -euo pipefail
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            backup="$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
+            if [ -f "$backup" ]; then
+              sudo mv "$backup" "$file"
+            fi
+          done
+
 
       - name: Show leftover firewall state on failure
         if: failure()

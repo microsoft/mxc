@@ -418,15 +418,14 @@ print(json.dumps({
 }))
 PY
 
-run_case "io_uring case: peer allowed on protocol icmp, echo sent from raw and packet sockets opened through io_uring" "$IO_URING_CONFIG"
-# Hosts such as RHEL refuse io_uring_setup with EPERM, which leaves the workload
-# no io_uring sockets to escape with. Any other setup error is a broken probe.
-# The workload runs on a pty, so its lines end in \r\n.
+run_case "io_uring case: peer allowed on protocol icmp, echo sent from a raw ICMP socket opened through io_uring" "$IO_URING_CONFIG"
+
+# Strip the carriage returns added by the workload's PTY.
 if grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1" <<<"${CASE_OUTPUT//$'\r'/}"; then
     log_io_uring_host_state
     echo "io_uring case: the workload cannot open io_uring (EPERM), so there are no io_uring sockets to test."
 else
-    assert_blocked "an echo from a raw or packet socket opened through io_uring reached the peer. io_uring hands the workload the sockets the capability drop takes away."
+    assert_blocked "an echo from a raw ICMP socket opened through io_uring reached the peer."
 fi
 
 run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG"

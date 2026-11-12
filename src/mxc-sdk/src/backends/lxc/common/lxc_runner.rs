@@ -35,7 +35,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 use crate::lxc_common::availability::LxcTooling;
 use crate::lxc_common::filesystem_mounts;
 use crate::lxc_common::loopback_relay::LoopbackRelay;
-use crate::lxc_common::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
+use crate::lxc_common::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::lxc_common::network_ingress::IngressManager;
 use crate::lxc_common::network_iptables::{
     needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
@@ -345,6 +345,7 @@ impl LxcScriptRunner {
         failures
     }
 
+    #[cfg(test)]
     fn set_up_network_rules(
         &self,
         container_name: &str,
@@ -368,6 +369,7 @@ impl LxcScriptRunner {
         Ok((fw_manager, ingress_manager))
     }
 
+    #[cfg(test)]
     fn egress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
         match result {
             Ok(true) => Ok(()),
@@ -376,6 +378,7 @@ impl LxcScriptRunner {
         }
     }
 
+    #[cfg(test)]
     fn ingress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
         match result {
             Ok(true) => Ok(()),
@@ -558,6 +561,21 @@ impl LxcScriptRunner {
             StartNetwork::FromContainerConfig
         };
 
+        let resolver = match crate::lxc_common::network_startup::configure(
+            &container,
+            &request.policy,
+            logger,
+        ) {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!("Failed to configure container network startup: {error}"),
+                ));
+            }
+        };
+
         let _ = writeln!(logger, "Starting LXC container...");
         if let Err(e) = container.start(network) {
             if self.destroy_on_exit || container_created {
@@ -570,11 +588,21 @@ impl LxcScriptRunner {
         }
         let _ = writeln!(logger, "Container started successfully.");
 
+        if let Some(resolver) = resolver {
+            if let Err(error) =
+                crate::lxc_common::network_startup::configure_resolver(&container, &resolver)
+            {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::failed(
+                    FailurePhase::PostLaunchFailed,
+                    &error,
+                ));
+            }
+        }
+
         let needs_network = needs_network(&request.policy);
 
         if needs_network {
-            // Alpine DHCP leases can arrive at about nine seconds; thirty
-            // seconds leaves margin.
             let timeout = Duration::from_secs(30);
             if let Some(response) = self.enforce_network_readiness(
                 &container_name,
@@ -597,9 +625,8 @@ impl LxcScriptRunner {
             self.release_after_failure(&container, container_created, logger);
             return Err(ScriptResponse::failed(
                 FailurePhase::PostLaunchFailed,
-                "Failed to discover the container init PID; cannot enter the container \
-                 network namespace to install its firewall. Aborting rather than \
-                 running without it.",
+                "Failed to discover the container init PID; cannot manage its network \
+                 namespace or the startup firewall. The script was not run.",
             ));
         };
 
@@ -610,53 +637,10 @@ impl LxcScriptRunner {
             }
         }
 
-        let setup = self.set_up_network_rules(
-            &container_name,
-            hook_point,
-            netns_pid,
-            &request.policy,
-            logger,
-        );
-
-        let (fw_manager, ingress_manager) = match setup {
-            Ok(managers) => managers,
-            Err(e) => {
-                self.release_after_failure(&container, container_created, logger);
-                return Err(ScriptResponse::failed(FailurePhase::PostLaunchFailed, &e));
-            }
-        };
-
-        // figure out if a firewall needs to be installed.
-        let is_firewall_installed = if fw_manager.rules_applied()
-            || ingress_manager
-                .as_ref()
-                .is_some_and(|mgr| mgr.rules_applied())
-        {
-            ContainerFirewall::Installed
-        } else {
-            ContainerFirewall::Absent
-        };
-
-        // Dropping CAP_NET_RAW also removed raw ICMP.  Widen the container's
-        // ping_group_range so unprivileged ping still works.
-        if is_firewall_installed == ContainerFirewall::Installed {
-            if let Err(e) = fw_manager.allow_ping_sockets(logger) {
-                self.release_after_failure(&container, container_created, logger);
-                return Err(ScriptResponse::failed(FailurePhase::PostLaunchFailed, &e));
-            }
-        }
-
         // A reused container can carry a pin left by an older run.
         let stale_pin_error = Self::clear_stale_hosts_pin(container_created, |command| {
             container
-                .attach_capture(
-                    command,
-                    "/",
-                    &[],
-                    true,
-                    Some(HOSTS_COMMAND_TIMEOUT),
-                    is_firewall_installed,
-                )
+                .attach_capture(command, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT))
                 .map_err(|e| e.to_string())
         });
         if let Err(reason) = stale_pin_error {
@@ -680,8 +664,6 @@ impl LxcScriptRunner {
         };
         let exec_env = resolved_env(request);
 
-        // Started last, after every step that can fail and release the
-        // container, and before the workload can try to reach the proxy.
         let relay = match &request.policy.network_proxy.address {
             Some(address) if request.policy.runtime_network_proxy_specified => {
                 let started = netns_pid
@@ -705,12 +687,34 @@ impl LxcScriptRunner {
             _ => None,
         };
 
+        let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
+        let mut ingress_manager = None;
+        if plan.installs_firewall() {
+            let ipv6 = match crate::lxc_common::network_startup::installed_ipv6(&container) {
+                Ok(ipv6) => ipv6,
+                Err(error) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &error,
+                    ));
+                }
+            };
+            fw_manager.record_startup_rules(ipv6);
+            fw_manager.set_preserve_policy(!self.cleanup_policy);
+            if let Some(pid) = netns_pid {
+                let mut manager = IngressManager::new(&container_name, pid);
+                manager.record_startup_rules(ipv6);
+                manager.set_preserve_policy(!self.cleanup_policy);
+                ingress_manager = Some(manager);
+            }
+        }
+
         Ok(PreparedSandbox {
             fw_manager,
             ingress_manager,
             container,
             container_created,
-            firewall: is_firewall_installed,
             relay,
             released: false,
             force_stopped: false,
@@ -739,7 +743,6 @@ impl LxcScriptRunner {
             &prepared.exec_env,
             true,
             prepared.timeout,
-            prepared.firewall,
         );
 
         let response = match result {
@@ -831,8 +834,6 @@ struct PreparedSandbox {
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     container_created: bool,
-
-    firewall: ContainerFirewall,
 
     /// Carries the runtime proxy's loopback port into the container, and holds
     /// the container's network namespace open until it is dropped.
@@ -1169,7 +1170,6 @@ impl LxcScriptRunner {
                     &prepared.start_directory,
                     &prepared.exec_env,
                     true,
-                    prepared.firewall,
                 )
                 .map(|child| (child, None)),
             StdioMode::Pty(size) => prepared
@@ -1179,7 +1179,6 @@ impl LxcScriptRunner {
                     &prepared.start_directory,
                     &prepared.exec_env,
                     true,
-                    prepared.firewall,
                     UnixPtySize {
                         rows: size.rows,
                         cols: size.cols,
@@ -2139,7 +2138,6 @@ mod tests {
             ingress_manager,
             container: LxcContainer::new(&name, Some("/var/lib/lxc")),
             container_created: false,
-            firewall: ContainerFirewall::Absent,
             relay: None,
             released: false,
             force_stopped: false,

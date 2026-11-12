@@ -110,8 +110,8 @@ jobs:
           # installs a similar but narrower set and sets the same skip
           # env var for the same reason (compounded by 1ES Hosted Pool
           # egress filtering).
-          packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
-          version: 1.4
+          packages: bubblewrap lxc lxc-utils uidmap dnsmasq-base iptables bridge-utils
+          version: 1.5
 
       - name: Verify or repair Linux containment dependencies
         if: matrix.os_label == 'linux'

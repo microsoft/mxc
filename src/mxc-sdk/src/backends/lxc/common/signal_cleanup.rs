@@ -11,6 +11,7 @@
 //! sandboxes a library host can hold, and a library may not exit its caller's
 //! process.  There each sandbox handle tears itself down instead.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -40,6 +41,11 @@ struct ActiveSandbox {
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
 static WATCHDOG_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "linux")]
+static STARTUP_ALLOCATION: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "linux")]
+static STARTUP_CANCELLED: AtomicBool = AtomicBool::new(false);
+
 fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
     ACTIVE_CONTAINER
         .get_or_init(|| Mutex::new(ActiveSandbox::default()))
@@ -60,6 +66,70 @@ fn watchdog_installed() -> bool {
         return overridden;
     }
     WATCHDOG_INSTALLED.load(Ordering::Acquire)
+}
+
+pub fn exit_after_signal_cleanup(exit_code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+
+    #[cfg(target_os = "linux")]
+    if watchdog_installed() {
+        let active = lock_slot();
+        if STARTUP_CANCELLED.load(Ordering::Acquire) {
+            drop(active);
+            loop {
+                thread::park();
+            }
+        }
+        std::process::exit(exit_code);
+    }
+    std::process::exit(exit_code)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn check_startup_cancellation() -> Result<(), String> {
+    if watchdog_installed() && STARTUP_CANCELLED.load(Ordering::Acquire) {
+        Err("LXC startup was cancelled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_fatal_diagnostic(message: &str) {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Reopen stderr with independent file-status flags instead of changing the original handle.
+    if let Ok(mut stderr) = OpenOptions::new()
+        .append(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+        .open("/proc/self/fd/2")
+    {
+        let _ = stderr.write(format!("{message}\n").as_bytes());
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn with_startup_allocation<T>(
+    allocate: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if !watchdog_installed() {
+        return allocate();
+    }
+    let allocation = STARTUP_ALLOCATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let result = check_startup_cancellation().and_then(|()| allocate());
+    if check_startup_cancellation().is_err() {
+        if let Err(error) = &result {
+            write_fatal_diagnostic(error);
+        }
+    }
+    drop(allocation);
+    while check_startup_cancellation().is_err() {
+        thread::park();
+    }
+    result
 }
 
 /// Registers the container the watchdog destroys.
@@ -146,6 +216,13 @@ pub fn install() -> Result<(), String> {
 fn run_watchdog(mask: SigSet) -> ! {
     loop {
         let Ok(sig) = mask.wait() else { continue };
+        {
+            let _slot = lock_slot();
+            STARTUP_CANCELLED.store(true, Ordering::Release);
+        }
+        let _allocation = STARTUP_ALLOCATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
             let mut buf_logger = Logger::new(Mode::Buffer);
@@ -158,9 +235,15 @@ fn run_watchdog(mask: SigSet) -> ! {
                 );
                 IngressManager::force_cleanup(&name, pid, &mut buf_logger);
             }
-            let _ = LxcContainer::new(&name, None).destroy();
+            if let Err(error) =
+                LxcContainer::new(&name, None).destroy_with_reporter(write_fatal_diagnostic)
+            {
+                write_fatal_diagnostic(&error);
+            }
         }
-        std::process::exit(128 + sig as i32);
+
+        // Terminate without flushing another thread's buffered output.
+        unsafe { nix::libc::_exit(128 + sig as i32) }
     }
 }
 

@@ -67,8 +67,8 @@ if grep -Fq '"network"' "$OMIT_CONFIG"; then
 fi
 
 cleanup() {
-    lxc-destroy -n "CLI-LXC-V08-No-Net-Allow" -f >/dev/null 2>&1 || true
-    lxc-destroy -n "CLI-LXC-V08-No-Net-Omit" -f >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "CLI-LXC-V08-No-Net-Allow" >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "CLI-LXC-V08-No-Net-Omit" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

@@ -102,9 +102,9 @@ struct PortRange {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct FirewallRuleArgs {
-    ipv4: Vec<Vec<String>>,
-    ipv6: Vec<Vec<String>>,
+pub(crate) struct FirewallRuleArgs {
+    pub(crate) ipv4: Vec<Vec<String>>,
+    pub(crate) ipv6: Vec<Vec<String>>,
 }
 
 impl FirewallRuleArgs {
@@ -309,6 +309,45 @@ impl NetworkIptablesManager {
 
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
+    }
+
+    pub(crate) fn record_startup_rules(&mut self, ipv6: bool) {
+        self.created.v4 = FamilyResources {
+            chain: true,
+            hook: true,
+        };
+        if ipv6 {
+            self.created.v6 = self.created.v4;
+        }
+        self.rules_applied = true;
+        Self::publish_created(&self.created);
+    }
+
+    pub(crate) fn startup_rules(
+        container_name: &str,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<FirewallRuleArgs, String> {
+        let chain = chain_name_for(container_name);
+        let policy_rules = Self::build_policy_rules_logged(&chain, policy, logger)?;
+        let default = Self::effective_default_policy(policy);
+        let mut rules = FirewallRuleArgs::default();
+        for (family, policy_rules) in [
+            (&mut rules.ipv4, policy_rules.ipv4),
+            (&mut rules.ipv6, policy_rules.ipv6),
+        ] {
+            family.push(vec!["-N".into(), chain.clone()]);
+            family.extend(Self::build_base_chain_rule_args(&chain));
+            family.extend(policy_rules);
+            family.push(Self::build_default_policy_rule_arg(&chain, default));
+            family.push(
+                ["-I", "OUTPUT", "1", "-j", &chain]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            );
+        }
+        Ok(rules)
     }
 
     /// Discard the record of what was installed, so no later removal is

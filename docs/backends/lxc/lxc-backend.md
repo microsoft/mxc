@@ -64,6 +64,21 @@ for unprivileged LXC.  Everything else needs root.
 Refer to your distribution's manual to configure networking for LXC
 containers.  A config with a `network` section fails without it.
 
+MXC removes `CAP_NET_ADMIN` and `CAP_NET_RAW` before the container's init
+process starts.  Firewall rules are installed before init runs, and the
+restrictions apply to init, the workload, and their children.
+
+When a run needs networking, MXC reuses the container's reservation or
+reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
+MXC assigns the address from the host and releases the reservation when it
+destroys the container.  A container first run without networking can obtain
+a reservation on a later networked run.  Creating a reservation restarts the
+shared `lxc-net` service.
+
+MXC requests DNS servers and search settings from the host DHCP server.
+A configured mount supplying `/etc/resolv.conf` or an ancestor directory
+keeps its own resolver settings.
+
 ## Configuration
 
 Note the required field lxc.
@@ -345,17 +360,6 @@ These failures carry the `backend_error` code and exit `-1`.
 - **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
   ICMP type through the firewall, but the command MXC runs can originate only Echo
   requests, the ones `ping` sends.
-- **The network restrictions bind only the command MXC runs and its children.**
-  MXC takes away that command's ability to change the firewall or send raw
-  packets, but the container's init process (PID 1) keeps both.  The command
-  runs as root inside the container, so it can ask init to start a new process,
-  for example with `systemd-run` on Ubuntu.  That process is not a child of the
-  command, and it can change the firewall and send raw packets.
-- **Network access stops after about an hour.** The stock `lxcbr0` hands out
-  DHCP leases that last one hour, and MXC's firewall blocks the DHCP request the
-  container sends to renew one.  When the lease expires the container loses its
-  address and the workload can no longer reach the network.  A run that finishes
-  within the hour is unaffected.
 - **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
