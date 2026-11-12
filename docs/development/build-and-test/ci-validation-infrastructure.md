@@ -11,6 +11,10 @@ build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
+Linux CI covers Ubuntu 24.04 and 26.04: x64/ARM64 builds and x64 .NET, Node SDK,
+and LXC E2E tests. Shared binaries are published only from Ubuntu 24.04 to
+preserve compatibility with the older supported host.
+
 ## At a glance
 
 - Validation tests **never build from source**. They download the artifacts
