@@ -14,17 +14,10 @@ stdio relay; callers need not mix interfaces.
 
 Invocation signatures, result types and .NET error properties are unchanged.
 Existing native structured details are retained, and rejected checkout errors
-also include any valid cleanup ID in their message. These are proposed
-full-lifecycle capabilities, not working Phase 2 execution examples.
+also include any valid cleanup ID in their message.
 Typed W365 configuration and contract publication remain out of scope.
 
-**Implementation boundary:** Phase 2 implements checkout and terminal release
-through the Windows executor's existing lifecycle interface. The backend is
-included and tested through the engine on Windows, Linux and macOS; lifecycle
-CLI support for Linux and macOS is deferred to separate work.
-The existing Dev SDK JSON APIs support the same checkout and terminal release.
-Start/readiness and exec are deferred. The full-lifecycle examples below are
-not runnable Phase 2 SDK examples. See the
+For currently supported operations and usage, see the
 [backend guide](../../../../backends/w365agents/w365agents-backend.md).
 
 ## Caller scenario
