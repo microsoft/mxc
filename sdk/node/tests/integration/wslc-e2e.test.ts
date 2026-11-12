@@ -16,6 +16,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -28,6 +29,7 @@ import { sdk } from './test-helpers.js';
 const isWslcAvailable = os.platform() === 'win32' && process.env.MXC_ENABLE_WSLC_TESTS === '1';
 const forcedWaitFailureCommand =
   'true # mxc-test-force-wslc-get-exit-code-failure';
+const uniqueContainerName = () => `mxc-wait-${randomUUID().replace(/-/g, '')}`;
 
 function assertForcedWaitFailure(error: unknown): boolean {
   assert.ok(error instanceof MxcError);
@@ -231,18 +233,30 @@ srv.handle_request()
     containment: { type: 'wslc' as const, config: { image: 'alpine:latest' } },
   });
 
+  const namedRequest = (command: string, containerName: string) => ({
+    ...stdinRequest(command),
+    containerName,
+  });
+
+  // WSLc refuses a session name that is still in use.
+  async function assertContainerNameReleased(containerName: string, marker: string): Promise<void> {
+    const recovered = await sdk.run(namedRequest(`echo ${marker}`, containerName));
+    assert.equal(recovered.stdout.trim(), marker);
+  }
+
   it('captured run preserves structured post-admission wait failures', { timeout: 180_000 }, async () => {
+    const containerName = uniqueContainerName();
     await assert.rejects(
-      sdk.run(stdinRequest(forcedWaitFailureCommand)),
+      sdk.run(namedRequest(forcedWaitFailureCommand, containerName)),
       assertForcedWaitFailure,
     );
 
-    const recovered = await sdk.run(stdinRequest('echo RUN-RECOVERED'));
-    assert.equal(recovered.stdout.trim(), 'RUN-RECOVERED');
+    await assertContainerNameReleased(containerName, 'RUN-RECOVERED');
   });
 
   it('spawned process wait preserves structured post-admission wait failures', { timeout: 180_000 }, async () => {
-    const process = await sdk.spawn(stdinRequest(forcedWaitFailureCommand));
+    const containerName = uniqueContainerName();
+    const process = await sdk.spawn(namedRequest(forcedWaitFailureCommand, containerName));
     try {
       await assert.rejects(process.wait(), assertForcedWaitFailure);
       await assert.rejects(process.wait(), assertForcedWaitFailure);
@@ -250,8 +264,7 @@ srv.handle_request()
       process.dispose();
     }
 
-    const recovered = await sdk.run(stdinRequest('echo PROCESS-RECOVERED'));
-    assert.equal(recovered.stdout.trim(), 'PROCESS-RECOVERED');
+    await assertContainerNameReleased(containerName, 'PROCESS-RECOVERED');
   });
 
   function collectBytes(stream: NodeJS.ReadableStream | null): Promise<Buffer> {

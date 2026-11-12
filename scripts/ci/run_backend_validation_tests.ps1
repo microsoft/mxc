@@ -319,6 +319,17 @@ function Invoke-NamedSuites {
     }
 }
 
+# Daemon discovery reuses any running daemon, including one another suite started.
+function Stop-WslcDaemons {
+    foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
+        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id) from an earlier suite."
+        Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+        if (-not $daemon.WaitForExit(30000)) {
+            throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
+        }
+    }
+}
+
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
     foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
@@ -349,6 +360,7 @@ function Invoke-WslcSuites {
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
         'Node' = {
+            Stop-WslcDaemons
             Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' `
                 -RequiredTests @('V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership',
                     'captured exec preserves structured post-admission wait failures',
@@ -361,6 +373,7 @@ function Invoke-WslcSuites {
                     'spawned process wait preserves structured post-admission wait failures')
         }
         'C#' = {
+            Stop-WslcDaemons
             Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' `
                 -RequiredMethods @('DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership',
                     'RunInContainer_PreservesStructuredPostAdmissionWaitFailure',

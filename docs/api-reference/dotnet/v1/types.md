@@ -729,7 +729,7 @@ public class MxcProcess : IMxcProcess
 `MxcException` when MXC cannot obtain a terminal process result after
 admission. The exception preserves `Code`, `Message`, `Operation`,
 `NativeCode`, and `Remediation`; the failure is not converted into an exit
-code.
+code. `MxcPtyProcess` does not preserve these fields.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcPtyProcess`

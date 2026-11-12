@@ -244,6 +244,7 @@ $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 # omitted one used to produce (WSLC_E_INVALID_SESSION_NAME, 0x80040608). Every
 # other config here sets the field, so this is the only guard on that path.
 $null = $results.Add((Run-WslcTest "wslc_no_container_id.json" -OutputContains "NO_CONTAINER_ID_OK"))
+$null = $results.Add((Run-WslcTest "wslc_test_hook_marker.json" -As "the test-only exit-code failure command runs normally"))
 
 Write-Host "`n--- Environment Tests ---" -ForegroundColor Cyan
 # PYTHON_VERSION is baked into the image by ENV. Unlike PATH and TERM, no shell

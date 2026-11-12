@@ -256,6 +256,7 @@ terminal result retain those fields from `MxcContainer.Run`,
 `MxcLifecycle.RunInContainer`, `MxcProcess.TryGetExitCode`, `Wait`, and
 `WaitAsync`; they are not converted into an exit code. Repeated waits report
 the same failure, while disposal still performs process cleanup.
+`MxcPtyProcess` does not preserve these fields.
 Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
 warnings become an empty array; malformed warnings fail explicitly. When

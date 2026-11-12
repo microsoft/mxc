@@ -1963,9 +1963,7 @@ impl StartedContainer {
         // The handle is `Send`, so this may run on a thread that never entered
         // the apartment `init_and_load_sdk` established; join it for the call.
         let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_step_error())?;
-        let exit_event = self
-            .exit_event()
-            .map_err(|e| WslcError::Runtime(e).into_step_error())?;
+        let exit_event = self.exit_event()?;
         // SAFETY: `self` owns live process / container handles and a live SDK.
         unsafe { WSLContainerRunner::wait_for_process(self, exit_event, abort_event, logger) }
     }
@@ -2011,7 +2009,7 @@ impl StartedContainer {
         use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
         use windows::Win32::System::Threading::GetCurrentProcess;
 
-        let event = self.exit_event()?;
+        let event = self.exit_event().map_err(|error| error.error_message)?;
         if event.is_null() {
             return Ok(None);
         }
@@ -2038,12 +2036,12 @@ impl StartedContainer {
     }
 
     /// The process's exit event, or a null handle if the SDK has none.
-    fn exit_event(&self) -> Result<HANDLE, String> {
+    fn exit_event(&self) -> Result<HANDLE, WslcStepError> {
         let mut cached = lock(&self.exit_event);
         if let Some(event) = *cached {
             return Ok(event as HANDLE);
         }
-        let _com = ComApartment::enter()?;
+        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_step_error())?;
         let mut event: HANDLE = ptr::null_mut();
 
         // SAFETY: `self` owns a live process handle and SDK.
@@ -2052,10 +2050,7 @@ impl StartedContainer {
                 .WslcGetProcessExitEvent(self.process_guard.as_raw(), &mut event)
         };
         if hr != S_OK {
-            return Err(format!(
-                "WslcGetProcessExitEvent failed: HRESULT 0x{:08X}",
-                hr as u32
-            ));
+            return Err(sdk_wait_error("WslcGetProcessExitEvent", hr, ""));
         }
         *cached = Some(event as usize);
         Ok(event)

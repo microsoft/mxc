@@ -38,7 +38,7 @@
 
   <Target Name="BuildMxcTestSupportNativeLibrary"
           AfterTargets="Build"
-          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true'">
+          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' != 'true'">
     <Exec Command="rustc -vV"
           WorkingDirectory="$(MxcSrcDir)"
           ConsoleToMSBuild="true"
@@ -59,17 +59,12 @@
       <MxcTestNativeOutput>$(MxcTestCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/$(MxcTestNativeFileName)</MxcTestNativeOutput>
       <MxcTestWslcDaemonOutput>$(MxcTestWslcCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/wxc-wslc-daemon.exe</MxcTestWslcDaemonOutput>
     </PropertyGroup>
-    <Message Importance="high"
-             Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'"
-             Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
-    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;"
-          WorkingDirectory="$(MxcSrcDir)"
-          Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'" />
-    <Error Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true' and !Exists('$(MxcTestNativeOutput)')"
+    <Message Importance="high" Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
+    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
+    <Error Condition="!Exists('$(MxcTestNativeOutput)')"
            Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
     <Copy SourceFiles="$(MxcTestNativeOutput)"
-          DestinationFolder="$(TargetDir)"
-          Condition="'$(MxcUsePrebuiltTestNativeLibrary)' != 'true'" />
+          DestinationFolder="$(TargetDir)" />
     <Message Importance="high"
              Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))"
              Text="mxc: building isolated test-support WSLC daemon for $(MxcTestRustHostTriple)" />
@@ -90,6 +85,11 @@
            Text="The prebuilt test-support native library does not exist at $(MxcTestPrebuiltNativeLibrary)." />
     <Copy SourceFiles="$(MxcTestPrebuiltNativeLibrary)"
           DestinationFolder="$(TargetDir)" />
+    <Error Condition="'$(MxcTestPrebuiltWslcDaemon)' != '' and !Exists('$(MxcTestPrebuiltWslcDaemon)')"
+           Text="The prebuilt test-support WSLC daemon does not exist at $(MxcTestPrebuiltWslcDaemon)." />
+    <Copy SourceFiles="$(MxcTestPrebuiltWslcDaemon)"
+          DestinationFiles="$(TargetDir)wxc-wslc-daemon.exe"
+          Condition="'$(MxcTestPrebuiltWslcDaemon)' != ''" />
   </Target>
 
   <ItemGroup>

@@ -1305,8 +1305,21 @@ fn natural_exit_confirmed(exit_wait: ExitWait, callback_confirmed: bool) -> bool
         || (matches!(exit_wait, ExitWait::NoEvent) && callback_confirmed)
 }
 
-#[cfg(all(feature = "test-support", debug_assertions))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 const TEST_EXIT_CODE_FAILURE_SCRIPT: &str = "true # mxc-test-force-wslc-get-exit-code-failure";
+
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+fn forced_exit_code_result(
+    script_code: &str,
+    natural_exit_confirmed: bool,
+    result: HRESULT,
+) -> HRESULT {
+    if result == S_OK && natural_exit_confirmed && script_code == TEST_EXIT_CODE_FAILURE_SCRIPT {
+        E_FAIL
+    } else {
+        result
+    }
+}
 
 pub(crate) fn test_exit_code_result(
     script_code: &str,
@@ -1314,9 +1327,7 @@ pub(crate) fn test_exit_code_result(
     result: HRESULT,
 ) -> HRESULT {
     #[cfg(all(feature = "test-support", debug_assertions))]
-    if result == S_OK && natural_exit_confirmed && script_code == TEST_EXIT_CODE_FAILURE_SCRIPT {
-        return 0x8000_4005_u32 as HRESULT;
-    }
+    let result = forced_exit_code_result(script_code, natural_exit_confirmed, result);
 
     let _ = (script_code, natural_exit_confirmed);
     result
@@ -1760,32 +1771,45 @@ mod tests {
     use super::*;
     use crate::mxc_common::models::FailurePhase;
 
-    #[cfg(all(feature = "test-support", debug_assertions))]
     #[test]
     fn test_exit_code_failure_requires_the_exact_successful_natural_exit() {
-        let forced = 0x8000_4005_u32 as HRESULT;
+        let access_denied = 0x8007_0005_u32 as HRESULT;
         assert_eq!(
-            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, S_OK),
-            forced
+            forced_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, S_OK),
+            E_FAIL
         );
         assert_eq!(
-            test_exit_code_result(
-                TEST_EXIT_CODE_FAILURE_SCRIPT,
-                true,
-                0x8007_0005_u32 as HRESULT
-            ),
-            0x8007_0005_u32 as HRESULT
+            forced_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, access_denied),
+            access_denied
         );
         assert_eq!(
-            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, false, S_OK),
+            forced_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, false, S_OK),
             S_OK
         );
         assert_eq!(
-            test_exit_code_result(
+            forced_exit_code_result(
                 "true # mxc-test-force-wslc-get-exit-code-failure ",
                 true,
                 S_OK
             ),
+            S_OK
+        );
+    }
+
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[test]
+    fn the_exit_code_failure_marker_fails_the_call_with_test_support() {
+        assert_eq!(
+            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, S_OK),
+            E_FAIL
+        );
+    }
+
+    #[cfg(not(all(feature = "test-support", debug_assertions)))]
+    #[test]
+    fn the_exit_code_failure_marker_is_inert_without_test_support() {
+        assert_eq!(
+            test_exit_code_result(TEST_EXIT_CODE_FAILURE_SCRIPT, true, S_OK),
             S_OK
         );
     }

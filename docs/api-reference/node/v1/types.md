@@ -471,8 +471,9 @@ export class MxcProcess {
 
 `wait()` rejects with `MxcError` when MXC cannot obtain a terminal process
 result after admission. The rejection preserves `code`, `message`,
-`operation`, `nativeCode`, `remediation`, and `details`; it is not converted
-into an exit result.
+`operation`, `nativeCode`, and `remediation`; it is not converted into an exit
+result. Its `details` carry only the native status code (`ffiStatus`), not
+backend details. `MxcPtyProcess` does not preserve these fields.
 
 
 ## `@microsoft/mxc-sdk/v1::MxcPtyProcess`

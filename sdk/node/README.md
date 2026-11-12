@@ -257,7 +257,7 @@ Failures that occur after a process starts but before MXC can confirm its
 terminal result retain those fields from `run`, `runInContainer`, and
 `MxcProcess.wait`; they are not converted into an exit result. Every caller
 awaiting the process receives the same rejection, and `dispose()` still
-performs process cleanup.
+performs process cleanup. `MxcPtyProcess` does not preserve these fields.
 Captured `stdout` and `stderr` are workload output; warnings and structured
 denial-capture metadata are not appended to those streams.
 Validation warnings are returned in `ValidationResult.warnings`.

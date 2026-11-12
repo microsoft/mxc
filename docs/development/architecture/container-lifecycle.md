@@ -960,7 +960,8 @@ sentinel exit codes from the exec process, matching the existing one-shot conven
 A backend can also fail while observing the process after admission. Captured
 execution and the .NET and Node live-process wait APIs preserve the resulting
 error code, message, operation, native code, and remediation instead of
-reporting a successful exit. Rust `MxcProcess::try_wait`, `wait`, and
+reporting a successful exit. PTY processes do not preserve these fields. Rust
+`MxcProcess::try_wait`, `wait`, and
 `wait_with_output` retain their existing `std::io::Error` contracts and
 message text. Their `*_detailed` counterparts return `mxc_sdk::v1::Error` with
 the structured fields intact.
