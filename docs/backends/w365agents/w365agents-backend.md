@@ -4,18 +4,16 @@
 
 This experimental backend implements **Phase 2 only**: checkout through
 `provision`, and terminal release through `stop` or `deprovision`. It is
-included in normal Windows, Linux and macOS builds. Phase 2 exposes checkout
-and release through the Windows executor's existing lifecycle interface,
-with `--experimental` authorization. The Linux and macOS executors do not
+included in normal Windows, Linux and macOS builds. Checkout and release are
+available through the Rust, .NET and Node V1.Dev JSON APIs with experimental
+authorization, and the Windows executor with `--experimental`. The Linux and macOS executors do not
 expose lifecycle operations; adding that CLI support is outside this slice.
 Local probes do not report W365
 availability and never authenticate, discover a pool or check out a Cloud PC.
 
 Start/readiness, captured or streaming exec, PTY, create-and-run execution
 and placement sessions are unavailable. They fail explicitly without service
-work. Typed W365 SDK authoring APIs do not exist. Rust, .NET and Node Dev SDK
-JSON lifecycle access is also deliberately unavailable until cross-SDK
-structured error metadata and public SDK validation are complete.
+work. Typed W365 SDK authoring APIs do not exist.
 Native executor responses retain structured errors and cleanup identities.
 
 At the native engine boundary, create-and-run execution resolves the W365
@@ -90,6 +88,12 @@ Unparseable, dropped and ambiguous checkout replies report
 uncertainty and request context. Never automatically repeat that POST.
 HTTP authorization, missing-pool, throttling and server failures have
 operation-specific `details.code` values.
+When checkout returns a valid session ID but fails, its error message also
+includes the complete cleanup `sandboxId`. This makes the ID available through
+existing SDK error messages, including .NET's `MxcException.Message`; no new
+.NET error property is required. Retain the ID for explicit release.
+No cleanup ID is included in the message when the returned session ID is
+absent or invalid. Later operations already receive the ID from the caller.
 
 Release validates the complete ID before DELETE and always targets its
 session, never a rejected computer ID. HTTP 200, 202, 204 and 404 mean accepted
@@ -99,6 +103,47 @@ capacity. Both release alternatives return
 Failed or uncertain release retains the ID in error details for an explicit
 retry against the same session. A later checkout B does not replace or clean
 up checkout A.
+
+### Dev SDK checkout and release
+
+Supply the documented environment variables before invoking an SDK. Use a
+complete development-contract request, including `phase`:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "w365Agents": {
+    "provision": {
+      "poolId": "11111111-1111-1111-1111-111111111111",
+      "userType": "HumanUser",
+      "userObjectId": "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}
+```
+
+Replace the synthetic GUIDs with authorized values. Pass this JSON string to
+the existing Dev API; each returns the complete response JSON:
+
+| SDK | Provision call |
+| --- | --- |
+| Rust | `dev::provision_container_json(provision_json, dev::JsonOptions { experimental: true })` through `mxc_sdk::v1::dev`. |
+| .NET | `Dev.MxcLifecycle.ProvisionContainerJson(provisionJson, new Dev.JsonOptions { Experimental = true })` with `using Dev = Microsoft.Mxc.Sdk.V1.Dev;`. |
+| Node | `await provisionContainerJson(provisionJson, { experimental: true })` from `@microsoft/mxc-sdk/v1/dev`. |
+
+Retain `result.sandboxId` immediately. To release without start or exec,
+pass `{"version":"1.1.0-alpha","phase":"deprovision","sandboxId":"<retained-id>"}`
+to the corresponding `deprovision_container_json`, `DeprovisionContainerJson`
+or `deprovisionContainerJson` API with experimental authorization.
+The stop APIs are terminal release alternatives. Validation APIs perform
+local checks without allocating or releasing a session.
+
+On failed Provision, retain the error message and any returned cleanup ID for
+explicit release. Messages are diagnostic text, not a structured parsing API.
+If no valid ID was returned, use the service reconciliation procedure below;
+do not repeat checkout automatically. No SDK call acquires or renews tokens.
 
 ### Service validation limit
 
@@ -171,6 +216,18 @@ Report release acceptance separately from service-confirmed reset completion.
 uses a controlled TLS service through the normal development parser,
 experimental authorization, checked binding and backend dispatch.
 This fixture runs on Windows, Linux and macOS.
+It also exercises the public Rust V1.Dev checkout/release APIs and Provision
+error messages. `.NET`'s `MxcLifecycleW365Tests` runs against its existing isolated
+test-support native library in the SDK test suite.
+The Node integration fixture `w365-fixture.ts` runs separately against an
+isolated test-support library using
+`scripts\ci\run-w365-node-fixture.ps1`, after building the Node SDK integration
+tests. GitHub Actions and Azure SDK integration jobs require this fixture;
+the normal packaged-artifact tests continue to use shipping libraries.
+The Node fixture first makes an asynchronous call through another Koffi library
+before importing MXC and checks that the SDK leaves Koffi's stack setting unchanged.
+W365 HTTPS calls use a joined native thread with a 1 MiB stack rather than
+depending on the caller's native stack size.
 On Windows, `lifecycle_fresh_executor_fixture` additionally launches independent
 `wxc-exec` processes for checkout and release with renewed synthetic credentials.
 The latter is ignored by default because it requires a separately built

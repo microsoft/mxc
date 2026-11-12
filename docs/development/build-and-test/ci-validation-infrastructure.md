@@ -6,40 +6,14 @@ How MXC runs its backend end-to-end suites across real operating systems, what
 each job covers today, and what to change when you need to add, remove, or
 retire something.
 
-This document describes the GitHub Actions validation matrix, with Azure build
-coverage noted for W365 below. PR-time
+This document describes the GitHub Actions validation matrix only. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
+Offline TLS fixture coverage in GitHub Actions and Azure build/SDK jobs is
+also noted below.
 
 ## At a glance
-
-W365 checkout/release uses offline trusted-TLS functional fixtures in the
-existing GitHub Actions and Azure Windows, Linux and macOS **build jobs**, not
-the scheduled live-service matrix. Each job checks discovery of `lifecycle_contract_and_recovery_fixture`
-and runs it through the normal parser/engine/backend paths. Windows additionally
-builds a separate `test-support` executor, checks discovery of
-`lifecycle_fresh_executor_fixture` and runs it in fresh processes. Linux and macOS
-executors do not expose lifecycle operations in this slice. Normal artifacts
-include W365 without a Cargo opt-in; test trust never enters shipping artifacts.
-No OS/architecture matrix entry is removed. See the
-[W365 backend guide](../../backends/w365agents/w365agents-backend.md) for local
-commands, service-contract differences and the explicitly unrun live validation.
-
-Azure's `Rust.Build.Job.yml` explicitly discovers and runs the engine fixture
-on Linux x64 and both fixtures on Windows x64, using an isolated executor target
-directory outside shipping artifacts. `Mac.Build.Job.yml` checks engine fixture
-discovery before its existing package suite runs it on macOS arm64. Azure's
-cross-compiled Windows/Linux arm64 jobs remain build-only. The Linux arm64 job
-also checks that enabling `hyperlight` retains W365's native TLS dependency
-without enabling Hyperlight's x86_64-only gzip feature. Linux build jobs install
-OpenSSL development headers and `pkg-config`; Azure's x64-to-arm64 cross-build
-additionally installs `libssl-dev:arm64` from Ubuntu's ARM64 repository and points
-the target-specific OpenSSL build variables at those headers and libraries.
-Windows and macOS TLS fixtures use OpenSSL to package their generated test
-identities as PKCS#12. Windows jobs set `MXC_W365_TEST_OPENSSL` to Git for
-Windows' executable without adding its Unix tools to `PATH`, so native Windows
-archive tools remain selected.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
@@ -56,6 +30,22 @@ archive tools remain selected.
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
+
+### Offline TLS fixtures
+
+W365 checkout/release fixtures use local HTTPS services with test-only
+certificate trust, not a production TLS verification bypass. Engine fixtures
+run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
+Windows also runs checkout/release through fresh executor processes.
+The .NET SDK test suite and Node SDK integration jobs exercise the public
+Dev JSON APIs.
+
+Test-support native libraries and executors are kept separate from shipping
+artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build
+and select an isolated fixture library; ordinary packaged-artifact tests
+continue to use shipping libraries. These fixtures do not establish live-service
+compatibility. See the [W365 backend guide](../../backends/w365agents/w365agents-backend.md)
+for local commands and platform prerequisites.
 
 ## Moving parts
 

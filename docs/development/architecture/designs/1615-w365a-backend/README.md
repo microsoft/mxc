@@ -95,10 +95,8 @@ not separate reasons to choose W365A.
 
 ## Proposed behavior
 
-**Current implementation:** [Phase 2 checkout/release](../../../../backends/w365agents/w365agents-backend.md)
-implements the approved environment-only provision contract and terminal release.
-Start/readiness, exec and public Dev SDK access remain deferred. The full
-lifecycle and SDK behavior below describe later stages, not current capabilities.
+For currently supported operations, see the
+[backend guide](../../../../backends/w365agents/w365agents-backend.md).
 
 The proposal adds experimental containment `w365_agents` and the
 `w365Agents` phase settings.
@@ -635,7 +633,7 @@ None for the proposed initial scope.
 - [x] Execution modes and container lifecycle support are explicit; exclusions are explained.
 - [x] Resource ownership, partial failures, failed cleanup, and subsequent container creation are addressed.
 - [x] Security, contract/API compatibility, and any breaking changes are addressed.
-- [x] A separate API proposal covers Dev SDK usage and additive error metadata; typed W365 APIs remain out of scope.
+- [x] A separate API proposal covers Dev SDK usage, native error details and Provision cleanup IDs in error messages; typed W365 APIs remain out of scope.
 - [x] Acceptance criteria and the CI plan cover observable behavior.
 - [x] Delivery and documentation changes are scoped; material questions are resolved.
 - [x] Answers are concise; diagrams explain the design without repeating the text.

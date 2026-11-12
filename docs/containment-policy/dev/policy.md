@@ -182,7 +182,7 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
 | `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
-| `provision` / `w365_agents` | Contract only; optional `w365Agents.provision` settings (below). No process or local policy sections. Runtime returns `backend_unavailable`. |
+| `provision` / `w365_agents` | Checks out a session using `w365Agents.provision` settings (below). No process or local policy sections. Requires experimental authorization. |
 | `provision` / `microvm` | Required registry-qualified `microvm.image`; optional positive `microvm.provision.memoryMib` when the runtime advertises memory support. Optional filesystem read-only, read-write, and denied paths, directional network defaults/rules, and `runtimeConfig.networkProxy`, subject to NVX capabilities and limits. These settings are fixed at provision. No filesystem enumeration, UI, or session phases. Requires experimental authorization. |
 | `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
 | `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All four implemented backends reject supplied network policy at exec and inherit their provision posture. IsolationSession, Windows Sandbox, and MicroVM reject an exec proxy; WSLc accepts one. |
@@ -346,11 +346,8 @@ human user; `Agentic` requires one representing the selected Agent User.
 This lifecycle slice does not provide auxiliary-token settings, so Agentic
 session authentication is not supported.
 
-With executor experimental opt-in, provision checks out a session and stop or
-deprovision requests terminal release using its retained `w365:` ID.
-Start/readiness and exec remain unavailable, and later phases reject
-`w365Agents` settings. Service configuration currently comes from the caller
-environment. Typed W365 SDK APIs do not exist, and Dev SDK JSON lifecycle
-access remains unavailable. See the
+Provision checks out a session; stop and deprovision request terminal release.
+These operations require experimental authorization. Start/readiness and
+execution remain unsupported. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md) for
-configuration, cleanup and service-validation limits.
+configuration and cleanup guidance.

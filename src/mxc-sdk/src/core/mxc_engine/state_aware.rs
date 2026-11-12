@@ -1118,7 +1118,6 @@ pub fn run_state_aware_json(
 ) -> Result<String, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     let value = run_state_aware_envelope(parsed, dry_run, &mut logger)?;
     serde_json::to_string(&value).map_err(|error| {
         Error::from(MxcError::backend_error(format!(
@@ -1139,7 +1138,6 @@ pub fn exec_state_aware_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
@@ -1149,7 +1147,6 @@ pub fn exec_state_aware_capture_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_capture_parsed(parsed, &mut logger)
 }
 
@@ -1161,17 +1158,7 @@ pub fn exec_state_aware_pty_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    require_sdk_lifecycle_ready(&parsed)?;
     exec_state_aware_pty_parsed(parsed, &mut logger, size)
-}
-
-fn require_sdk_lifecycle_ready(parsed: &ParsedStateAwareRequest) -> Result<(), Error> {
-    if parsed.request().containment == crate::mxc_common::models::ContainmentBackend::W365Agents {
-        return Err(MxcError::backend_unavailable(
-            "W365 Dev SDK access is deferred until cross-SDK error details and SDK validation are ready; use the experimental native executor",
-        ).into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

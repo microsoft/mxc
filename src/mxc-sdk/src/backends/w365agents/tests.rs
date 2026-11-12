@@ -474,6 +474,85 @@ fn lifecycle_contract_and_recovery_fixture() {
         "local probing must not use W365 services"
     );
 
+    {
+        use crate::v1::dev as sdk;
+        let options = sdk::JsonOptions { experimental: true };
+        let source = provision().to_string();
+        let before = fixture.count();
+        assert_eq!(
+            sdk::provision_container_json(&source, sdk::JsonOptions::default())
+                .unwrap_err()
+                .code,
+            crate::v1::ErrorCode::BackendUnavailable
+        );
+        sdk::validate_provision_json(&source, options).unwrap();
+        for error in [
+            sdk::start_container_json(&request("start", A).to_string(), options).err(),
+            sdk::run_in_container_json(&request("exec", A).to_string(), options).err(),
+            sdk::spawn_in_container_json(&request("exec", A).to_string(), options).err(),
+            sdk::spawn_in_container_with_pty_json(
+                &request("exec", A).to_string(),
+                sdk::PtyJsonOptions {
+                    experimental: true,
+                    ..Default::default()
+                },
+            )
+            .err(),
+        ] {
+            assert_eq!(error.unwrap().code, crate::v1::ErrorCode::UnsupportedPhase);
+        }
+        assert_eq!(
+            fixture.count(),
+            before,
+            "SDK validation cannot use the service"
+        );
+        fixture.reply(
+            200,
+            &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+        );
+        let value: Value =
+            serde_json::from_str(&sdk::provision_container_json(&source, options).unwrap())
+                .unwrap();
+        assert_eq!(value["result"]["sandboxId"], format!("w365:{POOL}:{A}"));
+        for phase in ["stop", "deprovision"] {
+            fixture.reply(204, "");
+            let call = if phase == "stop" {
+                sdk::stop_container_json
+            } else {
+                sdk::deprovision_container_json
+            };
+            let value: Value =
+                serde_json::from_str(&call(&request(phase, A).to_string(), options).unwrap())
+                    .unwrap();
+            assert_eq!(value["result"]["metadata"]["releaseRequested"], true);
+        }
+        for (body, known_id) in [
+            (json!({"sessionId":A}), true),
+            (json!({"sessionId":"invalid"}), false),
+        ] {
+            fixture.reply(500, &body.to_string());
+            let error = sdk::provision_container_json(&source, options).unwrap_err();
+            assert_eq!(error.code, crate::v1::ErrorCode::BackendError);
+            assert_eq!(
+                error.message.contains(&format!("w365:{POOL}:{A}")),
+                known_id
+            );
+            assert_eq!(error.message.contains("sandboxId"), known_id);
+            assert_eq!(
+                error.details.as_ref().unwrap().get("sandboxId").is_some(),
+                known_id
+            );
+        }
+        env.set("W365A_CP_TOKEN", "renewed-sdk-fixture-token");
+        fixture.reply(204, "");
+        sdk::deprovision_container_json(&request("deprovision", A).to_string(), options).unwrap();
+        assert!(fixture
+            .request(fixture.count() - 1)
+            .contains("renewed-sdk-fixture-token"));
+        fixture.configure(&env);
+    }
+
+    let first_checkout = fixture.count();
     for body in [
         json!({"sessionId":A,"computerId":A,"status":"Succeeded"}),
         json!({"sessionId":A,"status":"Succeeded"}),
@@ -484,7 +563,7 @@ fn lifecycle_contract_and_recovery_fixture() {
             format!("w365:{POOL}:{A}")
         );
     }
-    let first = fixture.request(0).to_ascii_lowercase();
+    let first = fixture.request(first_checkout).to_ascii_lowercase();
     assert!(first.starts_with(&format!("post /api/pools/{POOL}/sessions?api-version=2.0 ")));
     assert!(!first.contains("user-type:"));
     assert!(!first.contains("user-object-id:"));
@@ -497,7 +576,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
     );
     invoke(&human, true).unwrap();
-    let sent = fixture.request(2);
+    let sent = fixture.request(first_checkout + 2);
     assert!(sent.to_ascii_lowercase().contains("user-type: humanuser"));
     assert!(sent.contains(B));
     assert_eq!(
@@ -582,6 +661,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     ] {
         fixture.reply(200, &body.to_string());
         let error = invoke(&provision(), true).unwrap_err();
+        assert!(error.message.contains(&format!("w365:{POOL}:{A}")));
         let details = error.details.unwrap();
         assert_eq!(details["possiblySucceeded"], true);
         assert_eq!(details["sandboxId"], format!("w365:{POOL}:{A}"));
@@ -685,10 +765,9 @@ fn lifecycle_contract_and_recovery_fixture() {
     for status in [401, 403, 408, 429, 500, 302, 418] {
         let before = fixture.count();
         fixture.reply(status, "secret");
-        let details = invoke(&request("stop", A), true)
-            .unwrap_err()
-            .details
-            .unwrap();
+        let error = invoke(&request("stop", A), true).unwrap_err();
+        assert!(!error.message.contains("sandboxId"));
+        let details = error.details.unwrap();
         assert_eq!(details["sandboxId"], format!("w365:{POOL}:{A}"));
         assert_eq!(details["httpStatus"], status);
         assert_eq!(

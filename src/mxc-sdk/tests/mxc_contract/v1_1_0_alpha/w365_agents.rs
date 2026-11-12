@@ -238,11 +238,15 @@ fn w365_agents_does_not_expand_published_or_other_operation_contracts() {
 }
 
 #[test]
-fn w365_agents_dev_sdk_refuses_every_phase_with_or_without_opt_in() {
+fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
     use mxc_sdk::v1::dev as sdk;
     for experimental in [false, true] {
         for phase in PHASES {
-            let source = request(phase).to_string();
+            let mut value = request(phase);
+            if matches!(phase, "stop" | "deprovision") {
+                value["sandboxId"] = json!("w365:invalid");
+            }
+            let source = value.to_string();
             let options = sdk::JsonOptions { experimental };
             let error = match phase {
                 "provision" => sdk::provision_container_json(&source, options).unwrap_err(),
@@ -252,7 +256,16 @@ fn w365_agents_dev_sdk_refuses_every_phase_with_or_without_opt_in() {
                 "deprovision" => sdk::deprovision_container_json(&source, options).unwrap_err(),
                 _ => unreachable!(),
             };
-            let expected = mxc_sdk::v1::ErrorCode::BackendUnavailable;
+            let expected = if !experimental {
+                mxc_sdk::v1::ErrorCode::BackendUnavailable
+            } else if matches!(phase, "start" | "exec") {
+                mxc_sdk::v1::ErrorCode::UnsupportedPhase
+            } else if phase == "provision" {
+                // Missing settings must reach backend validation without service work.
+                mxc_sdk::v1::ErrorCode::PolicyValidation
+            } else {
+                mxc_sdk::v1::ErrorCode::MalformedId
+            };
             assert_eq!(error.code, expected, "{phase}, experimental={experimental}");
             if phase == "exec" {
                 let error = sdk::spawn_in_container_json(&source, options)

@@ -34,7 +34,7 @@ optional `userObjectId`. Service configuration is environment-only; later
 lifecycle phases reject `w365Agents`. The
 [W365 backend guide](backends/w365agents/w365agents-backend.md) describes
 Phase 2 checkout/release, unavailable execution modes, cleanup identities
-and the intentionally deferred Dev SDK boundary. Acceptance by the development
+and experimental Dev SDK JSON access. Acceptance by the development
 schema alone does not authorize execution or establish live-service compatibility.
 
 ### "MXC request JSON"

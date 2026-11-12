@@ -135,7 +135,7 @@ impl Client {
         &self,
         config: &W365AgentsProvisionConfig,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
-        self.checkout_once(config).map_err(|mut error| {
+        service_call(|| self.checkout_once(config)).map_err(|mut error| {
             if let Some(details) = error.details.as_mut() {
                 details["poolId"] = json!(config.pool_id.to_ascii_lowercase());
             }
@@ -275,6 +275,10 @@ impl Client {
     }
 
     pub(super) fn release(&self, identity: &Identity) -> Result<(), MxcError> {
+        service_call(|| self.release_once(identity))
+    }
+
+    fn release_once(&self, identity: &Identity) -> Result<(), MxcError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (agent, base) = self.agent(RELEASE_TIMEOUT)?;
         let url = format!(
@@ -318,6 +322,22 @@ impl Client {
     }
 }
 
+fn service_call<T: Send>(call: impl FnOnce() -> Result<T, MxcError> + Send) -> Result<T, MxcError> {
+    // Platform TLS can exceed SDK callers' small native stacks (Koffi uses 128 KiB).
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("mxc-w365-service".to_string())
+            .stack_size(1024 * 1024)
+            .spawn_scoped(scope, call)
+            .map_err(|error| {
+                MxcError::backend_error(format!("cannot start W365 service thread: {error}"))
+            })?;
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 fn safe_request_id(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
     response
         .headers()
@@ -355,7 +375,16 @@ fn failure(
         details["sessionId"] = json!(id.session_id);
         details["sandboxId"] = json!(id.encode());
     }
-    MxcError::backend_error(format!("w365_agents {operation} failed: {code}")).with_details(details)
+    let mut message = format!("w365_agents {operation} failed: {code}");
+    if operation == "checkout" {
+        if let Some(id) = identity {
+            message.push_str(&format!(
+                "; checkout returned sandboxId {}; retain this ID for explicit release",
+                id.encode()
+            ));
+        }
+    }
+    MxcError::backend_error(message).with_details(details)
 }
 
 #[cfg(any(test, feature = "test-support"))]
