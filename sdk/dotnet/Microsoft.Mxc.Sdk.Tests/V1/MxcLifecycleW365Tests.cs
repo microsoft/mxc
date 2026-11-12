@@ -224,6 +224,9 @@ public class MxcLifecycleW365Tests
             var names = new SubjectAlternativeNameBuilder();
             names.AddDnsName("localhost");
             request.CertificateExtensions.Add(names.Build());
+            // macOS requires explicit TLS server-authentication usage.
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+                new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, critical: false));
             using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),
                 DateTimeOffset.UtcNow.AddHours(1));
             // SChannel needs an imported server key. Without PersistKeySet,
