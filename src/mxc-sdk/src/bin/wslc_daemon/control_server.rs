@@ -42,8 +42,9 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use mxc_sdk::wslc_common::container_steps::OutStream;
 use mxc_sdk::wslc_common::daemon_protocol::{
-    encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, DeprovisionSessionConfig,
-    ExecTerminal, StreamFrame, MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE, MAX_STDIN_CHUNK_BYTES,
+    encode_frame, DaemonApiFailure, DaemonRequest, DaemonResponse, DeprovisionConfig,
+    DeprovisionSessionConfig, ExecTerminal, StreamFrame, MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE,
+    MAX_STDIN_CHUNK_BYTES,
 };
 
 use crate::session_manager::{ExecSlotGuard, ExecStream, SessionHandle, StdinRelay, WorkerError};
@@ -575,6 +576,7 @@ where
             &DaemonResponse::Err {
                 kind: mxc_sdk::wslc_common::daemon_protocol::ErrKind::Busy,
                 message: "WSLc daemon client capacity is exhausted".to_string(),
+                api_failure: None,
             },
         )
         .await?;
@@ -629,6 +631,7 @@ where
                     &DaemonResponse::Err {
                         kind: mxc_sdk::wslc_common::daemon_protocol::ErrKind::Busy,
                         message: "WSLc daemon exec capacity is exhausted".to_string(),
+                        api_failure: None,
                     },
                 )
                 .await?;
@@ -905,9 +908,11 @@ fn exit_terminal(
         Ok(Ok(ExecTerminal::Cancelled)) => StreamFrame::Cancelled,
         Ok(Err(e)) => StreamFrame::Error {
             message: e.to_string(),
+            api_failure: e.api_failure().map(DaemonApiFailure::from),
         },
         Err(_) => StreamFrame::Error {
             message: "WSLc worker dropped the exec reply channel".to_string(),
+            api_failure: None,
         },
     }
 }
@@ -925,6 +930,7 @@ fn worker_err_response(e: WorkerError) -> DaemonResponse {
     DaemonResponse::Err {
         kind: e.kind(),
         message: e.to_string(),
+        api_failure: e.api_failure().map(DaemonApiFailure::from),
     }
 }
 
@@ -977,6 +983,48 @@ mod tests {
         Arc::new(
             register_exec(&active_execs, "test-exec", "test-run", &cancellation, None).unwrap(),
         )
+    }
+
+    fn sdk_worker_error() -> WorkerError {
+        WorkerError::backend_with_api_failure(
+            anyhow::anyhow!("start failed"),
+            Some(Box::new(
+                mxc_sdk::mxc_common::mxc_error::ApiFailure::new("WslcStartContainer")
+                    .with_native_code("0x80072740"),
+            )),
+        )
+    }
+
+    #[test]
+    fn worker_error_response_carries_api_failure() {
+        match worker_err_response(sdk_worker_error()) {
+            DaemonResponse::Err {
+                kind,
+                message,
+                api_failure: Some(api_failure),
+            } => {
+                assert_eq!(kind, ErrKind::Backend);
+                assert_eq!(message, "start failed");
+                assert_eq!(api_failure.operation, "WslcStartContainer");
+                assert_eq!(api_failure.native_code.as_deref(), Some("0x80072740"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_error_frame_carries_api_failure() {
+        match exit_terminal(Ok(Err(sdk_worker_error()))) {
+            StreamFrame::Error {
+                message,
+                api_failure: Some(api_failure),
+            } => {
+                assert_eq!(message, "start failed");
+                assert_eq!(api_failure.operation, "WslcStartContainer");
+                assert_eq!(api_failure.native_code.as_deref(), Some("0x80072740"));
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
     }
 
     /// A streaming exec's output memory is its live-output queue alone, so the
@@ -1068,6 +1116,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::Busy,
                 message: "WSLc daemon client capacity is exhausted".to_string(),
+                api_failure: None,
             }
         );
         session.shutdown().await.unwrap();
@@ -1106,6 +1155,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::Busy,
                 message: "WSLc daemon exec capacity is exhausted".to_string(),
+                api_failure: None,
             }
         );
         session.shutdown().await.unwrap();
@@ -1416,6 +1466,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::Busy,
                 message: "WSLc daemon client capacity is exhausted".to_string(),
+                api_failure: None,
             }
         );
         clients.shutdown().await;
@@ -1664,7 +1715,7 @@ mod tests {
         retry_undelivered_release("wslcsess:abc", |_| {
             attempts.set(attempts.get() + 1);
             std::future::ready(if attempts.get() < 2 {
-                Err(WorkerError::Backend(anyhow::anyhow!("busy")))
+                Err(WorkerError::backend(anyhow::anyhow!("busy")))
             } else {
                 Ok(())
             })
@@ -1685,7 +1736,7 @@ mod tests {
 
         retry_undelivered_release("wslcsess:abc", |_| {
             attempts.set(attempts.get() + 1);
-            std::future::ready(Err(WorkerError::Backend(anyhow::anyhow!("gone"))))
+            std::future::ready(Err(WorkerError::backend(anyhow::anyhow!("gone"))))
         })
         .await;
 
@@ -1702,6 +1753,7 @@ mod tests {
         let resp = DaemonResponse::Err {
             kind: ErrKind::Backend,
             message: "provision failed".to_string(),
+            api_failure: None,
         };
 
         let outcome = deliver_minted_reply(&mut BrokenPipe, &resp, |id| {
@@ -2272,7 +2324,7 @@ mod tests {
 
         let resp: DaemonResponse = read_frame(&mut client).await.unwrap();
         match resp {
-            DaemonResponse::Err { kind, message } => {
+            DaemonResponse::Err { kind, message, .. } => {
                 assert_eq!(kind, ErrKind::NotProvisioned);
                 assert!(message.contains("wslc:nope"), "message was {message:?}");
             }
@@ -2299,6 +2351,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::NotStarted,
                 message: "sandbox wslc:cold is not started".to_string(),
+                api_failure: None,
             }
         );
     }
@@ -2320,7 +2373,11 @@ mod tests {
         assert_eq!(admit, DaemonResponse::Ok);
         let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
         match terminal {
-            StreamFrame::Error { message } => {
+            StreamFrame::Error {
+                message,
+                api_failure,
+            } => {
+                assert!(api_failure.is_none());
                 assert!(
                     message.contains("dropped the exec reply channel"),
                     "message was {message:?}"
