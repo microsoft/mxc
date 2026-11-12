@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "aci_edge_sandboxes"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "997773d086149556da6ccd9433f9a0eef7cc11165fa0de4303e907cf02b7258f"
+checksum = "a19f644326032a112d19a69a74056e2c90a560d1815722e1abdd7c332d8f998e"
 dependencies = [
  "aci_edge_sandboxes_model",
  "libc",
@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "aci_edge_sandboxes_model"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31e99bf22380ab45a0206618150df066f931e8de6d9f9c19ab2913d61eacce74"
+checksum = "eff5a7832aec130b3e882dafc7ea0711338685828ce0a93ead69e75676083bfd"
 dependencies = [
  "getrandom 0.4.2",
  "humantime",
@@ -1757,9 +1757,9 @@ dependencies = [
 
 [[package]]
 name = "nvx"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9d7438b1556fc07c3d9c3cb8f31358c56ba234c0d023c7ed17c2de7adfe06a3"
+checksum = "ccf8d7df72aff05b55ad9f56da689afdbc1c6e6e83f429e35341022f91e8467d"
 dependencies = [
  "getrandom 0.4.2",
  "nix 0.31.3",
