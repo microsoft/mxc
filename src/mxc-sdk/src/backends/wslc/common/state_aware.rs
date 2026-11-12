@@ -475,24 +475,24 @@ fn exec_piped(
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     config.stdin = forward_stdin;
 
-    std::thread::Builder::new()
+    // Admit before returning a handle so a daemon rejection reaches the caller
+    // with its error code, as on the relayed path.
+    let exec = client.admit_exec(config).map_err(map_daemon_error)?;
+
+    let spawned = std::thread::Builder::new()
         .name("wslc-state-aware-exec".to_string())
         .spawn(move || {
             let forwarding = StdinForwarding::default();
-            let result = client
-                .admit_exec(config)
-                .and_then(|exec| {
-                    if relay_cancellation.load(Ordering::Acquire) {
-                        client.cancel_exec(relay_exec_id, relay_run_token)?;
-                    } else if let Some(input) = stdin_read {
-                        start_stdin_pump(
-                            &client,
-                            relay_exec_id,
-                            relay_run_token,
-                            input,
-                            &forwarding,
-                        );
-                    }
+            let started = if relay_cancellation.load(Ordering::Acquire) {
+                client.cancel_exec(relay_exec_id, relay_run_token)
+            } else {
+                if let Some(input) = stdin_read {
+                    start_stdin_pump(&client, relay_exec_id, relay_run_token, input, &forwarding);
+                }
+                Ok(())
+            };
+            let result = started
+                .and_then(|()| {
                     exec.read_to_completion(|stream, bytes| match stream {
                         OutStream::Stdout => stdout_writer.write(bytes),
                         OutStream::Stderr => stderr_writer.write(bytes),
@@ -534,10 +534,13 @@ fn exec_piped(
             // during ExecHandle teardown lets the blocked write unwind.
             drop(stdout_pump);
             drop(stderr_pump);
-        })
-        .map_err(|error| {
-            MxcError::backend_error(format!("start WSLC exec stream thread: {error}"))
-        })?;
+        });
+    if let Err(error) = spawned {
+        let _ = terminator_client.cancel_exec(exec_id, run_token);
+        return Err(MxcError::backend_error(format!(
+            "start WSLC exec stream thread: {error}"
+        )));
+    }
 
     let stdin_closer: Option<Box<dyn FnOnce() + Send>> = forward_stdin.then(|| {
         Box::new(move || {
@@ -939,9 +942,9 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(all(test, windows))]
 mod stdin_relay_tests {
     use super::*;
-    use crate::wslc_common::daemon_client::test_daemon::TestDaemon;
+    use crate::wslc_common::daemon_client::test_daemon::{Connection, TestDaemon};
     use crate::wslc_common::daemon_protocol::{
-        DaemonApiFailure, DaemonRequest, DaemonResponse, StreamFrame,
+        DaemonApiFailure, DaemonRequest, DaemonResponse, ErrKind, StreamFrame,
     };
     use std::os::windows::io::BorrowedHandle;
     use std::time::Duration;
@@ -1060,38 +1063,78 @@ mod stdin_relay_tests {
         assert_process_launch_failure(&running.join().unwrap());
     }
 
-    #[test]
-    fn a_piped_exec_preserves_structured_daemon_failure() {
-        let daemon = TestDaemon::start();
+    /// Start a piped exec, admitting it as the daemon would. Returns the handle
+    /// and the exec's daemon connection.
+    fn admitted_piped_exec(
+        daemon: TestDaemon,
+        forward_stdin: bool,
+    ) -> (ExecHandle, TestDaemon, Connection) {
+        let client = daemon.client.clone();
+        let admitting = std::thread::spawn(move || {
+            let mut exec = daemon.next();
+            exec.reply(&DaemonResponse::Ok);
+            (daemon, exec)
+        });
         let handle = exec_piped(
-            daemon.client.clone(),
+            client,
             config(),
             "exec-1".to_string(),
             "run-1".to_string(),
-            false,
+            forward_stdin,
         )
         .unwrap();
-        let mut exec = daemon.next();
-        exec.reply(&DaemonResponse::Ok);
+        let (daemon, exec) = admitting.join().unwrap();
+        (handle, daemon, exec)
+    }
+
+    #[test]
+    fn a_piped_exec_preserves_structured_daemon_failure() {
+        let (handle, _daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), false);
         exec.reply(&process_launch_failure());
 
         assert_process_launch_failure(&within("the waiter", handle.waiter).unwrap_err());
     }
 
     #[test]
-    fn a_piped_exec_without_stdin_gives_the_command_end_of_file() {
+    fn a_piped_exec_the_daemon_rejects_fails_before_a_handle_is_returned() {
         let daemon = TestDaemon::start();
-        let handle = exec_piped(
-            daemon.client.clone(),
+        let client = daemon.client.clone();
+        let rejecting = std::thread::spawn(move || {
+            let mut exec = daemon.next();
+            exec.reply(&DaemonResponse::Err {
+                kind: ErrKind::Rejected,
+                message: "proxy mismatch".to_string(),
+                api_failure: None,
+            });
+        });
+
+        let result = exec_piped(
+            client,
             config(),
             "exec-1".to_string(),
             "run-1".to_string(),
             false,
-        )
-        .unwrap();
-        let mut exec = daemon.next();
+        );
+        rejecting.join().unwrap();
+        let Err(error) = result else {
+            panic!("a rejected exec must not return a handle");
+        };
+
+        assert_eq!(
+            error.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            error.message.contains("proxy mismatch"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_piped_exec_without_stdin_gives_the_command_end_of_file() {
+        let (handle, _daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), false);
         assert!(matches!(&exec.request, DaemonRequest::Exec(config) if !config.stdin));
-        exec.reply(&DaemonResponse::Ok);
         exec.reply(&StreamFrame::Exit { code: 0 });
 
         assert!(handle.stdin.0.is_null());
@@ -1104,18 +1147,7 @@ mod stdin_relay_tests {
 
     #[test]
     fn killing_a_piped_exec_while_its_stdin_is_backed_up_ends_the_exec_and_the_write() {
-        let daemon = TestDaemon::start();
-        let handle = exec_piped(
-            daemon.client.clone(),
-            config(),
-            "exec-1".to_string(),
-            "run-1".to_string(),
-            true,
-        )
-        .unwrap();
-        let mut exec = daemon.next();
-        exec.reply(&DaemonResponse::Ok);
-
+        let (handle, daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), true);
         // SAFETY: the handle stays open until the waiter runs, below.
         let stdin = unsafe { BorrowedHandle::borrow_raw(handle.stdin.0) }
             .try_clone_to_owned()

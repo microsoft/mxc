@@ -1204,6 +1204,38 @@ try {
             Assert-True ($r.Stdout -match 'https_proxy=\[http://127\.0\.0\.1:8888\]') `
                 "https_proxy injected into the container"
         } | Out-Null
+
+        # A replaced environment reaches the container as `env -i` arguments.
+        Run-StateAwareTest "C: exec with a replaced environment gets the proxy" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:netSandboxId
+                runtimeConfig = @{ networkProxy = 'http://127.0.0.1:8888' }
+                process = @{
+                    commandLine = "sh -c 'echo FOO=[`$FOO] HTTP_PROXY=[`$HTTP_PROXY] NO_PROXY=[`$NO_PROXY]'"
+                    env = @('FOO=bar', 'HTTP_PROXY=http://caller.invalid:1', 'NO_PROXY=*')
+                    timeout = 30000
+                }
+            }
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout.Contains('FOO=[bar] HTTP_PROXY=[http://127.0.0.1:8888] NO_PROXY=[]')) `
+                "proxy replaced the caller's proxy variables ($($r.Stdout.Trim()))"
+        } | Out-Null
+
+        Run-StateAwareTest "C: credential-bearing proxy with a replaced environment is rejected" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:netSandboxId
+                runtimeConfig = @{ networkProxy = 'http://user:hunter2@127.0.0.1:8888' }
+                process = @{ commandLine = 'true'; env = @('FOO=bar'); timeout = 30000 }
+            }
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            if (-not $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True (-not ($r.Stdout + $r.Stderr).Contains('hunter2')) "the password is not echoed"
+        } | Out-Null
     }
 
     if ($netProvisionedOk) {
@@ -1222,98 +1254,6 @@ try {
         Write-Host ""
         Write-Host "[cleanup] best-effort deprovision of $script:netSandboxId" -ForegroundColor DarkGray
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:netSandboxId } catch { }
-    }
-}
-
-# ---------------- Lifecycle CR: proxy set at provision ----------------
-
-# A 1.1.0-alpha provision fixes runtimeConfig.networkProxy for the container; the
-# daemon injects it into every exec, and an exec naming a different proxy is
-# rejected.
-$script:crSandboxId = $null
-$script:crStarted = $false
-$crDeprovisionedOk = $false
-$crProxy = 'http://proxy.example:8080'
-try {
-    $crProvisionedOk = Run-StateAwareTest "CR: provision (bridged network + proxy)" {
-        $r = Invoke-StateAware -Request @{
-            version = '1.1.0-alpha'
-            phase = 'provision'
-            containment = 'wslc'
-            network = @{
-                egress = @{ default = 'allow' }
-                ingress = @{ default = 'allow'; hostLoopback = 'allow' }
-            }
-            runtimeConfig = @{ networkProxy = $crProxy }
-            wslc = @{ provision = @{ image = 'alpine:latest' } }
-        }
-        $envObj = Assert-ResultEnvelope $r "proxied provision"
-        if ($envObj) { $script:crSandboxId = [string]$envObj.result.sandboxId }
-    }
-
-    $crStartedOk = $false
-    if ($crProvisionedOk) {
-        $crStartedOk = Run-StateAwareTest "CR: start" {
-            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:crSandboxId
-            $null = Assert-ResultEnvelope $r "proxied start"
-            $script:crStarted = $true
-        }
-    }
-
-    if ($crStartedOk) {
-        Run-StateAwareTest "CR: exec without runtimeConfig gets the provisioned proxy" {
-            $r = Invoke-StateAware -Request @{
-                phase = 'exec'
-                sandboxId = $script:crSandboxId
-                process = @{
-                    commandLine = "sh -c 'echo HTTP_PROXY=[`$HTTP_PROXY] NO_PROXY=[`$NO_PROXY]'"
-                    env = @('HTTP_PROXY=http://caller.invalid:1', 'NO_PROXY=*')
-                    inheritDefaultEnv = $true
-                    timeout = 30000
-                }
-            }
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Assert-True ($r.Stdout.Contains("HTTP_PROXY=[$crProxy] NO_PROXY=[]")) `
-                "provisioned proxy replaced the caller's proxy variables ($($r.Stdout.Trim()))"
-        } | Out-Null
-
-        Run-StateAwareTest "CR: exec naming a different proxy is rejected" {
-            $r = Invoke-StateAware -Request @{
-                phase = 'exec'
-                sandboxId = $script:crSandboxId
-                runtimeConfig = @{ networkProxy = 'http://other.example:8080' }
-                process = @{ commandLine = 'true'; timeout = 30000 }
-            }
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (mismatched exec proxy rejected)"
-            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
-            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'must match the proxy set at provision') `
-                "error.message names the provisioned proxy rule (got '$msg')"
-        } | Out-Null
-    }
-
-    if ($crProvisionedOk) {
-        Run-StateAwareTest "CR: stop" {
-            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:crSandboxId
-            $null = Assert-ResultEnvelope $r "proxied stop"
-            $script:crStarted = $false
-        } | Out-Null
-        $crDeprovPassed = Run-StateAwareTest "CR: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:crSandboxId
-            $null = Assert-ResultEnvelope $r "proxied deprovision"
-        }
-        if ($crDeprovPassed) { $crDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:crSandboxId -and -not $crDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:crSandboxId" -ForegroundColor DarkGray
-        if ($script:crStarted) {
-            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:crSandboxId } catch { }
-        }
-        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:crSandboxId } catch { }
     }
 }
 
@@ -1550,6 +1490,26 @@ Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
     $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
     Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
         "error.message identifies the closed runtimeConfig path (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "D: provision (bridged runtime proxy rejected; set per exec)" {
+    $r = Invoke-StateAware -Request @{
+        version = '1.1.0-alpha'
+        phase = 'provision'
+        containment = 'wslc'
+        network = @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+        runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' }
+        wslc = @{ provision = @{ image = 'alpine:latest' } }
+    } -DryRun
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'set it on the exec phase') "error.message points to exec (got '$msg')"
 } | Out-Null
 
 # No legacy member remains legal on either exact v0.9 network-bearing

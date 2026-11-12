@@ -571,19 +571,11 @@ proxy must have an address routable from the container:
 }
 ```
 
-**Where to set it**
-
-- **Create-and-run execution:** on the request, with the unrestricted bridged
-  posture shown above. A proxy cannot make isolated networking reach an
-  external listener.
-
-- **Container lifecycle operations:** on a `1.1.0-alpha` `provision` request,
-  the proxy applies to every `exec` in the container. An `exec` request can
-  also set `runtimeConfig.networkProxy`, but it must name the same URL. An `exec` always
-  inherits the provisioned network posture.
-
 The removed `network.proxy` object and its `localhost`/`builtinTestServer`
-forms are rejected by schema `0.9.0-alpha`.
+forms are rejected by schema `0.9.0-alpha`. Create-and-run proxy use requires the unrestricted
+bridged posture shown above; a proxy cannot make isolated networking reach an
+external listener. Execution in an existing container (`exec`) instead supplies only `runtimeConfig` and
+inherits its provisioned network posture.
 
 ### Per-host filtering is not supported
 

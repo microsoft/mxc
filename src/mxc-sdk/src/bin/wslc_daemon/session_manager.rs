@@ -6200,9 +6200,13 @@ mod tests {
     #[test]
     fn an_exec_runs_under_the_proxy_set_at_provision() {
         let provisioned = "http://proxy.example:8080";
-        for requested in [None, Some(provisioned)] {
-            let (admitted, started) =
-                admit_proxied_exec(Some(provisioned), requested, EnvScope::Merge);
+        for (requested, env_scope) in [
+            (None, EnvScope::Merge),
+            (Some(provisioned), EnvScope::Merge),
+            (None, EnvScope::Replace),
+            (Some(provisioned), EnvScope::Replace),
+        ] {
+            let (admitted, started) = admit_proxied_exec(Some(provisioned), requested, env_scope);
             admitted.unwrap();
             let env = started.expect("the exec must reach the runner").env;
             let value = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
