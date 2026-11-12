@@ -14,9 +14,15 @@ the individual local test scripts are documented in
 Linux CI installs the `lxc` package for LXC command-line tools such as
 `lxc-create`, `lxc-start`, and `lxc-attach`. Do not require `lxc-utils`: it is a
 transitional package on Ubuntu 24.04 and is not available on Ubuntu 26.04.
-The GitHub-hosted x64 lanes use `ubuntu-latest`; the Linux build's ARM64 lane
-uses `ubuntu-24.04-arm`. Scheduled validation hosts remain selected independently
-by `scripts/ci/validation-test-matrix.json`.
+The GitHub-hosted Linux build covers Ubuntu 24.04 and 26.04 on both x64 and
+ARM64, using explicit `ubuntu-<version>` and `ubuntu-<version>-arm` runner labels.
+Linux .NET and Node SDK integration tests and LXC E2E tests cover both versions
+on x64. These lanes do not use the moving `ubuntu-latest` label.
+Only the Ubuntu 24.04 build lanes upload the shared binary
+artifacts, preserving compatibility with the older supported host and one
+artifact per target. Rust build and apt package caches are separated by runner
+version. Scheduled validation hosts remain selected independently by
+`scripts/ci/validation-test-matrix.json`.
 
 ## At a glance
 

@@ -18,9 +18,13 @@ jobs:
             os_label: windows
             runner: windows-latest
             node_version: 26.8.0
-          - name_label: linux
+          - name_label: linux-ubuntu24.04
             os_label: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            node_version: 24
+          - name_label: linux-ubuntu26.04
+            os_label: linux
+            runner: ubuntu-26.04
             node_version: 24
           - name_label: macos
             os_label: macos
@@ -96,7 +100,7 @@ jobs:
           # Network-dependent LXC tests remain gated by
           # MXC_SKIP_LXC_NETWORK_TESTS because guest DHCP is unreliable here.
           packages: bubblewrap lxc dnsmasq-base iptables bridge-utils
-          version: 1.4
+          version: 1.4-${{ matrix.runner }}
 
       - name: Verify or repair Linux containment dependencies
         if: matrix.os_label == 'linux'
