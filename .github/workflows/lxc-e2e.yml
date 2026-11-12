@@ -13,7 +13,7 @@ permissions:
 jobs:
   lxc-e2e:
     name: LXC-Exec Container and Network Policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates iptables debootstrap uidmap bridge-utils
 
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.

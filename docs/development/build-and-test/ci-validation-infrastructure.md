@@ -11,12 +11,12 @@ build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
-The GitHub-hosted Linux build, Linux .NET and Node SDK integration tests, and
-`lxc-e2e.yml` pin their x64 runners to `ubuntu-24.04` because their LXC setup
-requires `lxc-utils`. The Linux build's ARM64 runner uses `ubuntu-24.04-arm`.
-Keep these lanes on explicit OS versions so an `ubuntu-latest` migration cannot
-change their package prerequisites. Scheduled validation hosts remain selected
-independently by `scripts/ci/validation-test-matrix.json`.
+Linux CI installs the `lxc` package for LXC command-line tools such as
+`lxc-create`, `lxc-start`, and `lxc-attach`. Do not require `lxc-utils`: it is a
+transitional package on Ubuntu 24.04 and is not available on Ubuntu 26.04.
+The GitHub-hosted x64 lanes use `ubuntu-latest`; the Linux build's ARM64 lane
+uses `ubuntu-24.04-arm`. Scheduled validation hosts remain selected independently
+by `scripts/ci/validation-test-matrix.json`.
 
 ## At a glance
 
