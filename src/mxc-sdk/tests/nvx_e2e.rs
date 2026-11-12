@@ -682,15 +682,20 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 "timeout": 30000
             }
         });
-        let result = __ffi::run_json(&request.to_string(), true).unwrap();
-        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
-        assert_eq!(result.stdout, b"NVX_JSON_IMAGE_AND_POLICY_OK");
+        for executor in [false, true] {
+            assert_eq!(
+                clone_policy_output(&request, executor),
+                b"NVX_JSON_IMAGE_AND_POLICY_OK"
+            );
+        }
         assert_eq!(std::fs::read(ro.join("input")).unwrap(), b"read-ok");
         assert_eq!(std::fs::read(rw.join("secret")).unwrap(), b"secret");
         assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
         assert_eq!(std::fs::read(&ungranted).unwrap(), b"ungranted-sentinel");
         assert_no_run_state(std::process::id());
-        println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
+        println!(
+            "VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup confirmed clones"
+        );
     }
 
     #[test]
@@ -953,6 +958,51 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             "deprovision retained native sandbox state"
         );
         container.cleaned = true;
+        if !fallback {
+            let result: Value = serde_json::from_str(
+                &dev::provision_container_json(&provision.to_string(), options).unwrap(),
+            )
+            .unwrap();
+            let mut next = LifecycleContainer {
+                id: result["result"]["sandboxId"].as_str().unwrap().to_owned(),
+                local_app_data: None,
+                cleaned: false,
+            };
+            assert_ne!(next.id, container.id);
+            let offset = std::fs::read_to_string(&log_path).unwrap().len();
+            dev::start_container_json(&lifecycle_phase(&next.id, "start").to_string(), options)
+                .unwrap();
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            assert!(!log[offset..].contains(SNAPSHOT_WARNING), "{log}");
+            let template = clone_template(&log[offset..], "noNic");
+            assert_eq!(template, binding.as_ref().unwrap().0);
+            assert_clone_binding(&root, &next.id, &template);
+            let mut exec = lifecycle_phase(&next.id, "exec");
+            exec["process"] = json!({
+                "commandLine": format!(
+                    "test ! -e /tmp/{marker} && \
+                     grep -qw '{PLATFORM_TEMPLATE_PARAMETER}' /proc/cmdline && printf fresh-clone"
+                ),
+                "timeout": 30000
+            });
+            let output = dev::run_in_container_json(&exec.to_string(), options).unwrap();
+            assert_eq!(output.outcome, WaitResult::Exited(0), "{output:?}");
+            assert_eq!(output.stdout, b"fresh-clone");
+            dev::stop_container_json(&lifecycle_phase(&next.id, "stop").to_string(), options)
+                .unwrap();
+            let sandbox = lifecycle_sandbox_directory(&root, &next.id);
+            assert!(!sandbox.join("clone.json").exists());
+            dev::deprovision_container_json(
+                &lifecycle_phase(&next.id, "deprovision").to_string(),
+                options,
+            )
+            .unwrap();
+            assert!(!sandbox.exists());
+            next.cleaned = true;
+            println!(
+                "VM_EXECUTED SDK JSON lifecycle same-process clone cleanup lease release and reuse"
+            );
+        }
     }
 
     fn exercise_executor_lifecycle(local_app_data: &Path) {
@@ -1050,10 +1100,37 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_sdk_json_lifecycle() {
         const CHILD: &str = "MXC_NVX_LIFECYCLE_OWNER_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            exercise_sdk_lifecycle(false, true);
-            return;
+        match std::env::var(CHILD).ok().as_deref() {
+            Some("cleanup") => {
+                exercise_sdk_lifecycle(false, false);
+                return;
+            }
+            Some("owner") => {
+                exercise_sdk_lifecycle(false, true);
+                return;
+            }
+            Some(mode) => panic!("unknown lifecycle helper mode: {mode}"),
+            None => {}
         }
+        let cleanup = tempfile::tempdir().expect("isolated SDK cleanup LOCALAPPDATA");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "windows_x64::signed_bundle_sdk_json_lifecycle",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD, "cleanup")
+            .env("LOCALAPPDATA", cleanup.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("same-process lifecycle cleanup helper");
+        assert_helper_success(&output);
+        assert_template_captures(&String::from_utf8_lossy(&output.stderr), 1);
+        let marker =
+            "VM_EXECUTED SDK JSON lifecycle same-process clone cleanup lease release and reuse";
+        assert!(String::from_utf8_lossy(&output.stdout).contains(marker));
+        println!("{marker}");
         let cli = tempfile::tempdir().expect("isolated CLI lifecycle LOCALAPPDATA");
         exercise_executor_lifecycle(cli.path());
         let local_app_data = tempfile::tempdir().expect("isolated lifecycle owner LOCALAPPDATA");
@@ -1067,7 +1144,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                     "--ignored",
                     "--nocapture",
                 ])
-                .env(CHILD, "1")
+                .env(CHILD, "owner")
                 .env("LOCALAPPDATA", local_app_data.path())
                 .stdin(Stdio::null())
                 .stdout(std::fs::File::create(&stdout_path).unwrap())
@@ -1928,6 +2005,149 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
 
     const SNAPSHOT_WARNING: &str = "NVX platform snapshots are unavailable";
     const PLATFORM_TEMPLATE_PARAMETER: &str = "nvx_snapshot_tier=platform";
+
+    pub(super) fn clone_policy_output(request: &Value, executor: bool) -> Vec<u8> {
+        let mut request = request.clone();
+        request["process"]["commandLine"] = json!(format!(
+            "grep -qw '{PLATFORM_TEMPLATE_PARAMETER}' /proc/cmdline || exit 94; {}",
+            request["process"]["commandLine"]
+                .as_str()
+                .expect("policy workload command")
+        ));
+        if executor {
+            let (output, log) = executor_output_with_log(&request, false, false, &[]);
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            let metadata = start_metadata(&log);
+            assert_eq!(metadata["bootMode"], "clone", "{metadata}");
+            assert!(metadata["template"].is_object(), "{metadata}");
+            assert!(!log.contains(SNAPSHOT_WARNING), "{log}");
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains(SNAPSHOT_WARNING),
+                "{output:?}"
+            );
+            output.stdout
+        } else {
+            let output = __ffi::run_json(&request.to_string(), true).unwrap();
+            assert_eq!(output.outcome, WaitResult::Exited(0), "{output:?}");
+            assert!(!output
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(SNAPSHOT_WARNING)));
+            assert_no_run_state(std::process::id());
+            output.stdout
+        }
+    }
+
+    #[test]
+    #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
+    fn signed_bundle_snapshot_memory_capacity() {
+        let local_app_data = tempfile::tempdir().expect("isolated memory LOCALAPPDATA");
+        let environment = [("LOCALAPPDATA", local_app_data.path().as_os_str())];
+        for lifecycle in [false, true] {
+            let mut observed = Vec::new();
+            for memory_mib in [256_u64, 512] {
+                let label = format!("memory-{memory_mib}");
+                let command = format!(
+                    "printf '{label}\\n'; cat /proc/cpuinfo; \
+                     printf 'NVX_KERNEL_CMDLINE='; cat /proc/cmdline; \
+                     cat /proc/meminfo"
+                );
+                let (output, log) = if lifecycle {
+                    let mut provision = lifecycle_provision();
+                    provision["microvm"]["provision"] = json!({"memoryMib": memory_mib});
+                    let (output, _) =
+                        executor_output_with_log(&provision, false, false, &environment);
+                    assert!(output.status.success(), "{output:?}");
+                    let provisioned: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    let mut container = LifecycleContainer {
+                        id: provisioned["result"]["sandboxId"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                        local_app_data: Some(local_app_data.path().to_owned()),
+                        cleaned: false,
+                    };
+                    let (started, log) = executor_output_with_log(
+                        &lifecycle_phase(&container.id, "start"),
+                        false,
+                        false,
+                        &environment,
+                    );
+                    assert!(started.status.success(), "{started:?}");
+                    assert!(
+                        !String::from_utf8_lossy(&started.stderr).contains(SNAPSHOT_WARNING),
+                        "{started:?}"
+                    );
+                    let mut exec = lifecycle_phase(&container.id, "exec");
+                    exec["process"] = json!({"commandLine": command, "timeout": 30000});
+                    let (output, _) = executor_output_with_log(&exec, false, false, &environment);
+                    for phase in ["stop", "deprovision"] {
+                        let cleanup = executor_output_with_env(
+                            &lifecycle_phase(&container.id, phase),
+                            false,
+                            false,
+                            &environment,
+                        );
+                        assert!(cleanup.status.success(), "{cleanup:?}");
+                    }
+                    let root = local_app_data.path().join(r"Microsoft\MXC\nvx");
+                    assert!(!lifecycle_sandbox_directory(&root, &container.id).exists());
+                    container.cleaned = true;
+                    (output, log)
+                } else {
+                    let mut request = process_only_request(&command);
+                    request["microvm"]["provision"] = json!({"memoryMib": memory_mib});
+                    executor_output_with_log(&request, false, false, &environment)
+                };
+                assert_eq!(output.status.code(), Some(0), "{output:?}");
+                let cloned = memory_mib == 256;
+                let metadata = start_metadata(&log);
+                if cloned {
+                    assert_eq!(metadata["bootMode"], "clone", "{metadata}");
+                    assert!(metadata["template"].is_object(), "{metadata}");
+                } else {
+                    assert_cold_start(&log);
+                    assert_eq!(
+                        metadata["coldReason"], "memory-above-capacity",
+                        "{metadata}"
+                    );
+                }
+                assert!(!log.contains(SNAPSHOT_WARNING), "{log}");
+                assert!(
+                    !String::from_utf8_lossy(&output.stderr).contains(SNAPSHOT_WARNING),
+                    "{output:?}"
+                );
+                assert_snapshot_output(&output.stdout, &label, cloned);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let memory: Vec<u64> = stdout
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("MemTotal:"))
+                    .map(|value| {
+                        let mut fields = value.split_whitespace();
+                        let memory = fields
+                            .next()
+                            .expect("guest MemTotal value")
+                            .parse()
+                            .expect("guest MemTotal KiB");
+                        assert_eq!(fields.next(), Some("kB"), "{value}");
+                        assert!(fields.next().is_none(), "{value}");
+                        memory
+                    })
+                    .collect();
+                assert_eq!(memory.len(), 1, "{stdout}");
+                assert!(memory[0] > 0 && memory[0] <= memory_mib * 1024, "{stdout}");
+                observed.push(memory[0]);
+            }
+            // MemTotal excludes kernel reservations; compare the increase, not exact RAM.
+            let increase = observed[1]
+                .checked_sub(observed[0])
+                .expect("larger guest RAM");
+            assert!(increase.abs_diff(256 * 1024) <= 16 * 1024, "{observed:?}");
+        }
+        println!(
+            "VM_EXECUTED snapshot memory explicit 256 clone and 512 resource cold boot guest sizing both modes"
+        );
+    }
 
     fn assert_helper_success(output: &Output) {
         assert!(
