@@ -13,7 +13,7 @@ permissions:
 jobs:
   lxc-e2e:
     name: LXC-Exec Container and Network Policy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:

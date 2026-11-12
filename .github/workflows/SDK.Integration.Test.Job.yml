@@ -20,7 +20,7 @@ jobs:
             node_version: 26.8.0
           - name_label: linux
             os_label: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             node_version: 24
           - name_label: macos
             os_label: macos
@@ -95,7 +95,7 @@ jobs:
         with:
           # Installs the LXC + Bubblewrap substrate the SDK integration
           # tests need. Capability probe 27576588204 confirmed these
-          # packages install cleanly on ubuntu-latest, ubuntu-22.04, and
+          # packages install cleanly on ubuntu-24.04, ubuntu-22.04, and
           # ubuntu-24.04-arm and that lxc-net.service brings up the
           # lxcbr0 bridge with dnsmasq serving DHCP on 10.0.3.0/24, so
           # the long-standing "classic LXC is unreliable on GHA

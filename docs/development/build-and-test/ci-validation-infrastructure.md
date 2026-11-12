@@ -11,6 +11,13 @@ build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
+The GitHub-hosted Linux build, Linux .NET and Node SDK integration tests, and
+`lxc-e2e.yml` pin their x64 runners to `ubuntu-24.04` because their LXC setup
+requires `lxc-utils`. The Linux build's ARM64 runner uses `ubuntu-24.04-arm`.
+Keep these lanes on explicit OS versions so an `ubuntu-latest` migration cannot
+change their package prerequisites. Scheduled validation hosts remain selected
+independently by `scripts/ci/validation-test-matrix.json`.
+
 ## At a glance
 
 - Validation tests **never build from source**. They download the artifacts

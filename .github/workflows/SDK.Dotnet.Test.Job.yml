@@ -13,7 +13,7 @@ jobs:
           - os_label: windows
             runner: windows-latest
           - os_label: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - os_label: macos
             runner: macos-26
     runs-on: ${{ matrix.runner }}
