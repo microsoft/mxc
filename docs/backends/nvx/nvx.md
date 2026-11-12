@@ -30,9 +30,9 @@ From the repository root, build the executor:
 build.bat --with-microvm
 ```
 
-The `aci_edge_sandboxes` crate, pinned to `0.1.1` with `agent-bundled`,
+The `aci_edge_sandboxes` crate, pinned to `0.1.2` with `agent-bundled`,
 downloads and stages its own signed agent bundle. This version pins release
-`v0.1.0-build188642429` (sandbox ABI 3, guest runtime ABI
+`v0.2.0-build189870623` (sandbox ABI 3, guest runtime ABI
 `microvm-abi-v2-edge-ramfs-v7`). Distribute the complete `aci-edge-sandboxes`
 directory beside the executable, including its manifests, runtime binaries,
 guest images, and provenance files. Do not substitute a standalone OpenVMM
@@ -120,14 +120,15 @@ Schema-valid fields do not imply backend support. MXC rejects unsupported
 policy before creating a VM rather than ignoring it.
 
 The executor's `--dry-run` checks the signed bundle's capabilities and native
-request validation without probing or starting a VM. The complete signed
+request validation without probing or starting a VM, so it never captures
+[platform snapshot](#platform-snapshots) templates. The complete signed
 bundle must be available even when only validating a request.
 
 The table describes this MXC integration, not every capability of NVX. The
 signed agent limits workloads to one hour and constrains their working
 directories and environments as described below. Refusal of UI, writable
 stdin, and PTY operations are restrictions of this MXC integration.
-The [signed-agent documentation](https://docs.rs/aci_edge_sandboxes/0.1.1/aci_edge_sandboxes/agent/)
+The [signed-agent documentation](https://docs.rs/aci_edge_sandboxes/0.1.2/aci_edge_sandboxes/agent/)
 describes its contract; the direct OpenVMM backend uses a different guest and
 does not define the limits of this integration.
 
@@ -180,6 +181,19 @@ later entries override earlier ones.
 case-insensitively. MXC validates these process limits before bundle discovery,
 then validates the mapped request with the native agent before probing the
 host or provisioning a container.
+
+### Runtime proxy
+
+The verified runtime accepts an `http` or `https` proxy on `localhost` or
+`127.0.0.1` with an explicit port other than 0 or 53. It must listen on IPv4
+loopback. Usernames, passwords, nonempty paths, query strings, and fragments in
+the URL are unsupported and rejected before VM creation.
+
+Proxy mode requires `network.egress.default: "deny"` with no allow or deny
+rules, denied ingress, and denied host-loopback access. The runtime permits the
+proxy connection itself; direct egress and proxy mode are separate connectivity
+models. A native error for a credential-bearing URL is withheld to avoid
+exposing the credential.
 
 ### Output, timeout, and cleanup
 
@@ -248,15 +262,17 @@ still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
 VM shutdown and deprovisioning before exit code 130 is returned. A request
-received during startup is observed when the native startup call returns.
+received during startup, including a [platform snapshot](#platform-snapshots)
+template capture, is observed when the native call returns.
 Closing the console or forcibly terminating the process does not provide this
 cooperative-cleanup guarantee. Embedding the SDK does not install a
 process-wide console handler.
 
 ### Agent state directory
 
-The signed agent keeps its sandbox records, VM control data, diagnostics, and
-registered images in a per-user state directory,
+The signed agent keeps its sandbox records, VM control data, diagnostics,
+registered images, and [platform snapshot](#platform-snapshots) templates in a
+per-user state directory,
 `%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
 hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
 runtime keeps its own state. MXC obtains that digest from the pinned
@@ -270,12 +286,86 @@ operations and closes the client after each request; it does not maintain a
 persistent container database.
 
 To pull a reference again or reclaim disk space, delete the directory while no
-MicroVM request is running; the next request creates it again.
+MicroVM request or platform-owning SDK process is using it; the next request
+creates it again and captures new templates. Lifecycle operations retain their
+separate, unversioned root, `%LOCALAPPDATA%\Microsoft\MXC\nvx`, so existing
+container IDs and records do not move. Removing a bundle-specific directory does
+not remove lifecycle containers, registered images, or templates in that root.
+An upgrade that changes the runtime file digests cannot start containers
+provisioned with the previous files. Deprovision those containers and provision
+them again with the selected bundle; do not move or edit their records.
 
 If deprovisioning fails, MXC reports the failure and the directory's location.
 The agent's records for that sandbox remain there rather than being deleted
 while a VM might remain. Runtime files in the directory can contain sensitive
 data; confirm that no VM is running before you remove the directory.
+
+### Platform snapshots
+
+Create-and-run MicroVMs, with captured or live output, and lifecycle `start`
+operations use the agent's platform snapshot templates when the requested
+resources fit. Each start creates a separate VM; a template is not a pool of
+running customer VMs. The templates fit one virtual processor and the default
+256 MiB of memory. A request with another `microvm.provision.memoryMib` value
+cold boots with the requested resources instead.
+
+The native library owns the platform for the SDK process's lifetime. MXC opens
+stable validation and execution configurations and explicitly closes each
+operation's handles; closing a handle does not discard the native platform.
+The first successful execution-configuration open in a state directory can
+synchronously capture two templates, one with a network device and one without.
+Later calls in that process reuse the platform, and other processes reuse the
+templates on disk. Concurrent first requests coordinate capture. Failed
+initialization is retried by later requests rather than remembered as a
+successful platform.
+
+Request validation and host probing precede capture. Dry runs, lifecycle
+provision, exec, stop, and deprovision do not initialize templates. The two
+[state roots](#agent-state-directory) keep separate template stores. First-use
+capture costs additional time and disk space; neither is a fixed latency or
+allocation guarantee. The native runtime expires generations after 30 days and
+quarantines faulty generations. A fresh process may synchronously recapture an
+expired generation; while a generation is unavailable, individual starts may
+cold boot. Reusing the SDK process does not skip MXC's per-operation bundle
+verification or change certificate-revocation checks.
+
+A running restored VM has one controlling process. Several independent VMs can
+use the same template concurrently, but another process cannot exec or stop
+that same VM while its controller process remains alive. Closing its SDK
+handles does not release that process-owned controller. Use the same process
+for those operations, or hand control to another process after the original
+process exits. The runtime verifies the running VM's identity before adopting
+it. Separate executor invocations can therefore perform lifecycle operations
+sequentially after each preceding invocation exits.
+Existing-container errors withhold native details to protect possible proxy
+credentials, so a lifecycle exec or stop error with withheld details can also
+mean that another live process controls the VM.
+
+When the agent captures a template, it writes a line such as
+`aci_edge_agent: template store …: captured generation 1 of the noNic template in 605 ms`
+to the process's standard error. In the executor, that stream also carries the
+workload's standard error.
+
+A clone retains the template's boot-time memory state, including values created
+before capture. The guest reseeds its kernel random generator with fresh
+host-supplied entropy before allowing workloads; failure prevents activation.
+Guest randomness generated after reseeding is fresh; values already present in
+the template are retained. Reseeding does not re-randomize an existing kernel
+or agent memory layout. A clone uses the guest
+kernel's default CPU vulnerability mitigations, whereas the cold-boot path
+passes `mitigations=off`; MXC does not change those native launch settings.
+Its boot-console log has no guest boot output, so startup failure diagnostics
+show less of the console.
+
+If execution-platform initialization is unavailable, MXC uses its cold-boot
+client and returns a warning through the existing SDK warning channel. In
+create-and-run executor calls, the warning is printed on standard error; a
+lifecycle `start` returns it in the stdout envelope's `result.warnings`.
+Invalid configuration and handle-close failures remain errors. A start that
+does not fit a template records its cold reason without an initialization
+warning. With `--log-file`, create-and-run and lifecycle starts record
+`bootMode` (`clone` or `cold`), `template` or `coldReason`, and
+`bootMilliseconds`.
 
 ## Validation
 
@@ -295,11 +385,17 @@ binary stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 The SDK JSON scenario also covers live output larger than pipe capacity,
 container provision/start, live and captured exec, reuse, stop and deprovision.
-An isolated-console scenario interrupts both startup and running execution,
-then verifies that the owned OpenVMM process has terminated and that a later
-request succeeds with the same agent state directory. Another scenario checks
+An isolated-console scenario interrupts a first request's template capture,
+startup, and running execution, then verifies that the OpenVMM processes that
+the executor started have terminated and that a later request succeeds with
+the same agent state directory. Another scenario checks
 that concurrent first requests for an unregistered image all succeed, and that
-later concurrent requests boot it while its registry is unreachable.
+later concurrent requests boot it while its registry is unreachable. A third
+checks that create-and-run sandboxes, with and without a network device,
+start as clones of the platform snapshot templates, that a streaming request
+captures the templates too, that validation captures none, and that a host
+that cannot capture them cold boots sandboxes. Requests that native validation
+rejects capture no templates.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 
