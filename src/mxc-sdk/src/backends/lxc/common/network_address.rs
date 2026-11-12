@@ -37,11 +37,6 @@ mod linux {
 
     use crate::lxc_common::signal_cleanup::{check_startup_cancellation, with_startup_allocation};
 
-    #[cfg(test)]
-    mod tests {
-        include!("network_address_spec.rs");
-    }
-
     const DEFAULT_DNSMASQ_CONFIG: &str = "/etc/lxc/dnsmasq.conf";
     const OWNER_MARKER: &str = "# MXC-owned DHCP reservation: ";
 
@@ -99,6 +94,8 @@ mod linux {
         let host = read_host_configuration(Some(bridge), read_lxc_net_defaults_source()?)?;
         let network = read_bridge_network(bridge, host.range)?;
         let lease_path = PathBuf::from(format!("/var/lib/misc/dnsmasq.{bridge}.leases"));
+
+        // Read resolver settings when requested, checking for cancellation around the query.
         let read_resolver = |address| {
             check_startup_cancellation()?;
             let resolver = configure_resolver
@@ -154,6 +151,8 @@ mod linux {
                 ));
             }
         }
+
+        // Use the container name for DHCP when safe and unused, or derive a name from its MAC.
         let hostname = if dns_safe_hostname(container_name)
             && !records
                 .hostnames
@@ -302,6 +301,8 @@ mod linux {
         let Some((_, marker_line)) = owned_reservation(&contents, &mac)? else {
             return Ok(());
         };
+
+        // Keep every line except this MAC's ownership marker and reservation.
         let retained: String = contents
             .split_inclusive('\n')
             .enumerate()
@@ -357,6 +358,8 @@ mod linux {
         let [value] = values.as_slice() else {
             return Err(format!("Expected one literal {key} assignment in lxc-net"));
         };
+
+        // Strip a matching pair of single or double quotes from the path.
         let value = value
             .strip_prefix('"')
             .and_then(|value| value.strip_suffix('"'))
@@ -388,7 +391,7 @@ mod linux {
         let defaults = read_optional(&defaults_path)?;
         let network_defaults = read_optional(&directory.join("lxc-net"))?;
 
-        // Read the trusted host shell configuration without interpolating container values.
+        // Evaluate LXC's host defaults to get the effective bridge and DHCP settings.
         let output = Command::new("sh")
             .args([
                 "-c",
@@ -434,6 +437,8 @@ mod linux {
             }
         }
         let enabled = !values[0].is_empty();
+
+        // Use the configured DHCP file, falling back when LXC has not enabled one.
         let path = PathBuf::from(if enabled {
             values[0]
         } else {
@@ -444,6 +449,8 @@ mod linux {
                 "LXC_DHCP_CONFILE must name a writable absolute configuration file".to_string(),
             );
         }
+
+        // Parse an ordered IPv4 DHCP range when address allocation needs one.
         let range = if bridge.is_none() || values[1].is_empty() {
             None
         } else {
@@ -478,6 +485,7 @@ mod linux {
     }
 
     fn read_lxc_net_defaults_source() -> Result<(PathBuf, String), String> {
+        // Find the installed lxc-net script from the service's start and stop commands.
         let mut path = match Command::new("systemctl")
             .args([
                 "show",
@@ -538,6 +546,7 @@ mod linux {
             .lines()
             .any(|line| line.trim().starts_with("distrosysconfdir="))
         {
+            // Collect literal start and stop calls when the service script is a wrapper.
             let commands: Vec<_> = source
                 .lines()
                 .map(str::split_whitespace)
@@ -586,6 +595,8 @@ mod linux {
         }
         let interfaces: Vec<Value> = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("Invalid ip JSON for bridge {bridge}: {error}"))?;
+
+        // Gather the bridge's IPv4 address records.
         let addresses: Vec<_> = interfaces
             .iter()
             .filter_map(|interface| interface["addr_info"].as_array())
@@ -630,6 +641,8 @@ mod linux {
             if line.trim() != format!("{OWNER_MARKER}{mac}") {
                 continue;
             }
+
+            // Parse the DHCP record immediately following this MAC's ownership marker.
             let fields: Vec<_> = lines
                 .next()
                 .and_then(|(_, line)| line.trim().strip_prefix("dhcp-host="))
@@ -708,6 +721,8 @@ mod linux {
             if line.is_empty() {
                 continue;
             }
+
+            // Hosts-file lines are reservations; other files contain option assignments.
             let (key, value) = if hosts_file {
                 ("dhcp-host", line)
             } else if let Some(pair) = line.split_once('=') {
@@ -861,6 +876,8 @@ mod linux {
         let Some(contents) = read_optional(pid_file)? else {
             return Ok(());
         };
+
+        // Require a process ID greater than one before signaling dnsmasq.
         let pid = contents
             .trim()
             .parse::<i32>()
@@ -935,6 +952,7 @@ mod linux {
     }
 
     fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+        // Resolve existing symlinks before staging a replacement beside the target.
         let target = if path.exists() {
             fs::canonicalize(path)
                 .map_err(|error| format!("Failed to resolve {}: {error}", path.display()))?
@@ -946,6 +964,8 @@ mod linux {
             .ok_or_else(|| format!("Invalid configuration path: {}", path.display()))?;
         let mut staged = tempfile::NamedTempFile::new_in(parent)
             .map_err(|error| format!("Failed to stage {}: {error}", path.display()))?;
+
+        // Keep the target's permissions, or use 0644 for a new configuration file.
         let permissions = match fs::metadata(&target) {
             Ok(metadata) => metadata.permissions(),
             Err(error) if error.kind() == ErrorKind::NotFound => fs::Permissions::from_mode(0o644),
@@ -985,6 +1005,151 @@ mod linux {
         match result {
             Ok(()) => String::new(),
             Err(error) => format!("; restoring lxc-net also failed: {error}"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+        use std::net::Ipv4Addr;
+
+        #[test]
+        fn metadata_and_ipv6_leases_preserve_neighboring_ipv4_owners() {
+            let root = tempfile::tempdir_in(".").expect("create lease fixture directory");
+            let path = root.path().join("leases");
+            let leases = concat!(
+                "1700000000 00:16:3e:00:00:11 10.0.3.11 alpha *\n",
+                "duid 00:01:00:01:aa:bb:cc:dd\n",
+                "vendorclass 00:16:3e:00:00:11 ubuntu\n",
+                "agent-info 00:16:3e:00:00:11 circuit-id\n",
+                "1700000000 12345 2001:db8::11 beta 00:01:00:01:aa:bb\n",
+                "1700000000 00:16:3e:00:00:12 10.0.3.12 gamma *\n",
+            );
+            fs::write(&path, leases).expect("write mixed lease records");
+
+            assert_eq!(
+                read_leases(&path),
+                Ok(std::collections::HashMap::from([
+                    (Ipv4Addr::new(10, 0, 3, 11), "00:16:3e:00:00:11".to_owned()),
+                    (Ipv4Addr::new(10, 0, 3, 12), "00:16:3e:00:00:12".to_owned()),
+                ])),
+                "metadata and IPv6 records must not hide IPv4 address owners; leases={leases:?}"
+            );
+        }
+
+        #[test]
+        fn malformed_ipv4_leases_are_not_an_empty_allocation_snapshot() {
+            let root = tempfile::tempdir_in(".").expect("create lease fixture directory");
+            let path = root.path().join("leases");
+
+            for lease in [
+                "1700000000 00:16:3e:00:00:11 10.0.3.11 alpha\n",
+                "1700000000 00:16:3e:00:00:11 10.0.3.999 alpha *\n",
+            ] {
+                fs::write(&path, lease).expect("write malformed IPv4 lease");
+
+                assert!(
+                    read_leases(&path).is_err(),
+                    "malformed IPv4 data must fail instead of making occupied addresses available; lease={lease:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn missing_optional_network_defaults_do_not_hide_the_global_dhcp_configuration() {
+            let root =
+                tempfile::tempdir_in(".").expect("create host configuration fixture directory");
+            let directory = root
+                .path()
+                .canonicalize()
+                .expect("resolve fixture directory");
+            let conffile = directory.join("dhcp.conf");
+            fs::write(&conffile, "").expect("write DHCP configuration");
+            fs::write(
+                directory.join("lxc"),
+                format!("LXC_DHCP_CONFILE='{}'\n", conffile.display()),
+            )
+            .expect("write global LXC defaults");
+            let source = format!(
+                concat!(
+                    "distrosysconfdir='{}'\n",
+                    "varrun='{}'\n",
+                    "USE_LXC_BRIDGE=true\n",
+                    "LXC_BRIDGE=lxcbr0\n",
+                    "LXC_ADDR=10.0.3.1\n",
+                    "LXC_NETMASK=255.255.255.0\n",
+                    "LXC_NETWORK=10.0.3.0/24\n",
+                    "LXC_DHCP_RANGE=10.0.3.2,10.0.3.254\n",
+                    "LXC_DHCP_CONFILE=''\n",
+                    "[ ! -f \"$distrosysconfdir/lxc\" ] || . \"$distrosysconfdir/lxc\"\n",
+                ),
+                directory.display(),
+                directory.join("run").display(),
+            );
+
+            assert_eq!(
+                read_host_configuration(
+                    Some("lxcbr0"),
+                    (directory.join("lxc-net-service"), source)
+                )
+                .map(|configuration| configuration.path),
+                Ok(conffile.clone()),
+                "the global DHCP conffile must work without an optional lxc-net file; conffile={conffile:?}"
+            );
+        }
+
+        #[test]
+        fn global_dhcp_override_wins_after_sourcing_network_defaults() {
+            let root =
+                tempfile::tempdir_in(".").expect("create host configuration fixture directory");
+            let directory = root
+                .path()
+                .canonicalize()
+                .expect("resolve fixture directory");
+            let earlier_conffile = directory.join("earlier-dhcp.conf");
+            let conffile = directory.join("dhcp.conf");
+            fs::write(&earlier_conffile, "").expect("write earlier DHCP configuration");
+            fs::write(&conffile, "").expect("write final DHCP configuration");
+            fs::write(
+                directory.join("lxc-net"),
+                format!("LXC_DHCP_CONFILE='{}'\n", earlier_conffile.display()),
+            )
+            .expect("write optional network defaults");
+            fs::write(
+                directory.join("lxc"),
+                format!(
+                    ". \"$distrosysconfdir/lxc-net\"\nLXC_DHCP_CONFILE='{}'\n",
+                    conffile.display()
+                ),
+            )
+            .expect("write global defaults with the final DHCP override");
+            let source = format!(
+                concat!(
+                    "distrosysconfdir='{}'\n",
+                    "varrun='{}'\n",
+                    "USE_LXC_BRIDGE=true\n",
+                    "LXC_BRIDGE=lxcbr0\n",
+                    "LXC_ADDR=10.0.3.1\n",
+                    "LXC_NETMASK=255.255.255.0\n",
+                    "LXC_NETWORK=10.0.3.0/24\n",
+                    "LXC_DHCP_RANGE=10.0.3.2,10.0.3.254\n",
+                    "LXC_DHCP_CONFILE=''\n",
+                    "[ ! -f \"$distrosysconfdir/lxc\" ] || . \"$distrosysconfdir/lxc\"\n",
+                ),
+                directory.display(),
+                directory.join("run").display(),
+            );
+
+            assert_eq!(
+                read_host_configuration(
+                    Some("lxcbr0"),
+                    (directory.join("lxc-net-service"), source)
+                )
+                .map(|configuration| configuration.path),
+                Ok(conffile.clone()),
+                "sourcing lxc-net again must not replace the global file's final DHCP conffile; conffile={conffile:?}"
+            );
         }
     }
 }

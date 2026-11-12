@@ -64,10 +64,6 @@ for unprivileged LXC.  Everything else needs root.
 Refer to your distribution's manual to configure networking for LXC
 containers.  A config with a `network` section fails without it.
 
-MXC removes `CAP_NET_ADMIN` and `CAP_NET_RAW` before the container's init
-process starts.  Firewall rules are installed before init runs, and the
-restrictions apply to init, the workload, and their children.
-
 When a run needs networking, MXC reuses the container's reservation or
 reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
 MXC assigns the address from the host and releases the reservation when it
