@@ -496,6 +496,23 @@ fn lifecycle_contract_and_recovery_fixture() {
             MxcErrorCode::BackendUnavailable
         );
     }
+    let invalid_guids = [
+        "22222222222222222222222222222222",
+        "{22222222-2222-2222-2222-222222222222}",
+        "urn:uuid:22222222-2222-2222-2222-222222222222",
+        "2222222-22222-2222-2222-222222222222",
+    ];
+    for bad in invalid_guids {
+        for field in ["poolId", "userObjectId"] {
+            let mut value = provision();
+            value["w365Agents"]["provision"][field] = json!(bad);
+            assert_eq!(
+                invoke(&value, true).unwrap_err().code,
+                MxcErrorCode::MalformedRequest,
+                "{field}={bad}"
+            );
+        }
+    }
     for phase in ["start", "exec"] {
         assert_eq!(
             invoke(&request(phase, A), true).unwrap_err().code,
@@ -508,7 +525,10 @@ fn lifecycle_contract_and_recovery_fixture() {
             "../escape",
             "not-guid",
             "22222222-2222-2222-2222-222222222222:extra",
-        ] {
+        ]
+        .into_iter()
+        .chain(invalid_guids)
+        {
             assert_eq!(
                 invoke(&request(phase, bad), true).unwrap_err().code,
                 MxcErrorCode::MalformedId
@@ -798,9 +818,13 @@ fn lifecycle_contract_and_recovery_fixture() {
             .request(fixture.count() - 1)
             .starts_with(&format!("DELETE /api/sessions/{A}?api-version=2.0")));
     }
-    for body in ["{bad", "{}", r#"{"sessionId":"bad","status":"Succeeded"}"#] {
+    for body in ["{bad", "{}", r#"{"sessionId":"bad","status":"Succeeded"}"#]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(invalid_guids.map(|id| json!({"sessionId":id,"status":"Succeeded"}).to_string()))
+    {
         let n = fixture.count();
-        fixture.reply(200, body);
+        fixture.reply(200, &body);
         let details = invoke(&provision(), true).unwrap_err().details.unwrap();
         assert_eq!(details["possiblySucceeded"], true);
         assert!(details.get("sandboxId").is_none());

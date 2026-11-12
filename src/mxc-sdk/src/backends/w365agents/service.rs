@@ -30,14 +30,8 @@ pub(super) fn with_test_timeout<T>(timeout: Duration, operation: impl FnOnce() -
 }
 
 fn guid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
+    // UUID parsing also accepts simple, braced and URN forms; the contract does not.
+    value.len() == uuid::fmt::Hyphenated::LENGTH && uuid::Uuid::try_parse(value).is_ok()
 }
 
 pub(super) struct Identity {
