@@ -6,7 +6,6 @@
 - **Issue:** [#1615: Add new experimental backend for Windows 365](https://github.com/microsoft/mxc/issues/1615)
 - **SDK usage and API proposal:** [Experimental JSON lifecycle and execution](api.md).
 - **Contributor:** @tbyfield (proposal); W365 team (planned implementation).
-- **Implementation PRs:** Not started.
 
 The issue has `feature-accepted`; scope and contributor are agreed.
 Design approval is pending.
@@ -225,7 +224,7 @@ Missing authorization returns `backend_unavailable` before backend execution.
 Configuration JSON cannot grant that authorization.
 
 Client support follows MXC's supported operating systems and architectures.
-The TCP/rustls transport does not require local virtualization or a particular
+The remote transport does not require local virtualization or a particular
 Windows build. Guest support is determined independently by the W365 service:
 the caller must have a supported pool with compatible DesktopControl.Exec.
 The client's architecture does not need to match the Cloud PC's architecture.
@@ -277,7 +276,7 @@ fails locally; MXC does not acquire or renew tokens. Read configuration again
 for each invocation, including release in a fresh process with renewed credentials.
 The existing design budgets are 45000 ms for checkout and 30000 ms for release;
 there are no per-request timeout overrides or new renewal mechanism.
-Readiness and exec environment settings remain deferred with their implementation.
+Readiness and exec use separate data-plane service configuration.
 
 Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional
@@ -509,7 +508,7 @@ the shared scenarios below.
 | Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run with omitted and zero `process.timeout`, then run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. Confirm and record guest handling of zero `timeoutMs` and applicable service-side timeout defaults and limits. The positively timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
 | `w365agents_cp_loopback` plus lifecycle fixture | Equal IDs or omitted computer ID; different/malformed computer ID with a valid session ID; lost response, unparseable body or missing/malformed session ID. | Equal/omitted computer IDs produce the same session-based ID. Rejected successful checkout reports `possiblySucceeded`; a valid session ID is retained with the pool ID and opaque `sandboxId` in error details, not a successful container result. An unavailable/invalid session ID produces no fabricated cleanup reference. No second POST occurs. |
 | Checkout/release/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
-| Readiness fixture (later stage) | Waiting/Live then Ready, unknown state and expired budget; environment configuration/budget controls to be finalized in Phase 3. | Success only on Ready; timeout has last state; no release or replacement on timeout. |
+| Readiness fixture | Waiting/Live then Ready, unknown state and expired budget. | Success only on Ready; timeout has last state; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | Executor relay lifecycle fixture | Concurrent stdout/stderr of at least 1 MiB each, binary data, stdin/EOF and slow/closed output readers through executor relayed exec. | Exact separate output with concurrent draining; bounded relay buffers and explicit local I/O errors. EOF is forwarded without checkout or release. |
 | Rust/.NET/Node Dev lifecycle fixture (new) | Provision, start, repeated captured/spawned exec, stop and deprovision through each SDK with normal native libraries; repeat without experimental opt-in. | Same checked-out Cloud PC, complete lifecycle responses, separate output and actual exits; no executor subprocess or implicit release. Missing opt-in fails before network activity; PTY/create-and-run remain refused. |
@@ -554,7 +553,6 @@ nightly validation suite against a real W365 tenant and pool**. The existing
 `test-nightly`, which calls `Validation.Tests.Matrix.Job.yml` with `plan: nightly`
 and tests downloaded build artifacts, as described in the
 [validation runbook](../../../build-and-test/ci-validation-infrastructure.md).
-W365A is not currently wired into that suite.
 
 The proposed build-CI contract, loopback and native lifecycle fixtures use
 controlled service responses and synthetic credentials; they require no live
@@ -582,16 +580,16 @@ follow the [phase settings](#routing-and-phase-settings):
 | Service configuration (environment only) | Supply `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN` in the caller environment. Neither belongs in the provision document. |
 
 Stop/deprovision use the checkout/release environment again, including
-caller-renewed credentials when needed for cleanup. Readiness and exec are
-not available in Phase 2.
+caller-renewed credentials when needed for cleanup.
 
 Nightly live testing is proposed as follow-up beyond the initial experimental
 milestone. Unattended runs require an authorized test tenant, pool and identity,
 secure credential injection that keeps tokens out of checked-in request files,
 command-line arguments and logs, approved token acquisition/refresh arrangements,
 and runner/workflow setup using normal artifacts with experimental opt-in.
-These arrangements and their ownership are not yet established. MXC does not
-acquire or refresh tokens, and this plan introduces no new authentication mode.
+These arrangements and their ownership must be agreed before unattended runs.
+MXC does not acquire or refresh tokens, and this plan introduces no new
+authentication mode.
 
 This deferral requires maintainer agreement in #1615 and an infrastructure
 owner under the [validation runbook](../../../build-and-test/ci-validation-infrastructure.md).
