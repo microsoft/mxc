@@ -72,7 +72,7 @@ fn proc_entry_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
-fn run_terminal_fixture(mut command: std::process::Command) {
+fn run_terminal_fixture(mut command: std::process::Command) -> String {
     use std::process::Stdio;
     use std::time::Duration;
 
@@ -105,6 +105,7 @@ fn run_terminal_fixture(mut command: std::process::Command) {
         matches!(&outcome, Ok(status) if status.success()),
         "terminal fixture failed: {outcome:?}\n{output}"
     );
+    output
 }
 
 #[test]
@@ -215,6 +216,7 @@ fn streaming_bubblewrap_rule_failure_never_runs_workload() {
     use nix::unistd::Pid;
 
     const FIXTURE_ENV: &str = "MXC_BWRAP_RULE_FAILURE_FIXTURE";
+    const FIXTURE_DONE: &str = "BUBBLEWRAP_RULE_FAILURE_FIXTURE_DONE";
     if std::env::var_os(FIXTURE_ENV).is_some() {
         set_child_subreaper(true).expect("adopt sandbox children after startup failure");
         let dir = tempfile::tempdir_in("/tmp").expect("workload marker directory");
@@ -287,6 +289,7 @@ fn streaming_bubblewrap_rule_failure_never_runs_workload() {
             started.is_empty(),
             "workloads ran after rule installation failed: {started:?}"
         );
+        println!("{FIXTURE_DONE}");
         return;
     }
 
@@ -317,7 +320,11 @@ fn streaming_bubblewrap_rule_failure_never_runs_workload() {
         ])
         .env(FIXTURE_ENV, "1")
         .env("PATH", path);
-    run_terminal_fixture(command);
+    let output = run_terminal_fixture(command);
+    assert!(
+        output.contains(FIXTURE_DONE),
+        "rule-failure fixture did not complete its assertions:\n{output}"
+    );
 }
 
 #[test]
