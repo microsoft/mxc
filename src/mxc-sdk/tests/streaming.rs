@@ -660,6 +660,180 @@ fn streaming_honors_sub_500ms_timeout() {
     );
 }
 
+#[test]
+fn seatbelt_capture_failure_after_timeout_is_a_warning() {
+    // The workload removes the report directory, so the report write fails
+    // after the timeout. The timeout stays the result; the failure is a warning.
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("report directory");
+    let request = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": {
+            "commandLine": format!("rmdir {} && exec sleep 30", out.display()),
+            "timeout": 1000
+        },
+        "filesystem": { "readwritePaths": [dir.path()] },
+        "seatbelt": { "captureDenials": { "outputPath": out.join("denials.json") } }
+    });
+    let mut proc =
+        mxc_sdk::v1::dev::spawn_json(&request.to_string(), Default::default()).expect("spawn");
+    assert_eq!(proc.wait().expect("wait"), WaitResult::TimedOut);
+    let warnings = proc.warnings();
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("captureDenials failed after the run timed out")
+                && warning.contains("failed to create temporary actionable output file")
+        }),
+        "{warnings:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_capture_failure_after_exit_reports_the_kept_trace() {
+    use std::os::unix::fs::PermissionsExt;
+    // The workload makes the report directory read-only, so the report write
+    // fails after a normal exit while the open trace keeps its file.
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("report directory");
+    let request = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": format!("chmod a-w {}", out.display()) },
+        "filesystem": { "readwritePaths": [dir.path()] },
+        "seatbelt": {
+            "captureDenials": { "outputPath": out.join("denials.json"), "retainEtl": true }
+        }
+    });
+    let mut proc =
+        mxc_sdk::v1::dev::spawn_json(&request.to_string(), Default::default()).expect("spawn");
+    let error = proc.wait().expect_err("the report write fails").to_string();
+    let metadata = proc.output_metadata();
+    let warnings = proc.warnings();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)).expect("restore");
+
+    assert!(
+        warnings.iter().any(
+            |warning| warning.starts_with("Seatbelt captureDenials failed: ")
+                && warning.contains(&error)
+        ),
+        "{warnings:?}"
+    );
+
+    let failure = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials_error.as_ref())
+        .expect("captureDenialsError");
+    let trace = std::path::Path::new(&failure.etl_path);
+    assert!(error.contains(&failure.etl_path), "{error}");
+    assert_eq!(trace.parent(), Some(out.as_path()));
+    assert!(
+        failure.etl_path.ends_with(".seatbelt.log"),
+        "{}",
+        failure.etl_path
+    );
+    assert!(
+        failure.message.contains("captureDenials"),
+        "{}",
+        failure.message
+    );
+    assert!(trace.exists());
+}
+
+/// A capture request whose workload reads an ungranted file, and that file.
+#[cfg(target_os = "macos")]
+fn capture_denials_request(
+    dir: &std::path::Path,
+    command: &str,
+    retain_trace: bool,
+) -> (String, std::path::PathBuf) {
+    let secret = dir.join("secret.txt");
+    std::fs::write(&secret, "secret").expect("secret");
+    std::fs::create_dir(dir.join("out")).expect("report directory");
+    let request = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": command.replace("{SECRET}", &secret.display().to_string()) },
+        "seatbelt": {
+            "captureDenials": {
+                "outputPath": dir.join("out").join("denials.json"),
+                "retainEtl": retain_trace
+            }
+        }
+    });
+    (request.to_string(), secret)
+}
+
+#[cfg(target_os = "macos")]
+fn assert_report_lists(
+    metadata: Option<mxc_sdk::v1::ExecutionMetadata>,
+    exit_code: i32,
+    secret: &std::path::Path,
+) {
+    let capture = metadata
+        .and_then(|metadata| metadata.capture_denials)
+        .expect("captureDenials metadata");
+    assert_eq!(capture.exit_code, exit_code);
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&capture.output_path).expect("report"))
+            .expect("report JSON");
+    let secret = secret.display().to_string();
+    assert!(
+        report["denials"]
+            .as_array()
+            .expect("denials")
+            .iter()
+            .any(|denial| denial["resource"] == secret.as_str()),
+        "{report}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_capture_denials_reports_a_piped_run() {
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let (request, secret) =
+        capture_denials_request(dir.path(), "cat {SECRET} 2>/dev/null; exit 3", false);
+    let mut proc = mxc_sdk::v1::dev::spawn_json(&request, Default::default()).expect("spawn");
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(3));
+    assert_report_lists(proc.output_metadata().cloned(), 3, &secret);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_capture_denials_reports_a_pty_run() {
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let (request, secret) = capture_denials_request(
+        dir.path(),
+        "test -t 1 || exit 12; cat {SECRET}; exit 4",
+        false,
+    );
+    let terminal =
+        mxc_sdk::v1::dev::spawn_with_pty_json(&request, Default::default()).expect("spawn PTY");
+    assert_eq!(terminal.wait().expect("wait"), WaitResult::Exited(4));
+    assert_report_lists(terminal.output_metadata(), 4, &secret);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_capture_denials_drop_without_wait_leaves_no_files() {
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let (request, _) = capture_denials_request(dir.path(), "cat {SECRET}; exec sleep 30", true);
+    let out = dir.path().join("out");
+    let proc = mxc_sdk::v1::dev::spawn_json(&request, Default::default()).expect("spawn");
+    let files = || std::fs::read_dir(&out).expect("out").count();
+    assert_eq!(
+        files(),
+        1,
+        "the retained trace exists while the run is live"
+    );
+    drop(proc);
+    assert_eq!(files(), 0);
+}
+
 // Process lifetime: nothing the workload starts may outlive the run, including
 // a process that leaves MXC's session (`detached: true` calls `setsid()`).
 

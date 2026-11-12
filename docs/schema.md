@@ -192,6 +192,8 @@ that can be executed independently.
     "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Optional externally assigned container ID.
                                            //  Omit it to use backend-defined internal naming.
+                                           //  Must not contain an embedded NUL (`\u0000`);
+                                           //  the executor rejects it rather than truncating.
     "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {
@@ -277,7 +279,16 @@ that can be executed independently.
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
+                                           // Not combinable with profileOverride.
+            "mode": "block",               // "block" (default) or "allow" (default-denied access is
+                                           // allowed and recorded; explicit denies still apply)
+            "outputPath": "~/denials.json",// Absolute or ~/ path; parent dir must exist. Omit for a
+                                           // temp file. Actual path is printed on stderr.
+            "retainEtl": false             // Keep the raw log as a .seatbelt.log and report its
+                                           // path as etlPath
+        }
     },
 
     "telemetry": {                         // Telemetry (Windows only)

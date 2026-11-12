@@ -159,6 +159,10 @@ const V1_1_ROOTS: &[ContractRequestRoot] = &[
         schema_definition: "MicroVmProvisionRequest",
     },
     ContractRequestRoot {
+        fixture_directory: "w365_agents_provision",
+        schema_definition: "W365AgentsProvisionRequest",
+    },
+    ContractRequestRoot {
         fixture_directory: "wslc_provision",
         schema_definition: "WslcProvisionRequest",
     },

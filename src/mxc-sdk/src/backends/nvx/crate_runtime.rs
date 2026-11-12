@@ -178,10 +178,6 @@ fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
     bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
 }
 
-pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
-    create_client_with_guard(state_root, None)
-}
-
 pub(super) fn create_persistent_client(
     guard: crate::mxc_common::filesystem_security::LockedDirectoryPath,
 ) -> Result<NvxClient, MxcError> {
@@ -238,6 +234,61 @@ pub(super) fn require_agent_bundle_present() -> Result<(), MxcError> {
     }
 }
 
+pub(super) fn state_root(
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|profile| std::path::PathBuf::from(profile).join("AppData").join("Local"))
+        })
+        .ok_or_else(|| {
+            MxcError::backend_unavailable(
+                "NVX signed bundled agent: cannot resolve LOCALAPPDATA for the agent state directory",
+            )
+        })?;
+    let bundle = BundledAgent::discover().map_err(map_error)?;
+    state_root_in(&local_app_data, bundle.manifest_sha256())
+}
+
+fn state_root_in(
+    local_app_data: &Path,
+    manifest_sha256: [u8; 32],
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = std::path::absolute(local_app_data).map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot resolve the agent state directory: {error}"
+        ))
+    })?;
+    let parent = lock_lifecycle_state_root_in(&local_app_data)?;
+    let bundle_key: String = manifest_sha256[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let root = crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        parent.path(),
+        &[std::ffi::OsStr::new(&bundle_key)],
+        0,
+    )
+    .map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot create the bundle state directory below '{}': {error}",
+            parent.path().display()
+        ))
+    })?;
+    crate::mxc_common::filesystem_security::set_current_user_owner(root.path()).map_err(
+        |error| {
+            MxcError::backend_unavailable(format!(
+                "NVX signed bundled agent: cannot secure the bundle state directory {}: {error}",
+                root.path().display()
+            ))
+        },
+    )?;
+    Ok(root)
+}
+
 pub(super) fn lifecycle_state_root(
 ) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
@@ -246,8 +297,14 @@ pub(super) fn lifecycle_state_root(
         )
     })?;
     let local_app_data = std::path::PathBuf::from(local_app_data);
-    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
-        &local_app_data,
+    lock_lifecycle_state_root_in(&local_app_data)
+}
+
+fn lock_lifecycle_state_root_in(
+    local_app_data: &Path,
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let root = crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        local_app_data,
         [
             std::ffi::OsStr::new("Microsoft"),
             std::ffi::OsStr::new("MXC"),
@@ -258,10 +315,19 @@ pub(super) fn lifecycle_state_root(
     )
     .map_err(|error| {
         MxcError::backend_unavailable(format!(
-            "cannot admit persistent NVX lifecycle state below '{}': {error}",
+            "cannot admit persistent NVX state below '{}': {error}",
             local_app_data.display()
         ))
-    })
+    })?;
+    crate::mxc_common::filesystem_security::set_current_user_owner(root.path()).map_err(
+        |error| {
+            MxcError::backend_unavailable(format!(
+                "cannot make the current user the owner of persistent NVX state '{}': {error}",
+                root.path().display()
+            ))
+        },
+    )?;
+    Ok(root)
 }
 
 pub(super) enum Event {
@@ -935,6 +1001,31 @@ mod tests {
         let setup = agent_setup(&bundle, Path::new(r"C:\state"));
         assert_eq!(setup.cpu_profile, CpuProfile::Host);
         assert_eq!(serde_json::to_value(&setup).unwrap()["cpuProfile"], "host");
+    }
+
+    #[test]
+    fn state_root_is_keyed_by_bundle_owned_by_the_user_and_reused() {
+        let local_app_data = tempfile::tempdir().unwrap();
+        let root = state_root_in(local_app_data.path(), [0xab; 32]).unwrap();
+        assert_eq!(
+            root.path(),
+            local_app_data
+                .path()
+                .join(r"Microsoft\MXC\nvx\abababababababab")
+        );
+        assert!(
+            crate::mxc_common::filesystem_security::owner_is_current_user(root.path()).unwrap()
+        );
+        std::fs::write(root.path().join("registered-image"), b"cached").unwrap();
+        let reused = state_root_in(local_app_data.path(), [0xab; 32]).unwrap();
+        assert_eq!(reused.path(), root.path());
+        assert_eq!(
+            std::fs::read(reused.path().join("registered-image")).unwrap(),
+            b"cached"
+        );
+        let other_bundle = state_root_in(local_app_data.path(), [0xcd; 32]).unwrap();
+        assert_ne!(other_bundle.path(), root.path());
+        assert!(!other_bundle.path().join("registered-image").exists());
     }
 
     struct FakeControl {
