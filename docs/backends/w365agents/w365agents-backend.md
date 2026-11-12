@@ -102,6 +102,10 @@ Unparseable, dropped and ambiguous checkout replies report
 uncertainty and request context. Never automatically repeat that POST.
 HTTP authorization, missing-pool, throttling and server failures have
 operation-specific `details.code` values.
+Checkout error messages include `clientRequestId`, `possiblySucceeded` and,
+when returned and validated, the service's `requestId`. These remain available
+through existing SDK error messages when no valid session ID was returned.
+Retain them for service-side reconciliation rather than repeating checkout.
 When checkout returns a valid session ID but fails, its error message also
 includes the complete cleanup `sandboxId`. This makes the ID available through
 existing SDK error messages, including .NET's `MxcException.Message`; no new
@@ -207,8 +211,9 @@ wxc-exec.exe --config provision.json --operation provision --experimental
 Immediately retain the returned `result.sandboxId`, or a rejected checkout's
 `error.details.sandboxId`, together with deployment/account context.
 Do not call start or exec in this slice.
-Without a valid ID, report the client/server request IDs to the authorized
-service operator for reconciliation; do not fabricate an ID or replay checkout.
+Without a valid ID, report the client/server request IDs from the error details
+or SDK error message to the authorized service operator for reconciliation;
+do not fabricate an ID or replay checkout.
 
 Save `{"version":"1.1.0-alpha"}` as `release.json`. In a fresh process with
 valid, caller-renewed credentials, pass the retained ID unchanged:

@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -70,12 +72,18 @@ public class MxcLifecycleW365Tests
                 () => Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, options));
             Assert.Equal(ErrorCode.BackendError, error.Code);
             Assert.Contains("provision_timeout", error.Message);
+            var clientRequestId = fixture.Requests.Last().Split('\n')
+                .Single(header => header.StartsWith("x-ms-client-request-id:", StringComparison.OrdinalIgnoreCase))
+                .Split(':', 2)[1].Trim();
+            Assert.Contains($"clientRequestId={clientRequestId}", error.Message);
+            Assert.Contains("requestId=fixture-request", error.Message);
+            Assert.Contains("possiblySucceeded=true", error.Message);
             Assert.Equal(knownId, error.Message.Contains(Id, StringComparison.Ordinal));
             Assert.Equal(knownId, error.Message.Contains("sandboxId", StringComparison.Ordinal));
             Assert.DoesNotContain("must-not-surface", error.Message);
             Assert.DoesNotContain("fixture-token", error.Message);
         }
-        Environment.SetEnvironmentVariable("W365A_CP_TOKEN", "renewed-fixture-token");
+        SetEnvironmentVariable("W365A_CP_TOKEN", "renewed-fixture-token");
         fixture.Reply(204, "");
         Dev.MxcLifecycle.DeprovisionContainerJson(Request("deprovision"), options);
         Assert.Equal(6, fixture.Requests.Count);
@@ -86,9 +94,36 @@ public class MxcLifecycleW365Tests
         Assert.Contains("Bearer renewed-fixture-token", requests[^1]);
     }
 
+    // On Unix, .NET caches environment updates without changing libc's environment.
+    private static void SetEnvironmentVariable(string name, string? value)
+    {
+        Environment.SetEnvironmentVariable(name, value);
+        if (!OperatingSystem.IsWindows())
+            SetNativeEnvironmentVariable(name, value);
+    }
+
+    private static void SetNativeEnvironmentVariable(string name, string? value)
+    {
+        var result = value is null ? UnsetEnv(name) : SetEnv(name, value, 1);
+        if (result != 0)
+            throw new Win32Exception(Marshal.GetLastPInvokeError(),
+                $"Could not update native environment variable {name}");
+    }
+
+    [DllImport("libc", EntryPoint = "getenv")]
+    private static extern IntPtr GetEnv([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
+    [DllImport("libc", EntryPoint = "setenv", SetLastError = true)]
+    private static extern int SetEnv(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value, int overwrite);
+
+    [DllImport("libc", EntryPoint = "unsetenv", SetLastError = true)]
+    private static extern int UnsetEnv([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly Dictionary<string, string?> environment;
+        private readonly Dictionary<string, (string? Managed, string? Native)> environment;
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"mxc-w365-{Guid.NewGuid():N}");
         private readonly X509Certificate2 certificate;
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
@@ -101,7 +136,9 @@ public class MxcLifecycleW365Tests
         {
             environment = new[] { "W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN",
                 "MXC_W365_TEST_CA", "MXC_W365_TEST_PORT" }
-                .ToDictionary(key => key, Environment.GetEnvironmentVariable);
+                .ToDictionary(key => key, key => (
+                    Managed: Environment.GetEnvironmentVariable(key),
+                    Native: OperatingSystem.IsWindows() ? null : Marshal.PtrToStringUTF8(GetEnv(key))));
             using var key = RSA.Create(2048);
             var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256,
                 RSASignaturePadding.Pkcs1);
@@ -124,10 +161,10 @@ public class MxcLifecycleW365Tests
             var ca = Path.Combine(directory, "certificate.pem");
             File.WriteAllText(ca, certificate.ExportCertificatePem());
             listener.Start();
-            Environment.SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
-            Environment.SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
-            Environment.SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
-            Environment.SetEnvironmentVariable("MXC_W365_TEST_PORT",
+            SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
+            SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
+            SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
+            SetEnvironmentVariable("MXC_W365_TEST_PORT",
                 ((IPEndPoint)listener.LocalEndpoint).Port.ToString());
             worker = Serve();
         }
@@ -151,7 +188,7 @@ public class MxcLifecycleW365Tests
                 Requests.Enqueue(headers.ToString());
                 Assert.True(replies.TryDequeue(out var reply), "unexpected W365 service request");
                 var response = Encoding.UTF8.GetBytes(
-                    $"HTTP/1.1 {reply.Status} Fixture\r\nContent-Length: {Encoding.UTF8.GetByteCount(reply.Body)}\r\nConnection: close\r\n\r\n{reply.Body}");
+                    $"HTTP/1.1 {reply.Status} Fixture\r\nContent-Length: {Encoding.UTF8.GetByteCount(reply.Body)}\r\nx-ms-request-id: fixture-request\r\nConnection: close\r\n\r\n{reply.Body}");
                 await stream.WriteAsync(response, cancellation.Token);
                 await stream.FlushAsync(cancellation.Token);
             }
@@ -173,7 +210,11 @@ public class MxcLifecycleW365Tests
                 certificate.Dispose();
                 cancellation.Dispose();
                 foreach (var (key, value) in environment)
-                    Environment.SetEnvironmentVariable(key, value);
+                {
+                    if (!OperatingSystem.IsWindows())
+                        SetNativeEnvironmentVariable(key, value.Native);
+                    Environment.SetEnvironmentVariable(key, value.Managed);
+                }
                 Directory.Delete(directory, recursive: true);
             }
         }

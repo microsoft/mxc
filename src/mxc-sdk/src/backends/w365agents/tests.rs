@@ -529,10 +529,19 @@ fn lifecycle_contract_and_recovery_fixture() {
         for (body, known_id) in [
             (json!({"sessionId":A}), true),
             (json!({"sessionId":"invalid"}), false),
+            (json!({}), false),
         ] {
             fixture.reply(500, &body.to_string());
             let error = sdk::provision_container_json(&source, options).unwrap_err();
             assert_eq!(error.code, crate::v1::ErrorCode::BackendError);
+            let details = error.details.as_ref().unwrap();
+            let client_id = details["clientRequestId"].as_str().unwrap();
+            assert!(error
+                .message
+                .contains(&format!("clientRequestId={client_id}")));
+            assert!(fixture.request(fixture.count() - 1).contains(client_id));
+            assert!(error.message.contains("requestId=fixture-request"));
+            assert!(error.message.contains("possiblySucceeded=true"));
             assert_eq!(
                 error.message.contains(&format!("w365:{POOL}:{A}")),
                 known_id
@@ -737,6 +746,10 @@ fn lifecycle_contract_and_recovery_fixture() {
         fixture.reply(status, "ticket-secret-must-not-surface");
         let error = invoke(&provision(), true).unwrap_err();
         assert!(!format!("{error:?}").contains("ticket-secret"));
+        let uncertain = status >= 500 || status == 408 || (200..400).contains(&status);
+        assert!(error
+            .message
+            .contains(&format!("possiblySucceeded={uncertain}")));
         let details = error.details.unwrap();
         assert_eq!(details["httpStatus"], status);
         assert_eq!(details["requestId"], "fixture-request");

@@ -38,7 +38,8 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
       : process.platform === 'darwin' ? 'libSystem.B.dylib' : 'libc.so.6');
     const replies: { status: number; body: string }[] = [];
     const requests: { method: string | undefined; url: string | undefined;
-      authorization: string | undefined; userType: string | string[] | undefined }[] = [];
+      authorization: string | undefined; userType: string | string[] | undefined;
+      clientRequestId: string | string[] | undefined }[] = [];
     let server: ReturnType<typeof createServer> | undefined;
     const reply = (status: number, body: object | undefined = undefined) =>
       replies.push({ status, body: body === undefined ? '' : JSON.stringify(body) });
@@ -71,11 +72,13 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
             method: incoming.method, url: incoming.url,
             authorization: incoming.headers.authorization,
             userType: incoming.headers['user-type'],
+            clientRequestId: incoming.headers['x-ms-client-request-id'],
           });
           const next = replies.shift();
           assert.ok(next, 'unexpected W365 service request');
           response.writeHead(next.status, {
             'Content-Length': Buffer.byteLength(next.body), Connection: 'close',
+            'x-ms-request-id': 'fixture-request',
           });
           response.end(next.body);
         });
@@ -118,6 +121,11 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
           assert.ok(error instanceof MxcError);
           assert.equal(error.code, 'backend_error');
           assert.match(error.message, /provision_timeout/);
+          const clientRequestId = requests.at(-1)?.clientRequestId;
+          assert.equal(typeof clientRequestId, 'string');
+          assert.ok(error.message.includes(`clientRequestId=${clientRequestId}`));
+          assert.ok(error.message.includes('requestId=fixture-request'));
+          assert.ok(error.message.includes('possiblySucceeded=true'));
           assert.equal(error.message.includes(id), knownId);
           assert.equal(error.message.includes('sandboxId'), knownId);
           assert.ok(!error.message.includes('must-not-surface'));

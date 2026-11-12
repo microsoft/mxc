@@ -377,6 +377,12 @@ fn failure(
     }
     let mut message = format!("w365_agents {operation} failed: {code}");
     if operation == "checkout" {
+        message.push_str(&format!(
+            "; clientRequestId={client_id}; possiblySucceeded={uncertain}"
+        ));
+        if let Some(id) = server_id {
+            message.push_str(&format!("; requestId={id}"));
+        }
         if let Some(id) = identity {
             message.push_str(&format!(
                 "; checkout returned sandboxId {}; retain this ID for explicit release",
