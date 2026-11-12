@@ -111,7 +111,9 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         ..Default::default()
     };
     let mut mounts = bwrap_command::policy_mounts(&request.policy);
-    let _storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
+    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
+        .unwrap()
+        .unwrap();
     let args = bwrap_command::build_args_classified_with_mode(
         &request,
         None,
@@ -134,4 +136,12 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         .position(|args| args[0] == "--tmpfs" && args[1] == root.join("missing").to_str().unwrap())
         .unwrap();
     assert!(overlay < child && overlay < denied);
+    let hidden = std::fs::canonicalize(storage.path()).unwrap();
+    let hidden = hidden.to_str().unwrap();
+    assert!(args
+        .windows(2)
+        .any(|args| args[0] == "--tmpfs" && args[1] == hidden));
+    assert!(args
+        .windows(2)
+        .any(|args| args[0] == "--remount-ro" && args[1] == hidden));
 }

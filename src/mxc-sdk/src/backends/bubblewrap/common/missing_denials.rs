@@ -122,6 +122,19 @@ pub(crate) fn prepare(
             }),
         }
     }
+    // A caller may grant its whole temporary directory read-write. The workload
+    // must not reach the overlay's private lower layer through that grant.
+    let hidden = storage.into_os_string().into_string().map_err(|_| {
+        FilesystemPolicyError::Host(
+            "Bubblewrap: private deny mountpoint storage is not valid UTF-8".to_owned(),
+        )
+    })?;
+    mounts.push(PolicyMount {
+        source: hidden.clone(),
+        destination: hidden,
+        intent: FsIntent::Denied,
+        readonly_overlay: None,
+    });
     mounts.sort_by_key(|mount| Path::new(&mount.destination).components().count());
     Ok(Some(directory))
 }
