@@ -494,7 +494,15 @@ impl WSLContainerRunner {
 }
 
 impl ScriptRunner for WSLContainerRunner {
+    /// Reject policies WSLc cannot enforce, before any container is created.
+    /// Mirrors the config parser so requests reaching the engine directly
+    /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
+    /// instead of late in `execute` on the broken in-container iptables path.
+    /// An embedded NUL in `containerId` is rejected here too, before
+    /// session-name conversion can truncate it and before a dry-run can
+    /// report success.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        reject_embedded_nul_container_id(&request.container_id)?;
         self.validate_target_os()?;
         reject_unsupported_lifecycle(request)?;
 
@@ -532,6 +540,22 @@ fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
 /// SDK call. Tests assert its absence to prove a rejection aborted early.
 pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
+
+/// Refuse an embedded NUL before it can become a WSLc session name.
+///
+/// `string_util::to_wide` truncates at the first NUL, so `alpha\0evil` and
+/// `alpha` would otherwise name the same session. The parser rejects this for
+/// JSON entry points; this covers an already-built `ExecutionRequest`. Do not
+/// echo the raw id — the NUL would also truncate logs.
+fn reject_embedded_nul_container_id(container_id: &str) -> Result<(), ScriptResponse> {
+    if container_id.contains('\0') {
+        return Err(
+            WslcError::Rejected("containerId must not contain null bytes".to_string())
+                .into_response(),
+        );
+    }
+    Ok(())
+}
 
 /// Refuses the `lifecycle` settings the one-shot surface cannot honour.
 ///
@@ -594,6 +618,8 @@ impl WSLContainerRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
+        // Backstop for a direct `execute` that skipped `validate_runner`.
+        reject_embedded_nul_container_id(&request.container_id)?;
         let session_name_str = resolve_session_name(&request.container_id);
         let session_name: Vec<u16> = to_wide(&session_name_str);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
@@ -2751,6 +2777,92 @@ mod tests {
                 crate::mxc_common::models::FailurePhase::Rejected
             );
         }
+    }
+
+    fn request_with_container_id(container_id: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            container_id: container_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// An embedded NUL must fail at `validate_runner`, not only inside
+    /// `create_session`. Session-name conversion truncates at the first NUL,
+    /// so the check has to run before a dry-run can report success.
+    #[test]
+    fn validate_runner_rejects_embedded_nul_container_id() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        assert!(
+            runner
+                .validate_runner(&request_with_container_id("alpha"))
+                .is_ok(),
+            "a containerId without a NUL must stay accepted"
+        );
+
+        let err = runner
+            .validate_runner(&request_with_container_id("alpha\0evil"))
+            .expect_err("an embedded NUL must be rejected");
+        assert!(
+            err.error_message
+                .contains("containerId must not contain null bytes"),
+            "got: {}",
+            err.error_message
+        );
+        assert!(
+            !err.error_message.contains("alpha"),
+            "the raw id must not be echoed: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+    }
+
+    /// Dry-run returns success as soon as `validate_runner` passes, so a NUL
+    /// id must fail there rather than look like a validated request.
+    #[test]
+    fn dry_run_rejects_embedded_nul_container_id_before_container_start() {
+        let mut clean = request_with_container_id("alpha");
+        clean.dry_run = true;
+        let mut clean_logger = Logger::new(Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let clean_response = ScriptRunner::run(&mut runner, &clean, &mut clean_logger);
+        assert_eq!(clean_response.exit_code, 0);
+        assert!(
+            !clean_logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "a passing dry-run must not start a container; logger: {}",
+            clean_logger.get_buffer()
+        );
+
+        let mut request = request_with_container_id("alpha\0evil");
+        request.dry_run = true;
+        let mut logger = Logger::new(Mode::Buffer);
+        let response = ScriptRunner::run(&mut runner, &request, &mut logger);
+        // Follow the shared refusal exit code: -1 on this branch, 1 after the
+        // CI merge picks up main's `Rejected` phase mapping.
+        assert_eq!(
+            response.exit_code,
+            WslcError::Rejected(String::new()).into_response().exit_code
+        );
+        assert!(
+            response
+                .error_message
+                .contains("containerId must not contain null bytes"),
+            "got: {}",
+            response.error_message
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "dry-run must reject before `start_container`; logger: {}",
+            logger.get_buffer()
+        );
     }
 
     /// A rejection must abort the request rather than tear a container down
