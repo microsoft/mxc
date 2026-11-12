@@ -538,8 +538,11 @@ mod tests {
             assert!(message.contains("IT-managed policy rule"));
             assert!(message.contains("requested sandbox permissions"));
             assert!(message.contains("system administrator"));
-            assert!(message.contains("1260"));
-            assert!(message.contains("0x800704EC"));
+            assert!(message.contains(&ERROR_ACCESS_DISABLED_BY_POLICY.0.to_string()));
+            assert!(message.contains(&format!(
+                "0x{:08X}",
+                ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0 as u32
+            )));
             assert!(message.contains(function));
             assert_eq!(message.starts_with("captureDenials:"), capture);
             assert!(!message.contains("target executable"));
@@ -549,9 +552,15 @@ mod tests {
     #[test]
     fn unrelated_environment_and_trace_errors_keep_their_message() {
         for (function, code) in [
-            ("CreateProcessSecurityEnvironment", 0x80070005_u32 as i32),
+            (
+                "CreateProcessSecurityEnvironment",
+                windows::Win32::Foundation::E_ACCESSDENIED.0,
+            ),
             ("CreateProcessSecurityEnvironment", E_NOTIMPL.0),
-            ("CreateProcessSecurityEnvironment", 1260),
+            (
+                "CreateProcessSecurityEnvironment",
+                ERROR_ACCESS_DISABLED_BY_POLICY.0 as i32,
+            ),
             (
                 "GetLastProcessSecurityEnvironmentPolicyResult",
                 ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0,

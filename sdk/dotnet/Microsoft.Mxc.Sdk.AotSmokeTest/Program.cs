@@ -13,7 +13,6 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text;
 using System.Text.Encodings.Web;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
@@ -41,65 +40,73 @@ CheckRoundTrip(new Dev.JsonOptions { Experimental = true },
     x => x.Experimental, "dev JSON execution options");
 CheckRoundTrip(new Dev.PolicyPreparationOptions { Experimental = true },
     x => x.Experimental, "policy preparation options");
+const uint unknownResultVersion = Dev.PolicyFailureVersions.Result + 98;
+const uint unknownMinimumReaderVersion = Dev.PolicyFailureVersions.MinimumReader + 97;
 var policyFailures = new Dev.PolicyFailures
 {
     Results =
     [
         new()
         {
-            Version = 99,
-            MinimumReaderVersion = 98,
+            Version = unknownResultVersion,
+            MinimumReaderVersion = unknownMinimumReaderVersion,
             Outcome = uint.MaxValue,
             Details =
             [
                 new()
                 {
                     FailureClass = uint.MaxValue,
-                    FailureReason = 2,
-                    RequiredAction = 2,
-                    ResourceKind = 1,
-                    ValueKind = 1,
+                    FailureReason = Dev.PolicyFailureReasons.AccessExceedsCeiling,
+                    RequiredAction = Dev.PolicyFailureActions.RestrictFilesystemAccess,
+                    ResourceKind = Dev.PolicyFailureResourceKinds.Path,
+                    ValueKind = Dev.PolicyFailureValueKinds.Access,
                     Flags = uint.MaxValue,
                     RequestedValue = ulong.MaxValue,
                     RequiredValue = 9_007_199_254_740_993,
-                    Resource = [0xD800, 0],
+                    Resource = "C:\\data\0",
                 },
-                new() { Resource = [] },
+                new() { Resource = string.Empty },
                 new(),
+                new() { Resource = "C:\\data\\\u00e9" },
             ],
         },
-        new() { Outcome = 2 },
+        new() { Outcome = Dev.PolicyFailureOutcomes.EvaluationFailed },
     ],
 };
 var storedFailures = policyFailures.ToJson();
 var restoredFailures = Dev.PolicyFailures.FromJson(storedFailures);
 Check(restoredFailures.Results.Length == 2
-    && restoredFailures.Results[0].Version == 99
-    && restoredFailures.Results[0].MinimumReaderVersion == 98
+    && restoredFailures.Results[0].Version == unknownResultVersion
+    && restoredFailures.Results[0].MinimumReaderVersion == unknownMinimumReaderVersion
     && restoredFailures.Results[0].Outcome == uint.MaxValue
     && restoredFailures.Results[0].Details[0].RequestedValue == ulong.MaxValue
     && restoredFailures.Results[0].Details[0].RequiredValue == 9_007_199_254_740_993
-    && restoredFailures.Results[0].Details[0].Resource!.SequenceEqual(new ushort[] { 0xD800, 0 })
-    && restoredFailures.Results[0].Details[1].GetResourceText() == string.Empty
-    && restoredFailures.Results[0].Details[2].GetResourceText() is null,
+    && restoredFailures.Results[0].Details[0].Resource == "C:\\data\0"
+    && restoredFailures.Results[0].Details[1].Resource == string.Empty
+    && restoredFailures.Results[0].Details[2].Resource is null
+    && restoredFailures.Results[0].Details[3].Resource == "C:\\data\\\u00e9",
     "public policy-failure JSON helpers preserve batches, values, and resource presence");
 try
 {
-    _ = restoredFailures.Results[0].Details[0].GetResourceText();
-    Check(false, "resource text rejects malformed UTF-16");
+    _ = new Dev.PolicyFailures
+    {
+        Results = [new() { Details = [new() { Resource = "\uD800" }] }],
+    }.ToJson();
+    Check(false, "policy-failure storage rejects a lone-surrogate resource string");
 }
-catch (DecoderFallbackException)
+catch (JsonException)
 {
 }
 CheckRoundTrip(policyFailures, x => x.ToJson() == storedFailures, "policy failures root");
 CheckRoundTrip(policyFailures.Results[0],
-    x => x.Version == 99 && x.Details[0].RequestedValue == ulong.MaxValue, "native policy-result root");
+    x => x.Version == unknownResultVersion && x.Details[0].RequestedValue == ulong.MaxValue,
+    "native policy-result root");
 CheckRoundTrip(policyFailures.Results[0].Details[0],
     x => x.Flags == uint.MaxValue && x.RequiredValue == 9_007_199_254_740_993, "native policy-detail root");
 var mergedFailures = restoredFailures.MergedWith(Dev.PolicyFailures.FromJson(storedFailures));
 Check(mergedFailures.ToJson() == storedFailures
-    && !ReferenceEquals(mergedFailures.Results[0].Details[0].Resource,
-        restoredFailures.Results[0].Details[0].Resource),
+    && !ReferenceEquals(mergedFailures.Results[0].Details[0],
+        restoredFailures.Results[0].Details[0]),
     "public policy-failure merge deduplicates whole batches into owned storage");
 Dev.PreparedPolicyRequest preparedPolicy;
 using (var document = JsonDocument.Parse("""{"null":null,"value":{"large":18446744073709551615}}"""))
@@ -178,8 +185,9 @@ CheckRoundTrip(MxcJson.Deserialize<JsonElement>(errorDetailsJson),
 MxcException policyError;
 using (var document = JsonDocument.Parse(errorDetailsJson))
 {
+    const string accessDeniedHResult = "0x80070005";
     policyError = new MxcException(ErrorCode.BackendError, "creation refused",
-        "PSEC.Create", "0x80070005", null, document.RootElement);
+        "PSEC.Create", accessDeniedHResult, null, document.RootElement);
 }
 Check(Dev.PolicyFailures.FromException(policyError)?.ToJson() == storedFailures
     && policyError.Details!.Value.GetProperty("other").GetProperty("retained").GetBoolean()

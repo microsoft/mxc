@@ -17,6 +17,8 @@ import { MxcError } from '../../src/v1/errors.js';
 import { run } from '../../src/v1/container.js';
 import {
   runJson, preparePolicyJson, policyFailuresFromError, serializePolicyFailures,
+  PolicyFailureVersions, PolicyFailureClasses, PolicyFailureReasons, PolicyFailureActions,
+  PolicyFailureResourceKinds, PolicyFailureValueKinds, PolicyFailureNativeCodes,
   type PolicyFailures, type PreparedPolicyRequest,
 } from '../../src/v1/dev/index.js';
 import { getStreamingNative } from '../../src/bindings/streaming.js';
@@ -105,7 +107,8 @@ describe('native execution metadata decoding', () => {
 
 describe('native run binding', () => {
   it('keeps Dev creation strict and frees owned error JSON through its result exactly once', async (t) => {
-    const report = { formatVersion: 1, results: [] };
+    const accessDeniedHResult = '0x80070005';
+    const report = { formatVersion: PolicyFailureVersions.Format, results: [] };
     const detailsJson = Buffer.from(JSON.stringify({
       policyFailures: report, backendDetail: { retained: true },
     }) + '\0');
@@ -143,7 +146,7 @@ describe('native run binding', () => {
           error: status ? {
             message: Buffer.from('creation blocked\0'),
             operation: Buffer.from('CreateProcess\0'),
-            nativeCode: Buffer.from('0x80070005\0'),
+            nativeCode: Buffer.from(accessDeniedHResult + '\0'),
             remediation: Buffer.from('Inspect the structured result.\0'),
             detailsJson,
           } : createAbiErrorDetail(),
@@ -169,7 +172,7 @@ describe('native run binding', () => {
         assert.strictEqual(error.code, 'policy_validation');
         assert.strictEqual(error.message, 'creation blocked');
         assert.strictEqual(error.operation, 'CreateProcess');
-        assert.strictEqual(error.nativeCode, '0x80070005');
+        assert.strictEqual(error.nativeCode, accessDeniedHResult);
         assert.strictEqual(error.remediation, 'Inspect the structured result.');
         assert.deepStrictEqual(error.details, {
           ffiStatus: 11, policyFailures: report, backendDetail: { retained: true },
@@ -202,14 +205,17 @@ describe('native run binding', () => {
   it('prepares through Koffi async with separate inputs and owned output/error allocations', async (t) => {
     const requestJson = ' { "version":"1.1.0-alpha","process":{"commandLine":"echo"} } ';
     const failures: PolicyFailures = {
-      formatVersion: 1,
+      formatVersion: PolicyFailureVersions.Format,
       results: [{
-        version: 0xffff_ffff, minimumReaderVersion: 1, outcome: 0xffff_ffff,
+        version: 0xffff_ffff, minimumReaderVersion: PolicyFailureVersions.MinimumReader, outcome: 0xffff_ffff,
         details: [{
-          failureClass: 2, failureReason: 2, requiredAction: 2, resourceKind: 1,
-          valueKind: 1, flags: 0xffff_ffff,
+          failureClass: PolicyFailureClasses.Filesystem,
+          failureReason: PolicyFailureReasons.AccessExceedsCeiling,
+          requiredAction: PolicyFailureActions.RestrictFilesystemAccess,
+          resourceKind: PolicyFailureResourceKinds.Path,
+          valueKind: PolicyFailureValueKinds.Access, flags: 0xffff_ffff,
           requestedValue: '18446744073709551615', requiredValue: '9007199254740993',
-          resource: [0xd800, 0],
+          resource: 'C:\\data\0',
         }],
       }],
     };
@@ -293,7 +299,7 @@ describe('native run binding', () => {
 
   it('cleans preparation allocations on native, decoding, callback and scheduling failures', async (t) => {
     const marker = 'PREPARATION_MALFORMED_RESULT_PRIVATE';
-    const failures: PolicyFailures = { formatVersion: 1, results: [] };
+    const failures: PolicyFailures = { formatVersion: PolicyFailureVersions.Format, results: [] };
     let mode = '';
     let output: Buffer | null = null;
     let diagnostic: Buffer | null = null;
@@ -330,7 +336,7 @@ describe('native run binding', () => {
           Object.assign(error, {
             message: Buffer.from('Policy preparation refused.\0'),
             operation: Buffer.from('prepare_policy_json\0'),
-            nativeCode: Buffer.from('0x800704EC\0'),
+            nativeCode: Buffer.from(PolicyFailureNativeCodes.PolicyBlocked + '\0'),
             detailsJson: diagnostic,
           });
           if (mode === 'scheduling') throw new Error(marker);
@@ -359,7 +365,7 @@ describe('native run binding', () => {
           }
           if (mode === 'native') {
             assert.strictEqual(error.operation, 'prepare_policy_json');
-            assert.strictEqual(error.nativeCode, '0x800704EC');
+            assert.strictEqual(error.nativeCode, PolicyFailureNativeCodes.PolicyBlocked);
             assert.deepStrictEqual(error.details, {
               policyFailures: failures, otherDetail: 'retained', ffiStatus: 11,
             });
@@ -383,7 +389,7 @@ describe('native run binding', () => {
       new Error(diagnostic),
     );
     try {
-      await assert.rejects(preparePolicyJson('{}', { formatVersion: 1, results: [] }),
+      await assert.rejects(preparePolicyJson('{}', { formatVersion: PolicyFailureVersions.Format, results: [] }),
         (error: unknown) => {
           assert.ok(error instanceof MxcError);
           assert.strictEqual(error.code, 'backend_error');

@@ -190,16 +190,30 @@ impl From<PolicyResult> for PolicyFailureResult {
                 .details
                 .unwrap_or_default()
                 .into_iter()
-                .map(|detail| PolicyFailureDetail {
-                    failure_class: detail.failure_class.0,
-                    failure_reason: detail.failure_reason.0,
-                    required_action: detail.required_action.0,
-                    resource_kind: detail.resource_kind.0,
-                    value_kind: detail.value_kind.0,
-                    flags: detail.flags,
-                    requested_value: detail.requested_value,
-                    required_value: detail.required_value,
-                    resource: detail.resource,
+                .map(|detail| {
+                    let mut flags = detail.flags;
+                    let resource = match detail.resource {
+                        None => None,
+                        Some(units) => match String::from_utf16(&units) {
+                            Ok(text) => Some(text),
+                            Err(_) => {
+                                // Omission must not turn a malformed resource into a resource-free remedy.
+                                flags = (flags | RESOURCE_UNAVAILABLE) & !RESOURCE_COMPLETE;
+                                None
+                            }
+                        },
+                    };
+                    PolicyFailureDetail {
+                        failure_class: detail.failure_class.0,
+                        failure_reason: detail.failure_reason.0,
+                        required_action: detail.required_action.0,
+                        resource_kind: detail.resource_kind.0,
+                        value_kind: detail.value_kind.0,
+                        flags,
+                        requested_value: detail.requested_value,
+                        required_value: detail.required_value,
+                        resource,
+                    }
                 })
                 .collect(),
         }
@@ -225,7 +239,10 @@ impl From<&PolicyFailureResult> for PolicyResult {
                         flags: detail.flags,
                         requested_value: detail.requested_value,
                         required_value: detail.required_value,
-                        resource: detail.resource.clone(),
+                        resource: detail
+                            .resource
+                            .as_ref()
+                            .map(|text| text.encode_utf16().collect()),
                     })
                     .collect(),
             ),

@@ -10,7 +10,7 @@ import {
   preparePolicyJson, parsePolicyFailures, serializePolicyFailures, type PolicyFailures,
   PolicyFailureOutcomes, PolicyFailureClasses, PolicyFailureReasons, PolicyFailureActions,
   PolicyFailureResourceKinds, PolicyFailureValueKinds, PolicyFailureAccessValues, PolicyFailureFlags,
-  policyFailureResourceText,
+  PolicyFailureVersions,
 } from '@microsoft/mxc-sdk/v1/dev';
 import { MxcError, policy } from '@microsoft/mxc-sdk/v1';
 import { createPrivateWindowsTempDir, isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
@@ -106,13 +106,14 @@ it('V1.Dev rejects unknown fields and unregistered exact versions through native
   );
 });
 
-it('V1.Dev bounds terminal policy failures at native preparation without creating a workload', {
-  skip: !windows,
-}, async () => {
+it('V1.Dev bounds terminal policy failures at native preparation without creating a workload', async () => {
   const report: PolicyFailures = {
-    formatVersion: 1,
+    formatVersion: PolicyFailureVersions.Format,
     results: Array.from({ length: 65 }, (_, outcome) => ({
-      version: 1, minimumReaderVersion: 1, outcome, details: [],
+      version: PolicyFailureVersions.Result,
+      minimumReaderVersion: PolicyFailureVersions.MinimumReader,
+      outcome,
+      details: [],
     })),
   };
   const restored = parsePolicyFailures(serializePolicyFailures(report));
@@ -125,6 +126,36 @@ it('V1.Dev bounds terminal policy failures at native preparation without creatin
       assert.equal(error.details?.ffiStatus, 1);
       assert.match(error.message, /result limit/);
       return true;
+  });
+});
+
+it('V1.Dev preparation without observations returns the request unchanged on every backend', async () => {
+  for (const containment of ['processcontainer', 'process', 'bubblewrap', 'seatbelt', undefined]) {
+    const request = JSON.stringify({
+      version: '1.1.0-alpha',
+      ...(containment === undefined ? {} : { containment }),
+      process: { commandLine: 'echo must-not-run' },
+    });
+    const prepared = await preparePolicyJson(request, {
+      formatVersion: PolicyFailureVersions.Format, results: [],
+    });
+    assert.equal(prepared.requestJson, request, `containment ${containment ?? '(default)'}`);
+    assert.deepEqual(prepared.changes, []);
+  }
+  const bubblewrap = '{"version":"1.1.0-alpha","containment":"bubblewrap",'
+    + '"process":{"commandLine":"echo must-not-run"}}';
+  await assert.rejects(preparePolicyJson(bubblewrap, {
+    formatVersion: PolicyFailureVersions.Format,
+    results: [{
+      version: PolicyFailureVersions.Result,
+      minimumReaderVersion: PolicyFailureVersions.MinimumReader,
+      outcome: PolicyFailureOutcomes.Blocked,
+      details: [],
+    }],
+  }), (error: unknown) => {
+    assert.ok(error instanceof MxcError);
+    assert.equal(error.code, 'unsupported_containment');
+    return true;
   });
 });
 
@@ -193,10 +224,10 @@ it('V1.Dev prepares filesystem ceilings for caller-accepted strict creation', {
       },
     };
     const failures: PolicyFailures = {
-      formatVersion: 1,
+      formatVersion: PolicyFailureVersions.Format,
       results: [{
-        version: 1,
-        minimumReaderVersion: 1,
+        version: PolicyFailureVersions.Result,
+        minimumReaderVersion: PolicyFailureVersions.MinimumReader,
         outcome: PolicyFailureOutcomes.Blocked,
         details: [{
           failureClass: PolicyFailureClasses.Filesystem,
@@ -207,8 +238,7 @@ it('V1.Dev prepares filesystem ceilings for caller-accepted strict creation', {
           flags: PolicyFailureFlags.HasActionableDetails | PolicyFailureFlags.ResourceComplete,
           requestedValue: PolicyFailureAccessValues.ReadWrite,
           requiredValue: PolicyFailureAccessValues.ReadOnly,
-          resource: Array.from({ length: restrictedDirectory.length }, (_, index) =>
-            restrictedDirectory.charCodeAt(index)),
+          resource: restrictedDirectory,
         }],
       }],
     };
@@ -216,7 +246,7 @@ it('V1.Dev prepares filesystem ceilings for caller-accepted strict creation', {
     const storedFailures = serializePolicyFailures(failures);
     const restoredFailures = parsePolicyFailures(storedFailures);
     assert.deepEqual(restoredFailures, failures);
-    assert.equal(policyFailureResourceText(restoredFailures.results[0].details[0]), restrictedDirectory);
+    assert.equal(restoredFailures.results[0].details[0].resource, restrictedDirectory);
     const baseline = await runJson(requestJson);
     assert.equal(baseline.exitCode, 21, baseline.stderr);
     assert.match(fs.readFileSync(restrictedFile, 'utf8'), /UNEXPECTED_RESTRICTED_WRITE/);

@@ -28,7 +28,7 @@ public class MxcProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
         Assert.SkipUnless(!preparePolicy || OperatingSystem.IsWindows(),
-            "policy preparation requires Windows ProcessContainer");
+            "policy observations are currently produced only by Windows ProcessContainer");
         if (preparePolicy)
         {
             await RunPreparedFilesystemScenarioAsync(version);
@@ -97,7 +97,7 @@ public class MxcProcessTests
                                 Flags = Dev.PolicyFailureFlags.HasActionableDetails | Dev.PolicyFailureFlags.ResourceComplete,
                                 RequestedValue = Dev.PolicyFailureAccessValues.ReadWrite,
                                 RequiredValue = Dev.PolicyFailureAccessValues.ReadOnly,
-                                Resource = restricted.Select(character => (ushort)character).ToArray(),
+                                Resource = restricted,
                             },
                         ],
                     },

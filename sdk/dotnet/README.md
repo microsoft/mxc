@@ -290,7 +290,11 @@ directories.
 `Microsoft.Mxc.Sdk.V1.Dev.MxcContainer.PreparePolicyJson` and
 `PreparePolicyJsonAsync` take MXC request JSON, saved `PolicyFailures`, and
 optional `PolicyPreparationOptions`. Preparation validates supported
-restrictive changes for Windows ProcessContainer without creating a container.
+restrictive changes without creating a container. It accepts create-and-run
+requests for every backend; empty observations return the request unchanged.
+Native Windows ProcessContainer is currently the only backend that reports and
+applies observations, and other backends reject non-empty observations with
+`UnsupportedContainment`.
 It returns an owned `PreparedPolicyRequest` with `RequestJson` and `Changes`.
 The application inspects and explicitly accepts the changes before passing
 `RequestJson` to ordinary strict creation. Each creation call makes one native
@@ -338,10 +342,12 @@ catch (MxcException error)
 `MxcException.Details` without changing its code, message, or other backend
 details. `ToJson` and `FromJson` are public, source-generated JSON helpers
 that also work with Native AOT. They preserve native batch boundaries, unknown
-numeric codes, lossless `ulong` values as decimal strings, and optional
-`ushort[]` resources.
-`PolicyFailureDetail.GetResourceText()` throws `DecoderFallbackException` for
-malformed UTF-16 while leaving the raw units available.
+numeric codes, and lossless `ulong` values as decimal strings.
+`PolicyFailureDetail.Resource` holds a resource name as a string; an empty
+string is a resource and `null` means none was reported. Windows can report a
+name that is not valid UTF-16. That detail leaves `Resource` null, marks the
+resource unavailable, and is never used to change a
+request. `ToJson` rejects a `Resource` string containing an unpaired surrogate.
 Named groups such as `Dev.PolicyFailureOutcomes.Blocked` and
 `Dev.PolicyFailureReasons.CapabilityNotAllowed` make comparisons readable
 without changing numeric JSON or discarding unknown values.

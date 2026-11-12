@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::core_modules::process_security_environment_policy_result::experimental_process_security_environment_policy_result as layout;
-use crate::mxc_common::policy_failures::PolicyFailureDetail;
+use crate::mxc_common::policy_failures::{PolicyFailureDetail, MAX_RESULTS};
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::{E_FAIL, S_OK};
 use windows::Win32::System::Com::CoTaskMemAlloc;
@@ -19,6 +19,8 @@ const POLICY_DENIED_MESSAGE: &str = concat!(
     "(ERROR_ACCESS_DISABLED_BY_POLICY, 1260). Review the requested sandbox permissions or ",
     "contact your system administrator.",
 );
+/// An unrelated caller flag that policy-result capture must preserve.
+const CALLER_FLAG: u32 = 0x40;
 
 struct FakeState {
     status: HRESULT,
@@ -44,20 +46,22 @@ impl Default for FakeState {
             status: POLICY_DENIED,
             handle: false,
             support_status: S_OK,
-            support_flags: 0x10,
+            support_flags: EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT,
             getter_status: S_OK,
             report: PolicyFailureResult {
-                outcome: 1,
+                outcome: PolicyFailureResult::OUTCOME_BLOCKED,
                 details: vec![PolicyFailureDetail {
-                    failure_class: 2,
-                    failure_reason: 2,
-                    required_action: 2,
-                    resource_kind: 1,
-                    value_kind: 1,
-                    flags: 3,
-                    requested_value: 2,
-                    required_value: 1,
-                    resource: Some(r"C:\work".encode_utf16().collect()),
+                    failure_class: PolicyFailureDetail::CLASS_FILESYSTEM,
+                    failure_reason: PolicyFailureDetail::REASON_ACCESS_EXCEEDS_CEILING,
+                    required_action: PolicyFailureDetail::ACTION_RESTRICT_FILESYSTEM_ACCESS,
+                    resource_kind: PolicyFailureDetail::RESOURCE_KIND_PATH,
+                    value_kind: PolicyFailureDetail::VALUE_KIND_ACCESS,
+                    flags: PolicyFailureDetail::FLAG_HAS_ACTIONABLE_DETAILS
+                        | PolicyFailureDetail::FLAG_RESOURCE_COMPLETE,
+                    requested_value: PolicyFailureDetail::ACCESS_READ_WRITE,
+                    required_value: PolicyFailureDetail::ACCESS_READ_ONLY,
+                    resource: Some(r"C:\work".to_string()),
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -300,12 +304,13 @@ fn policy_preparation_app_loop_merges_observations_then_accepts_strict_creation(
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.report.details = vec![PolicyFailureDetail {
-                failure_class: 2,
-                failure_reason: 1,
-                required_action: 1,
-                resource_kind: 2,
-                flags: 3,
-                resource: Some(capability.encode_utf16().collect()),
+                failure_class: PolicyFailureDetail::CLASS_FILESYSTEM,
+                failure_reason: PolicyFailureDetail::REASON_CAPABILITY_NOT_ALLOWED,
+                required_action: PolicyFailureDetail::ACTION_REMOVE_CAPABILITY,
+                resource_kind: PolicyFailureDetail::RESOURCE_KIND_CAPABILITY,
+                flags: PolicyFailureDetail::FLAG_HAS_ACTIONABLE_DETAILS
+                    | PolicyFailureDetail::FLAG_RESOURCE_COMPLETE,
+                resource: Some(capability.to_string()),
                 ..Default::default()
             }];
         });
@@ -447,15 +452,22 @@ fn policy_failures_native_invalid_payloads_stop_and_free_without_text_specifics(
                     bytes[4..].copy_from_slice(b"PSEP");
                     state.payload_override = Some(bytes);
                 }
-                "version" => state.report.minimum_reader_version = 2,
-                "resourceFlags" => state.report.details[0].flags = 1,
+                "version" => {
+                    state.report.minimum_reader_version =
+                        PolicyFailureResult::MINIMUM_READER_VERSION + 1
+                }
+                "resourceFlags" => {
+                    state.report.details[0].flags = PolicyFailureDetail::FLAG_HAS_ACTIONABLE_DETAILS
+                }
                 "byteLimit" => state.reported_size = Some(MAX_RESULT_BYTES as u32 + 1),
-                "resourceLimit" => state.report.details[0].resource = Some(vec![65; 32_768]),
+                "resourceLimit" => state.report.details[0].resource = Some("A".repeat(32_768)),
                 "zeroSize" => state.reported_size = Some(0),
                 _ => unreachable!(),
             }
         });
-        let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+        let failure = api
+            .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+            .unwrap_err();
         let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
         assert!(
             PolicyFailures::from_error(&error).unwrap().is_none(),
@@ -470,7 +482,10 @@ fn policy_failures_native_invalid_payloads_stop_and_free_without_text_specifics(
                 .is_some(),
             "{fault}"
         );
-        assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+        assert_eq!(
+            error.native_code.as_deref(),
+            Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED)
+        );
         assert_eq!(error.message, POLICY_DENIED_MESSAGE, "{fault}");
         STATE.with(|state| assert_eq!(state.borrow().frees, 1, "{fault}"));
     }
@@ -489,7 +504,9 @@ fn policy_failures_native_maximum_byte_count_remains_usable() {
         bytes.resize(MAX_RESULT_BYTES, 0);
         state.payload_override = Some(bytes);
     });
-    let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+    let failure = api
+        .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+        .unwrap_err();
     let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
     assert_eq!(
         PolicyFailures::from_error(&error)
@@ -505,15 +522,16 @@ fn policy_failures_native_maximum_byte_count_remains_usable() {
 #[test]
 fn policy_failures_from_malformed_error_details_use_one_canonical_error() {
     let api = reset();
-    let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+    let failure = api
+        .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+        .unwrap_err();
     let valid = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
     let stored = valid.details.as_deref().unwrap()["policyFailures"].clone();
     let mut wrong_version = stored.clone();
     wrong_version["formatVersion"] = 2.into();
     let mut over_limit = stored.clone();
     let result = stored["results"][0].clone();
-    over_limit["results"] =
-        vec![result; crate::mxc_common::policy_failures::MAX_RESULTS + 2].into();
+    over_limit["results"] = vec![result; MAX_RESULTS + 2].into();
     for (case, policy_failures) in [
         ("formatVersion", wrong_version),
         ("resultLimit", over_limit),
@@ -540,13 +558,15 @@ fn policy_failures_from_malformed_error_details_use_one_canonical_error() {
 fn policy_failures_caller_merge_keeps_a_complete_terminal_batch() {
     let api = reset();
     let mut prior = PolicyFailures::default();
-    for index in 0..64 {
+    for index in 0..MAX_RESULTS {
         let mut result = STATE.with(|state| state.borrow().report.clone());
-        result.details[0].resource = Some(format!(r"C:\history\{index}").encode_utf16().collect());
+        result.details[0].resource = Some(format!(r"C:\history\{index}"));
         prior.append(result);
     }
     prior.validate().unwrap();
-    let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+    let failure = api
+        .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+        .unwrap_err();
     let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
     assert!(error
         .details
@@ -554,7 +574,10 @@ fn policy_failures_caller_merge_keeps_a_complete_terminal_batch() {
         .unwrap()
         .get("policyFeedbackError")
         .is_none());
-    assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+    assert_eq!(
+        error.native_code.as_deref(),
+        Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED)
+    );
     assert_eq!(
         error.operation.as_deref(),
         Some("CreateProcessSecurityEnvironment")
@@ -562,8 +585,8 @@ fn policy_failures_caller_merge_keeps_a_complete_terminal_batch() {
     let current = PolicyFailures::from_error(&error).unwrap().unwrap();
     assert_eq!(current.results.len(), 1);
     let complete = prior.merged_with(&current).unwrap();
-    assert_eq!(complete.results.len(), 65);
-    assert_eq!(&complete.results[..64], &prior.results);
+    assert_eq!(complete.results.len(), MAX_RESULTS + 1);
+    assert_eq!(&complete.results[..MAX_RESULTS], &prior.results);
     assert_eq!(
         PolicyFailures::from_json(&complete.to_json().unwrap()).unwrap(),
         complete
@@ -593,14 +616,15 @@ fn policy_preparation_capture_removal_is_authorable_and_strictly_submitted() {
     let mut failures = PolicyFailures::default();
     for capability in ["learningModeLogging", "permissiveLearningMode"] {
         failures.append(PolicyFailureResult {
-            outcome: 1,
+            outcome: PolicyFailureResult::OUTCOME_BLOCKED,
             details: vec![PolicyFailureDetail {
-                failure_class: 3,
-                failure_reason: 1,
-                required_action: 1,
-                resource_kind: 2,
-                flags: 3,
-                resource: Some(capability.encode_utf16().collect()),
+                failure_class: PolicyFailureDetail::CLASS_ENFORCEMENT_MODE,
+                failure_reason: PolicyFailureDetail::REASON_CAPABILITY_NOT_ALLOWED,
+                required_action: PolicyFailureDetail::ACTION_REMOVE_CAPABILITY,
+                resource_kind: PolicyFailureDetail::RESOURCE_KIND_CAPABILITY,
+                flags: PolicyFailureDetail::FLAG_HAS_ACTIONABLE_DETAILS
+                    | PolicyFailureDetail::FLAG_RESOURCE_COMPLETE,
+                resource: Some(capability.to_string()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -678,9 +702,13 @@ fn policy_preparation_capture_removal_is_authorable_and_strictly_submitted() {
 fn policy_failures_native_capture_preserves_data_status_and_cleanup_not_prose() {
     let api = reset();
     STATE.with(|state| state.borrow_mut().handle = true);
-    let error = api.create_with_diagnostics(b"spec", 0x40).unwrap_err();
+    let error = api
+        .create_with_diagnostics(b"spec", CALLER_FLAG)
+        .unwrap_err();
     let rendered = format!("{error:?}");
-    assert!(!rendered.contains("67, 58, 92, 119"), "{rendered}");
+    for resource in [r"C:\work", r"C:\\work"] {
+        assert!(!rendered.contains(resource), "{rendered}");
+    }
     assert!(rendered.contains("<redacted>"), "{rendered}");
     let error = crate::mxc_engine::Error::from(error.response(false).into_mxc_error());
     let failures = PolicyFailures::from_error(&error).unwrap().unwrap();
@@ -688,13 +716,13 @@ fn policy_failures_native_capture_preserves_data_status_and_cleanup_not_prose() 
         error.operation.as_deref(),
         Some("CreateProcessSecurityEnvironment")
     );
-    assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+    assert_eq!(
+        error.native_code.as_deref(),
+        Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED)
+    );
     assert_eq!(error.message, POLICY_DENIED_MESSAGE);
     assert_eq!(
-        failures.results[0].details[0]
-            .resource_text()
-            .unwrap()
-            .as_deref(),
+        failures.results[0].details[0].resource.as_deref(),
         Some(r"C:\work")
     );
     STATE.with(|state| {
@@ -711,7 +739,10 @@ fn policy_failures_native_capture_preserves_data_status_and_cleanup_not_prose() 
                     .position(|call| *call == "close")
                     .unwrap()
         );
-        assert_eq!(state.flags, [0x42]);
+        assert_eq!(
+            state.flags,
+            [CALLER_FLAG | EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT]
+        );
         assert_eq!(state.frees, 1);
         assert_eq!(state.closes, 1);
         assert!(state
@@ -719,6 +750,59 @@ fn policy_failures_native_capture_preserves_data_status_and_cleanup_not_prose() 
             .iter()
             .all(|id| *id == std::thread::current().id()));
     });
+}
+
+#[test]
+fn policy_failures_malformed_native_resource_is_unavailable_and_cannot_prepare() {
+    let _host =
+        crate::process_container_common::test_env::PolicyCapabilityGuard::set(true, true, true);
+    for path_count in [false, true] {
+        let mut api = reset();
+        api.version_support = Some(version);
+        let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.handle = true;
+            let mut native = PolicyResult::from(&state.report);
+            let detail = &mut native.details.as_mut().unwrap()[0];
+            detail.resource = Some(vec![0xd800]);
+            if path_count {
+                detail.failure_reason = layout::FailureReason::RequestPathLimit;
+                detail.required_action = layout::RequiredAction::ReducePathCount;
+                detail.resource_kind = layout::ResourceKind::None;
+                detail.value_kind = layout::ValueKind::PathCount;
+            }
+            let mut builder = flatbuffers::FlatBufferBuilder::new();
+            let root = native.pack(&mut builder);
+            layout::finish_policy_result_buffer(&mut builder, root);
+            state.payload_override = Some(builder.finished_data().to_vec());
+        });
+        let error = api
+            .create_with_diagnostics(b"spec", CALLER_FLAG)
+            .unwrap_err();
+        let error = crate::mxc_engine::Error::from(error.response(false).into_mxc_error());
+        let captured = PolicyFailures::from_error(&error).unwrap().unwrap();
+        let restored = PolicyFailures::from_json(&captured.to_json().unwrap()).unwrap();
+        assert_eq!(restored, captured);
+        let detail = &restored.results[0].details[0];
+        assert!(detail.resource.is_none());
+        assert_eq!(
+            detail.flags,
+            PolicyFailureDetail::FLAG_HAS_ACTIONABLE_DETAILS
+                | PolicyFailureDetail::FLAG_RESOURCE_UNAVAILABLE
+        );
+        let request = r#"{"version":"1.0.0","process":{"commandLine":"must-not-run"}}"#;
+        let error = crate::v1::dev::prepare_policy_json(request, &restored, Default::default())
+            .unwrap_err();
+        assert_eq!(error.code, crate::v1::ErrorCode::PolicyValidation);
+        STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(state.specifications.len(), 1);
+            assert!(!state.calls.contains(&"launch"));
+            assert_eq!(state.frees, 1);
+            assert_eq!(state.closes, 1);
+        });
+    }
 }
 
 #[test]
@@ -730,7 +814,7 @@ fn policy_failures_are_not_queried_after_success_or_unrelated_failure() {
             state.status = status;
             state.handle = status.is_ok();
         });
-        drop(api.create_with_diagnostics(b"spec", 0));
+        drop(api.create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE));
         STATE.with(|state| {
             let state = state.borrow();
             assert!(!state.calls.contains(&"get"));
@@ -744,7 +828,9 @@ fn policy_failures_are_not_queried_after_success_or_unrelated_failure() {
 fn policy_failures_getter_failure_frees_outputs_and_reports_unavailability() {
     let api = reset();
     STATE.with(|state| state.borrow_mut().getter_status = E_FAIL);
-    let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+    let failure = api
+        .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+        .unwrap_err();
     let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
     assert!(PolicyFailures::from_error(&error).unwrap().is_none());
     assert!(error
@@ -753,7 +839,10 @@ fn policy_failures_getter_failure_frees_outputs_and_reports_unavailability() {
         .unwrap()
         .get("policyResultUnavailable")
         .is_some());
-    assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+    assert_eq!(
+        error.native_code.as_deref(),
+        Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED)
+    );
     STATE.with(|state| assert_eq!(state.borrow().frees, 1));
 }
 
@@ -761,7 +850,9 @@ fn policy_failures_getter_failure_frees_outputs_and_reports_unavailability() {
 fn policy_failures_missing_getter_reports_unavailability_only_as_structured_data() {
     let mut api = reset();
     api.get_last_policy_result = None;
-    let failure = api.create_with_diagnostics(b"spec", 0).unwrap_err();
+    let failure = api
+        .create_with_diagnostics(b"spec", PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+        .unwrap_err();
     let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
     assert!(PolicyFailures::from_error(&error).unwrap().is_none());
     assert!(error
@@ -773,32 +864,40 @@ fn policy_failures_missing_getter_reports_unavailability_only_as_structured_data
     assert_eq!(error.message, POLICY_DENIED_MESSAGE);
     STATE.with(|state| {
         let state = state.borrow();
-        assert_eq!(state.flags, [0]);
+        assert_eq!(state.flags, [PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE]);
         assert!(!state.calls.contains(&"get"));
     });
 }
 
 #[test]
 fn policy_failures_unadvertised_or_failed_support_preserves_strict_creation() {
-    for (support_status, support_flags) in [(S_OK, 0), (S_OK, 0x0f), (E_FAIL, 0x10)] {
+    let no_support = 0;
+    let other_support = !EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT;
+    for (support_status, support_flags) in [
+        (S_OK, no_support),
+        (S_OK, other_support),
+        (E_FAIL, EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT),
+    ] {
         let api = reset();
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             state.support_status = support_status;
             state.support_flags = support_flags;
         });
-        let caller_flags = 0x40;
         let failure = api
-            .create_with_diagnostics(b"spec", caller_flags)
+            .create_with_diagnostics(b"spec", CALLER_FLAG)
             .unwrap_err();
         STATE.with(|state| {
             let state = state.borrow();
-            assert_eq!(state.flags, [caller_flags]);
+            assert_eq!(state.flags, [CALLER_FLAG]);
             assert_eq!(state.calls, ["support", "create"]);
             assert_eq!(state.frees, 0);
         });
         let error = crate::mxc_engine::Error::from(failure.response(false).into_mxc_error());
-        assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+        assert_eq!(
+            error.native_code.as_deref(),
+            Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED)
+        );
         assert_eq!(
             error.operation.as_deref(),
             Some("CreateProcessSecurityEnvironment")

@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System.Buffers;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -114,15 +113,36 @@ public static class PolicyFailureFlags
     public const uint ResourceUnavailable = 4;
 }
 
+/// <summary>Supported policy-failure format and native result versions.</summary>
+public static class PolicyFailureVersions
+{
+    /// <summary>The supported <see cref="PolicyFailures.FormatVersion"/>.</summary>
+    public const uint Format = 1;
+    /// <summary>The native result version the SDK writes for <see cref="PolicyFailureResult.Version"/>.</summary>
+    public const uint Result = 1;
+    /// <summary>The native reader version the SDK writes for <see cref="PolicyFailureResult.MinimumReaderVersion"/>.</summary>
+    public const uint MinimumReader = 1;
+}
+
 /// <summary>Caller-owned creation-policy observations, not a policy approval.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class PolicyFailures
 {
-    private const int MaximumStorageBytes = 4 * 1024 * 1024 + 512 * 1024;
+    private const int MaximumInvocationBytes = 4 * 1024 * 1024;
+    private const int MaximumStorageBytes = MaximumInvocationBytes + 512 * 1024;
+    private const int MaximumInvocationResults = 64;
+    private const int MaximumInvocationDetails = 1024;
+    private const long MaximumInvocationResourceUnits = 262_144;
+    private const int MaximumDetailsPerResult = 64;
+    private const long MaximumResourceUnitsPerResult = 32_768;
+    // A terminal report can contain one native batch beyond the invocation limits.
+    private const int MaximumStorageResults = MaximumInvocationResults + 1;
+    private const int MaximumStorageDetails = MaximumInvocationDetails + MaximumDetailsPerResult;
+    private const long MaximumStorageResourceUnits = MaximumInvocationResourceUnits + MaximumResourceUnitsPerResult;
 
     /// <summary>The MXC policy-failure format version, independent of native versions.</summary>
     [JsonRequired]
-    public uint FormatVersion { get; init; } = 1;
+    public uint FormatVersion { get; init; } = PolicyFailureVersions.Format;
 
     /// <summary>Native refusal batches, preserving their boundaries and order.</summary>
     [JsonRequired]
@@ -215,12 +235,11 @@ public sealed class PolicyFailures
 
     private void ValidateStorage()
     {
-        if (FormatVersion != 1)
+        if (FormatVersion != PolicyFailureVersions.Format)
         {
             throw new JsonException("unsupported policy-failure formatVersion");
         }
-        // A terminal report can contain one native batch beyond the invocation limits.
-        if (Results is null || Results.Length > 65)
+        if (Results is null || Results.Length > MaximumStorageResults)
         {
             throw new JsonException("policy failures exceed the storage result limit or have null results");
         }
@@ -229,7 +248,7 @@ public sealed class PolicyFailures
         long resourceUnits = 0;
         foreach (var result in Results)
         {
-            if (result?.Details is null || result.Details.Length > 64)
+            if (result?.Details is null || result.Details.Length > MaximumDetailsPerResult)
             {
                 throw new JsonException("policy failures have an invalid result or exceed the per-result detail limit");
             }
@@ -241,18 +260,15 @@ public sealed class PolicyFailures
                 {
                     throw new JsonException("policy failures contain a null detail");
                 }
-                if (detail.Resource is { } resource)
-                {
-                    resultUnits += resource.LongLength + 1;
-                }
+                resultUnits += detail.ResourceUnitsWithTerminator();
             }
-            if (resultUnits > 32_768)
+            if (resultUnits > MaximumResourceUnitsPerResult)
             {
                 throw new JsonException("policy failures exceed the per-result resource limit");
             }
             resourceUnits += resultUnits;
         }
-        if (details > 1088 || resourceUnits > 294_912)
+        if (details > MaximumStorageDetails || resourceUnits > MaximumStorageResourceUnits)
         {
             throw new JsonException("policy failures exceed the total storage detail/resource limit");
         }
@@ -265,11 +281,11 @@ public sealed class PolicyFailureResult
 {
     /// <summary>The native policy-result contract version.</summary>
     [JsonRequired]
-    public uint Version { get; init; } = 1;
+    public uint Version { get; init; } = PolicyFailureVersions.Result;
 
     /// <summary>The minimum native reader version.</summary>
     [JsonRequired]
-    public uint MinimumReaderVersion { get; init; } = 1;
+    public uint MinimumReaderVersion { get; init; } = PolicyFailureVersions.MinimumReader;
 
     /// <summary>The native outcome; compare with <see cref="PolicyFailureOutcomes"/>. Unknown values are retained.</summary>
     [JsonRequired]
@@ -280,7 +296,7 @@ public sealed class PolicyFailureResult
     public PolicyFailureDetail[] Details { get; init; } = [];
 }
 
-/// <summary>A native policy observation with lossless numeric and resource data.</summary>
+/// <summary>A native policy observation with lossless numeric values and optional resource text.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class PolicyFailureDetail
 {
@@ -318,27 +334,37 @@ public sealed class PolicyFailureDetail
     [JsonConverter(typeof(PolicyFailureValueJsonConverter))]
     public ulong RequiredValue { get; init; }
 
-    /// <summary>Optional UTF-16 code units without a terminator. Null differs from empty or malformed data.</summary>
-    public ushort[]? Resource { get; init; }
+    /// <summary>
+    /// Native resource text without a terminator. An empty string differs from null (absent).
+    /// Completeness is reported by <see cref="PolicyFailureFlags.ResourceComplete"/>.
+    /// Invalid native UTF-16 is omitted and marked unavailable.
+    /// </summary>
+    public string? Resource { get; init; }
 
-    /// <summary>Decode resource text strictly; this does not establish completeness or authorize a policy change.</summary>
-    /// <exception cref="DecoderFallbackException">The resource contains malformed UTF-16.</exception>
-    public string? GetResourceText()
+    internal long ResourceUnitsWithTerminator()
     {
-        if (Resource is null)
+        if (Resource is { } text)
         {
-            return null;
-        }
-        var text = new string(MemoryMarshal.Cast<ushort, char>(Resource.AsSpan()));
-        var remaining = text.AsSpan();
-        while (!remaining.IsEmpty)
-        {
-            if (Rune.DecodeFromUtf16(remaining, out _, out var consumed) != OperationStatus.Done)
+            // Serialization would silently replace an unpaired surrogate.
+            if (!IsValidUtf16(text))
             {
-                throw new DecoderFallbackException("policy resource is not valid UTF-16");
+                throw new JsonException("policy failure resource must be valid UTF-16");
             }
-            remaining = remaining[consumed..];
+            return text.Length + 1L;
         }
-        return text;
+        return 0;
+    }
+
+    private static bool IsValidUtf16(ReadOnlySpan<char> text)
+    {
+        while (!text.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(text, out _, out var consumed) != OperationStatus.Done)
+            {
+                return false;
+            }
+            text = text[consumed..];
+        }
+        return true;
     }
 }

@@ -21,6 +21,7 @@ import {
   createAbiErrorDetail,
   type AbiErrorDetail,
 } from '../../src/bindings/native-error.js';
+import { PolicyFailureVersions } from '../../src/v1/dev/policy-failures.js';
 
 class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
@@ -285,7 +286,7 @@ describe('native streaming binding ownership', () => {
   it('preserves structured creation errors and frees their JSON only with the out-error', async () => {
     const request = ' { "version":"1.1.0-alpha","process":{"commandLine":"echo"} } ';
     for (const json of [
-      '{"policyFailures":{"formatVersion":1,"results":[]},"backendDetail":"retained"}',
+      `{"policyFailures":{"formatVersion":${PolicyFailureVersions.Format},"results":[]},"backendDetail":"retained"}`,
       '{',
     ]) {
       const native = new FakeNative();
@@ -295,9 +296,7 @@ describe('native streaming binding ownership', () => {
         createStreamingDriverFromJson(request, native, new FakeStreams(), true),
         json === '{'
           ? { code: 'backend_error', message: 'native runtime returned malformed error details' }
-          : { code: 'policy_validation', details: {
-            ffiStatus: 11, policyFailures: { formatVersion: 1, results: [] }, backendDetail: 'retained',
-          } },
+          : { code: 'policy_validation', details: { ffiStatus: 11, ...JSON.parse(json) } },
       );
       assert.strictEqual(native.spawnRequest, request);
       assert.strictEqual(native.spawnExperimental, 1);

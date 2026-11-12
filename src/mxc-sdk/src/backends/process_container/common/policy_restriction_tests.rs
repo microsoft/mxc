@@ -30,6 +30,10 @@ fn remove(capability: &str) -> RestrictionHint {
     RestrictionHint::RemoveCapability(capability.into())
 }
 
+const NO_ACCESS: u64 = Detail::ACCESS_NONE;
+const RO: u64 = Detail::ACCESS_READ_ONLY;
+const RW: u64 = Detail::ACCESS_READ_WRITE;
+
 fn restrict(path: &str, requested: u64, maximum: u64) -> RestrictionHint {
     RestrictionHint::RestrictPath {
         path: path.into(),
@@ -50,42 +54,45 @@ fn rejection(
 fn observation(
     hints: &[RestrictionHint],
 ) -> crate::mxc_common::policy_failures::PolicyFailureResult {
-    use crate::mxc_common::policy_failures::{PolicyFailureDetail, PolicyFailureResult};
-    PolicyFailureResult {
-        outcome: 1,
+    use crate::mxc_common::policy_failures::{
+        PolicyFailureDetail as Detail, PolicyFailureResult as Batch,
+    };
+    Batch {
+        outcome: Batch::OUTCOME_BLOCKED,
         details: hints
             .iter()
             .map(|hint| match hint {
-                RestrictionHint::RemoveCapability(capability) => PolicyFailureDetail {
-                    failure_class: 2,
-                    failure_reason: 1,
-                    required_action: 1,
-                    resource_kind: 2,
-                    flags: 3,
-                    resource: Some(capability.encode_utf16().collect()),
+                RestrictionHint::RemoveCapability(capability) => Detail {
+                    failure_class: Detail::CLASS_FILESYSTEM,
+                    failure_reason: Detail::REASON_CAPABILITY_NOT_ALLOWED,
+                    required_action: Detail::ACTION_REMOVE_CAPABILITY,
+                    resource_kind: Detail::RESOURCE_KIND_CAPABILITY,
+                    flags: Detail::FLAG_HAS_ACTIONABLE_DETAILS | Detail::FLAG_RESOURCE_COMPLETE,
+                    resource: Some(capability.clone()),
                     ..Default::default()
                 },
                 RestrictionHint::RestrictPath {
                     path,
                     requested,
                     maximum,
-                } => PolicyFailureDetail {
-                    failure_class: 2,
-                    failure_reason: 2,
-                    required_action: 2,
-                    resource_kind: 1,
-                    value_kind: 1,
-                    flags: 3,
+                } => Detail {
+                    failure_class: Detail::CLASS_FILESYSTEM,
+                    failure_reason: Detail::REASON_ACCESS_EXCEEDS_CEILING,
+                    required_action: Detail::ACTION_RESTRICT_FILESYSTEM_ACCESS,
+                    resource_kind: Detail::RESOURCE_KIND_PATH,
+                    value_kind: Detail::VALUE_KIND_ACCESS,
+                    flags: Detail::FLAG_HAS_ACTIONABLE_DETAILS | Detail::FLAG_RESOURCE_COMPLETE,
                     requested_value: *requested,
                     required_value: *maximum,
-                    resource: Some(path.encode_utf16().collect()),
+                    resource: Some(path.clone()),
+                    ..Default::default()
                 },
-                RestrictionHint::ReducePathCount { requested, maximum } => PolicyFailureDetail {
-                    failure_class: 2,
-                    failure_reason: 4,
-                    required_action: 3,
-                    value_kind: 2,
-                    flags: 1,
+                RestrictionHint::ReducePathCount { requested, maximum } => Detail {
+                    failure_class: Detail::CLASS_FILESYSTEM,
+                    failure_reason: Detail::REASON_REQUEST_PATH_LIMIT,
+                    required_action: Detail::ACTION_REDUCE_PATH_COUNT,
+                    value_kind: Detail::VALUE_KIND_PATH_COUNT,
+                    flags: Detail::FLAG_HAS_ACTIONABLE_DETAILS,
                     requested_value: *requested,
                     required_value: *maximum,
                     ..Default::default()
@@ -103,16 +110,16 @@ fn policy_restriction_replays_strengthened_observations_against_fresh_requests()
         ..Default::default()
     });
     let mut failures = PolicyFailures::default();
-    failures.append(observation(&[restrict(r"C:\work", 2, 1)]));
-    failures.append(observation(&[restrict(r"C:\work", 1, 0)]));
+    failures.append(observation(&[restrict(r"C:\work", RW, RO)]));
+    failures.append(observation(&[restrict(r"C:\work", RO, NO_ACCESS)]));
     let candidate = restrict_request(&original, &failures, false, &mut canonical).unwrap();
-    assert_eq!(access_at(&candidate.policy, r"C:\work"), 0);
+    assert_eq!(access_at(&candidate.policy, r"C:\work"), NO_ACCESS);
     assert_eq!(candidate.policy.readwrite_paths, [r"C:\unrelated"]);
     assert_eq!(
         original.policy.readwrite_paths,
         [r"C:\work", r"C:\unrelated"]
     );
-    assert_eq!(failures.results[1].details[0].requested_value, 1);
+    assert_eq!(failures.results[1].details[0].requested_value, RO);
     let already_satisfied = restrict_request(&candidate, &failures, false, &mut canonical).unwrap();
     assert_eq!(
         already_satisfied.policy.denied_paths,
@@ -180,8 +187,8 @@ fn policy_restriction_rejects_unknown_and_contradictory_batches_before_creation(
     });
     let mut failures = PolicyFailures::default();
     failures.append(observation(&[
-        restrict(r"C:\work", 2, 1),
-        restrict(r"C:\work", 2, 0),
+        restrict(r"C:\work", RW, RO),
+        restrict(r"C:\work", RW, NO_ACCESS),
     ]));
     assert_eq!(
         restrict_request(&original, &failures, false, &mut canonical).unwrap_err(),
@@ -226,7 +233,10 @@ fn restriction_filesystem_narrowing_preserves_and_ignores_enumeration_bootstrap(
         r"C:\bootstrap".to_string(),
         r"C:\bootstrap".to_string(),
     ];
-    for (path, maximum) in [(r"C:\Users\AdminUser\Desktop\denied", 0), (desktop, 1)] {
+    for (path, maximum) in [
+        (r"C:\Users\AdminUser\Desktop\denied", NO_ACCESS),
+        (desktop, RO),
+    ] {
         let original = request(ContainerPolicy {
             readwrite_paths: vec![desktop.into()],
             enumerate_paths: enumeration.clone(),
@@ -234,7 +244,7 @@ fn restriction_filesystem_narrowing_preserves_and_ignores_enumeration_bootstrap(
         });
         let candidate = restrict_with_hints(
             &original,
-            &[restrict(path, 2, maximum)],
+            &[restrict(path, RW, maximum)],
             false,
             &mut |path| {
                 assert!(
@@ -541,7 +551,7 @@ fn restriction_moves_only_the_existing_writable_spelling_and_preserves_exception
     });
     let candidate = restrict_with_hints(
         &original,
-        &[restrict(r"C:\WORK", 2, 1)],
+        &[restrict(r"C:\WORK", RW, RO)],
         false,
         &mut canonical,
     )
@@ -563,7 +573,7 @@ fn restriction_moves_only_the_existing_writable_spelling_and_preserves_exception
     assert_eq!(
         rejection(
             &original,
-            &[restrict(r"C:\work\new", 2, 1)],
+            &[restrict(r"C:\work\new", RW, RO)],
             false,
             &mut canonical
         ),
@@ -581,12 +591,15 @@ fn restriction_can_add_deny_but_cannot_remove_a_readonly_exception_under_a_write
     });
     let candidate = restrict_with_hints(
         &original,
-        &[restrict(r"C:\work\read", 1, 0)],
+        &[restrict(r"C:\work\read", RO, NO_ACCESS)],
         false,
         &mut canonical,
     )
     .unwrap();
-    assert_eq!(access_at(&candidate.policy, r"C:\work\read\child"), 0);
+    assert_eq!(
+        access_at(&candidate.policy, r"C:\work\read\child"),
+        NO_ACCESS
+    );
     assert!(candidate
         .policy
         .denied_paths
@@ -621,7 +634,7 @@ fn restriction_rejects_ambiguous_filesystem_policy() {
         assert_eq!(
             rejection(
                 &original,
-                &[remove("registryRead"), restrict(path, 2, 0)],
+                &[remove("registryRead"), restrict(path, RW, NO_ACCESS)],
                 false,
                 &mut canonical,
             ),
@@ -630,22 +643,28 @@ fn restriction_rejects_ambiguous_filesystem_policy() {
         );
     }
     assert_eq!(
-        rejection(&original, &[restrict(r"C:\work", 2, 1)], false, &mut |_| {
-            Ok(PathCanonical::Canonical(r"C:\elsewhere".into()))
-        }),
+        rejection(
+            &original,
+            &[restrict(r"C:\work", RW, RO)],
+            false,
+            &mut |_| { Ok(PathCanonical::Canonical(r"C:\elsewhere".into())) }
+        ),
         "filesystem restriction will not guess the provenance of an aliased path"
     );
     assert_eq!(
-        rejection(&original, &[restrict(r"C:\work", 2, 1)], false, &mut |_| {
-            Ok(PathCanonical::Unknown)
-        }),
+        rejection(
+            &original,
+            &[restrict(r"C:\work", RW, RO)],
+            false,
+            &mut |_| { Ok(PathCanonical::Unknown) }
+        ),
         "filesystem restriction cannot resolve every relevant path safely"
     );
     let mut enumeration = original.clone();
     enumeration.policy.enumerate_paths.push(r"C:\index".into());
     let restricted = restrict_with_hints(
         &enumeration,
-        &[restrict(r"C:\work", 2, 1)],
+        &[restrict(r"C:\work", RW, RO)],
         false,
         &mut canonical,
     )
@@ -662,7 +681,7 @@ fn restriction_rejects_ambiguous_filesystem_policy() {
         assert_eq!(
             rejection(
                 &root_request,
-                &[restrict(root, 2, 1)],
+                &[restrict(root, RW, RO)],
                 false,
                 &mut canonical
             ),
@@ -727,7 +746,10 @@ fn restriction_rejects_contradictory_and_unmatched_constraints() {
     assert_eq!(
         rejection(
             &original,
-            &[restrict(r"C:\work", 2, 1), restrict(r"C:\work", 2, 0)],
+            &[
+                restrict(r"C:\work", RW, RO),
+                restrict(r"C:\work", RW, NO_ACCESS)
+            ],
             false,
             &mut canonical,
         ),
@@ -736,7 +758,7 @@ fn restriction_rejects_contradictory_and_unmatched_constraints() {
     assert_eq!(
         rejection(
             &original,
-            &[restrict(r"C:\work", 1, 0)],
+            &[restrict(r"C:\work", RO, NO_ACCESS)],
             false,
             &mut canonical
         ),

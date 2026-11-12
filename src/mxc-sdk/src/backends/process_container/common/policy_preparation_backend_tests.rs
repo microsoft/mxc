@@ -31,7 +31,7 @@ fn remove_capability(capability: &str) -> PolicyFailures {
         required_action: D::ACTION_REMOVE_CAPABILITY,
         resource_kind: D::RESOURCE_KIND_CAPABILITY,
         flags: D::FLAG_HAS_ACTIONABLE_DETAILS | D::FLAG_RESOURCE_COMPLETE,
-        resource: Some(capability.encode_utf16().collect()),
+        resource: Some(capability.to_string()),
         ..Default::default()
     })
 }
@@ -88,7 +88,8 @@ fn policy_preparation_preserves_contract_metadata_presence_and_inferred_cwd_in_s
         flags: D::FLAG_HAS_ACTIONABLE_DETAILS | D::FLAG_RESOURCE_COMPLETE,
         requested_value: D::ACCESS_READ_WRITE,
         required_value: D::ACCESS_READ_ONLY,
-        resource: Some(work.to_string_lossy().encode_utf16().collect()),
+        resource: Some(work.to_string_lossy().into_owned()),
+        ..Default::default()
     });
     for (index, version) in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"].iter().enumerate() {
         let original = json!({
@@ -402,7 +403,10 @@ fn policy_preparation_unknown_or_unsafe_observations_fail_before_native_creation
             "outcome" => observed.results[0].outcome = R::OUTCOME_EVALUATION_FAILED,
             "action" => observed.results[0].details[0].required_action = u32::MAX,
             "flags" => observed.results[0].details[0].flags = D::FLAG_RESOURCE_UNAVAILABLE,
-            "resource" => observed.results[0].details[0].resource = Some(vec![0xd800]),
+            "resource" => {
+                let detail = &mut observed.results[0].details[0];
+                detail.resource = None;
+            }
             _ => unreachable!(),
         }
         let error = crate::v1::dev::prepare_policy_json(request, &observed, Default::default())

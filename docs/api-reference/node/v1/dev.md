@@ -80,8 +80,15 @@ Its `experimental` authorization is independent of the request's declared
 contract version and must also be supplied to subsequent creation when
 required. Observations are untrusted data, not policy approval. Unknown native
 codes remain inspectable and do not authorize guessed changes. Unsupported
-actions, unsafe edits, and unsupported backends fail explicitly. Windows
-reevaluates the current creator's policy during strict creation.
+actions and unsafe edits fail explicitly. Windows reevaluates the current
+creator's policy during strict creation.
+
+Preparation accepts create-and-run requests for every backend and OS. With
+empty observations it returns the request unchanged with no changes.
+Observations are specific to the backend that reported them; native Windows
+ProcessContainer is currently the only backend that reports and applies them.
+Non-empty observations for any other backend throw `MxcError`
+(`unsupported_containment`) rather than being ignored.
 
 `preparePolicyJson` is the only operation that takes observations; creation,
 lifecycle, validation, and PTY options accept only the properties shown above,
@@ -157,18 +164,19 @@ export interface PolicyFailureDetail {
   flags: number;
   requestedValue: string;
   requiredValue: string;
-  resource?: number[];
+  resource?: string;
 }
 
 export function parsePolicyFailures(json: string): PolicyFailures;
 export function serializePolicyFailures(value: PolicyFailures): string;
 export function mergePolicyFailures(older: PolicyFailures, newer: PolicyFailures): PolicyFailures;
 export function policyFailuresFromError(error: unknown): PolicyFailures | undefined;
-export function policyFailureResourceText(detail: PolicyFailureDetail): string | undefined;
 ```
 
-`formatVersion` is `1` for observation JSON, independently of native batch
-versions and the MXC request JSON's `version`. Native versions, outcomes, detail
+`formatVersion` identifies observation JSON, independently of native batch
+versions and the MXC request JSON's `version`. The supported values are
+`PolicyFailureVersions.Format`, `PolicyFailureVersions.Result` and
+`PolicyFailureVersions.MinimumReader`. Native versions, outcomes, detail
 codes, and flags are unsigned 32-bit numbers; unrecognized values are
 preserved. Each result is one native refusal batch, and its details may not
 describe every restriction.
@@ -190,6 +198,7 @@ structured outcome, progress, and application stop conditions.
 
 | Exported object | Read-only members |
 |---|---|
+| `PolicyFailureVersions` | `Format: 1`, `Result: 1`, `MinimumReader: 1` |
 | `PolicyFailureOutcomes` | `Unknown: 0`, `Blocked: 1`, `EvaluationFailed: 2` |
 | `PolicyFailureClasses` | `None: 0`, `Network: 1`, `Filesystem: 2`, `EnforcementMode: 3` |
 | `PolicyFailureReasons` | `None: 0`, `CapabilityNotAllowed: 1`, `AccessExceedsCeiling: 2`, `DenyRequired: 3`, `RequestPathLimit: 4` |
@@ -202,15 +211,15 @@ structured outcome, progress, and application stop conditions.
 Only `PolicyFailureAccessValues` uses strings, matching the lossless
 `requestedValue` and `requiredValue` fields. The other groups contain numbers.
 
-`resource` contains the native UTF-16 code units, each between 0 and 65535,
-without a terminator. Omitted resources, empty arrays, and malformed UTF-16
-are distinct and survive JSON storage. `policyFailureResourceText` returns
-`undefined` for an omitted resource and `''` for an empty one, and throws
-`MxcError` with `code: 'malformed_request'` for unpaired surrogates instead of
-replacing them. Decoded text does not establish that a resource is complete,
-actionable, or safe to use as a path.
-Readers normalize explicit `resource: null` to absence, and serialized output
-omits it. An empty array remains present.
+`resource` is the native resource text without a terminator; `''` remains
+distinct from an omitted resource. When a native resource is not valid UTF-16,
+such as one containing an unpaired surrogate, the text is omitted,
+`PolicyFailureFlags.ResourceUnavailable` is set and
+`PolicyFailureFlags.ResourceComplete` is cleared. That detail is never actionable.
+Storage helpers reject a `resource` with an unpaired surrogate. Resource text
+does not establish that a resource is complete, actionable, or safe to use as
+a path. Readers normalize explicit `null` to absence, and serialized output
+omits absent fields.
 
 Storage helpers validate the documented shape and reject unknown fields and
 invalid numeric representations with `MxcError` (`malformed_request`).
@@ -229,7 +238,8 @@ and inspection with `getters` enabled include it.
 Filter `details` before logging or serializing an error.
 
 Store the extracted `policyFailures` value, not the whole `error.details`
-object. Its JSON starts with `{ formatVersion: 1, results: [...] }`. Storage
+object. Its JSON starts with
+`{ formatVersion: PolicyFailureVersions.Format, results: [...] }`. Storage
 helpers do not preserve companion diagnostics or retry budgets. Persist
 application stopping decisions separately if needed across restarts.
 

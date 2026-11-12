@@ -13,10 +13,6 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class DevEntryPointTests
 {
-    private static bool HostCanPreparePolicy =>
-        OperatingSystem.IsWindows()
-        && Environment.GetEnvironmentVariable("MXC_E2E_PSEC_CAPABLE_HOST") == "1";
-
     [Fact]
     public async Task DevEntryPointsRejectInvalidDocumentsWithoutLaunching()
     {
@@ -188,15 +184,17 @@ public class DevEntryPointTests
     [Fact]
     public void PolicyFailureStoragePreservesUnknownValuesBatchBoundariesAndResourcePresence()
     {
-        ushort[] malformedResource = [0xD800, 0, 0xDC00];
+        const string resourceText = "C:\\data\0";
+        const uint unknownResultVersion = Dev.PolicyFailureVersions.Result + 98;
+        const uint unknownMinimumReaderVersion = Dev.PolicyFailureVersions.MinimumReader + 97;
         var failures = new Dev.PolicyFailures
         {
             Results =
             [
                 new()
                 {
-                    Version = 99,
-                    MinimumReaderVersion = 98,
+                    Version = unknownResultVersion,
+                    MinimumReaderVersion = unknownMinimumReaderVersion,
                     Outcome = uint.MaxValue,
                     Details =
                     [
@@ -210,11 +208,11 @@ public class DevEntryPointTests
                             Flags = uint.MaxValue,
                             RequestedValue = ulong.MaxValue,
                             RequiredValue = 9_007_199_254_740_993,
-                            Resource = malformedResource,
+                            Resource = resourceText,
                         },
-                        new() { Resource = [] },
+                        new() { Resource = string.Empty },
                         new(),
-                        new() { Resource = [0xD83D, 0xDE00] },
+                        new() { Resource = "\uD83D\uDE00" },
                     ],
                 },
                 new()
@@ -242,35 +240,41 @@ public class DevEntryPointTests
         var restored = Dev.PolicyFailures.FromJson(stored);
         Assert.Equal(stored, restored.ToJson());
         Assert.Equal(2, restored.Results.Length);
-        Assert.Equal((uint)99, restored.Results[0].Version);
-        Assert.Equal((uint)98, restored.Results[0].MinimumReaderVersion);
+        Assert.Equal(unknownResultVersion, restored.Results[0].Version);
+        Assert.Equal(unknownMinimumReaderVersion, restored.Results[0].MinimumReaderVersion);
         Assert.Equal(uint.MaxValue, restored.Results[0].Outcome);
         var first = restored.Results[0].Details[0];
         Assert.Equal(ulong.MaxValue, first.RequestedValue);
         Assert.Equal(9_007_199_254_740_993UL, first.RequiredValue);
         Assert.Equal(uint.MaxValue, first.Flags);
-        Assert.Equal(malformedResource, first.Resource);
-        var decoding = Assert.Throws<DecoderFallbackException>(() => first.GetResourceText());
-        Assert.Equal("policy resource is not valid UTF-16", decoding.Message);
-        Assert.Null(decoding.InnerException);
-        Assert.Equal(string.Empty, restored.Results[0].Details[1].GetResourceText());
-        Assert.Null(restored.Results[0].Details[2].GetResourceText());
-        Assert.Equal("\uD83D\uDE00", restored.Results[0].Details[3].GetResourceText());
+        Assert.Equal(resourceText, first.Resource);
+        Assert.Equal(string.Empty, restored.Results[0].Details[1].Resource);
+        Assert.Null(restored.Results[0].Details[2].Resource);
+        Assert.Equal("\uD83D\uDE00", restored.Results[0].Details[3].Resource);
         using var document = JsonDocument.Parse(stored);
         var known = document.RootElement.GetProperty("results")[1];
-        Assert.Equal(1u, known.GetProperty("outcome").GetUInt32());
+        Assert.Equal(Dev.PolicyFailureOutcomes.Blocked, known.GetProperty("outcome").GetUInt32());
+        var expectedKnown = new JsonObject
+        {
+            ["failureClass"] = Dev.PolicyFailureClasses.Filesystem,
+            ["failureReason"] = Dev.PolicyFailureReasons.AccessExceedsCeiling,
+            ["requiredAction"] = Dev.PolicyFailureActions.RestrictFilesystemAccess,
+            ["resourceKind"] = Dev.PolicyFailureResourceKinds.Path,
+            ["valueKind"] = Dev.PolicyFailureValueKinds.Access,
+            ["flags"] = Dev.PolicyFailureFlags.HasActionableDetails | Dev.PolicyFailureFlags.ResourceComplete,
+            ["requestedValue"] = Dev.PolicyFailureAccessValues.ReadWrite.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["requiredValue"] = Dev.PolicyFailureAccessValues.ReadOnly.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
         Assert.True(JsonNode.DeepEquals(
-            JsonNode.Parse("""
-                {"failureClass":2,"failureReason":2,"requiredAction":2,"resourceKind":1,
-                 "valueKind":1,"flags":3,"requestedValue":"2","requiredValue":"1"}
-                """),
+            expectedKnown,
             JsonNode.Parse(known.GetProperty("details")[0].GetRawText())));
         var details = document.RootElement.GetProperty("results")[0].GetProperty("details");
         Assert.Equal("18446744073709551615", details[0].GetProperty("requestedValue").GetString());
         Assert.Equal("9007199254740993", details[0].GetProperty("requiredValue").GetString());
-        Assert.Equal(0, details[1].GetProperty("resource").GetArrayLength());
+        Assert.Equal(resourceText, details[0].GetProperty("resource").GetString());
+        Assert.Equal(string.Empty, details[1].GetProperty("resource").GetString());
         Assert.False(details[2].TryGetProperty("resource", out _));
-        Assert.Equal(new ushort[] { 0xD800, 0, 0xDC00 }, malformedResource);
+        Assert.Equal("\uD83D\uDE00", details[3].GetProperty("resource").GetString());
         Assert.Equal(stored, failures.ToJson());
         var nullable = JsonNode.Parse(stored)!;
         nullable["results"]![0]!["details"]![2]!["resource"] = null;
@@ -282,15 +286,17 @@ public class DevEntryPointTests
     [Fact]
     public void PolicyFailureStorageRejectsInvalidShapeVersionAndLossyValues()
     {
+        const uint format = Dev.PolicyFailureVersions.Format;
+        const uint unsupportedFormat = format + 1;
         foreach (var json in new[]
         {
             "null", "[]", "{}",
-            """{"formatVersion":2,"results":[]}""",
-            """{"formatVersion":1,"results":null}""",
-            """{"formatVersion":1,"results":[null]}""",
-            """{"formatVersion":1,"results":[],"extra":true}""",
-            """{"formatVersion":1,"formatVersion":1,"results":[]}""",
-            """{"formatVersion":1,"results":[{"version":1,"minimumReaderVersion":1,"outcome":1,"details":null}]}""",
+            $$"""{"formatVersion":{{unsupportedFormat}},"results":[]}""",
+            $$"""{"formatVersion":{{format}},"results":null}""",
+            $$"""{"formatVersion":{{format}},"results":[null]}""",
+            $$"""{"formatVersion":{{format}},"results":[],"extra":true}""",
+            $$"""{"formatVersion":{{format}},"formatVersion":{{format}},"results":[]}""",
+            $$"""{"formatVersion":{{format}},"results":[{"version":{{Dev.PolicyFailureVersions.Result}},"minimumReaderVersion":{{Dev.PolicyFailureVersions.MinimumReader}},"outcome":{{Dev.PolicyFailureOutcomes.Blocked}},"details":null}]}""",
         })
         {
             Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromJson(json));
@@ -306,7 +312,13 @@ public class DevEntryPointTests
             json["results"]![0]!["details"]![0]!["requestedValue"] = JsonNode.Parse(invalid);
             Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromJson(json.ToJsonString()));
         }
-        foreach (var invalid in new[] { """{"extra":true}""", """{"resource":[65536]}""", """{"flags":-1}""" })
+        foreach (var invalid in new[]
+        {
+            """{"extra":true}""",
+            """{"resource":[65]}""",
+            """{"resourceUnits":[55296]}""",
+            """{"flags":-1}""",
+        })
         {
             var json = JsonNode.Parse(valid)!;
             foreach (var property in JsonNode.Parse(invalid)!.AsObject())
@@ -315,14 +327,26 @@ public class DevEntryPointTests
             }
             Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromJson(json.ToJsonString()));
         }
+
+        const string loneSurrogateMarker = "MXC_LONE_SURROGATE_MARKER";
+        var withMarker = JsonNode.Parse(valid)!;
+        withMarker["results"]![0]!["details"]![0]!["resource"] = loneSurrogateMarker;
+        Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromJson(
+            withMarker.ToJsonString().Replace(loneSurrogateMarker, "\\ud800", StringComparison.Ordinal)));
+        Assert.Throws<JsonException>(() => new Dev.PolicyFailures
+        {
+            Results = [new() { Details = [new() { Resource = "\uD800" }] }],
+        }.ToJson());
     }
 
     [Fact]
     public void MalformedPolicyFailuresDoNotLeakInputIntoValidationErrors()
     {
         const string marker = "MXC_MALFORMED_POLICY_STRUCTURED_ONLY_9D133E1B";
-        var unknown = $$$"""{"formatVersion":1,"results":[],"{{{marker}}}":"private resource"}""";
-        var duplicate = $$$"""{"formatVersion":1,"results":[],"{{{marker}}}":true,"{{{marker}}}":false}""";
+        const string accessDeniedHResult = "0x80070005";
+        const uint format = Dev.PolicyFailureVersions.Format;
+        var unknown = $$$"""{"formatVersion":{{{format}}},"results":[],"{{{marker}}}":"private resource"}""";
+        var duplicate = $$$"""{"formatVersion":{{{format}}},"results":[],"{{{marker}}}":true,"{{{marker}}}":false}""";
         foreach (var json in new[] { unknown, duplicate })
         {
             AssertGenericValidationError(Assert.Throws<JsonException>(
@@ -330,7 +354,7 @@ public class DevEntryPointTests
             using var document = JsonDocument.Parse(
                 $$$"""{"policyFailures":{{{json}}},"backend":"preserved"}""");
             var original = new MxcException(ErrorCode.BackendError, "creation refused",
-                "PSEC.Create", "0x80070005", null, document.RootElement);
+                "PSEC.Create", accessDeniedHResult, null, document.RootElement);
             var extraction = Assert.Throws<MxcException>(
                 () => Dev.PolicyFailures.FromException(original));
             Assert.Equal(ErrorCode.BackendError, extraction.Code);
@@ -342,7 +366,7 @@ public class DevEntryPointTests
             Assert.Equal("preserved", original.Details.Value.GetProperty("backend").GetString());
             Assert.Equal("creation refused", original.Message);
             Assert.Equal("PSEC.Create", original.Operation);
-            Assert.Equal("0x80070005", original.NativeCode);
+            Assert.Equal(accessDeniedHResult, original.NativeCode);
         }
         AssertGenericValidationError(Assert.Throws<JsonException>(
             () => Dev.PolicyFailures.FromJson(unknown[..^1])));
@@ -404,7 +428,7 @@ public class DevEntryPointTests
                 Details = Enumerable.Range(0, 64)
                     .Select(detail => new Dev.PolicyFailureDetail
                     {
-                        Resource = index < 9 && detail == 0 ? new ushort[32_767] : null,
+                        Resource = index < 9 && detail == 0 ? new string('a', 32_767) : null,
                     }).ToArray(),
             }).ToArray();
         var terminal = new Dev.PolicyFailures { Results = results };
@@ -423,16 +447,16 @@ public class DevEntryPointTests
             Results = [
                 .. Enumerable.Range(0, 9).Select(_ => new Dev.PolicyFailureResult
                 {
-                    Details = [new() { Resource = new ushort[32_767] }],
+                    Details = [new() { Resource = new string('a', 32_767) }],
                 }),
-                new() { Details = [new() { Resource = [] }] },
+                new() { Details = [new() { Resource = string.Empty }] },
             ],
         };
         Assert.Equal(10, tooManyUnits.Results.Sum(result => result.Details.Length));
         Assert.Throws<JsonException>(() => tooManyUnits.ToJson());
         Assert.Throws<JsonException>(() => new Dev.PolicyFailures
         {
-            Results = [new() { Details = [new() { Resource = new ushort[32_768] }] }],
+            Results = [new() { Details = [new() { Resource = new string('a', 32_768) }] }],
         }.ToJson());
         Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromJson(
             new string(' ', 4 * 1024 * 1024 + 512 * 1024) + "{}"));
@@ -442,22 +466,33 @@ public class DevEntryPointTests
     [Fact]
     public async Task PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching()
     {
-        Assert.SkipUnless(HostCanPreparePolicy, "policy preparation requires a PSEC-capable host");
-        const string request =
-            """{"version":"1.1.0-alpha","containment":"processcontainer","process":{"commandLine":"MXC_PREPARATION_MUST_NOT_EXECUTE_0A7C5DF1.exe","timeout":1000}}""";
         var failures = new Dev.PolicyFailures();
         var stored = failures.ToJson();
-        var sync = Dev.MxcContainer.PreparePolicyJson(request, failures);
-        var asynchronous = await Dev.MxcContainer.PreparePolicyJsonAsync(
-            request, failures, cancellationToken: TestContext.Current.CancellationToken);
-        foreach (var prepared in new[] { sync, asynchronous })
+        foreach (var containment in new[] { "processcontainer", "bubblewrap", "seatbelt" })
         {
-            Assert.Empty(prepared.Changes);
-            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request), JsonNode.Parse(prepared.RequestJson)));
-            Assert.Equal(prepared.RequestJson,
-                Dev.PreparedPolicyRequest.FromJson(prepared.ToJson()).RequestJson);
+            var request =
+                $$$"""{"version":"1.1.0-alpha","containment":"{{{containment}}}","process":{"commandLine":"MXC_PREPARATION_MUST_NOT_EXECUTE_0A7C5DF1.exe","timeout":1000}}""";
+            var sync = Dev.MxcContainer.PreparePolicyJson(request, failures);
+            var asynchronous = await Dev.MxcContainer.PreparePolicyJsonAsync(
+                request, failures, cancellationToken: TestContext.Current.CancellationToken);
+            foreach (var prepared in new[] { sync, asynchronous })
+            {
+                Assert.Empty(prepared.Changes);
+                Assert.Equal(request, prepared.RequestJson);
+                Assert.Equal(prepared.RequestJson,
+                    Dev.PreparedPolicyRequest.FromJson(prepared.ToJson()).RequestJson);
+            }
         }
         Assert.Equal(stored, failures.ToJson());
+
+        var observed = new Dev.PolicyFailures
+        {
+            Results = [new() { Outcome = Dev.PolicyFailureOutcomes.Blocked }],
+        };
+        var unsupported = Assert.Throws<MxcException>(() => Dev.MxcContainer.PreparePolicyJson(
+            """{"version":"1.1.0-alpha","containment":"bubblewrap","process":{"commandLine":"MXC_PREPARATION_MUST_NOT_EXECUTE_0A7C5DF1.exe"}}""",
+            observed));
+        Assert.Equal(ErrorCode.UnsupportedContainment, unsupported.Code);
     }
 
     [Theory]
@@ -465,8 +500,6 @@ public class DevEntryPointTests
     [InlineData(true)]
     public void PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(bool nativePreparation)
     {
-        Assert.SkipUnless(!nativePreparation || HostCanPreparePolicy,
-            "policy preparation requires a PSEC-capable host");
         var request =
             "{\"version\":\"1.1.0-alpha\",\"containment\":\"processcontainer\",\"_comment\":\""
             + new string('<', 6 * 1024 * 1024)
@@ -490,8 +523,6 @@ public class DevEntryPointTests
     [InlineData(true)]
     public void PolicyPreparationStoragePreservesDuplicateCommentMembers(bool nativePreparation)
     {
-        Assert.SkipUnless(!nativePreparation || HostCanPreparePolicy,
-            "policy preparation requires a PSEC-capable host");
         const string request =
             """ {"version":"1.1.0-alpha","containment":"processcontainer","_comment":{"x":1,"x":2},"process":{"commandLine":"MXC_PREPARATION_MUST_NOT_EXECUTE_0A7C5DF1.exe"}} """;
         var nativeCompatible = "{\"requestJson\":\""
@@ -512,15 +543,15 @@ public class DevEntryPointTests
         {
             FailureClass = uint.MaxValue,
             RequestedValue = ulong.MaxValue,
-            Resource = [0xD800, 0],
+            Resource = "C:\\data\0",
         };
-        var secondDetail = new Dev.PolicyFailureDetail { Resource = [] };
+        var secondDetail = new Dev.PolicyFailureDetail { Resource = string.Empty };
         var first = new Dev.PolicyFailures
         {
             Results =
             [
                 new() { Outcome = uint.MaxValue, Details = [firstDetail, secondDetail] },
-                new() { Outcome = 1, Details = [firstDetail] },
+                new() { Outcome = Dev.PolicyFailureOutcomes.Blocked, Details = [firstDetail] },
             ],
         };
         var second = Dev.PolicyFailures.FromJson(first.ToJson());
@@ -532,13 +563,13 @@ public class DevEntryPointTests
         var originalSecond = second.ToJson();
         var merged = first.MergedWith(second);
         Assert.Equal(3, merged.Results.Length);
-        Assert.Equal(new[] { uint.MaxValue, 1u, uint.MaxValue },
+        Assert.Equal(new[] { uint.MaxValue, Dev.PolicyFailureOutcomes.Blocked, uint.MaxValue },
             merged.Results.Select(result => result.Outcome));
         Assert.Equal(ulong.MaxValue, merged.Results[0].Details[0].RequestedValue);
-        Assert.Equal(new ushort[] { 0xD800, 0 }, merged.Results[0].Details[0].Resource);
+        Assert.Equal("C:\\data\0", merged.Results[0].Details[0].Resource);
         Assert.Equal(2, merged.Results[2].Details.Length);
-        Assert.Empty(merged.Results[2].Details[0].Resource!);
-        merged.Results[0].Details[0].Resource![0] = 42;
+        Assert.Equal(string.Empty, merged.Results[2].Details[0].Resource);
+        merged.Results[0].Details[0] = new() { Resource = "changed" };
         merged.Results[1].Details[0] = new();
         merged.Results[2] = new();
         Assert.Equal(originalFirst, first.ToJson());
@@ -553,13 +584,13 @@ public class DevEntryPointTests
             Results = Enumerable.Range(0, 65)
                 .Select(index => new Dev.PolicyFailureResult { Outcome = (uint)index }).ToArray(),
         };
-        var second = new Dev.PolicyFailures { Results = [new() { Outcome = 65 }] };
+        var second = new Dev.PolicyFailures { Results = [new() { Outcome = (uint)first.Results.Length }] };
         var originalFirst = first.ToJson();
         var originalSecond = second.ToJson();
         Assert.Throws<JsonException>(() => first.MergedWith(second));
         Assert.Equal(originalFirst, first.ToJson());
         Assert.Equal(originalSecond, second.ToJson());
-        var invalid = new Dev.PolicyFailures { FormatVersion = 2 };
+        var invalid = new Dev.PolicyFailures { FormatVersion = Dev.PolicyFailureVersions.Format + 1 };
         Assert.Throws<JsonException>(() => invalid.MergedWith(second));
         Assert.Throws<JsonException>(() => second.MergedWith(invalid));
         var invalidDuplicates = new Dev.PolicyFailures
@@ -799,7 +830,8 @@ public class DevEntryPointTests
             Assert.Null(error.InnerException);
         }
         var invalidFailures = Assert.Throws<MxcException>(
-            () => Dev.MxcContainer.PreparePolicyJson("{}", new() { FormatVersion = 2 }));
+            () => Dev.MxcContainer.PreparePolicyJson(
+                "{}", new() { FormatVersion = Dev.PolicyFailureVersions.Format + 1 }));
         Assert.Equal(ErrorCode.MalformedRequest, invalidFailures.Code);
         Assert.Null(invalidFailures.InnerException);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(

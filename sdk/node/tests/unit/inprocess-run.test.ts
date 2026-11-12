@@ -14,6 +14,7 @@ import {
   type NativeLifecycleDriver,
 } from '../../src/v1/container-process.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
+import { PolicyFailureVersions } from '../../src/v1/dev/index.js';
 
 const { MxcError } = v1Sdk;
 const { run, spawn } = v1Sdk;
@@ -198,7 +199,7 @@ describe('in-process asynchronous run routing', () => {
     await assert.rejects(
       run({ command: 'echo hello' }, {
         // @ts-expect-error Typed creation options do not accept policy failures.
-        policyFailures: { formatVersion: 1, results: [] },
+        policyFailures: { formatVersion: PolicyFailureVersions.Format, results: [] },
       }),
       /does not support option 'policyFailures'/,
     );

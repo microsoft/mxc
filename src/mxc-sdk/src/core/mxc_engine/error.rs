@@ -215,6 +215,7 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+    use crate::mxc_common::policy_failures::PolicyFailures;
 
     #[test]
     fn policy_failures_error_debug_does_not_render_structured_resources() {
@@ -234,8 +235,7 @@ mod tests {
 
     #[test]
     fn policy_failures_details_survive_sdk_conversions() {
-        let payload =
-            serde_json::json!({ "policyFailures": { "formatVersion": 1, "results": [] } });
+        let payload = serde_json::json!({ "policyFailures": PolicyFailures::default() });
         let original = MxcError::backend_error("Creation refused.").with_details(payload.clone());
         let converted = Error::from(original);
         assert_eq!(converted.details.as_deref(), Some(&payload));

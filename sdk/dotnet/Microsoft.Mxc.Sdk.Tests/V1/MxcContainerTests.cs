@@ -166,7 +166,7 @@ public class MxcContainerTests
             ErrorOperation = "ProcessModel.Probe",
             ErrorNativeCode = "0x80070005",
             ErrorRemediation = "check policy",
-            ErrorDetailsJson = """{"backend":{"retained":true},"policyFailures":{"formatVersion":1,"results":[]}}""",
+            ErrorDetailsJson = $$$"""{"backend":{"retained":true},"policyFailures":{"formatVersion":{{{Microsoft.Mxc.Sdk.V1.Dev.PolicyFailureVersions.Format}}},"results":[]}}""",
         };
         var previous = MxcContainer.RequestProbeInterop;
         MxcContainer.RequestProbeInterop = native;

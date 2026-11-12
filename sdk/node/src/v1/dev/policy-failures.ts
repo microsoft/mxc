@@ -71,6 +71,16 @@ export const PolicyFailureFlags = Object.freeze({
   ResourceUnavailable: 4,
 } as const);
 
+/** Supported policy-failure format and native result versions. */
+export const PolicyFailureVersions = Object.freeze({
+  /** The supported `formatVersion`. */
+  Format: 1,
+  /** The native result version written for `version`. */
+  Result: 1,
+  /** The native reader version written for `minimumReaderVersion`. */
+  MinimumReader: 1,
+} as const);
+
 /** Creation-policy observations, not a policy approval. */
 export interface PolicyFailures {
   formatVersion: number;
@@ -95,15 +105,25 @@ export interface PolicyFailureDetail {
   flags: number;
   requestedValue: string;
   requiredValue: string;
-  /** UTF-16 code units without a terminator. Absence differs from an empty array. */
-  resource?: number[];
+  /**
+   * Native resource text without a terminator. An empty string differs from
+   * absence. `PolicyFailureFlags.ResourceComplete` reports completeness.
+   * Invalid native UTF-16 is omitted and marked unavailable.
+   */
+  resource?: string;
 }
 
+const MAX_INVOCATION_BYTES = 4 * 1024 * 1024;
+const MAX_INVOCATION_RESULTS = 64;
+const MAX_INVOCATION_DETAILS = 1024;
+const MAX_INVOCATION_RESOURCE_UNITS = 262_144;
+const MAX_DETAILS_PER_RESULT = 64;
+const MAX_RESOURCE_UNITS_PER_RESULT = 32_768;
 // Storage includes one final native batch beyond the limits for preparation.
-const MAX_STORAGE_BYTES = 4.5 * 1024 * 1024;
-const MAX_STORAGE_RESULTS = 65;
-const MAX_STORAGE_DETAILS = 1088;
-const MAX_STORAGE_RESOURCE_UNITS = 294_912;
+const MAX_STORAGE_BYTES = MAX_INVOCATION_BYTES + 512 * 1024;
+const MAX_STORAGE_RESULTS = MAX_INVOCATION_RESULTS + 1;
+const MAX_STORAGE_DETAILS = MAX_INVOCATION_DETAILS + MAX_DETAILS_PER_RESULT;
+const MAX_STORAGE_RESOURCE_UNITS = MAX_INVOCATION_RESOURCE_UNITS + MAX_RESOURCE_UNITS_PER_RESULT;
 
 function malformed(message: string): never {
   throw new MxcError('malformed_request', `invalid policyFailures: ${message}`);
@@ -141,29 +161,30 @@ function uint64(value: unknown): string {
   return value;
 }
 
-function resourceUnits(value: unknown): number[] {
-  if (!Array.isArray(value)) malformed('resource must be an array of UTF-16 code units');
-  if (value.length >= 32_768) malformed('per-result resource limit exceeded');
-  return Array.from(value, (unit: unknown) => {
-    if (typeof unit !== 'number' || !Number.isInteger(unit) || unit < 0 || unit > 0xffff) {
-      malformed('resource must contain unsigned 16-bit integers');
-    }
-    return unit;
-  });
+// Each present resource also reserves a terminator unit within the per-result limit.
+function checkResourceLength(length: number): void {
+  if (length >= MAX_RESOURCE_UNITS_PER_RESULT) malformed('per-result resource limit exceeded');
+}
+
+function resourceText(value: unknown): string {
+  if (typeof value !== 'string') malformed('resource must be a string');
+  checkResourceLength(value.length);
+  if (/\p{Surrogate}/u.test(value)) malformed('resource must be valid UTF-16');
+  return value;
 }
 
 function readPolicyFailures(value: unknown): PolicyFailures {
   const failures = record(value, ['formatVersion', 'results']);
-  if (failures.formatVersion !== 1) malformed('unsupported formatVersion');
+  if (failures.formatVersion !== PolicyFailureVersions.Format) malformed('unsupported formatVersion');
   if (!Array.isArray(failures.results) || failures.results.length > MAX_STORAGE_RESULTS) {
-    malformed('results must be an array of at most 65 native batches');
+    malformed(`results must be an array of at most ${MAX_STORAGE_RESULTS} native batches`);
   }
   let detailCount = 0;
   let resourceCount = 0;
   const results = Array.from(failures.results, (entry: unknown): PolicyFailureResult => {
     const result = record(entry, ['version', 'minimumReaderVersion', 'outcome', 'details']);
-    if (!Array.isArray(result.details) || result.details.length > 64) {
-      malformed('each result must contain an array of at most 64 details');
+    if (!Array.isArray(result.details) || result.details.length > MAX_DETAILS_PER_RESULT) {
+      malformed(`each result must contain an array of at most ${MAX_DETAILS_PER_RESULT} details`);
     }
     detailCount += result.details.length;
     if (detailCount > MAX_STORAGE_DETAILS) malformed('total detail storage limit exceeded');
@@ -173,10 +194,9 @@ function readPolicyFailures(value: unknown): PolicyFailures {
         'failureClass', 'failureReason', 'requiredAction', 'resourceKind',
         'valueKind', 'flags', 'requestedValue', 'requiredValue',
       ], ['resource']);
-      const resource = detail.resource === undefined || detail.resource === null
-        ? undefined : resourceUnits(detail.resource);
-      if (resource !== undefined) resultResourceCount += resource.length + 1;
-      if (resultResourceCount > 32_768) malformed('per-result resource limit exceeded');
+      const resource = detail.resource == null ? undefined : resourceText(detail.resource);
+      resultResourceCount += resource === undefined ? 0 : resource.length + 1;
+      if (resultResourceCount > MAX_RESOURCE_UNITS_PER_RESULT) malformed('per-result resource limit exceeded');
       return {
         failureClass: uint32(detail.failureClass),
         failureReason: uint32(detail.failureReason),
@@ -198,7 +218,7 @@ function readPolicyFailures(value: unknown): PolicyFailures {
       details,
     };
   });
-  return { formatVersion: 1, results };
+  return { formatVersion: PolicyFailureVersions.Format, results };
 }
 
 function storageJson(value: PolicyFailures): string {
@@ -207,7 +227,7 @@ function storageJson(value: PolicyFailures): string {
   return json;
 }
 
-/** Parse caller-owned storage, preserving unknown codes and raw UTF-16 units. */
+/** Parse caller-owned storage, preserving unknown codes and resource text. */
 export function parsePolicyFailures(json: string): PolicyFailures {
   if (typeof json !== 'string' || Buffer.byteLength(json, 'utf8') > MAX_STORAGE_BYTES) {
     malformed('expected a JSON string of at most 4.5 MiB');
@@ -245,7 +265,7 @@ export function mergePolicyFailures(older: PolicyFailures, newer: PolicyFailures
       }
     }
   }
-  const merged = readPolicyFailures({ formatVersion: 1, results });
+  const merged = readPolicyFailures({ formatVersion: PolicyFailureVersions.Format, results });
   storageJson(merged);
   return merged;
 }
@@ -267,26 +287,4 @@ export function policyFailuresFromError(error: unknown): PolicyFailures | undefi
     }
     throw cause;
   }
-}
-
-/**
- * Decode resource text strictly. This does not establish completeness or safety
- * for use as a path or as corrective policy.
- */
-export function policyFailureResourceText(detail: PolicyFailureDetail): string | undefined {
-  if (detail.resource === undefined) return undefined;
-  const units = resourceUnits(detail.resource);
-  let text = '';
-  for (let index = 0; index < units.length; index += 1) {
-    const unit = units[index];
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const low = units[++index];
-      if (low === undefined || low < 0xdc00 || low > 0xdfff) malformed('resource contains malformed UTF-16');
-      text += String.fromCharCode(unit, low);
-    } else {
-      if (unit >= 0xdc00 && unit <= 0xdfff) malformed('resource contains malformed UTF-16');
-      text += String.fromCharCode(unit);
-    }
-  }
-  return text;
 }

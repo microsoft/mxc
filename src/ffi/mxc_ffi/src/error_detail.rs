@@ -257,10 +257,7 @@ mod tests {
     #[test]
     fn policy_failures_owned_json_round_trips_and_frees_with_the_error() {
         let payload = serde_json::json!({
-            "policyFailures": {
-                "formatVersion": 1,
-                "results": [],
-            },
+            "policyFailures": mxc_sdk::v1::dev::PolicyFailures::default(),
             "otherBackendDetail": "retained",
         });
         let mut error = Error::new(ErrorCode::BackendError, "Creation refused.");

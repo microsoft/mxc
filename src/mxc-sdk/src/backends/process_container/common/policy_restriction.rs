@@ -10,7 +10,7 @@ use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::models::{
     CaptureDenialsMode, ContainerPolicy, ExecutionRequest, NetworkAction, ScriptResponse,
 };
-use crate::mxc_common::policy_failures::PolicyFailures;
+use crate::mxc_common::policy_failures::{PolicyFailureDetail as Detail, PolicyFailures};
 use crate::process_container_common::base_container_helpers::{
     effective_capabilities, unrestricted_host_loopback_allowed,
 };
@@ -388,11 +388,11 @@ fn same_path(first: &str, second: &str) -> bool {
 
 fn access_at(policy: &ContainerPolicy, point: &str) -> u64 {
     let mut best = None;
-    let mut access = 0;
+    let mut access = Detail::ACCESS_NONE;
     for (paths, value) in [
-        (&policy.readwrite_paths, 2),
-        (&policy.readonly_paths, 1),
-        (&policy.denied_paths, 0),
+        (&policy.readwrite_paths, Detail::ACCESS_READ_WRITE),
+        (&policy.readonly_paths, Detail::ACCESS_READ_ONLY),
+        (&policy.denied_paths, Detail::ACCESS_NONE),
     ] {
         for path in paths {
             let path = path.trim_end_matches('\\');
@@ -413,7 +413,10 @@ fn restrict_path(
     maximum: u64,
     resolve: &mut impl FnMut(&str) -> Result<PathCanonical, String>,
 ) -> Result<(), String> {
-    if maximum > 1 || requested > 2 || maximum >= requested {
+    if maximum > Detail::ACCESS_READ_ONLY
+        || requested > Detail::ACCESS_READ_WRITE
+        || maximum >= requested
+    {
         return Err("the filesystem constraint is not a supported narrowing instruction".into());
     }
     let point = literal_path(path)?;
@@ -423,7 +426,7 @@ fn restrict_path(
     if access_at(policy, &point) <= maximum {
         return Ok(());
     }
-    let readonly_grants: Vec<_> = if maximum == 1 {
+    let readonly_grants: Vec<_> = if maximum == Detail::ACCESS_READ_ONLY {
         policy
             .readwrite_paths
             .iter()
@@ -433,7 +436,7 @@ fn restrict_path(
     } else {
         Vec::new()
     };
-    if maximum == 1 && readonly_grants.is_empty() {
+    if maximum == Detail::ACCESS_READ_ONLY && readonly_grants.is_empty() {
         return Err(
             "read-only restriction requires an existing matching read-write grant; MXC will not \
              introduce a new grant name or downgrade an unrelated ancestor"
@@ -476,7 +479,7 @@ fn restrict_path(
     policy
         .readwrite_paths
         .retain(|path| !same_path(path, &point));
-    if maximum == 0 {
+    if maximum == Detail::ACCESS_NONE {
         policy
             .readonly_paths
             .retain(|path| !same_path(path, &point));

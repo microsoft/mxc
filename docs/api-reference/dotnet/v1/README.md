@@ -13,7 +13,7 @@ Discovery, probes, telemetry, and policy helpers use the same versioned boundary
 
 Request data and operation controls are separate. Initial PTY size belongs to the corresponding PTY options; runtime resize remains a process-handle operation. Backend policy enforcement and support checks remain native.
 
-V1.Dev adds separate Windows ProcessContainer policy preparation.
+V1.Dev adds separate policy preparation for every backend; native Windows ProcessContainer is currently the only backend that reports and applies policy observations.
 [Preparation types and public JSON helpers](dev.md#policy-preparation-and-caller-owned-observations)
 support typed extraction from `MxcException.Details` and lossless
 application-owned storage, including Native AOT.

@@ -83,12 +83,14 @@ fn dev_json_processcontainer_policy_feedback_restricts_current_request() {
     std::fs::write(&control, b"seed").unwrap();
     std::fs::write(restricted.join("relative.txt"), b"ORIGINAL_CWD").unwrap();
     std::fs::write(unrelated.join("relative.txt"), b"WRONG_CWD").unwrap();
-    let resource: Vec<u16> = restricted.to_string_lossy().encode_utf16().collect();
+    let resource = restricted.to_string_lossy().into_owned();
     let failures = PolicyFailures::from_json(
         &serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": PolicyFailures::FORMAT_VERSION,
             "results": [{
-                "version": 1, "minimumReaderVersion": 1, "outcome": R::OUTCOME_BLOCKED,
+                "version": R::VERSION,
+                "minimumReaderVersion": R::MINIMUM_READER_VERSION,
+                "outcome": R::OUTCOME_BLOCKED,
                 "details": [{
                     "failureClass": D::CLASS_FILESYSTEM,
                     "failureReason": D::REASON_ACCESS_EXCEEDS_CEILING,

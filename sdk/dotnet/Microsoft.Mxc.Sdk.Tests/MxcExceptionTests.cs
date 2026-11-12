@@ -74,16 +74,17 @@ public class MxcExceptionTests
     [Fact]
     public void BackendDetailsAreIndependentOfTheOriginalJsonDocument()
     {
+        const string accessDeniedHResult = "0x80070005";
         MxcException exception;
         using (var document = JsonDocument.Parse("""{"backend":{"observations":[1,true,"value"]}}"""))
         {
             exception = new MxcException(ErrorCode.BackendError, "unchanged",
-                "PSEC.Create", "0x80070005", null, document.RootElement);
+                "PSEC.Create", accessDeniedHResult, null, document.RootElement);
         }
 
         Assert.Equal("value", exception.Details!.Value.GetProperty("backend").GetProperty("observations")[2].GetString());
         Assert.Equal("unchanged", exception.Message);
-        Assert.Equal("0x80070005", exception.NativeCode);
+        Assert.Equal(accessDeniedHResult, exception.NativeCode);
     }
 
     [Fact]

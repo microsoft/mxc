@@ -34,9 +34,15 @@ administrative policy.
 `prepare_policy_json` proposes supported restrictive edits against a freshly
 supplied request. It never calls `CreateProcessSecurityEnvironment`, starts a
 trace, or executes a workload. It may query host support and use bounded
-filesystem probes in the current creator's context. Unsupported actions,
-unsafe changes and unsupported backends fail explicitly. Preparation is
-supported only for native Windows ProcessContainer create-and-run requests.
+filesystem probes in the current creator's context. Unsupported actions and
+unsafe changes fail explicitly.
+
+Preparation accepts create-and-run requests for every backend and OS. With
+empty observations it returns the request unchanged with no changes.
+Observations are specific to the backend that reported them; native Windows
+ProcessContainer is currently the only backend that reports and applies them.
+Non-empty observations for any other backend fail with
+`UnsupportedContainment` rather than being ignored.
 
 ```rust
 pub fn prepare_policy_json(
@@ -126,14 +132,19 @@ impl PolicyFailures {
 
 Its `format_version` identifies observation JSON, independently of each native
 result's `version` and `minimum_reader_version` and the MXC request JSON's
-`version`. `results` contains `PolicyFailureResult` values with
+`version`. The supported values are `PolicyFailures::FORMAT_VERSION`,
+`PolicyFailureResult::VERSION` and `PolicyFailureResult::MINIMUM_READER_VERSION`.
+`results` contains `PolicyFailureResult` values with
 numeric `outcome` and `details: Vec<PolicyFailureDetail>`. Native numeric
 discriminators and flags retain unknown values. `requested_value` and
 `required_value` are `u64`, stored as decimal strings in JSON. Optional
-`resource` contains UTF-16 units without a terminator; `resource_text()`
-decodes strictly without treating invalid text as a repair instruction.
-JSON readers treat `resource: null` as absent and omit it when serializing;
-an empty array remains distinct.
+`resource: Option<String>` contains the native resource text without a
+terminator; an empty string remains distinct from absence. When a native
+resource is not valid UTF-16, such as one containing an unpaired surrogate,
+the text is omitted, `FLAG_RESOURCE_UNAVAILABLE` is set and
+`FLAG_RESOURCE_COMPLETE` is cleared. That detail never authorizes a repair.
+JSON readers reject unpaired surrogates, treat `null` as absent and omit absent fields when
+serializing.
 
 Use associated constants for known values, for example
 `result.outcome == PolicyFailureResult::OUTCOME_BLOCKED` or
@@ -149,6 +160,8 @@ this status alone does not establish that another creation call is safe.
 
 | Type and constant prefix | Known suffixes and values |
 |---|---|
+| `PolicyFailures::` (`u32`) | `FORMAT_VERSION = 1` |
+| `PolicyFailureResult::` (`u32`) | `VERSION = 1`, `MINIMUM_READER_VERSION = 1` |
 | `PolicyFailureResult::OUTCOME_` (`u32`) | `UNKNOWN = 0`, `BLOCKED = 1`, `EVALUATION_FAILED = 2` |
 | `PolicyFailureDetail::CLASS_` (`u32`) | `NONE = 0`, `NETWORK = 1`, `FILESYSTEM = 2`, `ENFORCEMENT_MODE = 3` |
 | `PolicyFailureDetail::REASON_` (`u32`) | `NONE = 0`, `CAPABILITY_NOT_ALLOWED = 1`, `ACCESS_EXCEEDS_CEILING = 2`, `DENY_REQUIRED = 3`, `REQUEST_PATH_LIMIT = 4` |
@@ -163,7 +176,7 @@ extension:
 
 ```text
 Error.details: { policyFailures: F, companion diagnostics... }
-Observations file: F = { formatVersion: 1, results: [...] }
+Observations file: F = { formatVersion: FORMAT_VERSION, results: [...] }
 prepare_policy_json(&request_json, &F, options)
 ```
 

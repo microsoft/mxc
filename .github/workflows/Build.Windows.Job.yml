@@ -110,6 +110,28 @@ jobs:
             throw 'The NVX module lifetime regression must execute and pass.'
           }
 
+      # The Test step also runs these, but stays green if a renamed selector
+      # matches nothing, and the module selections stay green without the no-op
+      # tests. Linux and macOS pin the same selections.
+      - name: Require policy preparation tests
+        shell: pwsh
+        run: |
+          $selections = @(
+            'mxc-sdk mxc_engine::policy_preparation',
+            'mxc_ffi policy_preparation',
+            'mxc-sdk preparation_returns_empty_observation_requests_unchanged_on_every_backend',
+            'mxc_ffi preparation_ffi_returns_empty_observation_requests_unchanged_on_every_backend')
+          foreach ($selection in $selections) {
+            $package, $filter = $selection -split ' '
+            $output = @(cargo test --locked --release --target '${{ matrix.target }}' `
+              -p $package --lib $filter -- --color never 2>&1)
+            $output | Write-Output
+            if ($LASTEXITCODE -ne 0 -or
+                -not ($output -match '^test result: ok\. [1-9]\d* passed; 0 failed; 0 ignored;')) {
+              throw "Policy preparation tests in $package must run, pass, and ignore none."
+            }
+          }
+
       - name: Test and stage filesystem probe request deadlines
         shell: pwsh
         run: |

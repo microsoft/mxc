@@ -148,6 +148,18 @@ creating a container. The FFI pin selects
 Keep the workflow selector aligned when renaming the test; the step fails if a
 pin runs no passing tests, even when Cargo exits successfully.
 
+### V1.Dev policy preparation on every OS
+
+Policy preparation with no observations must return the request unchanged on
+every OS and backend, and observations a backend cannot apply must fail with
+unsupported containment. The Windows, Linux, and macOS builds pin the engine
+and FFI `policy_preparation` tests, and select the engine and FFI no-op tests
+by name so they cannot disappear from those modules unnoticed. The .NET SDK
+job reruns the `PolicyPreparation` tests for each framework, and the Node
+integration job reruns the two V1.Dev preparation tests, on Windows, Linux,
+and macOS. These pins fail if a selection runs no passing tests or ignores or
+skips a test, so keep their selectors aligned when renaming the tests.
+
 ### LXC (`lxc-e2e.yml`)
 
 A separate workflow, because the primary Linux lane does not install LXC and

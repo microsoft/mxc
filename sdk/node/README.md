@@ -280,9 +280,9 @@ if (await acceptPolicyChange(prepared)) {
 Named groups such as `PolicyFailureOutcomes.Blocked` and
 `PolicyFailureReasons.CapabilityNotAllowed` are exported from the Dev subpath
 for readable comparisons. Native codes remain numeric; unsigned 64-bit values
-remain decimal strings, and resources retain their UTF-16 code units.
-`policyFailureResourceText` decodes text strictly and throws for malformed
-UTF-16. Decoded text alone does not establish a safe policy change. The native
+remain decimal strings. A resource is a string in `resource`; a native resource
+that is not valid UTF-16 is omitted and marked unavailable, and that detail is
+never actionable. Resource text alone does not establish a safe policy change. The native
 backend validates preparation and Windows reevaluates policy during strict
 creation. Both `before` and `after` are required JSON values in every change,
 including null placeholders

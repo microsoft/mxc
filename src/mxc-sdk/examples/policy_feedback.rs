@@ -191,9 +191,11 @@ mod tests {
 
     #[test]
     fn native_status_outcome_and_every_terminal_code_guard_preparation() {
-        let current = PolicyFailures::from_json(
-            r#"{"formatVersion":1,"results":[{"version":1,"minimumReaderVersion":1,"outcome":1,"details":[]}]}"#,
-        ).unwrap();
+        const E_ACCESSDENIED: &str = "0x80070005";
+        let mut blocked = PolicyFailureResult::default();
+        blocked.outcome = PolicyFailureResult::OUTCOME_BLOCKED;
+        let mut current = PolicyFailures::default();
+        current.results.push(blocked);
         let mut error = Error::new(ErrorCode::BackendError, "Policy refused creation.");
         error.operation = Some("CreateProcessSecurityEnvironment".into());
         error.native_code = Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED.into());
@@ -201,7 +203,7 @@ mod tests {
         error.operation = Some("CreateProcessW".into());
         assert!(!is_policy_refusal(&error, &current));
         error.operation = Some("CreateProcessSecurityEnvironment".into());
-        error.native_code = Some("0x80070005".into());
+        error.native_code = Some(E_ACCESSDENIED.into());
         assert!(!is_policy_refusal(&error, &current));
         error.native_code = Some(PolicyFailures::NATIVE_CODE_POLICY_BLOCKED.into());
         error.details = Some(Box::new(serde_json::json!({

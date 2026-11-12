@@ -168,6 +168,8 @@ public unsafe class NativeErrorTests
     {
         const string resourceMarker = "MXC_POLICY_RESOURCE_STRUCTURED_ONLY_7B30AC71";
         const string capabilityMarker = "MXC_POLICY_CAPABILITY_STRUCTURED_ONLY_2AE56531";
+        const uint unknownResultVersion = Dev.PolicyFailureVersions.Result + 98;
+        const uint unknownMinimumReaderVersion = Dev.PolicyFailureVersions.MinimumReader + 97;
         var failures = new Dev.PolicyFailures
         {
             Results =
@@ -181,16 +183,16 @@ public unsafe class NativeErrorTests
                         {
                             RequestedValue = ulong.MaxValue,
                             RequiredValue = 9_007_199_254_740_993,
-                            Resource = resourceMarker.Select(static character => (ushort)character).ToArray(),
+                            Resource = resourceMarker,
                         },
                     ],
                 },
                 new()
                 {
-                    Version = 99,
-                    MinimumReaderVersion = 98,
+                    Version = unknownResultVersion,
+                    MinimumReaderVersion = unknownMinimumReaderVersion,
                     Outcome = uint.MaxValue,
-                    Details = [new() { FailureClass = uint.MaxValue, Resource = [0xD800, 0] }],
+                    Details = [new() { FailureClass = uint.MaxValue, Resource = "C:\\data\0" }],
                 },
             ],
         };
@@ -226,7 +228,7 @@ public unsafe class NativeErrorTests
         Assert.Equal(ErrorCode.BackendError, exception.Code);
         Assert.Equal("creation refused", exception.Message);
         Assert.Equal("CreateProcessSecurityEnvironment", exception.Operation);
-        Assert.Equal("0x800704EC", exception.NativeCode);
+        Assert.Equal(Dev.PolicyFailureNativeCodes.PolicyBlocked, exception.NativeCode);
         Assert.Equal("check policy", exception.Remediation);
         Assert.DoesNotContain("policyFailures", exception.ToString());
         Assert.NotNull(exception.StackTrace);
@@ -254,12 +256,13 @@ public unsafe class NativeErrorTests
         var extracted = Dev.PolicyFailures.FromException(exception);
         Assert.NotNull(extracted);
         Assert.Equal(2, extracted.Results.Length);
-        Assert.Equal(resourceMarker, extracted.Results[0].Details[0].GetResourceText());
+        Assert.Equal(resourceMarker, extracted.Results[0].Details[0].Resource);
         Assert.Equal(uint.MaxValue, extracted.Results[1].Outcome);
-        Assert.Equal(new ushort[] { 0xD800, 0 }, extracted.Results[1].Details[0].Resource);
+        Assert.Equal(unknownResultVersion, extracted.Results[1].Version);
+        Assert.Equal("C:\\data\0", extracted.Results[1].Details[0].Resource);
         Assert.Equal(failures.ToJson(), Dev.PolicyFailures.FromJson(extracted.ToJson()).ToJson());
         Assert.Equal(resourceMarker,
-            Dev.PolicyFailures.FromJson(extracted.ToJson()).Results[0].Details[0].GetResourceText());
+            Dev.PolicyFailures.FromJson(extracted.ToJson()).Results[0].Details[0].Resource);
     }
 
     [Fact]
@@ -289,11 +292,12 @@ public unsafe class NativeErrorTests
     public void PolicyFailureExtractionDistinguishesAbsenceFromMalformedObservations()
     {
         Assert.Null(Dev.PolicyFailures.FromException(new MxcException(ErrorCode.BackendError, "ordinary error")));
+        const uint unsupportedFormat = Dev.PolicyFailureVersions.Format + 1;
         foreach (var json in new[]
         {
             """{"other":"retained"}""",
             """{"other":"retained","policyFailures":null}""",
-            """{"other":"retained","policyFailures":{"formatVersion":2,"results":[]}}""",
+            $$$"""{"other":"retained","policyFailures":{"formatVersion":{{{unsupportedFormat}}},"results":[]}}""",
         })
         {
             var detail = Detail("original error", detailsJson: json);

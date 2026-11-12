@@ -48,6 +48,7 @@ public sealed class V1ApiSurfaceTests
             typeof(Dev.PolicyFailureValueKinds),
             typeof(Dev.PolicyFailureAccessValues),
             typeof(Dev.PolicyFailureFlags),
+            typeof(Dev.PolicyFailureVersions),
         };
         Assert.All(
             exportedTypes,

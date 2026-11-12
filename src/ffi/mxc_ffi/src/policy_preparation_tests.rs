@@ -15,7 +15,9 @@ fn assert_empty(detail: &MxcErrorDetail) {
 #[test]
 fn preparation_ffi_initializes_outputs_and_rejects_null_or_invalid_utf8_inputs() {
     let request = CString::new("{}").unwrap();
-    let failures = CString::new(r#"{"formatVersion":1,"results":[]}"#).unwrap();
+    let failures =
+        CString::new(serde_json::to_string(&mxc_sdk::v1::dev::PolicyFailures::default()).unwrap())
+            .unwrap();
     let invalid = [0xffu8, 0];
     for (request, failures, expected) in [
         (ptr::null(), failures.as_ptr(), MXC_STATUS_NULL_ARGUMENT),
@@ -62,7 +64,8 @@ fn preparation_ffi_initializes_outputs_and_rejects_null_or_invalid_utf8_inputs()
 
 #[test]
 fn preparation_ffi_limits_and_parse_failures_do_not_return_input_as_ordinary_errors() {
-    let empty = r#"{"formatVersion":1,"results":[]}"#;
+    let empty = serde_json::to_string(&mxc_sdk::v1::dev::PolicyFailures::default()).unwrap();
+    let empty = empty.as_str();
     let oversized_request = format!("INPUT_SECRET_MARKER{}", "x".repeat(8 * 1024 * 1024));
     let oversized_failures = format!("INPUT_SECRET_MARKER{}", "x".repeat(4 * 1024 * 1024));
     for (request, failures) in [
@@ -109,6 +112,62 @@ fn preparation_ffi_limits_and_parse_failures_do_not_return_input_as_ordinary_err
         );
         assert!(output.is_null());
     }
+}
+
+#[test]
+fn preparation_ffi_returns_empty_observation_requests_unchanged_on_every_backend() {
+    let empty =
+        CString::new(serde_json::to_string(&mxc_sdk::v1::dev::PolicyFailures::default()).unwrap())
+            .unwrap();
+    for json in [
+        r#"{"version":"1.0.0","containment":"processcontainer","process":{"commandLine":"must-not-run"}}"#,
+        r#"{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"must-not-run"}}"#,
+        r#"{"version":"1.0.0","containment":"seatbelt","process":{"commandLine":"must-not-run"}}"#,
+        r#"{ "version":"1.0.0", "process":{"commandLine":"must-not-run"} }"#,
+    ] {
+        let request = CString::new(json).unwrap();
+        let mut output = ptr::null_mut();
+        let mut error = MxcErrorDetail::none();
+        let status = unsafe {
+            mxc_prepare_policy_json(request.as_ptr(), empty.as_ptr(), 0, &mut output, &mut error)
+        };
+        assert_eq!(status, MXC_STATUS_SUCCESS, "{json}");
+        assert_empty(&error);
+        let serialized = unsafe { CStr::from_ptr(output) }.to_str().unwrap();
+        let prepared = mxc_sdk::v1::dev::PreparedPolicyRequest::from_json(serialized).unwrap();
+        assert_eq!(prepared.request_json, json);
+        assert!(prepared.changes.is_empty());
+        unsafe { mxc_string_free(output) };
+    }
+
+    let mut observed = mxc_sdk::v1::dev::PolicyFailures::default();
+    let mut result = mxc_sdk::v1::dev::PolicyFailureResult::default();
+    result.outcome = mxc_sdk::v1::dev::PolicyFailureResult::OUTCOME_BLOCKED;
+    observed.results.push(result);
+    let observed = CString::new(serde_json::to_string(&observed).unwrap()).unwrap();
+    let request = CString::new(
+        r#"{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"must-not-run"}}"#,
+    )
+    .unwrap();
+    let mut output = ptr::dangling_mut();
+    let mut error = MxcErrorDetail::none();
+    let status = unsafe {
+        mxc_prepare_policy_json(
+            request.as_ptr(),
+            observed.as_ptr(),
+            0,
+            &mut output,
+            &mut error,
+        )
+    };
+    assert_eq!(status, MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+    assert!(output.is_null());
+    let message = unsafe { CStr::from_ptr(error.message_utf8) }
+        .to_str()
+        .unwrap();
+    assert!(message.contains("policy observations"));
+    unsafe { mxc_error_detail_free(&mut error) };
+    assert_empty(&error);
 }
 
 #[test]

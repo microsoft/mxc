@@ -82,9 +82,16 @@ completion after a workload timeout.
 
 `PreparePolicyJson(json, failures, options)` validates untrusted creation-policy
 observations against the current MXC creation request and proposes only
-supported restrictive changes for Windows ProcessContainer. It creates no
-container and returns complete prepared request JSON plus a change report.
-Unsupported backends, phases, actions, and unsafe changes fail explicitly.
+supported restrictive changes. It creates no container and returns complete
+prepared request JSON plus a change report. Unsupported phases, actions, and
+unsafe changes fail explicitly.
+
+Preparation accepts create-and-run requests for every backend and OS. With
+empty observations it returns the request unchanged with no changes.
+Observations are specific to the backend that reported them; native Windows
+ProcessContainer is currently the only backend that reports and applies them.
+Non-empty observations for any other backend throw `MxcException` with
+`UnsupportedContainment` rather than being ignored.
 
 Applications own storage, acceptance of the proposed changes, and the decision
 to make another strict creation call. Observations are not policy approval and
@@ -132,7 +139,7 @@ public sealed class PreparedPolicyRequest
 
 public sealed class PolicyFailures
 {
-    public uint FormatVersion { get; init; } = 1;
+    public uint FormatVersion { get; init; } = PolicyFailureVersions.Format;
     public PolicyFailureResult[] Results { get; init; } = [];
 
     public string ToJson();
@@ -143,8 +150,8 @@ public sealed class PolicyFailures
 
 public sealed class PolicyFailureResult
 {
-    public uint Version { get; init; } = 1;
-    public uint MinimumReaderVersion { get; init; } = 1;
+    public uint Version { get; init; } = PolicyFailureVersions.Result;
+    public uint MinimumReaderVersion { get; init; } = PolicyFailureVersions.MinimumReader;
     public uint Outcome { get; init; }
     public PolicyFailureDetail[] Details { get; init; } = [];
 }
@@ -159,9 +166,7 @@ public sealed class PolicyFailureDetail
     public uint Flags { get; init; }
     public ulong RequestedValue { get; init; }
     public ulong RequiredValue { get; init; }
-    public ushort[]? Resource { get; init; }
-
-    public string? GetResourceText();
+    public string? Resource { get; init; }
 }
 ```
 
@@ -233,10 +238,11 @@ if (Console.ReadLine() == "accept")
 ### Observations and storage
 
 `FormatVersion` identifies the MXC storage format independently of native
-`Version` and `MinimumReaderVersion`. Format version 1 is supported.
+`Version` and `MinimumReaderVersion`. The supported values are
+`PolicyFailureVersions.Format`, `PolicyFailureVersions.Result` and
+`PolicyFailureVersions.MinimumReader`.
 Native versions, numeric discriminators, outcomes, and flags retain unknown
-`uint` values for inspection. Known native outcomes are 0 (unknown),
-1 (blocked), and 2 (evaluation failed). `RequestedValue` describes the
+`uint` values for inspection. `RequestedValue` describes the
 request Windows evaluated, which need not be the request supplied on a
 later call.
 
@@ -255,6 +261,7 @@ structured outcome, progress, and application stop conditions.
 
 | Static class | Public constants |
 |---|---|
+| `PolicyFailureVersions` (`uint`) | `Format = 1`, `Result = 1`, `MinimumReader = 1` |
 | `PolicyFailureOutcomes` (`uint`) | `Unknown = 0`, `Blocked = 1`, `EvaluationFailed = 2` |
 | `PolicyFailureClasses` (`uint`) | `None = 0`, `Network = 1`, `Filesystem = 2`, `EnforcementMode = 3` |
 | `PolicyFailureReasons` (`uint`) | `None = 0`, `CapabilityNotAllowed = 1`, `AccessExceedsCeiling = 2`, `DenyRequired = 3`, `RequestPathLimit = 4` |
@@ -267,14 +274,16 @@ structured outcome, progress, and application stop conditions.
 `ToJson` and `FromJson` use source-generated serialization without reflection
 and are supported by Native AOT. JSON field names are camelCase.
 `requestedValue` and `requiredValue` are decimal strings, preserving the
-entire `ulong` range. Other numeric fields are JSON numbers. Resource data
-is an optional array of UTF-16 code units without a terminator. Omitted
-resources, empty arrays, and malformed UTF-16 remain distinguishable.
-JSON readers normalize `resource: null` to absence, and serialization omits it.
-`GetResourceText()` returns null for an absent resource and throws
-`DecoderFallbackException` for malformed UTF-16; it does not replace
-invalid units, include resource bytes in decoder diagnostics, or establish
-that the text is actionable.
+entire `ulong` range. Other numeric fields are JSON numbers. `Resource` is
+the optional native resource text without a terminator; an empty string
+remains distinct from null. When a native resource is not valid UTF-16, such
+as one containing an unpaired surrogate, the text is omitted,
+`PolicyFailureFlags.ResourceUnavailable` is set and
+`PolicyFailureFlags.ResourceComplete` is cleared. That detail is never actionable.
+Storage helpers reject a `Resource` with an unpaired surrogate.
+JSON readers normalize `null` to absence, and
+serialization omits absent fields. Resource text alone does not establish
+that a change is safe.
 
 `PolicyFailures.FromException(error)` extracts `error.Details.policyFailures`.
 It returns null when the property is absent. If present observations are

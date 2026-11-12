@@ -39,7 +39,10 @@ pub struct PolicyPreparationOptions {
 
 /// Prepare a restrictive candidate, without creating an environment or workload.
 ///
-/// Supported only for native Windows ProcessContainer create-and-run requests.
+/// Accepts create-and-run requests for every backend. Empty observations return
+/// the request unchanged. Non-empty observations must come from a backend that
+/// applies them; currently only native Windows ProcessContainer does, and other
+/// backends return [`ErrorCode::UnsupportedContainment`](crate::mxc_engine::ErrorCode::UnsupportedContainment).
 /// Inspect and accept, edit or reject the result before submitting the chosen
 /// request through ordinary strict [`run_json`] or [`spawn_json`].
 /// Unsupported or unsafe observations fail explicitly. Request input is limited

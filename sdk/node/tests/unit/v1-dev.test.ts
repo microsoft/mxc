@@ -470,35 +470,43 @@ function policyDetail(overrides: Partial<dev.PolicyFailureDetail> = {}): dev.Pol
   };
 }
 
+function policyResult(
+  details: dev.PolicyFailureDetail[] = [],
+  outcome: number = dev.PolicyFailureOutcomes.Blocked,
+): dev.PolicyFailureResult {
+  return {
+    version: dev.PolicyFailureVersions.Result,
+    minimumReaderVersion: dev.PolicyFailureVersions.MinimumReader,
+    outcome,
+    details,
+  };
+}
+
+function policyReport(results: dev.PolicyFailureResult[] = []): dev.PolicyFailures {
+  return { formatVersion: dev.PolicyFailureVersions.Format, results };
+}
+
 const policyResourceMarker = 'MXC_POLICY_RESOURCE_STRUCTURED_ONLY_7CDBA9';
 
 function samplePolicyFailures(): dev.PolicyFailures {
-  return {
-    formatVersion: 1,
-    results: [
-      {
-        version: 1, minimumReaderVersion: 1, outcome: dev.PolicyFailureOutcomes.Blocked,
-        details: [
-          policyDetail(),
-          policyDetail({ resource: [] }),
-          policyDetail({ resource: [67, 58, 92, 0xd83d, 0xde00, 0] }),
-          policyDetail({
-            resource: [...policyResourceMarker].map((character) => character.charCodeAt(0)),
-          }),
-        ],
-      },
-      {
-        version: 0xffff_ffff, minimumReaderVersion: 0xffff_ffff, outcome: 0xffff_ffff,
-        details: [policyDetail({
-          failureClass: 0xffff_ffff, failureReason: 0xffff_ffff,
-          requiredAction: 0xffff_ffff, resourceKind: 0xffff_ffff,
-          valueKind: 0xffff_ffff, flags: 0xffff_ffff,
-          requestedValue: '18446744073709551615', requiredValue: '9007199254740993',
-          resource: [0xd800, 0],
-        })],
-      },
-    ],
-  };
+  return policyReport([
+    policyResult([
+      policyDetail(),
+      policyDetail({ resource: '' }),
+      policyDetail({ resource: 'C:\\😀\0' }),
+      policyDetail({ resource: policyResourceMarker }),
+    ]),
+    {
+      version: 0xffff_ffff, minimumReaderVersion: 0xffff_ffff, outcome: 0xffff_ffff,
+      details: [policyDetail({
+        failureClass: 0xffff_ffff, failureReason: 0xffff_ffff,
+        requiredAction: 0xffff_ffff, resourceKind: 0xffff_ffff,
+        valueKind: 0xffff_ffff, flags: 0xffff_ffff,
+        requestedValue: '18446744073709551615', requiredValue: '9007199254740993',
+        resource: 'C:\\data\0',
+      })],
+    },
+  ]);
 }
 
 it('round-trips merged batches without losing numeric codes, u64 values or UTF-16', () => {
@@ -506,22 +514,22 @@ it('round-trips merged batches without losing numeric codes, u64 values or UTF-1
   const stored = dev.serializePolicyFailures(original);
   const restored = dev.parsePolicyFailures(stored);
   assert.deepStrictEqual(restored, original);
-  assert.deepStrictEqual(JSON.parse(stored).results[0].details[0], {
-    failureClass: 2, failureReason: 2, requiredAction: 2, resourceKind: 1,
-    valueKind: 1, flags: 3, requestedValue: '2', requiredValue: '1',
-  });
+  assert.deepStrictEqual(JSON.parse(stored).results[0].details[0], policyDetail());
   assert.strictEqual(restored.results[0].outcome, dev.PolicyFailureOutcomes.Blocked);
   assert.match(stored, /"18446744073709551615"/);
   assert.match(stored, /"9007199254740993"/);
   const [absent, empty, text] = restored.results[0].details;
   assert.strictEqual(Object.hasOwn(absent, 'resource'), false);
-  assert.strictEqual(dev.policyFailureResourceText(absent), undefined);
-  assert.strictEqual(dev.policyFailureResourceText(empty), '');
-  assert.strictEqual(dev.policyFailureResourceText(text), 'C:\\😀\0');
-  assert.throws(() => dev.policyFailureResourceText(restored.results[1].details[0]),
-    /malformed UTF-16/);
-  assert.throws(() => dev.policyFailureResourceText(policyDetail({ resource: [0xdc00] })),
-    /malformed UTF-16/);
+  assert.strictEqual(empty.resource, '');
+  assert.strictEqual(text.resource, 'C:\\😀\0');
+  assert.strictEqual(restored.results[1].details[0].resource, 'C:\\data\0');
+  assert.match(stored, /"resource":"C:\\\\😀\\u0000"/);
+  for (const resource of [{ resource: '\ud800' }, { resource: '\udc00' }]) {
+    assert.throws(() => dev.parsePolicyFailures(JSON.stringify(
+      policyReport([policyResult([policyDetail(resource)])]))), { code: 'malformed_request' });
+    assert.throws(() => dev.serializePolicyFailures(
+      policyReport([policyResult([policyDetail(resource)])])), { code: 'malformed_request' });
+  }
   assert.deepStrictEqual(dev.parsePolicyFailures(dev.serializePolicyFailures(restored)), original);
 
   const nullable = {
@@ -578,7 +586,7 @@ it('separates preparation, application acceptance and strict creation without mu
     assert.strictEqual(refusal.message, 'creation blocked');
     assert.strictEqual(refusal.toString(), 'MxcError: creation blocked');
     assert.strictEqual(refusal.operation, 'CreateProcessSecurityEnvironment');
-    assert.strictEqual(refusal.nativeCode, '0x800704EC');
+    assert.strictEqual(refusal.nativeCode, dev.PolicyFailureNativeCodes.PolicyBlocked);
     assert.strictEqual(typeof refusal.stack, 'string');
     const policyFragments = [
       policyResourceMarker, 'policyFailures', '4294967295',
@@ -611,9 +619,7 @@ it('separates preparation, application acceptance and strict creation without mu
     assert.deepStrictEqual(failures, report);
     const restored = dev.parsePolicyFailures(dev.serializePolicyFailures(failures));
     assert.deepStrictEqual(restored, report);
-    assert.strictEqual(
-      dev.policyFailureResourceText(restored.results[0].details[3]), policyResourceMarker,
-    );
+    assert.strictEqual(restored.results[0].details[3].resource, policyResourceMarker);
     const candidate: dev.PreparedPolicyRequest = {
       requestJson: json.replace('"timeout":120', '"timeout":100'),
       changes: [{ operation: 'replace', path: '/process/timeout', before: 120, after: 100 }],
@@ -644,7 +650,7 @@ it('separates preparation, application acceptance and strict creation without mu
     assert.deepStrictEqual(calls[1], spawn
       ? [candidate.requestJson, true, 100] : [candidate.requestJson, true]);
     assert.deepStrictEqual(report, samplePolicyFailures());
-    failures.results[0].details[0].flags = 0;
+    failures.results[0].details[0].flags = dev.PolicyFailureFlags.None;
     assert.deepStrictEqual(report, samplePolicyFailures(), 'extraction returned an owned report');
     const strict = await create(json);
     if (strict instanceof MxcProcess) strict.dispose();
@@ -656,52 +662,35 @@ it('separates preparation, application acceptance and strict creation without mu
 });
 
 it('retains terminal policy failures beyond preparation limits for inspection and storage', () => {
-  const terminal: dev.PolicyFailures = {
-    formatVersion: 1,
-    results: Array.from({ length: 65 }, (_, outcome) => ({
-      version: 1, minimumReaderVersion: 1, outcome, details: [],
-    })),
-  };
+  const terminal = policyReport(Array.from({ length: 65 }, (_, outcome) => policyResult([], outcome)));
   const error = new MxcError('policy_validation', 'creation blocked', {
     policyFailures: terminal,
     policyFeedbackError: { code: 'feedbackLimitExceeded', reason: 'input result limit exceeded' },
   });
   assert.deepStrictEqual(dev.policyFailuresFromError(error), terminal);
   assert.deepStrictEqual(dev.parsePolicyFailures(dev.serializePolicyFailures(terminal)), terminal);
-  terminal.results.push({ version: 1, minimumReaderVersion: 1, outcome: 66, details: [] });
+  terminal.results.push(policyResult([], 66));
   assert.throws(() => dev.serializePolicyFailures(terminal), /at most 65/);
 
-  const details: dev.PolicyFailures = {
-    formatVersion: 1,
-    results: Array.from({ length: 17 }, () => ({
-      version: 1, minimumReaderVersion: 1, outcome: 1,
-      details: Array.from({ length: 64 }, () => policyDetail()),
-    })),
-  };
+  const details = policyReport(Array.from({ length: 17 }, () => (
+    policyResult(Array.from({ length: 64 }, () => policyDetail())))));
   assert.deepStrictEqual(dev.parsePolicyFailures(dev.serializePolicyFailures(details)), details);
-  details.results.push({
-    version: 1, minimumReaderVersion: 1, outcome: 1, details: [policyDetail()],
-  });
+  details.results.push(policyResult([policyDetail()]));
   assert.throws(() => dev.serializePolicyFailures(details), /total detail storage limit/);
   details.results.pop();
   details.results[0].details.push(policyDetail());
   assert.throws(() => dev.serializePolicyFailures(details), /at most 64/);
 
-  const resources: dev.PolicyFailures = {
-    formatVersion: 1,
-    results: Array.from({ length: 9 }, () => ({
-      version: 1, minimumReaderVersion: 1, outcome: 1,
-      details: [policyDetail({ resource: Array<number>(32_767).fill(0) })],
-    })),
-  };
+  const resources = policyReport(Array.from({ length: 9 }, () => (
+    policyResult([policyDetail({ resource: '\0'.repeat(32_767) })]))));
   assert.deepStrictEqual(dev.parsePolicyFailures(dev.serializePolicyFailures(resources)), resources);
-  resources.results.push({
-    version: 1, minimumReaderVersion: 1, outcome: 1, details: [policyDetail({ resource: [] })],
-  });
+  resources.results.push(policyResult([policyDetail({ resource: '' })]));
   assert.throws(() => dev.serializePolicyFailures(resources), /total resource storage limit/);
   resources.results.pop();
-  resources.results[0].details.push(policyDetail({ resource: [] }));
+  resources.results[0].details.push(policyDetail({ resource: '' }));
   assert.throws(() => dev.serializePolicyFailures(resources), /per-result resource limit/);
+  const oversized = policyReport([policyResult([policyDetail({ resource: '\0'.repeat(32_768) })])]);
+  assert.throws(() => dev.serializePolicyFailures(oversized), /per-result resource limit/);
 });
 
 it('distinguishes absent error policy failures from malformed reports and rejects invalid shapes', async () => {
@@ -709,22 +698,18 @@ it('distinguishes absent error policy failures from malformed reports and reject
   assert.strictEqual(dev.policyFailuresFromError(new MxcError('backend_error', 'absent')), undefined);
   assert.strictEqual(dev.policyFailuresFromError(new MxcError('backend_error', 'absent', {})), undefined);
   const valid = samplePolicyFailures();
-  const invalidDetail = (override: Record<string, unknown>) => ({
-    formatVersion: 1,
-    results: [{
-      version: 1, minimumReaderVersion: 1, outcome: 1,
-      details: [{ ...policyDetail(), ...override }],
-    }],
-  });
+  const invalidDetail = (override: Record<string, unknown>) => (
+    policyReport([policyResult([{ ...policyDetail(), ...override }])]));
   const missing = invalidDetail({});
   delete (missing.results[0].details[0] as Partial<dev.PolicyFailureDetail>).requestedValue;
+  const format = dev.PolicyFailureVersions.Format;
   for (const value of [
-    null, [], {}, { results: [] }, { formatVersion: 1 }, { formatVersion: 2, results: [] },
+    null, [], {}, { results: [] }, { formatVersion: format }, { formatVersion: format + 1, results: [] },
     { ...valid, extra: true }, invalidDetail({ requestedValue: 9007199254740992 }),
     invalidDetail({ requiredValue: '18446744073709551616' }),
     invalidDetail({ requestedValue: '-1' }), invalidDetail({ flags: 1.5 }),
-    invalidDetail({ failureClass: 0x1_0000_0000 }), invalidDetail({ resource: [65536] }),
-    invalidDetail({ resource: [1, null] }), invalidDetail({ resource: 'path' }), missing,
+    invalidDetail({ failureClass: 0x1_0000_0000 }), invalidDetail({ resourceUnits: [0xd800] }),
+    invalidDetail({ resource: 1 }), invalidDetail({ resource: ['p'] }), missing,
   ]) {
     assert.throws(() => dev.parsePolicyFailures(JSON.stringify(value)), { code: 'malformed_request' });
     assert.throws(() => dev.policyFailuresFromError(new MxcError('backend_error', 'bad', {
@@ -738,10 +723,11 @@ it('distinguishes absent error policy failures from malformed reports and reject
 
 it('rejects duplicate keys in stored observations and preparation results', () => {
   const duplicate = { code: 'malformed_request', message: /duplicate JSON object keys/ };
+  const format = dev.PolicyFailureVersions.Format;
   assert.throws(() => dev.parsePolicyFailures(
-    '{"formatVersion":1,"formatVersion":1,"results":[]}'), duplicate);
+    `{"formatVersion":${format},"formatVersion":${format},"results":[]}`), duplicate);
   assert.throws(() => dev.parsePolicyFailures(
-    '{"formatVersion":1,"results":[],"\\u0066ormatVersion":1}'), duplicate);
+    `{"formatVersion":${format},"results":[],"\\u0066ormatVersion":${format}}`), duplicate);
   assert.throws(() => dev.parsePreparedPolicyRequest(
     '{"requestJson":"{}","changes":[],"changes":[]}'), duplicate);
   const change = (after: string) => '{"requestJson":"{}","changes":[{"operation":"add",'
@@ -843,14 +829,14 @@ it('rejects malformed preparation results and invalid JSON values without input 
       (error: unknown) => error instanceof MxcError && error.code === 'malformed_request'
         && ![error.message, error.stack, inspect(error)].join('\n').includes(marker));
     _setBindingPolicyPreparationAsyncImplementation(async () => json);
-    await assert.rejects(dev.preparePolicyJson('{}', { formatVersion: 1, results: [] }),
+    await assert.rejects(dev.preparePolicyJson('{}', policyReport()),
       (error: unknown) => error instanceof MxcError && error.code === 'backend_error'
         && ![error.message, error.stack, inspect(error)].join('\n').includes(marker));
   }
 });
 
 it('bounds preparation request UTF-8, result JSON and edit counts before use', async () => {
-  const failures: dev.PolicyFailures = { formatVersion: 1, results: [] };
+  const failures = policyReport();
   let calls = 0;
   _setBindingPolicyPreparationAsyncImplementation(async (requestJson) => {
     calls += 1;
@@ -895,53 +881,43 @@ it('merges complete refusal batches in first-seen order into independent storage
     ...original.results[0],
     details: original.results[0].details.map((detail) => ({ ...detail })),
   };
-  repeated.details[0].requestedValue = '0002';
+  repeated.details[0].requestedValue = dev.PolicyFailureAccessValues.ReadWrite.padStart(4, '0');
   const changedOrder = {
     ...original.results[0],
     details: [...original.results[0].details].reverse(),
   };
-  const older = { formatVersion: 1, results: [original.results[0], original.results[0]] };
-  const newer = { formatVersion: 1, results: [repeated, original.results[1], changedOrder] };
+  const older = policyReport([original.results[0], original.results[0]]);
+  const newer = policyReport([repeated, original.results[1], changedOrder]);
   const before = JSON.stringify([older, newer]);
   const merged = dev.mergePolicyFailures(older, newer);
-  assert.deepStrictEqual(merged, {
-    formatVersion: 1, results: [original.results[0], original.results[1], changedOrder],
-  });
+  assert.deepStrictEqual(merged, policyReport([original.results[0], original.results[1], changedOrder]));
   assert.strictEqual(JSON.stringify([older, newer]), before);
-  merged.results[0].details[1].resource?.push(99);
+  merged.results[1].details[0].resource = 'changed';
   merged.results[1].details[0].requestedValue = '0';
   assert.strictEqual(JSON.stringify([older, newer]), before, 'merge owns every nested value');
-  const empty = { formatVersion: 1, results: [] };
+  const empty = policyReport();
   assert.deepStrictEqual(dev.mergePolicyFailures(empty, original), original);
   assert.deepStrictEqual(dev.mergePolicyFailures(original, empty), original);
 });
 
 it('rejects over-limit merged storage without mutation or truncation', () => {
-  const empty: dev.PolicyFailures = { formatVersion: 1, results: [] };
-  const results = Array.from({ length: 65 }, (_, outcome) => ({
-    version: 1, minimumReaderVersion: 1, outcome, details: [],
-  }));
-  const full = { formatVersion: 1, results };
-  assert.deepStrictEqual(dev.mergePolicyFailures(full, { formatVersion: 1, results: [results[0]] }), full);
-  const detailBatches = Array.from({ length: 18 }, (_, outcome) => ({
-    version: 1, minimumReaderVersion: 1, outcome,
-    details: Array.from({ length: outcome === 17 ? 1 : 64 }, () => policyDetail()),
-  }));
-  const resourceBatches = Array.from({ length: 10 }, (_, outcome) => ({
-    version: 1, minimumReaderVersion: 1, outcome,
-    details: [policyDetail({ resource: Array<number>(outcome === 9 ? 0 : 32767).fill(0) })],
-  }));
+  const empty = policyReport();
+  const results = Array.from({ length: 65 }, (_, outcome) => policyResult([], outcome));
+  const full = policyReport(results);
+  assert.deepStrictEqual(dev.mergePolicyFailures(full, policyReport([results[0]])), full);
+  const detailBatches = Array.from({ length: 18 }, (_, outcome) => policyResult(
+    Array.from({ length: outcome === 17 ? 1 : 64 }, () => policyDetail()), outcome));
+  const resourceBatches = Array.from({ length: 10 }, (_, outcome) => policyResult(
+    [policyDetail({ resource: '\0'.repeat(outcome === 9 ? 0 : 32_767) })], outcome));
   const largeDetail = policyDetail({ requestedValue: '0'.repeat(2.3 * 1024 * 1024) });
   for (const [older, newer] of [
-    [full, { formatVersion: 1, results: [{ ...results[0], outcome: 65 }] }],
-    [{ formatVersion: 1, results: detailBatches.slice(0, 17) },
-      { formatVersion: 1, results: detailBatches.slice(17) }],
-    [{ formatVersion: 1, results: resourceBatches.slice(0, 9) },
-      { formatVersion: 1, results: resourceBatches.slice(9) }],
-    [{ formatVersion: 1, results: [{ ...results[0], details: [largeDetail] }] },
-      { formatVersion: 1, results: [{ ...results[1], details: [largeDetail] }] }],
-    [{ formatVersion: 1, results: [...results, results[0]] }, empty],
-    [empty, { formatVersion: 2, results: [] }],
+    [full, policyReport([{ ...results[0], outcome: 65 }])],
+    [policyReport(detailBatches.slice(0, 17)), policyReport(detailBatches.slice(17))],
+    [policyReport(resourceBatches.slice(0, 9)), policyReport(resourceBatches.slice(9))],
+    [policyReport([{ ...results[0], details: [largeDetail] }]),
+      policyReport([{ ...results[1], details: [largeDetail] }])],
+    [policyReport([...results, results[0]]), empty],
+    [empty, { formatVersion: dev.PolicyFailureVersions.Format + 1, results: [] }],
   ] satisfies Array<[dev.PolicyFailures, dev.PolicyFailures]>) {
     const before = JSON.stringify([older, newer]);
     assert.throws(() => dev.mergePolicyFailures(older, newer), { code: 'malformed_request' });

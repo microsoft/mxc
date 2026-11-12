@@ -59,10 +59,12 @@ corresponding preparation APIs.
 When the optional allocation-returning
 `Experimental_GetLastProcessSecurityEnvironmentPolicyResult` getter is present
 and support flags include `EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT` (`0x10`), MXC
-adds the internal capture flag (`0x2`) to
+adds `EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT`
+(`0x2`) to
 `CreateProcessSecurityEnvironment` (CPSE).
 This enables diagnostic capture only. It does not change the request. Only a
-CPSE policy refusal (`HRESULT 0x800704EC`)
+CPSE policy refusal (`HRESULT_FROM_WIN32(ERROR_ACCESS_DISABLED_BY_POLICY)`,
+`0x800704EC`)
 queries the getter; retrieval occurs synchronously on the failing native thread
 before cleanup, callbacks or another creation can replace its snapshot.
 Successful creation and unrelated failures do not query it.

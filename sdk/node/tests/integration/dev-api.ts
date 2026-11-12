@@ -18,7 +18,6 @@ import {
   parsePreparedPolicyRequest,
   serializePreparedPolicyRequest,
   policyFailuresFromError,
-  policyFailureResourceText,
 } from '@microsoft/mxc-sdk/v1/dev';
 import type { ExecutionResult, MxcProcess, MxcPtyProcess } from '@microsoft/mxc-sdk/v1';
 
@@ -48,7 +47,7 @@ export function verifyPackedPolicyPreparationSignatures(
   return [
     preparePolicyJson(json, merged, options),
     observed,
-    detail === undefined ? undefined : policyFailureResourceText(detail),
+    detail?.resource,
   ];
 }
 

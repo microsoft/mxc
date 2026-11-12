@@ -208,3 +208,22 @@ jobs:
           else
             npm test
           fi
+
+      # Policy preparation with no observations must succeed on every OS, and
+      # its input limits apply before backend selection. The broad run above
+      # stays green if these tests are later skipped or renamed, so require
+      # that they ran and passed here.
+      - name: Verify policy preparation tests ran without skips
+        shell: pwsh
+        run: |
+          . ../../../../scripts/ci/lib/TestSuiteResults.ps1
+          $required = @(
+            'V1.Dev bounds terminal policy failures at native preparation without creating a workload',
+            'V1.Dev preparation without observations returns the request unchanged on every backend')
+          $junit = Join-Path $env:RUNNER_TEMP 'policy-preparation.junit.xml'
+          node --test --test-force-exit --test-name-pattern ($required -join '|') `
+            --test-reporter=spec --test-reporter-destination=stdout `
+            --test-reporter=junit "--test-reporter-destination=$junit" dist/dev.test.js
+          if ($LASTEXITCODE -ne 0) { throw "Policy preparation tests exited $LASTEXITCODE." }
+          $failure = Get-NodeSuiteFailure -JunitPath $junit -RequiredTests $required
+          if ($failure) { throw "Policy preparation: $failure" }

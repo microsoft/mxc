@@ -87,8 +87,10 @@ request JSON field carries observations. See [api.md](api.md).
 
 1. Parse the request through its registered authoring contract and select the
    ordinary backend. Validate observation shape, format and input limits.
-   Preparation requires a serviceable native Windows ProcessContainer
-   create-and-run path; never ignore unsupported input or obtain a fallback.
+   Empty observations return the request unchanged on every backend and OS.
+   Non-empty observations require the backend that reported them, currently a
+   serviceable native Windows ProcessContainer create-and-run path; never
+   ignore unsupported observations or obtain a fallback.
 2. Build a fresh private request, including current certificate/proxy inputs
    and permissions derived from capture. Apply only recognized restrictive
    constraints, retaining unrelated grants and restrictive exceptions.
@@ -145,8 +147,8 @@ current-request facts.
 | Resource accounting units | 262,144 | 294,912 |
 
 Each batch has at most 64 details and 32,768 resource accounting units.
-Each present resource counts its UTF-16 array length plus one, including an
-empty array. A fresh native result is separately bounded to 128 KiB.
+Each present resource counts its length in UTF-16 code units plus one,
+including an empty resource. A fresh native result is separately bounded to 128 KiB.
 The larger storage bounds allow one final native batch beyond preparation
 input limits. An over-limit merge fails while both inputs remain intact; it
 never silently truncates or substitutes a smaller history.
@@ -176,7 +178,7 @@ current policy; the application chooses its inputs and accepted request.
 
 | Operation | Planned behavior |
 | --- | --- |
-| V1.Dev policy preparation | Prepare a native Windows create-and-run request without creation or execution; return owned candidate and changes. |
+| V1.Dev policy preparation | Prepare a create-and-run request on any backend without creation or execution; return owned candidate and changes. Empty observations return the request unchanged; only native Windows ProcessContainer applies non-empty observations. |
 | Dev captured create-and-run | Strict creation of caller-chosen JSON; fresh structured refusal where available. Ordinary output/timeout results remain. |
 | Dev creation with live pipes | Same strict creation semantics and normal process/stream ownership. Writable stdin is unchanged. |
 | Typed V1 creation | Existing signatures/options remain. Generic error details may carry native refusal data; typed extraction/preparation belongs to V1.Dev. |
@@ -193,11 +195,14 @@ normal caller disposal/stream/wait responsibilities.
 ## Backend applicability and availability
 
 This table concerns the feature, not whether a backend can otherwise run.
+Every backend accepts preparation with empty observations and returns the
+request unchanged. Support below means reporting and applying observations;
+observations are specific to the backend that reported them.
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
 | ProcessContainer | Yes, native Windows path only | Existing PSEC/request-version checks. Resolve the optional getter and advertised capture support for fresh diagnostics; denial capture retains separate checks. | Existing serviceability/request-error results, not policy approval or guaranteed diagnostic availability. |
-| WSLC | No; different creation/enforcement system | Preparation rejects this backend; no new host checks. Ordinary execution remains unchanged. | Unchanged backend availability. |
+| WSLC | No; different creation/enforcement system | Preparation rejects non-empty observations for this backend; no new host checks. Ordinary execution remains unchanged. | Unchanged backend availability. |
 | LXC | No; no Windows policy result | Same. | Unchanged. |
 | Bubblewrap | No; no Windows policy result | Same. | Unchanged. |
 | Seatbelt | No; no Windows policy result | Same. | Unchanged. |
@@ -205,7 +210,7 @@ This table concerns the feature, not whether a backend can otherwise run.
 | Windows Sandbox | No; VM lifecycle is outside this proposal | Same. | Unchanged. |
 | MicroVM | No; not the native ProcessContainer path | Same. | Unchanged. |
 | Hyperlight | No; not the native ProcessContainer path | Same. | Unchanged. |
-| VM containment intent | Not applicable; selects a concrete backend | Existing routing does not authorize preparation on that backend. | Existing resolved-backend result. |
+| VM containment intent | Not applicable; selects a concrete backend | Existing routing does not authorize applying observations on that backend. | Existing resolved-backend result. |
 
 ProcessContainer can be available while fresh refusal reporting is unavailable.
 An otherwise valid native creation still works without the optional getter.
@@ -346,9 +351,9 @@ of workload markers alone cannot prove that no transient environment was created
 | Different creator and stale observations | Prepare a fresh request using stored observations from another creator/current policy: verify restrictive applicability, then reevaluate Windows during creation. No creator-cache key or approval reuse. |
 | Native decode/ownership/support | Cover absent getter/unadvertised or failed support, failed getter, malformed/bounded versions/resources and unexpected native outputs: preserve original failure and free every allocation once. |
 | Restriction interactions | Decode submitted PSEC for current CA/proxy/capture inputs, stronger/repeated/satisfied constraints, intra-batch contradictions, deny/alias/root/enumeration rules and duplicate-only path budgets. Assert no access increase or permission reintroduction. |
-| Unknown data, limits and terminal state | Preserve unknown codes/flags, full u64 values and absent/empty/malformed resources. Over-limit merging leaves inputs intact; unsafe or over-limit preparation returns no partial result. Missing fresh data cannot invent progress. |
+| Unknown data, limits and terminal state | Preserve unknown codes/flag bits, full u64 values and absent/empty resource text. Omit invalid native UTF-16 and mark the resource unavailable; it must not authorize a repair. Over-limit merging leaves inputs intact; unsafe or over-limit preparation returns no partial result. Missing fresh data cannot invent progress. |
 | Errors, cleanup and cancellation | Policy details never appear in ordinary error/debug/console/warning text. Unrelated launch/wait/cleanup failures retain normal semantics and never relaunch. Verify disposed/late handles and subsequent fresh creation. |
-| Unsupported surfaces and compatibility | Preparation rejects another backend or non-create-and-run phase, including empty observations. Existing Rust Dev literals/lifetime-free storage and all creation/stdin/PTY/lifecycle signatures remain usable. Strict old-host creation remains available. |
+| Unsupported surfaces and compatibility | Preparation rejects non-empty observations for another backend and any non-create-and-run phase; empty observations on any backend return the request unchanged. Existing Rust Dev literals/lifetime-free storage and all creation/stdin/PTY/lifecycle signatures remain usable. Strict old-host creation remains available. |
 | Cross-SDK storage/ABI/AOT | Public extraction/merging, required before/after JSON values, null-versus-absence operations, JSON Pointers and limits survive storage and owned native transport. Source-generated .NET net8.0/net10.0 and AOT roots must not fall back to reflection. |
 
 Run the public preparation and strict-creation cases in the existing scheduled
