@@ -53,9 +53,21 @@ async fn handle(mut client: TcpStream, policy: &Policy) -> std::io::Result<()> {
         }
         HOST_LOOPBACK_NAME.to_string()
     } else {
-        let Some(ip) = resolve(&request.host, request.port).await else {
-            println!("DENY  {target} (no IPv4 address)");
-            return respond(&mut client, 502, "name did not resolve").await;
+        let ip = match request.host.parse::<Ipv4Addr>() {
+            Ok(ip) => ip,
+            // A lookup reaches the upstream resolver, so it needs the same
+            // permission as forwarded DNS.
+            Err(_) if !policy.forward_dns => {
+                println!("DENY  {target} (name lookups denied)");
+                return respond(&mut client, 403, "name lookups are denied by policy").await;
+            }
+            Err(_) => match resolve(&request.host, request.port).await {
+                Some(ip) => ip,
+                None => {
+                    println!("DENY  {target} (no IPv4 address)");
+                    return respond(&mut client, 502, "name did not resolve").await;
+                }
+            },
         };
         let (action, why) = policy.egress.check(ip, request.port);
         if action == Action::Deny {
@@ -85,9 +97,6 @@ async fn handle(mut client: TcpStream, policy: &Policy) -> std::io::Result<()> {
 }
 
 async fn resolve(host: &str, port: u16) -> Option<Ipv4Addr> {
-    if let Ok(ip) = host.parse() {
-        return Some(ip);
-    }
     tokio::net::lookup_host((host, port))
         .await
         .ok()?
@@ -243,5 +252,40 @@ mod tests {
         ] {
             assert_eq!(parse_head(head), None, "{head:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn names_are_not_looked_up_unless_dns_is_forwarded() {
+        use crate::gateway_policy::Egress;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(serve(
+            listener,
+            Arc::new(Policy {
+                workload_address: Ipv4Addr::new(10, 231, 1, 254),
+                egress_address: Ipv4Addr::new(10, 231, 0, 2),
+                proxy_port: 3128,
+                forward_dns: false,
+                egress: Egress {
+                    default: Action::Allow,
+                    allow: vec![],
+                    deny: vec![],
+                },
+                host_loopback: None,
+                custom_proxy: None,
+                port_mappings: vec![],
+            }),
+        ));
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"CONNECT localhost:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        assert!(response.contains("name lookups are denied"), "{response}");
     }
 }

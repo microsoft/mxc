@@ -44,8 +44,8 @@ pub struct Policy {
     /// listeners bind.
     pub egress_address: Ipv4Addr,
     pub proxy_port: u16,
-    /// Forward DNS queries the gateway doesn't answer itself; otherwise
-    /// refuse them.
+    /// Forward DNS queries the gateway doesn't answer itself and resolve
+    /// proxy request hostnames; otherwise refuse both.
     pub forward_dns: bool,
     pub egress: Egress,
     /// Relay TCP to Windows loopback through a second address; `None` refuses
