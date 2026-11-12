@@ -46,8 +46,83 @@ pub struct PolicyChange {
 }
 
 // The field deserializer rejects absence instead of treating a missing Value as JSON null.
+// It also rejects duplicate object keys, which `Value` would silently collapse to the last member.
 fn required_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
-    Value::deserialize(deserializer)
+    UniqueKeysValue::deserialize(deserializer).map(|value| value.0)
+}
+
+struct UniqueKeysValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueKeysValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(UniqueKeysVisitor).map(Self)
+    }
+}
+
+struct UniqueKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeysVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        UniqueKeysValue::deserialize(deserializer).map(|value| value.0)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(UniqueKeysValue(value)) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom("duplicate JSON object key"));
+            }
+            let UniqueKeysValue(value) = map.next_value()?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
 }
 
 /// A candidate request, not a created container or policy approval.
@@ -297,6 +372,32 @@ mod tests {
             let non_object = json!({"requestJson": request_json, "changes": []});
             assert!(PreparedPolicyRequest::from_json(&non_object.to_string()).is_err());
         }
+        let stored_change = |before: &str, after: &str| {
+            format!(
+                r#"{{"requestJson":"{{}}","changes":[{{"operation":"replace","path":"/a","before":{before},"after":{after}}}]}}"#
+            )
+        };
+        assert!(PreparedPolicyRequest::from_json(&stored_change(
+            r#"{"x":1,"y":2}"#,
+            r#"[{"x":1}]"#
+        ))
+        .is_ok());
+        for (before, after) in [
+            (r#"{"x":1,"x":2}"#, "null"),
+            ("null", r#"{"x":1,"x":2}"#),
+            (r#"{"a":{"x":1,"x":1}}"#, "null"),
+            ("1", r#"[{"x":true},{"y":1,"y":1}]"#),
+        ] {
+            assert!(PreparedPolicyRequest::from_json(&stored_change(before, after)).is_err());
+        }
+        let caller_request = json!({
+            "requestJson": r#"{"x":1,"x":2}"#,
+            "changes": [{"operation":"replace","path":"/a","before":{"x":1},"after":[{"y":2}]}],
+        });
+        let stored = PreparedPolicyRequest::from_json(&caller_request.to_string()).unwrap();
+        assert_eq!(stored.request_json, r#"{"x":1,"x":2}"#);
+        assert_eq!(stored.changes[0].before, json!({"x":1}));
+        assert_eq!(stored.changes[0].after, json!([{"y":2}]));
     }
 
     #[test]
