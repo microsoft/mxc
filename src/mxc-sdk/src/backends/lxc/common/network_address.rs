@@ -123,6 +123,8 @@ mod linux {
                 "MAC {mac} already has a foreign or duplicate DHCP reservation"
             ));
         }
+
+        // Reuse an owned reservation only after checking for address and lease conflicts.
         if let Some((address, _)) = owned {
             let value = u32::from(address);
             let mask = u32::MAX << (32 - network.prefix);
@@ -165,6 +167,7 @@ mod linux {
             return Err(format!("DHCP hostname {hostname} is already reserved"));
         }
 
+        // Reuse the owned address, or search the configured DHCP pool for a free one.
         let candidates = match owned {
             Some((address, _)) => u32::from(address)..=u32::from(address),
             None => network.first..=network.last,
@@ -183,6 +186,8 @@ mod linux {
 
             check_startup_cancellation()?;
             let mut changed_files = Vec::new();
+
+            // Stop DHCP before rechecking leases and updating the reservation files.
             let result = (|| {
                 stop_dnsmasq(&host.pid_file)?;
                 check_startup_cancellation()?;
@@ -220,6 +225,8 @@ mod linux {
                         "DHCP reservation for {address} changed during allocation"
                     ));
                 }
+
+                // Add the reservation with an ownership marker for later cleanup.
                 if owned.is_none() {
                     check_startup_cancellation()?;
                     let mut contents = current.as_deref().unwrap_or("").to_string();
@@ -232,6 +239,8 @@ mod linux {
                     changed_files.push((host.path.clone(), current));
                     write_atomic(&host.path, &contents)?;
                 }
+
+                // Configure LXC to read the reservation file when it is not already enabled.
                 if !host.enabled {
                     check_startup_cancellation()?;
                     let mut defaults = host.defaults.clone().unwrap_or_default();
@@ -249,6 +258,7 @@ mod linux {
                 )))
             })();
 
+            // Restart the network service and restore files if the update or restart fails.
             match result {
                 Err(error) => {
                     let rollback = restore_files(&changed_files);
@@ -263,6 +273,8 @@ mod linux {
                         let restart = change_network_service("start");
                         return Err(format!("{error}{rollback}{}", cleanup_error(restart)));
                     }
+
+                    // Read resolver settings and restore changed files if startup was canceled.
                     if let Some(reservation) = reservation {
                         let resolver = read_resolver(address);
                         if let Err(error) = check_startup_cancellation() {
