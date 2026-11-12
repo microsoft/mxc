@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use super::{CheckoutMetadata, ProvisionResult};
+use crate::mxc_common::models::W365AgentsProvisionConfig;
 use crate::mxc_common::mxc_error::MxcError;
-use crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig;
 use serde_json::{json, Value};
 use std::time::Duration;
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};

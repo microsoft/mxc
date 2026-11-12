@@ -5,7 +5,7 @@
 
 use crate::mxc_contract::dev as contract;
 
-use crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig as Provision;
+use crate::mxc_common::models::W365AgentsProvisionConfig as Provision;
 
 impl From<contract::W365AgentsProvision> for Provision {
     fn from(value: contract::W365AgentsProvision) -> Self {
@@ -40,7 +40,7 @@ mod tests {
         };
         let (common, operation) = input.into_parts();
         let StateAwareOperation::Provision(provision) = operation else {
-            panic!("provision")
+            panic!("expected provision operation")
         };
         (common, provision)
     }
@@ -60,7 +60,7 @@ mod tests {
         let (common, provision) = adapt(fixture!("w365_agents_provision/valid/complete.json"));
         assert_eq!(common.telemetry.unwrap().enabled, Some(false));
         let StateAwareProvision::W365Agents(Some(Some(config))) = provision else {
-            panic!("provision")
+            panic!("expected W365 provision")
         };
         assert_eq!(config.pool_id, "AAAAAAAA-bbbb-CCCC-dddd-EEEEEEEEEEEE");
         assert_eq!(config.user_type.as_deref(), Some("HumanUser"));
@@ -122,7 +122,7 @@ mod tests {
             assert!(common.sandbox_id.is_none());
             assert!(common.phase.is_none());
             let StateAwareProvision::W365Agents(settings) = input else {
-                panic!("W365")
+                panic!("expected W365 provision")
             };
             if let Some(Some(ref config)) = settings {
                 assert!(config.user_type.is_none());

@@ -6,14 +6,13 @@
 mod service;
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse, W365AgentsProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use crate::mxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecStdio, ProvisionResult, StartResult, StatefulSandboxBackend,
     StopResult,
 };
-use crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig;
 use crate::mxc_common::validator::validate_network_policy_support;
 use serde::Serialize;
 

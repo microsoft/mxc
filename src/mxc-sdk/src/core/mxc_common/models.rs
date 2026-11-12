@@ -274,6 +274,14 @@ impl MicroVmProvisionConfig {
     }
 }
 
+/// Passive W365 provision inputs; defaults and enforcement belong to the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W365AgentsProvisionConfig {
+    pub pool_id: String,
+    pub user_type: Option<String>,
+    pub user_object_id: Option<String>,
+}
+
 /// Runtime-owned state-aware provision config for the WSLc backend.
 ///
 /// Image selection and defaulting remain backend responsibilities. Conversion

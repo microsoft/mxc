@@ -185,7 +185,7 @@ pub fn bind_w365_agents<B>(
 ) -> Result<BoundStateAwareRequest<B>, MxcError>
 where
     B: StatefulSandboxBackend<
-        ProvisionConfig = crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig,
+        ProvisionConfig = crate::mxc_common::models::W365AgentsProvisionConfig,
         StartConfig = (),
         ExecConfig = (),
         StopConfig = (),

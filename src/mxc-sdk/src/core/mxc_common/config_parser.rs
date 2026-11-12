@@ -2030,9 +2030,7 @@ mod tests {
         WindowsSandbox,
         MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
-        W365Agents(
-            Option<Option<crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig>>,
-        ),
+        W365Agents(Option<Option<crate::mxc_common::models::W365AgentsProvisionConfig>>),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
