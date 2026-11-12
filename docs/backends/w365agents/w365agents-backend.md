@@ -47,6 +47,20 @@ Supply configuration in the **caller environment**:
 | `W365A_CONTROLPLANE_URL` | Bare ASCII DNS hostname, without scheme, port, path, query, credentials or whitespace. HTTPS uses port 443. |
 | `W365A_CP_TOKEN` | Nonempty resource-specific bearer token, without whitespace or control characters. |
 
+For example, configure the North Europe control-plane hostname below.
+With a resource-specific token already obtained through your approved
+credential mechanism in `$controlPlaneToken`, configure the caller in PowerShell:
+
+```powershell
+$env:W365A_CONTROLPLANE_URL = 'northeurope.sessionmanagement.regional.cloudinferenceplatform.azure.com'
+$env:W365A_CP_TOKEN = $controlPlaneToken
+```
+
+Set these variables before launching the SDK application or executor from that
+PowerShell process. This endpoint is an example, not a production default;
+use the endpoint authorized for your pool. Do not paste token values into shell
+history or logs.
+
 Missing, invalid or non-Unicode values fail locally. Each call reads the
 environment again. MXC does not acquire, cache or renew tokens. The caller
 renews credentials before a later cleanup call. Checkout uses the design's
