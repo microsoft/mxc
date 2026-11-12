@@ -11,23 +11,9 @@ build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
-Linux CI installs the `lxc` package for LXC command-line tools such as
-`lxc-create`, `lxc-start`, and `lxc-attach`. Do not require `lxc-utils`: it is a
-transitional package on Ubuntu 24.04 and is not available on Ubuntu 26.04.
-The GitHub-hosted Linux build covers Ubuntu 24.04 and 26.04 on both x64 and
-ARM64, using explicit `ubuntu-<version>` and `ubuntu-<version>-arm` runner labels.
-Linux .NET and Node SDK integration tests and LXC E2E tests cover both versions
-on x64. These lanes do not use the moving `ubuntu-latest` label.
-Only the Ubuntu 24.04 build lanes upload the shared binary
-artifacts, preserving compatibility with the older supported host and one
-artifact per target. Rust build and apt package caches are separated by runner
-version. Scheduled validation hosts remain selected independently by
-`scripts/ci/validation-test-matrix.json`.
-
-The Linux Node SDK job passes its test controls explicitly through `sudo`;
-it does not rely on `sudo -E` support. The LXC capability suite checks
-unprivileged ping using a copy without file capabilities, while separately
-requiring raw and packet sockets to be denied.
+Linux CI covers Ubuntu 24.04 and 26.04: x64/ARM64 builds and x64 .NET, Node SDK,
+and LXC E2E tests. Shared binaries are published only from Ubuntu 24.04 to
+preserve compatibility with the older supported host.
 
 ## At a glance
 
