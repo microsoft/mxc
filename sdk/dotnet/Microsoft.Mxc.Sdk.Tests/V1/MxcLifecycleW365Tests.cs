@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -29,9 +30,11 @@ public class MxcLifecycleW365Tests
         $$"""{"version":"1.1.0-alpha","phase":"{{phase}}","sandboxId":"{{Id}}"}""";
 
     [Fact]
-    public async Task DevJsonChecksOutAndReleasesWithProvisionRecoveryInMessage()
+    public Task DevJsonChecksOutAndReleasesWithProvisionRecoveryInMessage() =>
+        RunFixture(ExerciseLifecycle);
+
+    private static async Task ExerciseLifecycle(Fixture fixture)
     {
-        await using var fixture = new Fixture();
         var options = new Dev.JsonOptions { Experimental = true };
         var denied = await Assert.ThrowsAsync<MxcException>(
             () => Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision));
@@ -50,12 +53,14 @@ public class MxcLifecycleW365Tests
         Assert.Equal(ErrorCode.UnsupportedPhase, execution.Code);
         Assert.Empty(fixture.Requests);
 
+        fixture.Operation = "checkout";
         fixture.Reply(200, $$"""{"sessionId":"{{Session}}","status":"Succeeded"}""");
         using var provision = JsonDocument.Parse(
             await Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, options));
         Assert.Equal(Id, provision.RootElement.GetProperty("result").GetProperty("sandboxId").GetString());
         foreach (var phase in new[] { "stop", "deprovision" })
         {
+            fixture.Operation = phase;
             fixture.Reply(204, "");
             var result = phase == "stop"
                 ? Dev.MxcLifecycle.StopContainerJson(Request(phase), options)
@@ -67,6 +72,7 @@ public class MxcLifecycleW365Tests
 
         foreach (var knownId in new[] { true, false })
         {
+            fixture.Operation = "checkout recovery";
             fixture.Reply(500, $$"""{"sessionId":"{{(knownId ? Session : "invalid")}}","connectivityUrl":"https://example.invalid/?ticket=must-not-surface"}""");
             var error = await Assert.ThrowsAsync<MxcException>(
                 () => Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, options));
@@ -83,6 +89,7 @@ public class MxcLifecycleW365Tests
             Assert.DoesNotContain("must-not-surface", error.Message);
             Assert.DoesNotContain("fixture-token", error.Message);
         }
+        fixture.Operation = "deprovision with renewed token";
         SetEnvironmentVariable("W365A_CP_TOKEN", "renewed-fixture-token");
         fixture.Reply(204, "");
         Dev.MxcLifecycle.DeprovisionContainerJson(Request("deprovision"), options);
@@ -92,6 +99,75 @@ public class MxcLifecycleW365Tests
         Assert.DoesNotContain("user-type:", requests[0], StringComparison.OrdinalIgnoreCase);
         Assert.StartsWith($"DELETE /api/sessions/{Session}?api-version=2.0 ", requests[^1]);
         Assert.Contains("Bearer renewed-fixture-token", requests[^1]);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task FixtureDiagnosticsPreserveOperationAndServerFailures(
+        bool failOperation, bool failServer)
+    {
+        var operationError = new MxcException(ErrorCode.BackendError, "synthetic checkout failure");
+        var error = await Assert.ThrowsAsync<AggregateException>(() => RunFixture(async fixture =>
+        {
+            fixture.Operation = "diagnostic probe";
+            if (failServer)
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, fixture.Port,
+                    TestContext.Current.CancellationToken);
+                client.Close();
+                var serverError = await Record.ExceptionAsync(() =>
+                    fixture.Completion.WaitAsync(TimeSpan.FromSeconds(10),
+                        TestContext.Current.CancellationToken));
+                Assert.IsType<IOException>(serverError);
+            }
+            if (failOperation)
+                throw operationError;
+        }));
+
+        Assert.Equal((failOperation ? 1 : 0) + (failServer ? 1 : 0), error.InnerExceptions.Count);
+        Assert.Equal(failOperation, error.InnerExceptions.Contains(operationError));
+        if (failServer)
+        {
+            var serverError = Assert.Single(error.InnerExceptions.OfType<IOException>());
+            Assert.Contains("TLS handshake", serverError.Message);
+            Assert.NotNull(serverError.InnerException);
+        }
+        Assert.Contains("diagnostic probe", error.Message);
+        Assert.Contains("receivedHttpRequests=0", error.Message);
+        Assert.DoesNotContain("fixture-token", error.ToString());
+    }
+
+    private static async Task RunFixture(Func<Fixture, Task> exercise)
+    {
+        var fixture = new Fixture();
+        var operationError = await Record.ExceptionAsync(() => exercise(fixture));
+        var fixtureError = await Record.ExceptionAsync(async () => await fixture.DisposeAsync());
+        var errors = new[] { operationError, fixtureError }.OfType<Exception>().ToArray();
+        if (errors.Length != 0)
+            throw new AggregateException(
+                $"W365 fixture failed during {fixture.Operation} (receivedHttpRequests={fixture.Requests.Count}).",
+                errors);
+    }
+
+    [Fact]
+    public async Task FixtureDiagnosticsIncludeNativeTlsFailure()
+    {
+        var error = await Assert.ThrowsAsync<AggregateException>(() => RunFixture(async fixture =>
+        {
+            fixture.Operation = "checkout with untrusted certificate";
+            fixture.TrustUnrelatedCertificate();
+            await Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision,
+                new Dev.JsonOptions { Experimental = true });
+        }));
+
+        var clientError = Assert.Single(error.InnerExceptions.OfType<MxcException>());
+        Assert.Equal(ErrorCode.BackendError, clientError.Code);
+        Assert.Contains("checkout_transport", clientError.Message);
+        Assert.Contains("fixtureTransport: native_tls=", clientError.Message);
+        Assert.DoesNotContain("fixture-token", error.ToString());
     }
 
     // On Unix, .NET caches environment updates without changing libc's environment.
@@ -131,6 +207,9 @@ public class MxcLifecycleW365Tests
         private readonly ConcurrentQueue<(int Status, string Body)> replies = new();
         private readonly Task worker;
         public ConcurrentQueue<string> Requests { get; } = new();
+        public string Operation { get; set; } = "validation";
+        public int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
+        public Task Completion => worker;
 
         public Fixture()
         {
@@ -164,12 +243,22 @@ public class MxcLifecycleW365Tests
             SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
             SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
             SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
-            SetEnvironmentVariable("MXC_W365_TEST_PORT",
-                ((IPEndPoint)listener.LocalEndpoint).Port.ToString());
+            SetEnvironmentVariable("MXC_W365_TEST_PORT", Port.ToString());
             worker = Serve();
         }
 
         public void Reply(int status, string body) => replies.Enqueue((status, body));
+
+        public void TrustUnrelatedCertificate()
+        {
+            using var key = RSA.Create(2048);
+            var request = new CertificateRequest("CN=untrusted-fixture", key,
+                HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            using var unrelated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),
+                DateTimeOffset.UtcNow.AddHours(1));
+            File.WriteAllText(Path.Combine(directory, "certificate.pem"),
+                unrelated.ExportCertificatePem());
+        }
 
         private async Task Serve()
         {
@@ -177,10 +266,19 @@ public class MxcLifecycleW365Tests
             {
                 using var client = await listener.AcceptTcpClientAsync(cancellation.Token);
                 using var stream = new SslStream(client.GetStream());
-                await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                try
                 {
-                    ServerCertificate = certificate,
-                }, cancellation.Token);
+                    await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                    {
+                        ServerCertificate = certificate,
+                    }, cancellation.Token);
+                }
+                catch (Exception error) when (error is IOException or AuthenticationException)
+                {
+                    throw new IOException(
+                        $"W365 fixture TLS handshake failed (hasPrivateKey={certificate.HasPrivateKey}, publicKeyAlgorithm={certificate.PublicKey.Oid.Value}).",
+                        error);
+                }
                 using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
                 var headers = new StringBuilder();
                 while (await reader.ReadLineAsync(cancellation.Token) is { Length: > 0 } line)

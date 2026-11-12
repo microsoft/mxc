@@ -168,15 +168,18 @@ impl Client {
             request = request.header("user-object-id", oid);
         }
         // One allocation attempt. No polling, retry, redirect or compensating release.
-        let response = request.send_empty().map_err(|_| {
-            failure(
-                "checkout_transport",
-                "checkout",
-                None,
-                &request_id,
-                None,
-                true,
-                None,
+        let response = request.send_empty().map_err(|cause| {
+            with_fixture_transport_diagnostics(
+                &cause,
+                failure(
+                    "checkout_transport",
+                    "checkout",
+                    None,
+                    &request_id,
+                    None,
+                    true,
+                    None,
+                ),
             )
         })?;
         let status = response.status().as_u16();
@@ -297,15 +300,18 @@ impl Client {
             .header("x-ms-client-request-id", &request_id)
             .header("x-ms-sessionId", &identity.session_id)
             .call()
-            .map_err(|_| {
-                failure(
-                    "release_transport",
-                    "release",
-                    None,
-                    &request_id,
-                    None,
-                    true,
-                    Some(identity),
+            .map_err(|cause| {
+                with_fixture_transport_diagnostics(
+                    &cause,
+                    failure(
+                        "release_transport",
+                        "release",
+                        None,
+                        &request_id,
+                        None,
+                        true,
+                        Some(identity),
+                    ),
                 )
             })?;
         let status = response.status().as_u16();
@@ -326,6 +332,30 @@ impl Client {
             Some(identity),
         ))
     }
+}
+
+fn with_fixture_transport_diagnostics(_cause: &ureq::Error, error: MxcError) -> MxcError {
+    #[cfg(feature = "test-support")]
+    {
+        // Only TLS errors and numeric I/O diagnostics: never dump HTTP errors or requests.
+        let diagnostic = match _cause {
+            ureq::Error::NativeTls(cause) => format!("native_tls={cause}"),
+            ureq::Error::Tls(cause) => format!("tls={cause}"),
+            ureq::Error::Io(cause) => format!(
+                "ioKind={:?}, osError={:?}",
+                cause.kind(),
+                cause.raw_os_error()
+            ),
+            _ => return error,
+        };
+        let mut error = error;
+        error
+            .message
+            .push_str(&format!("; fixtureTransport: {diagnostic}"));
+        error
+    }
+    #[cfg(not(feature = "test-support"))]
+    error
 }
 
 fn service_call<T: Send>(call: impl FnOnce() -> Result<T, MxcError> + Send) -> Result<T, MxcError> {
