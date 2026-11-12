@@ -319,6 +319,12 @@ capture followed by reuse without recapture in later processes. Concurrent first
 requests exercise both template capture and image registration; later concurrent
 requests must still clone the same template with the registry unreachable.
 
+Explicit 256-MiB and 512-MiB requests exercise create-and-run execution and
+lifecycle starts. Native diagnostics must report a clone for 256 MiB and a cold
+boot with a memory-capacity reason for 512 MiB, without an initialization-fallback
+warning. Guest kernel parameters prove the selected path, and guest-visible
+memory must increase consistently with the requested capacity.
+
 Lifecycle scenarios require provision and dry-run validation to leave templates
 uncaptured, followed by a clone start and live and captured execs that preserve
 guest state. The live VM's native `clone.json` lease must match the logged
@@ -331,6 +337,10 @@ lives, then successfully adopt it and read the same guest state after the
 helper exits. Different VM IDs can run concurrently; this does not imply
 multiple processes can control one running cloned VM. The rejection assertion
 uses failure and owner liveness, not withheld native error text.
+
+An isolated SDK helper also stops and deprovisions a clone, checks release of its
+lease and sandbox state, then starts and cleans up another clone from the same
+template without exiting the owning SDK process.
 
 An intentionally blocked template store must cold boot successfully and return
 warnings to captured and streaming SDK callers. Lifecycle `start` must record a
@@ -351,6 +361,12 @@ the servers are reachable before and after testing the restrictions, so an
 unavailable server cannot be mistaken for a blocked connection. The host needs
 an IPv4 route through a non-loopback interface to an address outside the guest
 network, `10.0.0.0/24`.
+
+Network and filesystem enforcement scenarios run through both captured SDK
+execution and the executor. Every workload requires the guest platform-snapshot
+parameter and rejects initialization fallback; executor cases also require native
+clone diagnostics. Read/write/deny, TCP/UDP delivery, host-loopback, and proxy
+assertions therefore cannot pass solely on a cold boot.
 
 Regular Windows x64 PR builds remain host-only: they verify the signed bundle,
 require staged test-name discovery (including snapshot and lifecycle tests),
