@@ -32,6 +32,7 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 BASE="/mnt/masktest"
+PRIVATE_TMP="${BASE}-private"
 VISIBLE="$BASE/visible.txt"
 FILE="$BASE/secret_file.txt"
 DIR="$BASE/secret_dir"
@@ -39,7 +40,7 @@ DIR="$BASE/secret_dir"
 # Second fixture tree for the denied-symlink rejection cases below.
 SYMBASE="/mnt/symmask"
 
-cleanup() { sudo rm -rf "$BASE" "$SYMBASE"; }
+cleanup() { sudo rm -rf "$BASE" "$SYMBASE" "$PRIVATE_TMP"; }
 trap cleanup EXIT
 
 # Set up: a readable sibling (positive control), a denied secret file, and a
@@ -121,11 +122,22 @@ done
 # Missing deny mountpoints must be private even when their parent is read-only.
 TOOLS="$BASE/tools"
 mkdir "$TOOLS"
+sudo rm -rf "$PRIVATE_TMP"
+sudo mkdir -p "$PRIVATE_TMP"
+sudo chown "$(id -u):$(id -g)" "$PRIVATE_TMP"
+printf '%s\n' "$PRIVATE_TMP" > "$TOOLS/private-tmp"
 mkfifo "$TOOLS/ready" "$TOOLS/continue"
 exec 3<> "$TOOLS/ready" 4<> "$TOOLS/continue"
 (
     if read -r -t 30 READY <&3 && [ "$READY" = "READY" ] \
         && [ ! -e "$BASE/.env.local" ] && [ ! -e "$BASE/absent" ]; then
+        PRIVATE_STORAGE=$(find "$PRIVATE_TMP" -mindepth 1 -maxdepth 1 -type d -print -quit)
+        if [ -z "$PRIVATE_STORAGE" ] || [ ! -d "$PRIVATE_STORAGE/0/.env.local" ]; then
+            printf 'abort\n' >&4
+            exit 1
+        fi
+        printf 'OVERLAY_SECRET\n' > "$PRIVATE_STORAGE/0/.env.local/secret"
+        printf '%s\n' "$PRIVATE_STORAGE" > "$TOOLS/private-storage"
         printf 'LATE_SECRET\n' > "$BASE/.env.local"
         mkdir -p "$BASE/absent/nested"
         printf 'LATE_SECRET\n' > "$BASE/absent/nested/secret"
@@ -141,14 +153,15 @@ config='{
   "containment": "bubblewrap",
   "process": {
     "cwd": "/mnt/masktest/tools",
-    "commandLine": "set -eu; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; echo READONLY_MISSING_DENIALS_OK"
+    "commandLine": "set -eu; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; PRIVATE_TMP=$(cat private-tmp); printf allowed > \"$PRIVATE_TMP/sibling\"; test \"$(cat \"$PRIVATE_TMP/sibling\")\" = allowed; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; PRIVATE_STORAGE=$(cat private-storage); if cat \"$PRIVATE_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 34; fi; if printf ATTACK > \"$PRIVATE_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 35; fi; echo READONLY_MISSING_DENIALS_OK"
   },
   "filesystem": {
     "readonlyPaths": ["/mnt/masktest"],
-    "readwritePaths": ["/mnt/masktest/tools"],
+    "readwritePaths": ["/mnt/masktest/tools", "PRIVATE_TMP_PLACEHOLDER"],
     "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/.env.local", "/mnt/masktest/absent/nested"]
   }
 }'
+config=${config/PRIVATE_TMP_PLACEHOLDER/$PRIVATE_TMP}
 echo "Running Bubblewrap missing denials beneath a read-only parent..."
 READONLY_STATUS=0
 READONLY_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
@@ -164,7 +177,7 @@ elif [ "$READONLY_STATUS" -eq 0 ] && [ "$PUBLISHER_STATUS" -eq 0 ] \
     && echo "$READONLY_OUT" | grep -qFx "READONLY_MISSING_DENIALS_OK" \
     && [ "$(cat "$BASE/.env.local")" = "LATE_SECRET" ] \
     && [ "$(cat "$BASE/absent/nested/secret")" = "LATE_SECRET" ]; then
-    echo "PASS: missing denials stay masked after host creation; writable child and read-only parent preserved."
+    echo "PASS: missing denials stay masked after host creation; the RW TMPDIR sibling remains writable and overlay backing storage stays hidden."
 else
     echo "$READONLY_OUT"
     echo "FAIL: missing denial enforcement or read-only-parent controls failed (sandbox $READONLY_STATUS, publisher $PUBLISHER_STATUS)."

@@ -69,6 +69,16 @@ fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() 
 }
 
 #[test]
+fn absent_optional_baseline_sources_are_not_used_as_overlay_parents() {
+    let fixture = tempfile::tempdir().unwrap();
+    let absent = fixture.path().join("missing-lib32");
+    let path = absent.to_str().unwrap();
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
+    let mounts = baseline_mounts(&[path], &[], &mut probe).unwrap();
+    assert!(mounts.is_empty());
+}
+
+#[test]
 fn missing_denials_require_overlay_support_only_when_needed() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();

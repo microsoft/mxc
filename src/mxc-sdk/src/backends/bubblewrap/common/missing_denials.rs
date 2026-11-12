@@ -9,7 +9,48 @@ use tempfile::TempDir;
 use super::bwrap_command::{BaselineLink, PolicyMount, BASELINE_RO_BIND_PATHS};
 use super::bwrap_version::BwrapVersion;
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::filesystem_resolve::FsIntent;
+
+fn inspect_path(
+    probe: &mut FilesystemProbe,
+    path: PathBuf,
+) -> Result<Result<(), std::io::Error>, String> {
+    let display = path.display().to_string();
+    probe.run(&display, move |_| {
+        #[cfg(test)]
+        crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-missing-denials", &path);
+        std::fs::symlink_metadata(path).map(|_| ())
+    })
+}
+
+fn baseline_mounts(
+    paths: &[&str],
+    baseline_links: &[BaselineLink],
+    probe: &mut FilesystemProbe,
+) -> Result<Vec<PolicyMount>, FilesystemPolicyError> {
+    let mut mounts = Vec::new();
+    for &path in paths {
+        if baseline_links.iter().any(|link| link.path == path) {
+            continue;
+        }
+        match inspect_path(probe, PathBuf::from(path)).map_err(FilesystemPolicyError::Host)? {
+            Ok(()) => mounts.push(PolicyMount {
+                source: path.to_owned(),
+                destination: path.to_owned(),
+                intent: FsIntent::ReadOnly,
+                readonly_overlay: None,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(FilesystemPolicyError::Host(format!(
+                    "Bubblewrap: could not inspect baseline source '{path}': {error}"
+                )))
+            }
+        }
+    }
+    Ok(mounts)
+}
 
 /// Keep missing deny mountpoints off the host and out of read-only binds.
 /// The returned directory must outlive the sandbox's overlay mounts.
@@ -18,16 +59,8 @@ pub(crate) fn prepare(
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
 ) -> Result<Option<TempDir>, FilesystemPolicyError> {
-    let baseline: Vec<_> = BASELINE_RO_BIND_PATHS
-        .iter()
-        .filter(|path| !baseline_links.iter().any(|link| link.path == **path))
-        .map(|path| PolicyMount {
-            source: (*path).to_owned(),
-            destination: (*path).to_owned(),
-            intent: FsIntent::ReadOnly,
-            readonly_overlay: None,
-        })
-        .collect();
+    let mut probe = FilesystemProbe::default();
+    let baseline = baseline_mounts(BASELINE_RO_BIND_PATHS, baseline_links, &mut probe)?;
     let mut overlays = BTreeMap::<(String, String), Vec<PathBuf>>::new();
     for (index, denied) in mounts.iter().enumerate() {
         if denied.intent != FsIntent::Denied {
@@ -47,8 +80,8 @@ pub(crate) fn prepare(
             ))
         })?;
         let host_target = Path::new(&parent.source).join(relative);
-        match std::fs::symlink_metadata(&host_target) {
-            Ok(_) => continue,
+        match inspect_path(&mut probe, host_target).map_err(FilesystemPolicyError::Host)? {
+            Ok(()) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(FilesystemPolicyError::Host(format!(
