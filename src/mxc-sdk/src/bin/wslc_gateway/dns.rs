@@ -4,8 +4,8 @@
 //! DNS over UDP and TCP on the workload's network. Answers the host loopback and custom proxy
 //! names itself, and forwards or refuses everything else.
 
+use crate::gateway_policy::{Policy, HOST_LOOPBACK_NAME};
 use crate::relay::accept_loop;
-use mxc_sdk::wslc_gateway_policy::{Policy, HOST_LOOPBACK_NAME};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
@@ -254,7 +254,7 @@ fn upstream_nameserver() -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxc_sdk::wslc_gateway_policy::{Action, CustomProxy, Egress, HostLoopback};
+    use crate::gateway_policy::{Action, CustomProxy, Egress, HostLoopback};
 
     const UPSTREAM: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 11), 53);
 

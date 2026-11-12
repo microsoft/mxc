@@ -3,8 +3,8 @@
 
 //! TCP relays: port mappings, a custom proxy and host loopback.
 
+use crate::gateway_policy::{CustomProxy, PortMapping, HOST_LOOPBACK_NAME};
 use crate::netlink;
-use mxc_sdk::wslc_gateway_policy::{CustomProxy, PortMapping, HOST_LOOPBACK_NAME};
 use std::fmt;
 use std::future::Future;
 use std::io;

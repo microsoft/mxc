@@ -4,8 +4,8 @@
 //! Filtering HTTP proxy: `CONNECT` and absolute-form `http://` requests, one
 //! request per connection, allowed or denied by the egress rules.
 
+use crate::gateway_policy::{Action, Policy, HOST_LOOPBACK_NAME};
 use crate::relay::{accept_loop, connect, splice};
-use mxc_sdk::wslc_gateway_policy::{Action, Policy, HOST_LOOPBACK_NAME};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;

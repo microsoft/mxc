@@ -12,6 +12,12 @@
 
 #[cfg(target_os = "linux")]
 mod dns;
+// Compiled in rather than imported from mxc_sdk, so the image changes only
+// when the gateway's own sources do. The backend uses the rest.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../../backends/wslc/gateway_policy.rs"]
+mod gateway_policy;
 #[cfg(target_os = "linux")]
 mod netlink;
 #[cfg(target_os = "linux")]
@@ -36,7 +42,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 async fn run() -> Result<(), String> {
-    use mxc_sdk::wslc_gateway_policy::{Policy, POLICY_ENV};
+    use crate::gateway_policy::{Policy, POLICY_ENV};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::Arc;
     use tokio::task::JoinSet;
