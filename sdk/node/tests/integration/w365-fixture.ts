@@ -64,6 +64,7 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
       execFileSync(process.env.MXC_W365_TEST_OPENSSL ?? 'openssl', [
         'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
         '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost',
+        '-addext', 'extendedKeyUsage=serverAuth',
         '-keyout', key, '-out', certificate,
       ], { stdio: 'pipe' });
       server = createServer({ cert: readFileSync(certificate), key: readFileSync(key) },
