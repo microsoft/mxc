@@ -11,11 +11,12 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::script_runner::RunCancellation;
 use aci_edge_sandboxes::agent::{
-    AgentBackend, BundledAgent, CpuProfile, ImageDigest, SandboxDiagnostics, SetupConfig,
+    AgentBackend, AgentConfig, BundledAgent, CpuProfile, ImageDigest, PlatformSnapshots,
+    SandboxDiagnostics, SetupConfig,
 };
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Backend, Capabilities, Error, ErrorCode, ExecIo, ExecOutcome, ExecRequest,
-    ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec,
+    ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec, StartResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,9 +84,12 @@ pub(super) trait SandboxClient {
     fn capabilities(&self) -> Result<Capabilities, MxcError>;
     fn validate_provision(&self, input: &PreparedProvision) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
+    /// Opens the process-owned execution host, returning a cold-boot fallback reason if template
+    /// initialization is unavailable. Invalid setup and handle-close failures remain errors.
+    fn open_execution_host(&mut self) -> Result<Option<MxcError>, MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
     fn provision(&self, input: &PreparedProvision) -> Result<ProvisionOutput, MxcError>;
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
+    fn start(&self, sandbox_id: &SandboxId) -> Result<StartResult, MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
         &self,
@@ -174,10 +178,23 @@ struct ClientInner {
 
 pub(super) struct NvxClient(Option<ClientInner>);
 
+// Sandboxes have the agent's default resources, one virtual processor and 256 MiB of memory,
+// unless a request sets their memory, so the smallest templates fit them.
+const PLATFORM_SNAPSHOT_MAX_VCPUS: u32 = 1;
+const PLATFORM_SNAPSHOT_MAX_MEMORY_MIB: u32 = 256;
+
 fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
     bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
 }
 
+fn platform_snapshots() -> PlatformSnapshots {
+    PlatformSnapshots::new(
+        PLATFORM_SNAPSHOT_MAX_VCPUS,
+        PLATFORM_SNAPSHOT_MAX_MEMORY_MIB,
+    )
+}
+
+/// Opens the agent without platform snapshots, so opening it never boots a VM.
 pub(super) fn create_persistent_client(
     guard: crate::mxc_common::filesystem_security::LockedDirectoryPath,
 ) -> Result<NvxClient, MxcError> {
@@ -750,6 +767,47 @@ impl SandboxClient for NvxClient {
             .validate_exec(request)
             .map_err(map_error)
     }
+    fn open_execution_host(&mut self) -> Result<Option<MxcError>, MxcError> {
+        let inner = self
+            .0
+            .as_mut()
+            .ok_or_else(|| MxcError::backend_error("NVX client is closed"))?;
+        let cold = inner.backend.config();
+        let setup = cold
+            .setup
+            .clone()
+            .with_platform_snapshots(platform_snapshots());
+        setup.validate().map_err(map_error)?;
+        let config = AgentConfig::new(setup, cold.library.clone(), cold.library_sha256);
+        // The native library retains hosts by setup for the process lifetime, including after this
+        // operation's handle closes. Keep this setup stable rather than adding another cache.
+        let backend = match AgentBackend::new(config) {
+            Ok(backend) => Arc::new(backend),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ErrorCode::BackendUnavailable
+                        | ErrorCode::BackendError
+                        | ErrorCode::Unsupported
+                ) =>
+            {
+                return Ok(Some(map_error(error)));
+            }
+            Err(error) => return Err(map_error(error)),
+        };
+        inner.client = AciEdgeSandbox::from_shared(backend.clone());
+        let cold = std::mem::replace(&mut inner.backend, backend);
+        Arc::try_unwrap(cold)
+            .map_err(|_| {
+                MxcError::backend_error(
+                    "cannot close the NVX agent opened without platform snapshots: backend \
+                     still has other owners",
+                )
+            })?
+            .close()
+            .map_err(map_error)?;
+        Ok(None)
+    }
     fn probe(&self) -> Result<(), MxcError> {
         self.inner()?.client.probe().map_err(map_error)
     }
@@ -770,12 +828,8 @@ impl SandboxClient for NvxClient {
             })
             .map_err(map_error)
     }
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
-        self.inner()?
-            .client
-            .start(&sandbox_id.0)
-            .map(|_| ())
-            .map_err(map_error)
+    fn start(&self, sandbox_id: &SandboxId) -> Result<StartResult, MxcError> {
+        self.inner()?.client.start(&sandbox_id.0).map_err(map_error)
     }
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError> {
         self.inner()?
@@ -996,11 +1050,24 @@ mod tests {
     }
 
     #[test]
-    fn agent_setup_selects_host_cpu_profile() {
+    fn agent_setup_selects_host_cpu_profile_and_platform_snapshots_fit_its_defaults() {
         let bundle = BundledAgent::from_dir(r"C:\bundle").unwrap();
         let setup = agent_setup(&bundle, Path::new(r"C:\state"));
         assert_eq!(setup.cpu_profile, CpuProfile::Host);
-        assert_eq!(serde_json::to_value(&setup).unwrap()["cpuProfile"], "host");
+        let json = serde_json::to_value(&setup).unwrap();
+        assert_eq!(json["cpuProfile"], "host");
+        assert!(json.get("platformSnapshots").is_none(), "{json}");
+
+        let setup = setup.with_platform_snapshots(platform_snapshots());
+        assert_eq!(
+            serde_json::to_value(&setup).unwrap()["platformSnapshots"],
+            serde_json::json!({"enabled": true, "maxVcpus": 1, "maxMemoryMib": 256})
+        );
+        // The templates must fit the sandboxes that keep the agent's default resources.
+        setup.validate().unwrap();
+        let defaults = setup.defaults.resources;
+        assert_eq!(defaults.vcpus, Some(PLATFORM_SNAPSHOT_MAX_VCPUS));
+        assert_eq!(defaults.memory_mib, Some(PLATFORM_SNAPSHOT_MAX_MEMORY_MIB));
     }
 
     #[test]
