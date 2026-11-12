@@ -176,6 +176,7 @@ jobs:
         mxc_ffi.dll
         wxc-wslc-daemon.exe
         wslcsdk.dll
+        mxc-wslc-gateway.tar
       targetFolder: $(packageRoot)\runtimes\win-x64\native
 
   - task: CopyFiles@2
@@ -186,6 +187,7 @@ jobs:
         mxc_ffi.dll
         wxc-wslc-daemon.exe
         wslcsdk.dll
+        mxc-wslc-gateway.tar
       targetFolder: $(packageRoot)\runtimes\win-arm64\native
 
   - task: CopyFiles@2

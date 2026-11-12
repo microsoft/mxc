@@ -16,9 +16,10 @@
 #
 # Bumping: bump the `version: 'ms-prod-1.<N>'` lines in the two
 # `.azure-pipelines/templates/*.Build.Job.yml` files and `channel`
-# here in the same commit. Then run the standard pre-push ladder
-# (see `.github/copilot-instructions.md` § Verification) against the
-# new toolchain.
+# here in the same commit, and regenerate the WSLC gateway images
+# with `scripts/build-wslc-gateway-image.ps1`. Then run the standard
+# pre-push ladder (see `.github/copilot-instructions.md` § Verification)
+# against the new toolchain.
 #
 # Opt-out: `cargo +<channel> ...` or `RUSTUP_TOOLCHAIN=<channel> ...`
 # for one-off testing on a different toolchain.

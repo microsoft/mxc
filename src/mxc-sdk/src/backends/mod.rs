@@ -42,8 +42,9 @@ pub mod windows_sandbox {
     pub mod lifecycle;
 }
 
-#[cfg(target_os = "windows")]
 pub mod wslc {
-    #[cfg(feature = "wslc")]
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
     pub mod common;
+    #[cfg(any(all(target_os = "windows", feature = "wslc"), feature = "wslc-gateway"))]
+    pub mod gateway_policy;
 }

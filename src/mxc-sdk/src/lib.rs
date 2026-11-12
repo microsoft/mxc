@@ -177,6 +177,9 @@ pub use backend_modules::windows_sandbox::lifecycle as windows_sandbox_lifecycle
 #[cfg(all(target_os = "windows", feature = "wslc"))]
 pub use backend_modules::wslc::common as wslc_common;
 #[doc(hidden)]
+#[cfg(any(all(target_os = "windows", feature = "wslc"), feature = "wslc-gateway"))]
+pub use backend_modules::wslc::gateway_policy as wslc_gateway_policy;
+#[doc(hidden)]
 pub use core_modules::learning_mode_core;
 #[doc(hidden)]
 pub use core_modules::learning_mode_windows;

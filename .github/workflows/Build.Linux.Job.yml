@@ -241,7 +241,8 @@ jobs:
 
       # These need no LXC installed: the engine tests inject their probes, and
       # the dispatch and FFI pins are refused before a container is created.
-      - name: Test LXC dispatch and discovery
+      # The WSLC gateway runs in a Linux container, so its tests run here.
+      - name: Test LXC dispatch, discovery, and WSLC gateway
         working-directory: src
         shell: bash
         run: |
@@ -270,6 +271,8 @@ jobs:
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
           run_pinned "Probe coverage" -p mxc-sdk --lib mxc_engine::probe
           run_pinned "Backend registry" -p mxc-sdk --lib mxc_engine::backend_registry
+          run_pinned "WSLC gateway policy" --features wslc-gateway -p mxc-sdk --lib gateway_policy
+          run_pinned "WSLC gateway" --features wslc-gateway -p mxc-sdk --bin mxc-wslc-gateway
 
           # Hyperlight is a Linux backend only on x64, and the probe reports it
           # from a feature-gated branch the default build never compiles.

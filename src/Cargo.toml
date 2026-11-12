@@ -25,6 +25,17 @@ debug = "full"
 split-debuginfo = "packed"
 strip = "debuginfo"
 
+# The gateway binary ships inside a committed image, so keep it small.
+[profile.wslc-gateway]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+split-debuginfo = "off"
+strip = true
+
 [workspace.package]
 version = "1.0.1"
 edition = "2021"

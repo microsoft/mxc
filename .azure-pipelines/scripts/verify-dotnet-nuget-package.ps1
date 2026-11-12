@@ -36,8 +36,10 @@ try {
         $required += @(
             'runtimes/win-x64/native/wxc-wslc-daemon.exe',
             'runtimes/win-x64/native/wslcsdk.dll',
+            'runtimes/win-x64/native/mxc-wslc-gateway.tar',
             'runtimes/win-arm64/native/wxc-wslc-daemon.exe',
-            'runtimes/win-arm64/native/wslcsdk.dll'
+            'runtimes/win-arm64/native/wslcsdk.dll',
+            'runtimes/win-arm64/native/mxc-wslc-gateway.tar'
         )
     }
 
