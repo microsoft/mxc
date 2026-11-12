@@ -233,6 +233,13 @@ isolated test-support library using
 `scripts\ci\run-w365-node-fixture.ps1`, after building the Node SDK integration
 tests. GitHub Actions and Azure SDK integration jobs require this fixture;
 the normal packaged-artifact tests continue to use shipping libraries.
+
+The engine's `transport_deadlines_fixture` holds TLS responses open, including
+incomplete headers and bodies, to verify client deadline expiration, uncertain
+failures, retained release IDs and no automatic retries. Short timeout overrides
+are internal to the test build; production checkout and release budgets are
+unchanged.
+
 The Node fixture first makes an asynchronous call through another Koffi library
 before importing MXC and checks that the SDK leaves Koffi's stack setting unchanged.
 W365 HTTPS calls use a joined native thread with a 1 MiB stack rather than

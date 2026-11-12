@@ -12,7 +12,7 @@ use crate::mxc_common::{
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 #[cfg(target_os = "windows")]
 use std::time::Instant;
@@ -150,11 +150,26 @@ impl Drop for Environment {
     }
 }
 
+enum FixtureReply {
+    Complete(String),
+    Disconnect,
+    Hold {
+        prefix: String,
+        ready: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    },
+}
+
+struct HeldReply {
+    ready: mpsc::Receiver<()>,
+    _release: mpsc::Sender<()>,
+}
+
 struct Fixture {
     port: u16,
     ca: tempfile::NamedTempFile,
     requests: Arc<Mutex<Vec<String>>>,
-    replies: Arc<Mutex<std::collections::VecDeque<Option<String>>>>,
+    replies: Arc<Mutex<std::collections::VecDeque<FixtureReply>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
@@ -176,9 +191,7 @@ impl Fixture {
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let replies = Arc::new(Mutex::new(
-            std::collections::VecDeque::<Option<String>>::new(),
-        ));
+        let replies = Arc::new(Mutex::new(std::collections::VecDeque::<FixtureReply>::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (seen, responses, stopping) = (requests.clone(), replies.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
@@ -221,9 +234,24 @@ impl Fixture {
                     continue;
                 } // Rejected TLS never carries an HTTP request.
                 seen.lock().unwrap().push(String::from_utf8(data).unwrap());
-                if let Some(Some(reply)) = responses.lock().unwrap().pop_front() {
-                    stream.write_all(reply.as_bytes()).unwrap();
-                    stream.flush().unwrap();
+                let reply = responses.lock().unwrap().pop_front();
+                match reply {
+                    Some(FixtureReply::Complete(reply)) => {
+                        stream.write_all(reply.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    Some(FixtureReply::Hold {
+                        prefix,
+                        ready,
+                        release,
+                    }) => {
+                        stream.write_all(prefix.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                        let _ = ready.send(());
+                        // Dropping the test's gate also unblocks cleanup after a failed assertion.
+                        let _ = release.recv();
+                    }
+                    Some(FixtureReply::Disconnect) | None => {}
                 }
             }
         });
@@ -248,12 +276,28 @@ impl Fixture {
         self.reply_with_length(status, body, body.len());
     }
     fn reply_with_length(&self, status: u16, body: &str, length: usize) {
-        self.replies.lock().unwrap().push_back(Some(format!(
+        self.replies.lock().unwrap().push_back(FixtureReply::Complete(format!(
             "HTTP/1.1 {status} Fixture\r\nContent-Length: {length}\r\nx-ms-request-id: fixture-request\r\nConnection: close\r\n\r\n{body}"
         )));
     }
     fn drop_reply(&self) {
-        self.replies.lock().unwrap().push_back(None);
+        self.replies
+            .lock()
+            .unwrap()
+            .push_back(FixtureReply::Disconnect);
+    }
+    fn hold_reply(&self, prefix: &str) -> HeldReply {
+        let (ready, received) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        self.replies.lock().unwrap().push_back(FixtureReply::Hold {
+            prefix: prefix.into(),
+            ready,
+            release: released,
+        });
+        HeldReply {
+            ready: received,
+            _release: release,
+        }
     }
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
@@ -292,6 +336,80 @@ fn invoke(value: &Value, opt_in: bool) -> Result<Value, MxcError> {
     match crate::mxc_engine::run_state_aware(parsed, false)? {
         DispatchOutcome::Envelope(value) => Ok(value),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn transport_deadlines_fixture() {
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    const WATCHDOG: Duration = Duration::from_secs(15);
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = Fixture::new();
+    fixture.configure(&env);
+    let partial_body = format!(
+        "HTTP/1.1 200 Fixture\r\nContent-Length: 1000\r\nx-ms-request-id: fixture-request\r\n\r\n{{\"sessionId\":\"{A}\""
+    );
+    for (phase, prefix, code) in [
+        ("provision", "", "checkout_transport"),
+        ("provision", partial_body.as_str(), "checkout_response"),
+        ("stop", "", "release_transport"),
+        (
+            "deprovision",
+            "HTTP/1.1 204 Fixture\r\nx-ms-request-id: fixture-request\r\n",
+            "release_transport",
+        ),
+    ] {
+        let before = fixture.count();
+        let value = if phase == "provision" {
+            provision()
+        } else {
+            request(phase, A)
+        };
+        let error = std::thread::scope(|scope| {
+            let held = fixture.hold_reply(prefix);
+            let (completed, result) = mpsc::channel();
+            let client = scope.spawn(move || {
+                super::service::with_test_timeout(TIMEOUT, || {
+                    completed.send(invoke(&value, true)).unwrap();
+                });
+            });
+            let ready = held.ready.recv_timeout(WATCHDOG);
+            let outcome = result.recv_timeout(WATCHDOG);
+            // Keep the connection open until the client returns; the watchdog must fail,
+            // not close the socket early and accidentally satisfy the timeout assertion.
+            drop(held);
+            client.join().unwrap();
+            ready.expect("fixture must receive the request and hold its response open");
+            outcome
+                .expect("client did not enforce its short transport deadline")
+                .unwrap_err()
+        });
+        assert_eq!(error.code, MxcErrorCode::BackendError, "{phase}/{code}");
+        let details = error.details.unwrap();
+        assert_eq!(details["code"], code, "{phase}/{code}");
+        assert_eq!(details["possiblySucceeded"], true);
+        assert_eq!(
+            fixture.count(),
+            before + 1,
+            "deadline expiration must not replay checkout or release"
+        );
+        if phase == "provision" {
+            assert!(details.get("sandboxId").is_none());
+            assert!(details.get("sessionId").is_none());
+        } else {
+            assert_eq!(details["sandboxId"], format!("w365:{POOL}:{A}"));
+            assert_eq!(details["sessionId"], A);
+            assert!(fixture
+                .request(before)
+                .starts_with(&format!("DELETE /api/sessions/{A}?api-version=2.0")));
+        }
+        if code == "checkout_response" {
+            assert_eq!(details["httpStatus"], 200);
+            assert_eq!(details["requestId"], "fixture-request");
+        } else {
+            assert!(details.get("httpStatus").is_none());
+        }
     }
 }
 
@@ -941,7 +1059,13 @@ fn lifecycle_fresh_executor_fixture() {
     cleanup["sandboxId"] = error["error"]["details"]["sandboxId"].clone();
     env.set("W365A_CP_TOKEN", "renewed-error-cleanup-token");
     fixture.reply(204, "");
-    assert!(run(cleanup, true).status.success());
+    let output = run(cleanup, true);
+    assert!(
+        output.status.success(),
+        "cleanup failed: stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fixture.count(), 7);
     assert!(fixture
         .request(6)

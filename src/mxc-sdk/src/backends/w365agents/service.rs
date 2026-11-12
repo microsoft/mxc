@@ -12,6 +12,23 @@ const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_test_timeout<T>(timeout: Duration, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Duration>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_TIMEOUT.set(self.0);
+        }
+    }
+    let _restore = Restore(TEST_TIMEOUT.replace(Some(timeout)));
+    operation()
+}
+
 fn guid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
@@ -70,6 +87,8 @@ pub(super) fn validate_provision(
 pub(super) struct Client {
     host: String,
     token: String,
+    #[cfg(test)]
+    timeout_override: Option<Duration>,
 }
 
 impl Client {
@@ -103,10 +122,18 @@ impl Client {
                 "W365A_CP_TOKEN must be nonempty ASCII without whitespace or control characters",
             ));
         }
-        Ok(Self { host, token })
+        Ok(Self {
+            host,
+            token,
+            // Capture the test caller's override before moving TLS to its own thread.
+            #[cfg(test)]
+            timeout_override: TEST_TIMEOUT.get(),
+        })
     }
 
     fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
+        #[cfg(test)]
+        let timeout = self.timeout_override.unwrap_or(timeout);
         let tls = TlsConfig::builder()
             .provider(TlsProvider::NativeTls)
             .root_certs(RootCerts::PlatformVerifier);
