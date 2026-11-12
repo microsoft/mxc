@@ -3386,7 +3386,7 @@ mod tests {
             sdk_init::prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE);
 
         assert!(message.contains("WslPackage"));
-        assert!(message.contains("3.0.3"));
+        assert!(message.contains("3.0.5"));
         assert!(message.contains("wsl --update"));
         assert!(!message.contains("--pre-release"));
         assert!(!message.contains("Virtual Machine Platform"));
