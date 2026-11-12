@@ -164,7 +164,7 @@ config='{
 config=${config/PRIVATE_TMP_PLACEHOLDER/$PRIVATE_TMP}
 echo "Running Bubblewrap missing denials beneath a read-only parent..."
 READONLY_STATUS=0
-READONLY_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
+READONLY_OUT=$(TMPDIR="$PRIVATE_TMP" timeout 60 "$LXC_EXEC" --experimental \
     --config-base64 "$(printf '%s' "$config" | base64 -w0)" 3>&- 4>&- 2>&1) || READONLY_STATUS=$?
 PUBLISHER_STATUS=0
 wait "$PUBLISHER" || PUBLISHER_STATUS=$?
