@@ -538,16 +538,44 @@ fn lifecycle_contract_and_recovery_fixture() {
         }
     }
     for key in ["filesystem", "network", "ui", "clipboard", "runtimeConfig"] {
-        for phase in ["provision", "exec", "stop"] {
+        for phase in ["provision", "stop"] {
             let mut value = if phase == "provision" {
                 provision()
             } else {
                 request(phase, A)
             };
             value[key] = json!({});
-            assert!(invoke(&value, true).is_err(), "{key}/{phase}");
+            assert_eq!(
+                invoke(&value, true).unwrap_err().code,
+                MxcErrorCode::MalformedRequest,
+                "{key}/{phase}"
+            );
         }
     }
+    let policy_errors = [
+        ("network", json!({})),
+        (
+            "runtimeConfig",
+            json!({"networkProxy":"http://127.0.0.1:8080"}),
+        ),
+    ]
+    .map(|(key, policy)| {
+        let mut value = request("exec", A);
+        value[key] = policy;
+        (key, invoke(&value, true).unwrap_err().code)
+    });
+    assert_eq!(
+        policy_errors,
+        [
+            ("network", MxcErrorCode::PolicyValidation),
+            ("runtimeConfig", MxcErrorCode::PolicyValidation),
+        ]
+    );
+    assert_eq!(
+        fixture.count(),
+        before,
+        "exec policy refusal must not call the service"
+    );
     for host in [
         "",
         " ",
