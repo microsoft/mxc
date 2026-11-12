@@ -121,6 +121,7 @@ impl Client {
         #[cfg(not(any(test, feature = "test-support")))]
         let port = 443;
         let config = ureq::Agent::config_builder()
+            .user_agent(concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)"))
             .tls_config(tls.build())
             .timeout_global(Some(timeout))
             .max_redirects(0)

@@ -84,6 +84,9 @@ user-type and user-object-id headers. Release sends DELETE to
 Every request has an independent `x-ms-client-request-id`; safe returned
 `x-ms-request-id` values are retained on errors. There is no allocation
 retry, hidden cleanup, replacement checkout or durable local registry.
+All SDKs and executors send
+`User-Agent: mxc/<native SDK version> (w365_agents)`, using the native SDK package
+version. This identifies the client for diagnostics, not authentication.
 
 Successful checkout requires HTTP 200, `status: "Succeeded"` and a valid
 `sessionId`. An omitted `computerId` uses the session ID; a supplied computer

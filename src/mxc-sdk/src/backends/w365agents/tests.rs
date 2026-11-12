@@ -818,6 +818,17 @@ fn lifecycle_contract_and_recovery_fixture() {
     assert!(fixture
         .request(fixture.count() - 1)
         .starts_with(&format!("DELETE /api/sessions/{A}?")));
+    for request in fixture.requests.lock().unwrap().iter() {
+        let user_agent = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("user-agent")
+                .then_some(value.trim())
+        });
+        assert_eq!(
+            user_agent,
+            Some(concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)"))
+        );
+    }
 }
 
 // CI explicitly supplies a test-support executor. This never uses a live service.
