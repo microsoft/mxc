@@ -61,6 +61,11 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
       } = await import('@microsoft/mxc-sdk/v1/dev');
       assert.equal(koffi.config().async_stack_size, stackSize,
         'the SDK must not change the application Koffi configuration');
+      const nativeStdio = await import(new URL(
+        '../bindings/native-stdio.js', import.meta.resolve('@microsoft/mxc-sdk/v1'),
+      ).href) as typeof import('./node_modules/@microsoft/mxc-sdk/dist/bindings/native-stdio.js');
+      const supportsStreaming = nativeStdio.supportsNativeStdio(
+        process.platform, process.versions.node);
       execFileSync(process.env.MXC_W365_TEST_OPENSSL ?? 'openssl', [
         'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
         '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost',
@@ -94,13 +99,24 @@ it('W365 Dev JSON checks out and releases, retaining Provision cleanup IDs in me
       await assert.rejects(provisionContainerJson(provision),
         (error: unknown) => error instanceof MxcError && error.code === 'backend_unavailable');
       await validateProvisionJson(provision, options);
+      await assert.rejects(startContainerJson(request('start'), options),
+        (error: unknown) => error instanceof MxcError && error.code === 'unsupported_phase');
       for (const call of [
-        () => startContainerJson(request('start'), options),
         () => runInContainerJson(request('exec'), options),
         () => spawnInContainerJson(request('exec'), options),
       ]) {
-        await assert.rejects(call,
-          (error: unknown) => error instanceof MxcError && error.code === 'unsupported_phase');
+        await assert.rejects(call, (error: unknown) => {
+          assert.ok(error instanceof MxcError);
+          assert.equal(error.code, supportsStreaming ? 'unsupported_phase' : 'backend_unavailable');
+          if (!supportsStreaming) {
+            const platform = nativeStdio.nativeStdioPlatformName(process.platform);
+            const requirement = nativeStdio.nativeStdioNodeRequirement(process.platform);
+            assert.equal(error.message,
+              `native stdio on ${platform} requires Node.js ${requirement}; ` +
+              `current version is ${process.versions.node}`);
+          }
+          return true;
+        });
       }
       assert.equal(requests.length, 0, 'validation must not call the service');
 
