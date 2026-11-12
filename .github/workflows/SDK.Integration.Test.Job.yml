@@ -186,8 +186,8 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
-      # preserves the env vars above.
+      # Linux needs root for Bubblewrap unprivileged-userns paths.
+      # Pass test controls explicitly because Ubuntu 26.04's sudo ignores -E.
       #
       # `sudo` resets PATH from its own `secure_path`, which picks the image's
       # Node ahead of the one setup-node installed, so the suite would run on a
@@ -201,7 +201,10 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os_label }}" = "linux" ]; then
-            sudo -E env "PATH=$PATH" MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
+            sudo env "PATH=$PATH" \
+              "MXC_SKIP_OS_BUILD_DEPENDENT_TESTS=$MXC_SKIP_OS_BUILD_DEPENDENT_TESTS" \
+              "MXC_SKIP_LXC_NETWORK_TESTS=$MXC_SKIP_LXC_NETWORK_TESTS" \
+              MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
           else
             npm test
           fi
