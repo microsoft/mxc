@@ -118,6 +118,59 @@ for path in secret_dir secret_dir/nested missing; do
     fi
 done
 
+# Missing deny mountpoints must be private even when their parent is read-only.
+TOOLS="$BASE/tools"
+mkdir "$TOOLS"
+mkfifo "$TOOLS/ready" "$TOOLS/continue"
+exec 3<> "$TOOLS/ready" 4<> "$TOOLS/continue"
+(
+    if read -r -t 30 READY <&3 && [ "$READY" = "READY" ] \
+        && [ ! -e "$BASE/.env.local" ] && [ ! -e "$BASE/absent" ]; then
+        printf 'LATE_SECRET\n' > "$BASE/.env.local"
+        mkdir -p "$BASE/absent/nested"
+        printf 'LATE_SECRET\n' > "$BASE/absent/nested/secret"
+        printf 'continue\n' >&4
+    else
+        printf 'abort\n' >&4
+        exit 1
+    fi
+) &
+PUBLISHER=$!
+config='{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "cwd": "/mnt/masktest/tools",
+    "commandLine": "set -eu; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; echo READONLY_MISSING_DENIALS_OK"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/mnt/masktest"],
+    "readwritePaths": ["/mnt/masktest/tools"],
+    "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/.env.local", "/mnt/masktest/absent/nested"]
+  }
+}'
+echo "Running Bubblewrap missing denials beneath a read-only parent..."
+READONLY_STATUS=0
+READONLY_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
+    --config-base64 "$(printf '%s' "$config" | base64 -w0)" 3>&- 4>&- 2>&1) || READONLY_STATUS=$?
+PUBLISHER_STATUS=0
+wait "$PUBLISHER" || PUBLISHER_STATUS=$?
+exec 3>&- 4>&-
+if [ "$READONLY_STATUS" -ne 0 ] \
+    && echo "$READONLY_OUT" | grep -qF "requires bwrap 0.11.0 or newer" \
+    && [ ! -e "$BASE/.env.local" ] && [ ! -e "$BASE/absent" ]; then
+    echo "PASS: older Bubblewrap rejects missing denials beneath read-only parents without modifying the host."
+elif [ "$READONLY_STATUS" -eq 0 ] && [ "$PUBLISHER_STATUS" -eq 0 ] \
+    && echo "$READONLY_OUT" | grep -qFx "READONLY_MISSING_DENIALS_OK" \
+    && [ "$(cat "$BASE/.env.local")" = "LATE_SECRET" ] \
+    && [ "$(cat "$BASE/absent/nested/secret")" = "LATE_SECRET" ]; then
+    echo "PASS: missing denials stay masked after host creation; writable child and read-only parent preserved."
+else
+    echo "$READONLY_OUT"
+    echo "FAIL: missing denial enforcement or read-only-parent controls failed (sandbox $READONLY_STATUS, publisher $PUBLISHER_STATUS)."
+    FAIL=1
+fi
+
 # --- Denied-symlink masking ----------------------------------------------------
 # Denying a symlink masks the object it points to: the runner rewrites a denied
 # symlink to its canonical target so the mask lands on the real file/dir (bwrap

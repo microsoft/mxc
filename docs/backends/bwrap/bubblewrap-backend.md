@@ -40,11 +40,10 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add bubblewrap
   ```
-  The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
-  environment is built with `--clearenv` (bwrap 0.5.0+). The address-family
-  filter uses `--seccomp FD`, which predates that release, so **bwrap 0.5.0 or
-  newer** remains the requirement. Platform detection probes `bwrap --version`
+  The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
+  additionally require **bwrap 0.11.0+**, a non-setuid installation and
+  unprivileged overlayfs support. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -356,7 +355,7 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
-| `readonlyPaths` | `--ro-bind <real path> <real path>` | Explicit read-only bind mount |
+| `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
 | `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
