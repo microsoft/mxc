@@ -1009,7 +1009,7 @@ impl WSLContainerRunner {
             if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
                 std::mem::forget(session_guard);
             }
-            return Err(e);
+            return Err(e.into_response());
         }
 
         // -- Process settings --

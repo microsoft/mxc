@@ -1304,11 +1304,15 @@ $cqSandbox = New-PortMappedSandbox
 $cqPort = $cqSandbox.Port
 $script:cqSandboxId = $cqSandbox.SandboxId
 try {
-    $cqReady = $false
-    if ($null -ne $script:cqSandboxId -and (Envelope-Arm (Parse-Envelope -Stdout $cqSandbox.Start.Stdout)) -eq 'result') {
-        $script:cqStarted = $true
-        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_port_bind.json' -SandboxId $script:cqSandboxId
-        $cqReady = ($r.ExitCode -eq 0 -and $r.Stdout -match 'LISTENER_STARTED')
+    $cqReady = Run-StateAwareTest "CQ: a port-mapped sandbox starts and listens on its forwarded port" {
+        if (Assert-ResultEnvelope $cqSandbox.Provision "port-mapping provision") {
+            if (Assert-ResultEnvelope $cqSandbox.Start "port-mapping start") {
+                $script:cqStarted = $true
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_port_bind.json' -SandboxId $script:cqSandboxId
+                Assert-True ($r.ExitCode -eq 0) "listener exec exit code = 0"
+                Assert-True ($r.Stdout -match 'LISTENER_STARTED') "container listener started"
+            }
+        }
     }
 
     if ($cqReady) {
@@ -1338,6 +1342,10 @@ try {
                 $startEnv = Parse-Envelope -Stdout $s.Stdout
                 $code = if ($startEnv) { $startEnv.error.code } else { '<no envelope>' }
                 Assert-True ($code -eq 'backend_error') "the collision surfaced as 'backend_error' (got '$code')"
+                Assert-True ("$($startEnv.error.operation)" -eq 'WslcStartContainer') `
+                    "the collision names WslcStartContainer (got '$($startEnv.error.operation)')"
+                Assert-True ("$($startEnv.error.nativeCode)" -eq '0x80072740') `
+                    "the collision carries nativeCode 0x80072740 (got '$($startEnv.error.nativeCode)')"
                 Assert-True ("$($startEnv.error.message)" -match '0x80072740') `
                     "the message carries the address-in-use HRESULT (got '$($startEnv.error.message)')"
             } else {
