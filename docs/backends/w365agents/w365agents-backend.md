@@ -166,23 +166,10 @@ explicit release. Messages are diagnostic text, not a structured parsing API.
 If no valid ID was returned, use the service reconciliation procedure below;
 do not repeat checkout automatically. No SDK call acquires or renews tokens.
 
-### Service validation limit
-
-The implementation follows the approved design/reference API 2.0 header
-contract. The supplied North Europe INT service evidence used API **3.0**,
-a JSON body with `sessionKind: "local"` and `userObjectId`, and readiness
-polling via POST with `x-ms-sessionId`. That is a different service contract:
-it does not validate API 2.0 checkout for any accepted user type, omitted
-identity or release. Explicit `userType: "Local"` sends the API 2.0
-`user-type: Local` header, not an API 3.0 `sessionKind` body.
-No API-version compatibility layer or `Local` substitution is implemented.
-Actual checkout/release compatibility for each user type remains to be confirmed
-with the service owner and an explicitly authorized live run.
-
 ## Optional live validation: explicit invocation only
 
-**Live Phase 2 validation has not been run.** Do not use another caller's
-active checkout or token. Obtain authorization for a compatible API 2.0
+**Live validation requires explicit authorization.** Do not use another
+caller's active checkout or token. Obtain authorization for a compatible API 2.0
 pool and user identity and confirm the release contract before allocating.
 Use a normal executor, not a `test-support` build. Supply the two required
 environment variables through the caller's approved credential mechanism;
