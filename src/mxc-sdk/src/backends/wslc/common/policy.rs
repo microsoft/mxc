@@ -140,6 +140,15 @@ pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result
     Ok(())
 }
 
+/// The daemon's provision proxy check; requests that skip
+/// [`validate_provision_policy`] reach the daemon directly.
+pub fn check_provision_proxy(network_proxy: Option<&str>) -> Result<(), &'static str> {
+    match network_proxy {
+        Some(_) => Err(ERR_PROXY_AT_PROVISION),
+        None => Ok(()),
+    }
+}
+
 /// Validate the request for the provision phase. `rw` / `ro` paths become
 /// volume mounts and `network.egress.default` selects the container network
 /// mode; both are honoured here. Everything else in the module table is

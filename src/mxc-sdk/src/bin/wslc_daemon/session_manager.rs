@@ -2191,6 +2191,10 @@ impl Worker {
         reply: oneshot::Sender<Result<String, WorkerError>>,
         worker: &mpsc::UnboundedSender<WorkerCommand>,
     ) {
+        if let Err(message) = policy::check_provision_proxy(config.network_proxy.as_deref()) {
+            let _ = reply.send(Err(WorkerError::rejected(anyhow::anyhow!(message))));
+            return;
+        }
         let session_ref = match self.ensure_session(config.session_ref.as_deref(), worker) {
             Ok(SessionLookup::Ready(session_ref)) => session_ref,
             Ok(SessionLookup::Booting(session_ref)) => {
@@ -5155,6 +5159,31 @@ mod tests {
             reply.try_recv().is_ok(),
             "a sandbox in another session must be served while one session boots"
         );
+    }
+
+    #[test]
+    fn a_provision_proxy_is_refused_before_any_session_boots() {
+        for network in [NetworkMode::None, NetworkMode::Bridged] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut worker = Worker::new();
+            let (reply, mut rx) = oneshot::channel();
+            worker.begin_provision(
+                ProvisionConfig {
+                    network,
+                    network_proxy: Some("http://proxy.example:8080".to_string()),
+                    ..test_provision_config()
+                },
+                reply,
+                &tx,
+            );
+
+            let refusal = rx
+                .try_recv()
+                .unwrap()
+                .expect_err("a provision proxy must be refused");
+            assert_eq!(refusal.kind(), ErrKind::Rejected);
+            assert!(worker.sessions.is_empty() && worker.pending_sessions.is_empty());
+        }
     }
 
     /// Two implicit sessions would mean two VMs where the caller asked for
