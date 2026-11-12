@@ -5,7 +5,8 @@ pub mod bubblewrap {
     pub mod common;
 }
 
-pub(crate) mod w365agents;
+mod w365agents;
+pub(crate) use w365agents::{deferred as w365_deferred, Runner as W365AgentsRunner};
 
 pub mod hyperlight {
     pub mod common;

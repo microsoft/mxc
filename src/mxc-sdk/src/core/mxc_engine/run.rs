@@ -190,7 +190,7 @@ fn resolve_runner_inner_windows(
     match request.containment {
         ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(
             crate::mxc_common::sandbox_process::Runner::new(
-                crate::backend_modules::w365agents::Runner,
+                crate::backend_modules::W365AgentsRunner,
             ),
         ))),
         ContainmentBackend::ProcessContainer => {
@@ -296,7 +296,7 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
-            crate::backend_modules::w365agents::Runner,
+            crate::backend_modules::W365AgentsRunner,
         )))),
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
         ContainmentBackend::MicroVm => Err(MxcError::unsupported_containment(
@@ -333,7 +333,7 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
-            crate::backend_modules::w365agents::Runner,
+            crate::backend_modules::W365AgentsRunner,
         )))),
         ContainmentBackend::Seatbelt => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
