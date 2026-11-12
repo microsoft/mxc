@@ -34,7 +34,10 @@ also noted below.
 ### Offline TLS fixtures
 
 W365 checkout/release fixtures use local HTTPS services with test-only
-certificate trust, not a production TLS verification bypass. Engine fixtures
+certificate trust, not a production TLS verification bypass. The
+`mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
+isolated Cargo target directory so its artifacts cannot replace shipping builds.
+Its engine fixtures
 run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
 Windows also runs checkout/release through fresh executor processes.
 The .NET SDK test suite and Node SDK integration jobs exercise the public

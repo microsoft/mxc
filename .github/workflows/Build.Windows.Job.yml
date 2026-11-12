@@ -174,14 +174,14 @@ jobs:
             --target-dir target/w365-fixture --features test-support
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path 'target/w365-fixture/${{ matrix.target }}/debug/wxc-exec.exe').Path
-          $names = @(cargo test --locked -p mxc-sdk --lib --target '${{ matrix.target }}' -- --list)
+          $names = @(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target '${{ matrix.target }}' --target-dir target/w365-fixture -- --list)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($case in @('lifecycle_contract_and_recovery_fixture', 'lifecycle_fresh_executor_fixture')) {
-            if (-not ($names -match "backend_modules::w365agents::tests::${case}: test")) {
+          foreach ($case in @('lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture', 'lifecycle_fresh_executor_fixture')) {
+            if (-not ($names -match "^${case}: test")) {
               throw "Missing required W365 fixture: $case"
             }
           }
-          cargo test --locked -p mxc-sdk --lib --target '${{ matrix.target }}' w365 -- --include-ignored
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target '${{ matrix.target }}' --target-dir target/w365-fixture -- --include-ignored
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build debug executor for isolated telemetry smoke tests

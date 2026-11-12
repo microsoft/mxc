@@ -221,7 +221,8 @@ Report release acceptance separately from service-confirmed reset completion.
 
 ## Offline functional fixtures
 
-`backend_modules::w365agents::tests::lifecycle_contract_and_recovery_fixture`
+`src/mxc-sdk/tests/w365_lifecycle.rs` contains
+`lifecycle_contract_and_recovery_fixture`, which
 uses a controlled TLS service through the normal development parser,
 experimental authorization, checked binding and backend dispatch.
 This fixture runs on Windows, Linux and macOS.
@@ -237,7 +238,7 @@ the normal packaged-artifact tests continue to use shipping libraries.
 The engine's `transport_deadlines_fixture` holds TLS responses open, including
 incomplete headers and bodies, to verify client deadline expiration, uncertain
 failures, retained release IDs and no automatic retries. Short timeout overrides
-are internal to the test build; production checkout and release budgets are
+are internal to `test-support` builds; production checkout and release budgets are
 unchanged.
 
 The Node fixture first makes an asynchronous call through another Koffi library
@@ -253,9 +254,9 @@ From `src\` on Windows:
 
 ```powershell
 # Requires openssl on PATH, or MXC_W365_TEST_OPENSSL set to its executable path.
-cargo build --locked -p wxc --features test-support
-$env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\debug\wxc-exec.exe).Path
-cargo test --locked -p mxc-sdk --lib w365 -- --include-ignored
+cargo build --locked -p wxc --features test-support --target-dir target\w365-fixture
+$env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\w365-fixture\debug\wxc-exec.exe).Path
+cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target-dir target\w365-fixture -- --include-ignored
 ```
 
 GitHub Actions and Azure Windows CI use a separate target directory so fixture
@@ -263,9 +264,11 @@ executors cannot replace shipping artifacts. Both CI systems run the engine
 fixture on Linux and macOS without a fixture executor. Azure runs fixtures
 only on native hosts: Windows/Linux x64 and macOS arm64; cross-compiled arm64
 Windows/Linux jobs do not execute them.
-Only test builds honor `MXC_W365_TEST_CA` and `MXC_W365_TEST_PORT`; they add a
-trusted fixture certificate, never disable certificate or hostname validation.
-Shipping builds ignore these variables. Fixtures use only loopback services,
+The integration target requires `test-support`. Only builds with that feature
+honor `MXC_W365_TEST_CA`, `MXC_W365_TEST_PORT` and `MXC_W365_TEST_TIMEOUT_MS`.
+The fixtures supply a trusted certificate and short deadlines without disabling
+certificate or hostname validation. Shipping builds ignore these variables.
+Fixtures use only loopback services,
 synthetic credentials and generated certificates; no live tenant is needed.
 `rcgen` generates fixture certificates. The loopback server uses SChannel on
 Windows and `native-tls` elsewhere; the production client uses `native-tls`

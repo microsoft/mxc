@@ -66,9 +66,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          names="$(cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin -- --list)"
-          grep -Fq "backend_modules::w365agents::tests::lifecycle_contract_and_recovery_fixture: test" <<< "$names"
-          cargo test --locked -p mxc-sdk --lib --target aarch64-apple-darwin w365 -- --include-ignored
+          names="$(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target aarch64-apple-darwin --target-dir target/w365-fixture -- --list)"
+          for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture; do
+            grep -Fxq "${name}: test" <<< "$names"
+          done
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target aarch64-apple-darwin --target-dir target/w365-fixture -- --include-ignored
 
       - name: Test Seatbelt streaming and PTY
         run: cargo test --locked --release --target aarch64-apple-darwin

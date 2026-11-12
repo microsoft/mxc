@@ -12,23 +12,6 @@ const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
-#[cfg(test)]
-thread_local! {
-    static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) fn with_test_timeout<T>(timeout: Duration, operation: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Duration>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TEST_TIMEOUT.set(self.0);
-        }
-    }
-    let _restore = Restore(TEST_TIMEOUT.replace(Some(timeout)));
-    operation()
-}
-
 fn guid(value: &str) -> bool {
     // UUID parsing also accepts simple, braced and URN forms; the contract does not.
     value.len() == uuid::fmt::Hyphenated::LENGTH && uuid::Uuid::try_parse(value).is_ok()
@@ -81,8 +64,6 @@ pub(super) fn validate_provision(
 pub(super) struct Client {
     host: String,
     token: String,
-    #[cfg(test)]
-    timeout_override: Option<Duration>,
 }
 
 impl Client {
@@ -116,30 +97,33 @@ impl Client {
                 "W365A_CP_TOKEN must be nonempty ASCII without whitespace or control characters",
             ));
         }
-        Ok(Self {
-            host,
-            token,
-            // Capture the test caller's override before moving TLS to its own thread.
-            #[cfg(test)]
-            timeout_override: TEST_TIMEOUT.get(),
-        })
+        Ok(Self { host, token })
     }
 
     fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
-        #[cfg(test)]
-        let timeout = self.timeout_override.unwrap_or(timeout);
+        #[cfg(feature = "test-support")]
+        let timeout = match std::env::var_os("MXC_W365_TEST_TIMEOUT_MS") {
+            None => timeout,
+            Some(value) => Duration::from_millis(
+                value
+                    .to_str()
+                    .and_then(|value| value.parse::<std::num::NonZeroU64>().ok())
+                    .ok_or_else(|| MxcError::policy_validation("invalid W365 fixture timeout"))?
+                    .get(),
+            ),
+        };
         let tls = TlsConfig::builder()
             .provider(TlsProvider::NativeTls)
             .root_certs(RootCerts::PlatformVerifier);
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         let (tls, port) = test_tls(tls)?;
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         if port != 443 && self.host != "localhost" {
             return Err(MxcError::policy_validation(
                 "W365 fixture ports require localhost",
             ));
         }
-        #[cfg(not(any(test, feature = "test-support")))]
+        #[cfg(not(feature = "test-support"))]
         let port = 443;
         let config = ureq::Agent::config_builder()
             .user_agent(concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)"))
@@ -415,7 +399,7 @@ fn failure(
     MxcError::backend_error(message).with_details(details)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn test_tls(
     builder: ureq::tls::TlsConfigBuilder,
 ) -> Result<(ureq::tls::TlsConfigBuilder, u16), MxcError> {

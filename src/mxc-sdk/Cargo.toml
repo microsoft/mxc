@@ -17,6 +17,11 @@ path = "src/lib.rs"
 name = "nvx_bundle_integrity"
 path = "tests/nvx/crate_bundle_integrity.rs"
 
+[[test]]
+name = "w365_lifecycle"
+path = "tests/w365_lifecycle.rs"
+required-features = ["test-support"]
+
 [[bin]]
 name = "wxc-windows-sandbox-daemon"
 path = "src/bin/windows_sandbox_daemon/portable_main.rs"

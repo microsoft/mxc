@@ -202,6 +202,3 @@ impl StatefulSandboxBackend for Runner {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;

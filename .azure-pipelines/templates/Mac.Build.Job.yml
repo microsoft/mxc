@@ -83,8 +83,6 @@ jobs:
     # retaining the rest of the package tests.
     - script: |
         set -euo pipefail
-        tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --lib w365 -- --list)"
-        grep -q 'lifecycle_contract_and_recovery_fixture: test' <<< "$tests"
         cargo test --locked --release --target $(targetTriple) \
           -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi -- \
           --skip 'core_modules::mxc_pty::tests::'
@@ -96,6 +94,17 @@ jobs:
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk -p mxc_ffi --lib state_aware
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
       displayName: Test state-aware SDK boundaries
+      workingDirectory: $(workingDirectory)
+
+    - script: |
+        set -euo pipefail
+        fixture_target="$(Agent.TempDirectory)/w365-fixture"
+        tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --list)"
+        for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture; do
+          grep -Fxq "${name}: test" <<< "$tests"
+        done
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --include-ignored
+      displayName: Test W365 checkout and release fixtures
       workingDirectory: $(workingDirectory)
 
     # --- macOS Code Signing + Notarization (official builds only) ---

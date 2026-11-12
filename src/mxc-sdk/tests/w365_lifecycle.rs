@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_common::{
+use mxc_sdk::mxc_common::{
     config_parser::load_mxc_request_from_json,
     logger::{Logger, Mode},
     models::{ContainmentBackend, ExecutionRequest},
@@ -123,17 +123,20 @@ fn fixture_tls(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> native_tls::TlsAcc
 struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Environment {
     fn new() -> Self {
-        Self(
+        let environment = Self(
             [
                 "W365A_CONTROLPLANE_URL",
                 "W365A_CP_TOKEN",
                 "MXC_W365_TEST_CA",
                 "MXC_W365_TEST_PORT",
+                "MXC_W365_TEST_TIMEOUT_MS",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
             .collect(),
-        )
+        );
+        std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
+        environment
     }
     fn set(&self, key: &str, value: &str) {
         std::env::set_var(key, value);
@@ -333,7 +336,7 @@ fn invoke(value: &Value, opt_in: bool) -> Result<Value, MxcError> {
         panic!("lifecycle");
     };
     parsed.set_experimental_enabled(opt_in);
-    match crate::mxc_engine::run_state_aware(parsed, false)? {
+    match mxc_sdk::mxc_engine::run_state_aware(parsed, false)? {
         DispatchOutcome::Envelope(value) => Ok(value),
         other => panic!("{other:?}"),
     }
@@ -347,6 +350,7 @@ fn transport_deadlines_fixture() {
     let env = Environment::new();
     let fixture = Fixture::new();
     fixture.configure(&env);
+    env.set("MXC_W365_TEST_TIMEOUT_MS", &TIMEOUT.as_millis().to_string());
     let partial_body = format!(
         "HTTP/1.1 200 Fixture\r\nContent-Length: 1000\r\nx-ms-request-id: fixture-request\r\n\r\n{{\"sessionId\":\"{A}\""
     );
@@ -370,9 +374,7 @@ fn transport_deadlines_fixture() {
             let held = fixture.hold_reply(prefix);
             let (completed, result) = mpsc::channel();
             let client = scope.spawn(move || {
-                super::service::with_test_timeout(TIMEOUT, || {
-                    completed.send(invoke(&value, true)).unwrap();
-                });
+                completed.send(invoke(&value, true)).unwrap();
             });
             let ready = held.ready.recv_timeout(WATCHDOG);
             let outcome = result.recv_timeout(WATCHDOG);
@@ -433,7 +435,7 @@ fn lifecycle_contract_and_recovery_fixture() {
                     dry_run,
                     ..Default::default()
                 };
-                let result = crate::mxc_engine::run(&execution, &mut Logger::new(Mode::Buffer));
+                let result = mxc_sdk::mxc_engine::run(&execution, &mut Logger::new(Mode::Buffer));
                 if experimental_enabled {
                     let response = result.expect("the engine must select the refusing W365 runner");
                     assert_eq!(response.exit_code, 1);
@@ -449,7 +451,7 @@ fn lifecycle_contract_and_recovery_fixture() {
                 } else {
                     assert_eq!(result.unwrap_err().code.as_str(), "backend_unavailable");
                 }
-                let error = crate::mxc_engine::spawn_execution_request(&execution, false)
+                let error = mxc_sdk::mxc_engine::spawn_execution_request(&execution, false)
                     .err()
                     .expect("create-and-run streaming must never start a process");
                 assert_eq!(
@@ -603,7 +605,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         "a trusted certificate for another hostname must not receive credentials or checkout"
     );
     fixture.configure(&env);
-    assert!(crate::mxc_engine::available_backends()
+    assert!(mxc_sdk::mxc_engine::available_backends()
         .iter()
         .all(|b| b.backend != "w365_agents"));
     assert_eq!(
@@ -613,7 +615,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
 
     {
-        use crate::v1::dev as sdk;
+        use mxc_sdk::v1::dev as sdk;
         let options = sdk::JsonOptions { experimental: true };
         let source = provision().to_string();
         let before = fixture.count();
@@ -621,7 +623,7 @@ fn lifecycle_contract_and_recovery_fixture() {
             sdk::provision_container_json(&source, sdk::JsonOptions::default())
                 .unwrap_err()
                 .code,
-            crate::v1::ErrorCode::BackendUnavailable
+            mxc_sdk::v1::ErrorCode::BackendUnavailable
         );
         sdk::validate_provision_json(&source, options).unwrap();
         for error in [
@@ -637,7 +639,10 @@ fn lifecycle_contract_and_recovery_fixture() {
             )
             .err(),
         ] {
-            assert_eq!(error.unwrap().code, crate::v1::ErrorCode::UnsupportedPhase);
+            assert_eq!(
+                error.unwrap().code,
+                mxc_sdk::v1::ErrorCode::UnsupportedPhase
+            );
         }
         assert_eq!(
             fixture.count(),
@@ -671,7 +676,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         ] {
             fixture.reply(500, &body.to_string());
             let error = sdk::provision_container_json(&source, options).unwrap_err();
-            assert_eq!(error.code, crate::v1::ErrorCode::BackendError);
+            assert_eq!(error.code, mxc_sdk::v1::ErrorCode::BackendError);
             let details = error.details.as_ref().unwrap();
             let client_id = details["clientRequestId"].as_str().unwrap();
             assert!(error
