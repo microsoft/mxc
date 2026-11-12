@@ -39,7 +39,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, lifetime_spawner, network_rules,
+    bwrap_version, lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::{self, ResolverFile},
@@ -215,6 +215,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
 struct ValidatedLaunch {
     egress_plan: Option<network_rules::EgressPlan>,
     bwrap: PathBuf,
+    bwrap_version: bwrap_version::BwrapVersion,
     network_tools: Option<proxy_network::NetworkTools>,
 }
 
@@ -378,6 +379,7 @@ impl BubblewrapScriptRunner {
         Ok(ValidatedLaunch {
             egress_plan,
             bwrap: bwrap.path,
+            bwrap_version: bwrap.version,
             network_tools,
         })
     }
@@ -522,6 +524,7 @@ impl BubblewrapScriptRunner {
         let ValidatedLaunch {
             egress_plan,
             bwrap,
+            bwrap_version,
             network_tools,
         } = launch;
         let checked_network_tools = || {
@@ -551,6 +554,8 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
+        let deny_mountpoints = missing_denials::prepare(&mut mounts, baseline_links, bwrap_version)
+            .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -853,6 +858,7 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
+            _deny_mountpoints: deny_mountpoints,
         })
     }
 }
@@ -860,6 +866,7 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
+    _deny_mountpoints: Option<tempfile::TempDir>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -1625,6 +1632,7 @@ mod tests {
                 ValidatedLaunch {
                     egress_plan: None,
                     bwrap: PathBuf::from("/usr/bin/bwrap"),
+                    bwrap_version: bwrap_version::BwrapVersion::new(0, 11, 0),
                     network_tools: None,
                 },
                 &mut Logger::new(Mode::Buffer),
