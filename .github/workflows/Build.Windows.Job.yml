@@ -26,6 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Expose OpenSSL for Windows TLS fixtures
+        shell: pwsh
+        run: |
+          $openssl = Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'
+          if (-not (Test-Path $openssl)) {
+            throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
+          }
+          "MXC_W365_TEST_OPENSSL=$openssl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Test loopback command quoting
         shell: pwsh
         run: ..\tests\scripts\test_loopback_anchor_command.ps1
@@ -86,10 +95,29 @@ jobs:
           cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::consent
           cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::policy
 
+      - name: Build module lifetime regression fixture
+        run: cargo build --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --example module_lifetime_fixture
+             --no-default-features --features "${{ matrix.features }}"
+
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "${{ matrix.features }}"
+
+      - name: Require NVX module lifetime regression
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $output = @(cargo test --locked --release --target '${{ matrix.target }}' `
+            -p mxc-sdk --no-default-features --features microvm `
+            --test module_lifetime nvx_error_keeps_pending_worker_code_loaded `
+            -- --exact --color never 2>&1)
+          $output | Write-Output
+          if ($LASTEXITCODE -ne 0 -or
+              -not ($output -match '^test nvx_error_keeps_pending_worker_code_loaded \.\.\. ok$')) {
+            throw 'The NVX module lifetime regression must execute and pass.'
+          }
 
       - name: Test and stage filesystem probe request deadlines
         shell: pwsh
@@ -113,13 +141,6 @@ jobs:
           }
           & $destination --ignored filesystem_probe::launch_tests::
           if ($LASTEXITCODE -ne 0) { throw 'Filesystem probe request regression failed.' }
-
-      - name: Test NVX host-only executor matrix
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             -p mxc-sdk --no-default-features --features microvm
-             --test nvx_e2e windows_x64::host_only_executor_request_matrix
-             -- --ignored --exact
 
       - name: Test MicroVM validation infrastructure
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -145,6 +166,23 @@ jobs:
           & ./scripts/ci/stage-nvx-validation-tests.ps1 `
             -BinaryDirectory 'src/target/${{ matrix.target }}/release' `
             -Features '${{ matrix.features }}'
+
+      - name: Test W365 checkout and release with trusted TLS fixtures
+        shell: pwsh
+        run: |
+          cargo build --locked -p wxc --target '${{ matrix.target }}' `
+            --target-dir target/w365-fixture --features test-support
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path 'target/w365-fixture/${{ matrix.target }}/debug/wxc-exec.exe').Path
+          $names = @(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target '${{ matrix.target }}' --target-dir target/w365-fixture -- --list)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($case in @('lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture', 'lifecycle_fresh_executor_fixture')) {
+            if (-not ($names -match "^${case}: test")) {
+              throw "Missing required W365 fixture: $case"
+            }
+          }
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target '${{ matrix.target }}' --target-dir target/w365-fixture -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build debug executor for isolated telemetry smoke tests
         env:

@@ -10,6 +10,12 @@ This document describes the GitHub Actions validation matrix only. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
+Offline TLS fixture coverage in GitHub Actions and Azure build/SDK jobs is
+also noted below.
+
+Linux CI covers Ubuntu 24.04 and 26.04: x64/ARM64 builds and x64 .NET, Node SDK,
+and LXC E2E tests. Shared binaries are published only from Ubuntu 24.04 to
+preserve compatibility with the older supported host.
 
 ## At a glance
 
@@ -29,6 +35,25 @@ the individual local test scripts are documented in
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
 
+### Offline TLS fixtures
+
+W365 checkout/release fixtures use local HTTPS services with test-only
+certificate trust, not a production TLS verification bypass. The
+`mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
+isolated Cargo target directory so its artifacts cannot replace shipping builds.
+Its engine fixtures
+run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
+Windows also runs checkout/release through fresh executor processes.
+The .NET SDK test suite and Node SDK integration jobs exercise the public
+Dev JSON APIs.
+
+Test-support native libraries and executors are kept separate from shipping
+artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build
+and select an isolated fixture library; ordinary packaged-artifact tests
+continue to use shipping libraries. These fixtures do not establish live-service
+compatibility. See the [W365 backend guide](../../backends/w365agents/w365agents-backend.md)
+for local commands and platform prerequisites.
+
 ## Moving parts
 
 | File | Role |
@@ -38,8 +63,8 @@ the individual local test scripts are documented in
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
-| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests in the existing Windows artifact and checks required test discovery. |
-| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, and compiles `nvx_e2e` with `microvm` on Windows x64 without running a VM. |
+| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests, checks required test discovery, and verifies Microsoft signatures and integrity of the staged runtime without starting a VM. |
+| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, compiles `nvx_e2e`, and runs host-only signature and integrity validation with `microvm` on Windows x64. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
@@ -72,12 +97,18 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
+
+Bubblewrap startup coverage injects network-rule installation failure in both
+proxy-only and firewall-enforced modes. The scheduled CLI suite requires that
+the workload never starts and the supervisor is reaped. The Linux build's
+`streaming_bubblewrap` suite checks the setup diagnostic and absence of workload
+file writes through SDK `run`, `spawn`, and `spawn_with_pty`.
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
@@ -195,6 +226,12 @@ The IsolationSession command-line suite also checks that piped and file stdin
 reach the workload when stdout is a console. A workload reads one line and
 returns a distinct exit code only if the line matches.
 
+The suite also runs `isolation_session_post_exit_output.json`. A child waits
+for the workload to exit, then writes numbered lines to stdout and stderr
+for about 30 seconds. The test requires every line, both final markers, and
+workload exit code 42. The streaming smoke test, by contrast, checks output
+while the workload is still running.
+
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
 SDK regressions block each policy probe in a subprocess, require a bounded
@@ -275,12 +312,61 @@ get fixed or wired.
 ### MicroVM validation
 
 The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
-They check executor configurations, JSON requests that collect output, image
-selection, file access rules, and network address and port rules. They also
-check that traffic through a proxy works while direct connections are blocked,
-and that interrupting startup or execution removes the VM and its temporary files.
-The executor and captured JSON execution scenarios also check that the guest
-uses the host CPU profile.
+They check executor configurations, captured and live JSON execution, lifecycle
+operations, image selection, file access rules, and network address and port
+rules. They also check that traffic through a proxy works while direct
+connections are blocked.
+
+Platform snapshot scenarios require parsed native `StartResult` diagnostics,
+not just template files. MXC configures the native snapshot host for one virtual
+processor and 256 MiB of memory; the crate and bundled native agent own template
+creation and selection. Eligible CLI starts must report clone boot mode and a
+stable template key and generation across fresh executor processes for each
+tested configuration. Repeated public `v1::dev::run_json` and `spawn_json`
+calls in one process check the guest's `/proc/cmdline` for the native template
+parameter, `nvx_snapshot_tier=platform`. Guest output, the host CPU profile,
+distinct CLI VM identities, and private guest-file sentinels check that each
+request really runs in its own VM. Native capture diagnostics must show initial
+capture followed by reuse without recapture in later processes. Concurrent first
+requests exercise both template capture and image registration; later concurrent
+requests must still clone the same template with the registry unreachable.
+
+Explicit 256-MiB and 512-MiB requests exercise create-and-run execution and
+lifecycle starts. Native diagnostics must report a clone for 256 MiB and a cold
+boot with a memory-capacity reason for 512 MiB, without an initialization-fallback
+warning. Guest kernel parameters prove the selected path, and guest-visible
+memory must increase consistently with the requested capacity.
+
+Lifecycle scenarios require provision and dry-run validation to leave templates
+uncaptured, followed by a clone start and live and captured execs that preserve
+guest state. The live VM's native `clone.json` lease must match the logged
+template key and generation and remain unchanged across execs and adoption;
+stop must release it and deprovision must remove the sandbox state.
+Separate CLI processes provision, start, execute twice, stop,
+and deprovision. A separate SDK helper stays alive after its handles close:
+another process must fail to execute in that running clone while the helper
+lives, then successfully adopt it and read the same guest state after the
+helper exits. Different VM IDs can run concurrently; this does not imply
+multiple processes can control one running cloned VM. The rejection assertion
+uses failure and owner liveness, not withheld native error text.
+
+An isolated SDK helper also stops and deprovisions a clone, checks release of its
+lease and sandbox state, then starts and cleans up another clone from the same
+template without exiting the owning SDK process.
+
+An intentionally blocked template store must cold boot successfully and return
+warnings to captured and streaming SDK callers. Lifecycle `start` must record a
+redacted fallback diagnostic through the caller's configured logging without
+adding a backend warning to its response envelope. These checks retain workload
+exit codes, validation errors, cleanup, and credential redaction. Removing the
+obstruction must allow the same process to capture templates and clone a later
+request. Child helpers receive private `LOCALAPPDATA` directories without
+changing the suite process's environment.
+
+The isolated-console scenario interrupts first capture, startup, and execution.
+Its helper clears inherited Ctrl-C ignoring before spawning the executor.
+Each interruption must terminate the OpenVMM processes owned by that executor
+and leave the state directory usable; it never relies on a whole-host VM count.
 
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
@@ -288,8 +374,25 @@ unavailable server cannot be mistaken for a blocked connection. The host needs
 an IPv4 route through a non-loopback interface to an address outside the guest
 network, `10.0.0.0/24`.
 
-Regular Windows x64 PR builds run checks that do not need a VM. They also
-unpack the Rust crate package and check that its tests compile.
+Network and filesystem enforcement scenarios run through both captured SDK
+execution and the executor. Every workload requires the guest platform-snapshot
+parameter and rejects initialization fallback; executor cases also require native
+clone diagnostics. Read/write/deny, TCP/UDP delivery, host-loopback, and proxy
+assertions therefore cannot pass solely on a cold boot.
+
+Regular Windows x64 PR builds remain host-only: they verify the signed bundle,
+require staged test-name discovery (including snapshot and lifecycle tests),
+and unpack the Rust crate package to check that its tests compile. Actual VM
+scenarios run only in the scheduled Windows x64 job. Its dispatcher requires
+completion markers for CLI and SDK snapshots, lifecycle adoption, fallback
+warnings and lifecycle diagnostics, concurrent image reuse, and all three
+interruption phases, as well as the existing execution and policy scenarios.
+Missing markers, empty suites, skips, ignored tests, and filtered tests fail
+the job.
+
+`node --test scripts/tests/microvm-validation.test.js` runs host fixtures for
+these gates, including negative cases that omit required discovered tests or
+execution markers. The fixtures do not start VMs.
 
 ### ProcessContainer SDK streaming
 
@@ -316,8 +419,8 @@ Every scheduled `isolation-session` job runs
 `run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
 the architecture-matched telemetry test executor. That artifact is built with
 an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
-has no UTC routing. Consent is granted only in a temporary test store (needed by
-the published contract; development Required collection ignores it) and policy is
+has no UTC routing. Consent management is exercised only in a temporary test
+store; supported-contract Required collection ignores its state. Policy is
 redirected to an isolated HKCU key; real user consent and HKLM policy are not
 modified. The test mode also makes the build eligible for Required collection.
 
@@ -327,29 +430,29 @@ metadata while remaining local-only without provider-group routing. Release, non
 non-test-support and grouped builds reject this test setting.
 All events use the same `Microsoft.MXC` registration and provider GUID.
 Generated-group and registration tests separately check the shared WinExt
-input, failure/retry, and cleanup. ETW capture verifies both metadata categories,
+input, failure/retry, and cleanup. ETW capture verifies Required event metadata for all supported contracts,
 not Microsoft ingestion or an MXC Required/Optional consent model.
 
 The existing lifecycle suite runs provision, start, two successful execs, stop
-and deprovision twice, once with published `1.0.0` and once with development
-`1.1.0-alpha`, each phase in a separate executor process. The local
+and deprovision three times, once per `0.9.0-alpha`, `1.0.0`, and
+`1.1.0-alpha`, with request telemetry disabled and each phase in a separate executor process. The local
 ETW trace must contain one matching ExecutionStart/ExecutionEnd pair per
 recorded PID, correct phase/backend/mode attribution, one session ID and CV
-root throughout each lifecycle, and fresh attribution after cleanup. Successful
+root throughout each lifecycle, and unique session IDs and roots across all
+three lifecycles after cleanup. Successful
 deprovision must remove the isolated correlation records. Missing privileges,
 unsupported hosts, incomplete scenarios and missing events fail the job.
 
 Keyword checks read actual `System/Keywords` from decoded ETW, require
 ProcessExited for each exec, and check Start, End, Error and ProcessExited
-against the request's contract. Separate valid requests for the Windows-
-unsupported Bubblewrap backend require failure pairs and Error for both
-contracts. The same checks read `PartA_PrivTags`: the four development
-events must carry Performance, and published events must retain Usage.
-Development requests must emit only ExecutionStart, ExecutionEnd, Error and
+against the Required classification. Separate valid requests for the Windows-
+unsupported Bubblewrap backend require failure pairs and Error for all three
+contracts, including absent/denied consent and restrictive policy.
+The same checks read `PartA_PrivTags`: the four Required events must carry Performance.
+Supported contracts must emit only ExecutionStart, ExecutionEnd, Error and
 ProcessExited; any other emitted event fails the trace oracle.
-Missing, invalid or combined privacy tags fail. Other published event families
-must retain Measures; combined category masks fail.
-The Windows build job also runs paired create-and-run requests and
+Missing, invalid or combined privacy tags and combined category masks fail.
+The Windows build job also runs create-and-run requests with telemetry omitted and
 these failure cases. Keyword-check mode fails rather than skips without
 Administrator privileges.
 

@@ -106,7 +106,7 @@ request/result/option types and entry points. These typed APIs
 evolve additively as published 1.x contracts grow; the SDK owns the exact
 contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
-replacing V1.
+replacing V1. See [Required V2 changes](#required-v2-changes).
 
 V1.Dev is a separate API family within the supported V1 entrypoint:
 `mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev`, and
@@ -308,8 +308,8 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
-accepted by v1.0.
+provision, Seatbelt `captureDenials`, and the `vm`, `microvm`, and `hyperlight`
+one-shot surfaces, are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -327,6 +327,20 @@ version when the old default is a security bug. The older stable schema is
 left unchanged so the release contract stays auditable; newer schemas
 document the corrected default. Consumers that need the legacy behavior
 must set the field explicitly.
+
+### Approved telemetry behavior change
+
+The four Required events described in [Telemetry](../../telemetry.md) apply
+to `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha`, including V1 SDK callers.
+This intentionally replaces published contracts' optional-collection behavior:
+request telemetry settings, consent withdrawal, and administrative policy no
+longer suppress these events. Other telemetry events are excluded for these
+contracts. Existing consent-management APIs and stored decisions are preserved.
+
+This approved behavior change does not alter accepted JSON, published schemas,
+SDK signatures, or SDK contract targets. It is not a general exception to
+published-API versioning; unrelated breaking changes still require a new
+versioned surface.
 
 ### Security-servicing exception: PowerShell tool discovery
 
@@ -352,6 +366,18 @@ accepted relative denies could leave files accessible through broader grants.
 This validation applies to all supported contracts and SDK V1 without changing
 the API surface or released schemas. Callers must supply fully qualified paths;
 `process.cwd` does not provide a base for filesystem policy.
+
+### Fail-closed servicing exception: WSLc `targetOs`
+
+The published `0.9.0-alpha` and `1.0.0` create-and-run contracts, and the
+Node V1 `WslcConfig.targetOs` property, accept any string for
+`wslc.targetOs`. WSLc runs only Linux containers and cannot select another
+operating system, so the WSLc backend rejects every value other than `"linux"`
+with `policy_validation` before it creates a session or container. Omit the
+field or set it to `"linux"`.
+
+This fail-closed exception applies within V1 and does not require a new
+versioned API surface.
 
 ### Shipped vs Experimental
 
@@ -873,3 +899,13 @@ standard exact-contract diagnostic.
 7. **Experimental features modifying stable behavior:** Experimental features
    may need to modify stable behavior. How do we reason about
    and test this?
+
+## Required V2 changes
+
+These changes would break V1 callers, so they wait for V2:
+
+- Rename `captureDenials.retainEtl` and the result's `etlPath` to
+  `retainTrace` and `tracePath`. On macOS the file is a Seatbelt log, not an
+  ETL.
+- Move `captureDenials` to a top-level request field that each backend
+  accepts or rejects, instead of a backend-specific field.

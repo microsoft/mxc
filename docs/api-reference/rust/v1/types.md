@@ -179,12 +179,14 @@ pub struct DeprovisionOptions {
 An error returned by the SDK's fallible operations (spawn_execution_request).
 
 ```rust
+#[non_exhaustive]
 pub struct Error {
   pub code: ErrorCode,
   pub message: String,
   pub operation: Option<String>,
   pub native_code: Option<String>,
   pub remediation: Option<String>,
+  pub details: Option<Box<serde_json::Value>>,
 }
 
 impl Error {
@@ -199,6 +201,12 @@ impl From<MxcError> for Error {
   fn from(error: MxcError) -> Self;
 }
 ```
+
+`Error` is `#[non_exhaustive]`; use `Error::new` to construct it. The constructor
+sets `details` to `None`. Conversions to and from the internal error preserve
+structured details, including their JSON value type. Use
+`error.details.as_deref()` to borrow the value. `Display` omits details and
+`Debug` redacts them; do not log sensitive values.
 
 
 ## `mxc_sdk::v1::ErrorCode`
@@ -604,7 +612,7 @@ impl ExecutionRequest {
 
 ## `mxc_sdk::v1::TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```rust
 pub struct TelemetryConfig {

@@ -25,7 +25,7 @@ run_filesystem_probe_tests() {
     local executable="$binary_directory/mxc-filesystem-probe-tests"
     local cases=("${backend}_launch_rejects_stalled_paths")
     if [[ "$backend" == "bubblewrap" ]]; then
-        cases+=(bubblewrap_denied_paths_reject_stalls)
+        cases+=(bubblewrap_mount_paths_reject_stalls)
     else
         cases+=(lxc_mount_paths_reject_stalls)
     fi

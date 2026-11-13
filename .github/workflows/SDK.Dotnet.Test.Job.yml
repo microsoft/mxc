@@ -5,16 +5,22 @@ on:
 
 jobs:
   sdk-dotnet-tests:
-    name: SDK .NET Tests (${{ matrix.os_label }})
+    name: SDK .NET Tests (${{ matrix.name_label }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os_label: windows
+            name_label: windows
             runner: windows-latest
           - os_label: linux
-            runner: ubuntu-latest
+            name_label: linux-ubuntu24.04
+            runner: ubuntu-24.04
+          - os_label: linux
+            name_label: linux-ubuntu26.04
+            runner: ubuntu-26.04
           - os_label: macos
+            name_label: macos
             runner: macos-26
     runs-on: ${{ matrix.runner }}
     defaults:
@@ -96,7 +102,7 @@ jobs:
             sleep 5
           done
           sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
-            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates iptables debootstrap uidmap bridge-utils
 
       # The policy these tests use permits no network, so the container starts
       # with no interface and the runner's Docker-set FORWARD policy cannot

@@ -11,7 +11,7 @@ framework behind the App Sandbox that every Mac App Store app uses.
 |---|---|
 | **Binary** | `mxc-exec-mac` |
 | **Config value** | `"containment": "seatbelt"` |
-| **Schema** | `1.0.0`. |
+| **Schema** | `1.0.0` or later. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
 | **Enforced by** | The macOS kernel, via a generated profile |
@@ -362,6 +362,7 @@ Set under a top-level `"seatbelt"` key.
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules, and rejects an override that contains their `com.microsoft.mxc.run.` names. Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. Names starting with `com.microsoft.mxc.run.` are rejected. |
+| `captureDenials` | object | unset | **Requires config version `1.1.0-alpha`.** Records what the sandbox blocked into a JSON report. See [Learning mode](#learning-mode-capturedenials). |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
@@ -390,6 +391,93 @@ in `global-name`). Read access to `/private/var/db/mds` and
 `/private/var/folders`. System keychain stores are already covered by the
 baseline `/Library` and `/System` allows.
 </details>
+
+## Learning mode (`captureDenials`)
+
+Learning mode shows what a workload tried to do that the policy did not
+allow, so you can decide what to grant. The config must use version
+`1.1.0-alpha`. The typed v1 SDK settings send `1.0.0` requests, so they can't
+turn this on yet. Use `mxc-exec-mac`, or send a `1.1.0-alpha` request through
+the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
+[.NET](../../api-reference/dotnet/v1/dev.md), or
+[Node](../../api-reference/node/v1/dev.md).
+
+```json
+"seatbelt": {
+    "captureDenials": {
+        "mode": "block",
+        "outputPath": "~/mxc/denials.json"
+    }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
+| `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
+| `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
+
+MXC adds a per-run ID to the file name (`denials.json` becomes
+`denials.<pid>_<id>.json`). Names without an extension get `.json` first.
+MXC writes a `.verbose.json` file next to it and
+prints the actual path on stderr as a JSON line:
+
+```json
+{"type":"captureDenials","outputPath":"/Users/me/mxc/denials.53120_9f2c….json","exitCode":0,"totalDenials":4,"deniedResourcesTruncated":false}
+```
+
+The report uses the [same format as Windows](../../learning-mode.md#output-file-the-caller-consumes),
+with these macOS differences:
+
+- `resource` is an absolute path for `file`. Other types use
+  `<operation>:<target>`, for example `network-outbound:remote:*:443` or
+  `mach-lookup:com.apple.CARenderServer`.
+
+- Verbose signatures use `providerGuid` `com.apple.security.sandbox`, event
+  ID `0`, and the Seatbelt operation (for example `file-read-data`) as
+  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, other
+  values are kept, and values over 256 characters are cut short. There is no
+  account-name replacement or digest.
+
+`deniedResourcesTruncated: true` means some denials may be missing. Delete the
+report, its `.verbose.json` file, and any `.seatbelt.log` when you're done.
+
+Requests that `guiAccess` grants, such as Mach lookups and IOKit opens, aren't
+denials. They appear only in the verbose file, with `"decision": "allowGrant"`.
+
+`mxc-exec-mac --audit config.json` is a shortcut that runs the
+config with `captureDenials` in `"allow"` mode and writes the report to a temp
+file.
+
+**Limits**
+
+MXC counts repeated denials as they arrive instead of storing each one, so a
+workload that hits the same denial many times doesn't push other denials out
+of the report. The report lists at most 10,000 different denials, and the
+verbose file at most 4,096 groups; extra groups are only counted. MXC skips
+any log line over 64 KiB and sets `processedEventsTruncated` in the verbose
+file. Reaching the 10,000-denial limit or skipping a line marks the report as
+truncated. MXC stops writing `.seatbelt.log` at 1 GiB, keeps the file, and
+adds a warning; the report and verbose file are not affected.
+
+**Limitations**
+
+- It can't be combined with `profileOverride`. MXC finds this run's entries
+  by tagging the rules in its generated profile, and it doesn't rewrite a
+  custom profile.
+
+- macOS hides the remote address in network reports (`remote:*:443`), so only
+  the port is known.
+
+- Reads of paths that don't exist aren't reported.
+
+- Paths longer than about 900 bytes aren't reported, and the report isn't
+  marked truncated. macOS limits each report to about 1 KB. The access is
+  still blocked in `block` mode and allowed in `allow` mode.
+
+- MXC reads the reports with `log stream`. If it can't collect every report
+  before the workload exits, the verbose file sets `processedEventsTruncated`
+  to `true`. Accounts that can't run `log stream` haven't been tested.
 
 ## Process environment
 
@@ -513,6 +601,7 @@ running without special privileges.
 ./mxc-exec-mac config.json                        # config file
 ./mxc-exec-mac --config-base64 <base64-string>    # inline config
 ./mxc-exec-mac --dry-run config.json              # validate, don't run
+./mxc-exec-mac --audit config.json                # record what gets blocked (learning mode)
 ./mxc-exec-mac --debug --log-file mxc.log config.json
 ```
 

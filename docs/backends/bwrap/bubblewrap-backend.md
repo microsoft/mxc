@@ -349,16 +349,16 @@ whatever MXC passed.
 
 ### Filesystem Policy
 
-Policy validation and denied-path resolution use the shared
+Policy validation and the resolution of denied and granted paths use the shared
 [filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts).
 A stalled probe rejects startup rather than leaving a policy check unenforced.
 
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
-| `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
-| `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory or missing path) | `--tmpfs <path>`, then `--remount-ro <path>` | Masked with a read-only tmpfs |
-| `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
+| `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
+| `readonlyPaths` | `--ro-bind <real path> <real path>` | Explicit read-only bind mount |
+| `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
+| `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
 no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
@@ -378,8 +378,52 @@ ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
 filesystem path before mounting — canonicalizing the deepest existing ancestor
 (following symlinks at every level) and re-appending any not-yet-created trailing
 components — so the mask lands on the real object and its file/directory type is
-classified from that target. Dangling links, loops, and other paths that cannot
-be resolved fail before the sandbox starts.
+classified from that target. Relative entries are resolved from MXC's working
+directory. Dangling links, loops, and other paths that cannot be resolved fail
+before the sandbox starts.
+
+**Grants are mounted at their real paths too.** `readwritePaths` and
+`readonlyPaths` entries are resolved the same way, so the more specific entry
+wins whichever spelling the policy or the workload uses: a denied or read-only
+path inside a grant applies, and a grant inside a denied directory stays
+visible. Each host symlink that an entry is named through is recreated inside
+the sandbox, so the caller's spelling still works, including as `process.cwd`.
+For example, when `/home/alice/app` is a symlink to `/data/repos/app`, this
+policy mounts `/data/repos/app`, masks `/data/repos/app/.env`, and links
+`/home/alice/app` to `/data/repos/app`, so `.env` is hidden under both paths:
+
+```json
+"filesystem": {
+  "readwritePaths": ["/home/alice/app"],
+  "deniedPaths": ["/home/alice/app/.env"]
+}
+```
+
+A symlink that is already visible through another mount, such as one inside
+a granted directory, is used as it is, and any other symlinks it leads through
+are recreated as well. Where the sandbox has its own directory at the
+symlink's path, such as its private `/tmp` on a host whose `/tmp` is a symlink
+to `/var/tmp`, the sandbox keeps that directory and recreates the next part of
+the path inside it, so a grant of `/tmp/project` is still reachable as
+`/tmp/project`. A grant of that whole `/tmp` replaces the private `/tmp` with
+the symlink, so `/tmp` in the sandbox is the host's `/var/tmp`. Where the
+sandbox has its own symlink at that path pointing somewhere else, such as its
+`/var/run -> /run` on a host whose `/var/run` points elsewhere, the next part of
+the path is recreated where the sandbox's symlink leads.
+
+A directory that a path or symlink climbs out of with `..`, such as `staging` in
+`/data/staging/../app`, is created empty inside the sandbox if it is not already
+there, so the path still works without showing that directory's contents. A
+symlink that cannot be recreated at all, such as one under `/dev` or `/proc`,
+leaves paths through it unavailable inside the sandbox. Whenever a spelling is
+unavailable, Bubblewrap reports a warning naming the real path to use. A grant
+that cannot be resolved, such as a dangling symlink or a symlink loop, stops
+the sandbox from starting.
+
+Only symlinks are followed. A hard link, or a host bind mount that shows the
+same files under a second path, stays a separate path inside the sandbox: a
+rule on a file or directory inside one of them does not apply to the same
+files reached through the other.
 
 On merged-/usr hosts, baseline entries such as `/bin`, `/sbin`, and `/lib*` are
 symlinks into `/usr`. The sandbox recreates each one as a relative symlink to
@@ -388,10 +432,7 @@ denying `/usr/bin/cat` or `/bin/cat` hides the file under both spellings. If one
 of these symlinks cannot be followed, for example because of a permission error
 or a symlink loop, the sandbox does not start. A baseline symlink whose target
 lies outside the baseline is still mounted at its own path, where a mask on the
-target's real path does not apply. A `readonlyPaths` or `readwritePaths` entry
-spelled through one of these symlinks can be hidden by a denied parent
-directory; spell it with its real path instead, such as `/usr/lib/x/file`
-rather than `/lib/x/file`.
+target's real path does not apply.
 
 Example:
 ```json
@@ -832,7 +873,11 @@ shared-host-network behavior.
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
-   rule aborts the supervisor rather than starting an unenforced sandbox.
+   rule aborts startup. The runner terminates Bubblewrap and its blocked
+   sandbox child while the startup barrier is still held, then reaps the
+   launcher, cleans up the network helpers, and returns the setup error.
+   This also applies to create-and-run execution, streaming, and PTY execution
+   in both proxy-only and firewall-enforced modes.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the
@@ -1080,6 +1125,7 @@ These failures carry the `backend_error` code and exit `-1`.
 | `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
 | `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
 | `could not resolve the host's /bin` (or another system directory) | A merged-/usr symlink such as `/bin -> usr/bin` could not be followed; check that the link and its target are readable |
+| `readwritePaths entry '…' could not be resolved` (or `readonlyPaths`, `deniedPaths`) | The path goes through a dangling symlink, a symlink loop, or a directory the caller cannot search; fix the path or remove the entry |
 | `failed to wrap stdio pipes` | The sandbox started and then faulted |
 
 ## Limitations

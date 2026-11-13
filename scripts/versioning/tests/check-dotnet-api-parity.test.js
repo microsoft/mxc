@@ -19,6 +19,7 @@ const dispatchPath = join(
 const enginePath = join(
   root, "src", "mxc-sdk", "src", "core", "mxc_engine", "state_aware.rs"
 );
+const typedLifecyclePath = join(root, "src", "mxc-sdk", "src", "state_aware_sdk.rs");
 
 function runGate(changedPath, transform) {
   const errors = [];
@@ -53,7 +54,7 @@ function runGate(changedPath, transform) {
   return { status, errors: errors.join("\n") };
 }
 
-test("native-only discovery passes while V1 retains legacy tier readers", () => {
+test("native-only discovery and JSON-only lifecycle preserve managed parity", () => {
   assert.deepEqual(runGate(), { status: 0, errors: "" });
 });
 
@@ -100,17 +101,46 @@ test("supported lifecycle prefixes must remain in the native dispatcher", () => 
   assert.match(result.errors, /state-aware sandbox-id prefixes:.*wslc:Wslc/);
 });
 
-test("new lifecycle support requires managed enum and prefix parity", () => {
+test("new typed lifecycle support requires managed enum and prefix parity", () => {
+  const result = runGate(typedLifecyclePath, (source) => {
+    const marker = "enum ProvisionContainment {";
+    assert.ok(source.includes(marker));
+    return source.replace(marker, `${marker}\n    MicroVm,`);
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
+  assert.match(result.errors, /state-aware sandbox-id prefixes:.*microvm:MicroVm/);
+});
+
+test("typed lifecycle declarations must have native dispatch", () => {
+  const result = runGate(enginePath, (source) => {
+    const marker = "fn run_state_aware_typed(";
+    assert.ok(source.includes(marker));
+    const start = source.indexOf(marker);
+    return source.slice(0, start) + source.slice(start).replaceAll(
+      "ContainmentBackend::Wslc =>", "ContainmentBackend::Future =>"
+    );
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.errors, /typed lifecycle backend Wslc is missing native dispatch/);
+});
+
+test("JSON lifecycle support does not require a typed managed API", () => {
   const result = runGate(enginePath, (source) => {
     const marker = "_ => run_state_aware_fallback(parsed, dry_run),";
     assert.ok(source.includes(marker));
     return source.replace(
       marker,
-      "crate::mxc_common::models::ContainmentBackend::MicroVm => unimplemented!(),\n" +
-        `        ${marker}`
+      `crate::mxc_common::models::ContainmentBackend::Future => unimplemented!(),\n${marker}`
     );
   });
+  assert.deepEqual(result, { status: 0, errors: "" });
+});
+
+test("discovery backends still require managed parser mappings", () => {
+  const result = runGate(platformPath, (source) =>
+    source.replace(/^\s*"microvm"\s*=>[^\n]+\n/m, "")
+  );
   assert.equal(result.status, 1);
-  assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
-  assert.match(result.errors, /state-aware sandbox-id prefixes:.*microvm:MicroVm/);
+  assert.match(result.errors, /discovery backend MicroVm: managed wire "undefined"/);
 });

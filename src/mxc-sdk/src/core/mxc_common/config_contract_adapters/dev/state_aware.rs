@@ -193,7 +193,32 @@ pub(super) fn provision_into_input(
         }
         contract::ProvisionRequest::MicroVm(request) => microvm_provision_into_input(request),
         contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
+        contract::ProvisionRequest::W365Agents(request) => {
+            w365_agents_provision_into_input(request)
+        }
     }
+}
+
+fn w365_agents_provision_into_input(
+    request: contract::W365AgentsProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::W365AgentsProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::W365AgentsContainment,
+        telemetry,
+        w365_agents,
+    } = request;
+    StateAwareInput::new(
+        state_aware_common(schema, comment, version, telemetry),
+        StateAwareOperation::Provision(StateAwareProvision::W365Agents(
+            w365_agents
+                .into_option()
+                .map(|wrapper| wrapper.provision.into_option().map(Into::into)),
+        )),
+    )
 }
 
 fn microvm_provision_into_input(
@@ -277,6 +302,7 @@ fn wslc_provision_into_input(
         containment: contract::WslcContainment,
         filesystem,
         network,
+        runtime_config,
         telemetry,
         wslc,
     } = request;
@@ -284,6 +310,7 @@ fn wslc_provision_into_input(
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.filesystem = filesystem.into_option().map(convert_filesystem);
     common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
     StateAwareInput::new(
         common,
         StateAwareOperation::Provision(StateAwareProvision::Wslc(provision)),

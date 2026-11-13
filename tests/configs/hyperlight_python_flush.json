@@ -1,0 +1,12 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "process": {
+        "commandLine": "print('flush-' + 'no-newline-ok', end='')",
+        "timeout": 30000
+    },
+    "containment": "hyperlight",
+    "hyperlight": {
+        "runtime": "python"
+    }
+}

@@ -38,7 +38,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::__ffi::{
-    execute_lifecycle_json, execute_lifecycle_with_stdin_json,
+    execute_lifecycle_capture_json, execute_lifecycle_json, execute_lifecycle_with_stdin_json,
     run_lifecycle_json as run_state_aware_json, spawn_in_container_with_pty_json,
 };
 use mxc_sdk::v1::MxcPtySize;
@@ -357,7 +357,7 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
             }
         };
         crate::execute_output(
-            execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
+            execute_lifecycle_capture_json(request_json, experimental != 0).and_then(|process| {
                 process.wait_with_output().map_err(|error| {
                     mxc_sdk::v1::Error::new(
                         crate::ErrorCode::BackendError,
@@ -423,23 +423,26 @@ pub unsafe extern "C" fn mxc_state_aware_exec_pty(
                 ))
             }
         };
-        spawn_in_container_with_pty_json(
-            request_json,
-            MxcPtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            },
-            experimental != 0,
-        )
-        .map(MxcSandbox::new_pty)
-        .map_err(|error| {
+        let size = MxcPtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        size.validate().map_err(|error| {
             (
                 status_from_error_code(error.code),
                 MxcErrorDetail::from_error(&error),
             )
-        })
+        })?;
+        spawn_in_container_with_pty_json(request_json, size, experimental != 0)
+            .map(MxcSandbox::new_pty)
+            .map_err(|error| {
+                (
+                    status_from_error_code(error.code),
+                    MxcErrorDetail::from_error(&error),
+                )
+            })
     }))
     .unwrap_or_else(|panic| {
         crate::report_panic("mxc_state_aware_exec_pty", &*panic);
@@ -638,6 +641,60 @@ mod tests {
         };
         assert_eq!(status, out.status);
         out
+    }
+
+    #[test]
+    fn w365_sdk_lifecycle_preserves_authorization_and_backend_validation() {
+        for experimental in [false, true] {
+            for phase in ["provision", "start", "exec", "stop", "deprovision"] {
+                let mut value = serde_json::json!({
+                    "version":"1.1.0-alpha", "phase":phase,
+                });
+                if phase == "provision" {
+                    value["containment"] = serde_json::json!("w365_agents");
+                    value["w365Agents"] = serde_json::json!({"provision":{
+                        "poolId":"11111111-1111-1111-1111-111111111111",
+                    }});
+                } else {
+                    value["sandboxId"] = serde_json::json!(
+                        "w365:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
+                    );
+                }
+                if matches!(phase, "stop" | "deprovision") {
+                    value["sandboxId"] = serde_json::json!("w365:invalid");
+                }
+                if phase == "provision" {
+                    value.as_object_mut().unwrap().remove("w365Agents");
+                }
+                let expected = if !experimental {
+                    crate::MXC_STATUS_BACKEND_UNAVAILABLE
+                } else if matches!(phase, "start" | "exec") {
+                    crate::MXC_STATUS_UNSUPPORTED_PHASE
+                } else if phase == "provision" {
+                    crate::MXC_STATUS_POLICY_VALIDATION
+                } else {
+                    crate::MXC_STATUS_MALFORMED_ID
+                };
+                if phase == "exec" {
+                    value["process"] = serde_json::json!({"commandLine":"echo must-not-run"});
+                    let error = mxc_sdk::mxc_engine::exec_state_aware_capture_json(
+                        &value.to_string(),
+                        experimental,
+                    )
+                    .err()
+                    .expect("W365 SDK capture must not execute a workload");
+                    assert_eq!(status_from_error_code(error.code), expected);
+                }
+                let mut out = call_opt(&value.to_string(), phase == "exec", experimental);
+                assert_eq!(out.status, expected);
+                assert!(out.response_json_utf8.is_null());
+                // SAFETY: the failed native call returned an owned error string.
+                let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) };
+                assert!(!message.to_str().unwrap().is_empty());
+                // SAFETY: all result strings were allocated by the native call.
+                unsafe { mxc_state_aware_result_free(&mut out) };
+            }
+        }
     }
 
     /// The state-aware result carries the same API detail as the

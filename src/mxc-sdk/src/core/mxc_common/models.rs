@@ -44,6 +44,9 @@ pub enum ContainmentBackend {
     /// Uses `bwrap` to create namespace-isolated processes without root
     /// privileges. Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
+    /// Experimental remote Windows 365 checkout lifecycle.
+    #[serde(rename = "w365_agents")]
+    W365Agents,
 }
 
 impl ContainmentBackend {
@@ -60,6 +63,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::W365Agents => "w365_agents",
         }
     }
 
@@ -75,6 +79,7 @@ impl ContainmentBackend {
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
+            ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Vm => None,
@@ -127,6 +132,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
+            W::W365Agents => Self::W365Agents,
         }
     }
 }
@@ -179,6 +185,11 @@ pub struct SeatbeltConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub extra_mach_lookups: Vec<String>,
+
+    /// Records sandbox denials through the unified log while the workload
+    /// runs. On macOS, `retain_etl` keeps the raw log as `.seatbelt.log`.
+    #[serde(rename = "captureDenials", skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsConfig>,
 }
 
 fn default_nested_pty() -> bool {
@@ -193,6 +204,7 @@ impl Default for SeatbeltConfig {
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
+            capture_denials: None,
         }
     }
 }
@@ -260,6 +272,14 @@ impl MicroVmProvisionConfig {
         }
         Ok(())
     }
+}
+
+/// Passive W365 provision inputs; defaults and enforcement belong to the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W365AgentsProvisionConfig {
+    pub pool_id: String,
+    pub user_type: Option<String>,
+    pub user_object_id: Option<String>,
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -752,8 +772,9 @@ pub struct CaptureDenialsConfig {
     /// falls back to a managed per-run temporary file and prints its path on
     /// stderr.
     pub output_path: Option<String>,
-    /// Whether to preserve the sealed ETL trace after analysis. Defaults to
-    /// `false`, which deletes the internal trace. Retention is honored only by
+    /// Whether to preserve the sealed ETL trace (on macOS, the raw
+    /// `.seatbelt.log`) after analysis. Defaults to `false`, which deletes the
+    /// internal trace. Retention is honored only by
     /// a terminal wait that leaves structured output observable; abandoning the
     /// process handle deletes the trace.
     pub retain_etl: bool,
@@ -860,13 +881,9 @@ impl TestFeatureConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
-    /// Explicit telemetry opt-in for this invocation.
-    /// `Some(true)` = opt in (still subject to consent and policy),
-    /// `Some(false)` = force off, `None` = off.
+    /// Compatibility preference ignored by supported-contract Required collection.
+    /// Unattributed requests require `Some(true)`, consent, and permitting policy.
     pub enabled: Option<bool>,
-    /// Caller-requested containment kind, retained for telemetry attribution.
-    #[serde(skip)]
-    pub requested_sandbox_kind: Option<&'static str>,
 }
 
 /// Guest runtime for the Hyperlight backend: what `process.commandLine`
@@ -943,11 +960,14 @@ pub struct HyperlightConfig {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExecutionRequest {
-    /// Exact external contract that produced this request.
+    /// Contract that produced this request, including typed SDK compatibility input.
     ///
-    /// Direct typed SDK construction has no external contract attribution.
+    /// Direct internal construction may omit contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
+    /// Caller-requested containment kind, independent of telemetry preferences.
+    #[serde(skip)]
+    pub requested_sandbox_kind: Option<&'static str>,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -1289,7 +1309,8 @@ pub struct CaptureDenialsOutput {
     pub total_denials: usize,
     /// Whether the emitted denial set was truncated.
     pub denied_resources_truncated: bool,
-    /// Absolute path to the retained ETL trace, when retention was requested.
+    /// Absolute path to the retained ETL trace (on macOS, the `.seatbelt.log`),
+    /// when retention was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etl_path: Option<String>,
 }
@@ -1297,6 +1318,19 @@ pub struct CaptureDenialsOutput {
 impl CaptureDenialsOutput {
     /// The fixed `type` discriminator value.
     pub const KIND: &'static str = "captureDenials";
+}
+
+impl From<crate::learning_mode_core::DenialsOutputPointer> for CaptureDenialsOutput {
+    fn from(pointer: crate::learning_mode_core::DenialsOutputPointer) -> Self {
+        Self {
+            kind: pointer.kind,
+            output_path: pointer.output_path,
+            exit_code: pointer.exit_code,
+            total_denials: pointer.total_denials,
+            denied_resources_truncated: pointer.denied_resources_truncated,
+            etl_path: None,
+        }
+    }
 }
 
 impl ScriptResponse {

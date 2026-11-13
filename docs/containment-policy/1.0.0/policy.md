@@ -136,7 +136,7 @@ contract. Backend availability depends on platform, build, and host.
 | `processContainer.ui` | Optional `isolation` (`container`, `desktop`, `handles`, `atoms`), `desktopSystemControl` and `ime` booleans, and `systemSettings` (`none`, `parameters`, `display`, `all`). |
 | `lxc` | `distribution` and `release` strings, both required if this section is present. |
 | `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), and `extraMachLookups` (string array). |
-| `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. |
+| `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. The contract accepts any `targetOs` string, but the WSLc backend rejects values other than `"linux"`; omit it or use `"linux"`. |
 
 For Seatbelt, `profileOverride` replaces the generated profile, so
 `filesystem`, `network`, and `ui` restrictions in the request are not

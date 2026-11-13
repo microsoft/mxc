@@ -6,20 +6,19 @@
 //! Every other telemetry test asserts only that a run *succeeds* with
 //! `telemetry.enabled: true`, which passes just as happily when nothing is
 //! emitted at all. That blind spot hid two real defects: a build with no
-//! provider group GUID never routes anywhere, and a run whose consent is
-//! `undetermined` is silently suppressed. This test closes it by observing the
+//! provider group never routes anywhere, and a run can succeed without
+//! telemetry being collected. This test closes it by observing the
 //! events themselves.
 //!
 //! It builds a private local-only `wxc-exec.exe` (an empty
 //! `MXC_TELEMETRY_COMPONENT_PATH`, so no routing), grants MXC telemetry consent
-//! to that binary through the debug-only
-//! consent-store override, runs a real sandboxed execution while an ETW session
+//! to that binary through the debug-only consent-store override, enables local
+//! keyword test mode, and runs a real sandboxed execution while an ETW session
 //! is collecting, and decodes the trace. Routing through the signed telemetry
 //! component is covered by the Windows build job, not here.
 //!
-//! Two directions are asserted, because only the pair is meaningful:
-//! consent granted must produce a decodable `Microsoft.MXC` event, and consent
-//! denied must produce none.
+//! Required events must be collected with consent granted or denied.
+//! Verbose denial artifacts stay local and must not be sent as telemetry.
 //!
 //! `#[ignore]` by default: it shells out to a full `cargo build` and needs
 //! rights to create an ETW session.
@@ -141,6 +140,7 @@ fn build_instrumented_wxc_exec() -> PathBuf {
         ])
         .arg(&target_dir)
         .env("MXC_TELEMETRY_COMPONENT_PATH", "")
+        .env("MXC_TELEMETRY_TEST_KEYWORDS", "1")
         .env_remove("MXC_TELEMETRY_PROVIDER_GROUP_GUID")
         .output()
         .expect("failed to invoke cargo");
@@ -164,11 +164,7 @@ fn generated_provider_def() -> String {
     let entry = std::fs::read_dir(&build_dir)
         .expect("build directory missing")
         .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("mxc_telemetry-")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("mxc-sdk-"))
         .map(|e| e.path().join("out").join("provider_def.rs"))
         .find(|p| p.exists())
         .expect("generated provider_def.rs not found");
@@ -312,7 +308,7 @@ fn decode_trace(etl: &Path, workdir: &Path) -> Option<String> {
 fn assert_events_recorded(dump: &str) {
     assert!(
         dump.contains("Microsoft.MXC"),
-        "no Microsoft.MXC events were recorded while telemetry consent was granted"
+        "no Microsoft.MXC Required events were recorded"
     );
     for name in ["MXC.ExecutionStart", "MXC.ExecutionEnd"] {
         assert!(
@@ -346,31 +342,27 @@ fn assert_events_recorded(dump: &str) {
     }
 }
 
-fn assert_verbose_event_recorded(dump: &str) {
-    assert!(
-        dump.contains("MXC.VerboseDenials"),
-        "no MXC.VerboseDenials event was recorded for a completed captureDenials run"
-    );
-    for field in [
-        "mxc.document_id",
-        "mxc.document_version",
-        "mxc.chunk_index",
-        "mxc.chunk_count",
-        "mxc.document_bytes",
-        "mxc.document_sha256",
-        "mxc.content",
-        "mxc.summary",
+fn assert_required_inventory(dump: &str) {
+    assert_events_recorded(dump);
+    for event in [
+        "MXC.VerboseDenials",
+        "MXC.ProcessTimedOut",
+        "MXC.ProcessKillFailed",
+        "MXC.PolicyHash",
+        "MXC.SandboxNetworkPolicyApplied",
+        "MXC.SandboxTornDown",
+        "MXC.ConfigRejected",
     ] {
         assert!(
-            dump.contains(field),
-            "recorded MXC.VerboseDenials event is missing the {field} field"
+            !dump.contains(&format!("<Task>{event}</Task>")),
+            "excluded event {event} was emitted"
         );
     }
 }
 
 #[test]
 #[ignore] // Builds a second wxc-exec.exe and needs rights to create an ETW session.
-fn test_telemetry_emits_etw_events_when_consent_granted() {
+fn test_required_telemetry_emits_etw_events_independently_of_consent() {
     let _etw_test_guard = ETW_TEST_LOCK.lock().expect("ETW test lock was poisoned");
     let exe = build_instrumented_wxc_exec();
 
@@ -412,9 +404,9 @@ fn test_telemetry_emits_etw_events_when_consent_granted() {
 
     let granted_dump = decode_trace(&granted_etl, &workdir)
         .expect("tracerpt produced no output for the granted run");
-    assert_events_recorded(&granted_dump);
+    assert_required_inventory(&granted_dump);
 
-    // ---- denied: the same run must record nothing --------------------------
+    // ---- denied: Required events must still be recorded -------------------
     let denied_store = workdir.join("denied");
     seed_consent(&denied_store, "denied");
     assert_effective_consent(&exe, &denied_store, "denied");
@@ -432,18 +424,14 @@ fn test_telemetry_emits_etw_events_when_consent_granted() {
         String::from_utf8_lossy(&denied_run.stderr)
     );
 
-    // An empty trace decodes to nothing at all, which is itself a pass.
-    if let Some(denied_dump) = decode_trace(&denied_etl, &workdir) {
-        assert!(
-            !denied_dump.contains("Microsoft.MXC"),
-            "telemetry was emitted despite consent being denied"
-        );
-    }
+    let denied_dump = decode_trace(&denied_etl, &workdir)
+        .expect("tracerpt produced no output for the denied run");
+    assert_required_inventory(&denied_dump);
 }
 
 #[test]
 #[ignore] // Builds a second wxc-exec.exe and needs captureDenials plus ETW privileges.
-fn test_verbose_denials_etw_payload_honors_consent() {
+fn test_required_telemetry_keeps_verbose_denials_local() {
     let _etw_test_guard = ETW_TEST_LOCK.lock().expect("ETW test lock was poisoned");
     let exe = build_instrumented_wxc_exec();
     let workdir = build_target_dir().join("verbose-etw-e2e");
@@ -487,7 +475,7 @@ fn test_verbose_denials_etw_payload_honors_consent() {
 
     let granted_dump = decode_trace(&granted_etl, &workdir)
         .expect("tracerpt produced no output for the verbose telemetry run");
-    assert_verbose_event_recorded(&granted_dump);
+    assert_required_inventory(&granted_dump);
 
     let denied_store = workdir.join("denied");
     seed_consent(&denied_store, "denied");
@@ -505,10 +493,14 @@ fn test_verbose_denials_etw_payload_honors_consent() {
         "captureDenials failed under denied consent: {}",
         String::from_utf8_lossy(&denied_run.stderr)
     );
-    if let Some(denied_dump) = decode_trace(&denied_etl, &workdir) {
-        assert!(
-            !denied_dump.contains("MXC.VerboseDenials"),
-            "verbose telemetry was emitted despite consent being denied"
-        );
-    }
+    let denied_dump = decode_trace(&denied_etl, &workdir)
+        .expect("tracerpt produced no output for the denied run");
+    assert_required_inventory(&denied_dump);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(&verbose_path).expect("local verbose artifact was removed"),
+        )
+        .expect("local verbose artifact was not valid JSON")["version"],
+        4
+    );
 }

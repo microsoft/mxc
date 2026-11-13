@@ -1,0 +1,14 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/ungranted/secret.txt && echo CAPTURE_READ_OK || echo CAPTURE_READ_BLOCKED",
+        "timeout": 20000
+    },
+    "seatbelt": {
+        "captureDenials": {
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}
