@@ -26,6 +26,7 @@
 
     Automated configs (asserted by this script):
       - isolation_session_hello.json --env vars + working dir + agent name
+      - isolation_session_one_shot_env_bare_entry.json --bare env entry preserves default
       - isolation_session_exit42.json --exit code propagation
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
@@ -541,6 +542,10 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifec
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains @("process.env without process.inheritDefaultEnv=true is not supported")))
+
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_bare_entry.json" `
+    -ExpectedExit 0 `
+    -OutputContains @("TEMP_PRESENT")))
 
 # ---------------- Concurrent one-shot test ----------------
 #
