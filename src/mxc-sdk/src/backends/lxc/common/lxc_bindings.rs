@@ -193,7 +193,7 @@ fn wait_for_drain(
 /// Unblock the signals `lxc-exec` holds for its sigwait watchdog, so the child
 /// does not inherit a mask that makes it ignore Ctrl-C and termination.
 #[cfg(target_os = "linux")]
-fn unblock_fatal_signals(command: &mut std::process::Command) {
+pub(super) fn unblock_fatal_signals(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
     // SAFETY: `pre_exec` runs between fork and exec, where only

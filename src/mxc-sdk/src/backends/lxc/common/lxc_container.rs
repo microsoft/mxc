@@ -64,6 +64,9 @@ impl LxcContainer {
 
         // Generous enough to delete a large rootfs on slow storage.
         const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+        let timeout = crate::lxc_common::signal_cleanup::startup_time_remaining()
+            .map(|remaining| remaining.min(std::time::Duration::from_secs(5)))
+            .unwrap_or(RELEASE_TIMEOUT);
 
         let tool = cmd.get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::null())
@@ -84,7 +87,7 @@ impl LxcContainer {
         };
         let stderr = read_to_end_on_thread(stderr);
 
-        let outcome = wait_with_timeout(&mut child, Some(RELEASE_TIMEOUT));
+        let outcome = wait_with_timeout(&mut child, Some(timeout));
         if outcome.is_err() {
             let _ = child.kill();
             let _ = child.wait();
@@ -102,10 +105,11 @@ impl LxcContainer {
         let status = match outcome {
             Ok(status) => status,
             Err(WaitError::Timeout) => {
+                crate::lxc_common::signal_cleanup::record_startup_timeout();
                 return Err(format!(
                     "{} did not finish within {}s",
                     tool,
-                    RELEASE_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ));
             }
             Err(WaitError::Io(e)) => return Err(format!("Failed to wait for {}: {}", tool, e)),
@@ -137,7 +141,20 @@ impl LxcContainer {
     }
 
     pub fn init_pid(&self) -> Option<u32> {
-        let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
+        let mut command = self.lxc_command("lxc-info");
+        command.arg("-p");
+        #[cfg(target_os = "linux")]
+        let output = if crate::lxc_common::signal_cleanup::startup_time_remaining().is_some() {
+            crate::lxc_common::signal_cleanup::run_startup_tool(
+                command,
+                std::time::Duration::from_secs(5),
+            )
+            .ok()?
+        } else {
+            command.output().ok()?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let output = command.output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -491,15 +508,25 @@ impl LxcContainer {
         #[cfg(target_os = "linux")]
         unblock_fatal_signals(&mut cmd);
 
-        let start = || Self::run_tool(cmd).and_then(|()| self.validate_unprivileged());
-
         #[cfg(target_os = "linux")]
         {
+            use crate::lxc_common::signal_cleanup;
+
+            let start = || {
+                if signal_cleanup::watchdog_installed() {
+                    let mut readiness = self.lxc_command("lxc-wait");
+                    readiness.args(["-s", "RUNNING"]);
+                    signal_cleanup::run_owned_startup(cmd, readiness)?;
+                } else {
+                    Self::run_tool(cmd)?;
+                }
+                self.validate_unprivileged()
+            };
             crate::lxc_common::signal_cleanup::with_container_startup(self, start)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            start()
+            Self::run_tool(cmd).and_then(|()| self.validate_unprivileged())
         }
     }
 

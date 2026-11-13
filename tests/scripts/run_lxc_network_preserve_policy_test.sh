@@ -36,12 +36,20 @@ command -v nsenter >/dev/null 2>&1 || skip "nsenter is not installed."
 command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
 command -v python3 >/dev/null 2>&1 || skip "python3 is not installed."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
+[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ] \
+    && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" = 0 ] \
+    && [ -r /proc/sys/net/ipv6/conf/default/disable_ipv6 ] \
+    && [ "$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6)" = 0 ] \
+    || skip "IPv6 fixture prerequisites are not met; neither family was tested."
 
 VETH_HOST="mxcprehost"
 VETH_PEER="mxcprens"
 ALLOWED_IP="140.82.112.1"
 DENIED_IP="192.0.2.1"
 CONTAINER_IP="192.0.2.2"
+ALLOWED_IPV6="2001:db8:40::1"
+DENIED_IPV6="fd42:4d58:43::1"
+CONTAINER_IPV6="fd42:4d58:43::2"
 PEER_PORT=7778
 PEER_LOG="$SCRIPT_DIR/.lxc-preserve-peer-$$.log"
 LISTENER_PIDS=()
@@ -100,6 +108,8 @@ fi
 ip link add "$VETH_HOST" type veth peer name "$VETH_PEER" \
     || fail "could not create the preserved-policy probe link."
 VETH_CREATED=1
+HOST_MAC="$(cat "/sys/class/net/$VETH_HOST/address")"
+PEER_MAC="$(cat "/sys/class/net/$VETH_PEER/address")"
 ip link set "$VETH_PEER" netns "$INIT_PID" \
     || fail "could not move the probe interface into the retained container."
 ip addr add "$ALLOWED_IP/32" dev "$VETH_HOST" \
@@ -115,7 +125,21 @@ nsenter -t "$INIT_PID" -n ip link set "$VETH_PEER" up \
 nsenter -t "$INIT_PID" -n ip route add "$ALLOWED_IP/32" dev "$VETH_PEER" \
     || fail "could not route the retained container to the allowed HTTP peer."
 
-for address in "$ALLOWED_IP" "$DENIED_IP"; do
+# Assign IPv6 addresses without waiting for duplicate-address detection.
+ip -6 addr add "$ALLOWED_IPV6/128" dev "$VETH_HOST" nodad
+ip -6 addr add "$DENIED_IPV6/128" dev "$VETH_HOST" nodad
+nsenter -t "$INIT_PID" -n ip -6 addr add "$CONTAINER_IPV6/128" dev "$VETH_PEER" nodad
+ip -6 route add "$CONTAINER_IPV6/128" dev "$VETH_HOST"
+
+# Return traffic uses the container's permanent neighbor instead of filtered discovery.
+ip -6 neigh add "$CONTAINER_IPV6" lladdr "$PEER_MAC" dev "$VETH_HOST" nud permanent
+for address in "$ALLOWED_IPV6" "$DENIED_IPV6"; do
+    nsenter -t "$INIT_PID" -n ip -6 route add "$address/128" dev "$VETH_PEER" src "$CONTAINER_IPV6"
+    nsenter -t "$INIT_PID" -n ip -6 neigh add "$address" lladdr "$HOST_MAC" \
+        dev "$VETH_PEER" nud permanent
+done
+
+for address in "$ALLOWED_IP" "$DENIED_IP" "$ALLOWED_IPV6" "$DENIED_IPV6"; do
     python3 -m http.server "$PEER_PORT" --bind "$address" --directory "$REPO_DIR/tests/configs" \
         >>"$PEER_LOG" 2>&1 &
     LISTENER_PIDS+=("$!")
@@ -125,21 +149,13 @@ for address in "$ALLOWED_IP" "$DENIED_IP"; do
     fi
 done
 
-python3 - "$INIT_PID" "$ALLOWED_IP" "$DENIED_IP" "$PEER_PORT" <<'PY'
+python3 - "$INIT_PID" "$ALLOWED_IP" "$DENIED_IP" "$ALLOWED_IPV6" "$DENIED_IPV6" "$PEER_PORT" <<'PY'
 import subprocess
 import sys
 import urllib.request
 
-pid, allowed, denied, port = sys.argv[1:]
-allowed_url = f"http://{allowed}:{port}/lxc_network_preserve_policy.json"
-denied_url = f"http://{denied}:{port}/lxc_network_preserve_policy.json"
+pid, allowed_v4, denied_v4, allowed_v6, denied_v6, port = sys.argv[1:]
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(allowed_url, timeout=4) as response:
-    expected = response.read()
-with opener.open(denied_url, timeout=4) as response:
-    if response.read() != expected:
-        raise SystemExit("FAIL: the denied HTTP peer did not serve its control response")
-
 fetch = [
     "nsenter", "-t", pid, "-n", "python3", "-c",
     "import sys, urllib.request; "
@@ -147,18 +163,30 @@ fetch = [
     "response = opener.open(sys.argv[1], timeout=4); "
     "sys.stdout.buffer.write(response.read())",
 ]
-if subprocess.check_output([*fetch, allowed_url], timeout=10) != expected:
-    raise SystemExit("FAIL: the retained container did not receive the allowed HTTP response")
+for family, allowed, denied in [
+    ("IPv4", allowed_v4, denied_v4),
+    ("IPv6", f"[{allowed_v6}]", f"[{denied_v6}]"),
+]:
+    allowed_url = f"http://{allowed}:{port}/lxc_network_preserve_policy.json"
+    denied_url = f"http://{denied}:{port}/lxc_network_preserve_policy.json"
+    with opener.open(allowed_url, timeout=4) as response:
+        expected = response.read()
+    with opener.open(denied_url, timeout=4) as response:
+        if response.read() != expected:
+            raise SystemExit(f"FAIL: the denied {family} HTTP peer did not serve its control response")
 
-blocked = subprocess.run([*fetch, denied_url], capture_output=True, timeout=10)
-if blocked.returncode == 0:
-    raise SystemExit("FAIL: the retained container reached the denied HTTP peer after lxc-exec exited")
+    if subprocess.check_output([*fetch, allowed_url], timeout=10) != expected:
+        raise SystemExit(f"FAIL: the retained container did not receive the allowed {family} HTTP response")
 
-with opener.open(denied_url, timeout=4) as response:
-    if response.read() != expected:
-        raise SystemExit("FAIL: the denied HTTP peer stopped serving during the denial probe")
-if subprocess.check_output([*fetch, allowed_url], timeout=10) != expected:
-    raise SystemExit("FAIL: the retained container lost allowed HTTP access during the denial probe")
+    blocked = subprocess.run([*fetch, denied_url], capture_output=True, timeout=10)
+    if blocked.returncode == 0:
+        raise SystemExit(f"FAIL: the retained container reached the denied {family} HTTP peer after lxc-exec exited")
+
+    with opener.open(denied_url, timeout=4) as response:
+        if response.read() != expected:
+            raise SystemExit(f"FAIL: the denied {family} HTTP peer stopped serving during the denial probe")
+    if subprocess.check_output([*fetch, allowed_url], timeout=10) != expected:
+        raise SystemExit(f"FAIL: the retained container lost allowed {family} HTTP access during the denial probe")
 PY
 
-echo "PASS: allowed HTTP traffic succeeds and denied traffic fails after lxc-exec exits."
+echo "PASS: allowed IPv4/IPv6 HTTP traffic succeeds and denied traffic fails after lxc-exec exits."

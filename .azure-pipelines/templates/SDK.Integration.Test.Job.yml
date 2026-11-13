@@ -126,13 +126,59 @@ jobs:
 
       - ${{ if eq(target.os, 'linux') }}:
         - script: |
+            set -euo pipefail
             sudo apt-get update -qq
-            sudo apt-get install -y -qq lxc busybox-static dnsmasq-base iptables bubblewrap slirp4netns iproute2
+            sudo apt-get install -y -qq lxc uidmap dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
+
+        - script: |
+            set -euo pipefail
+            backup_dir="$(Agent.TempDirectory)/mxc-node-lxc-$(Build.BuildId)-$(System.JobAttempt)"
+            mkdir -m 700 "$backup_dir"
+            for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+              if sudo test -e "$file" || sudo test -L "$file"; then
+                sudo cp -a "$file" "$backup_dir/$(basename "$file")"
+              fi
+            done
+            touch "$backup_dir/complete"
+
+            for file in /etc/subuid /etc/subgid; do
+              sudo touch "$file"
+              if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
+                printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
+              fi
+            done
+
+            sudo touch /etc/lxc/default.conf
+
+            # Remove active mappings before adding the test-only UID/GID range.
+            sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
+            printf '%s\n' \
+              'lxc.idmap = u 0 100000 65536' \
+              'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
+          displayName: Configure unprivileged LXC
 
         - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
+
+        - script: |
+            set -euo pipefail
+            backup_dir="$(Agent.TempDirectory)/mxc-node-lxc-$(Build.BuildId)-$(System.JobAttempt)"
+            if [ -f "$backup_dir/complete" ]; then
+              status=0
+              for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+                backup="$backup_dir/$(basename "$file")"
+                if sudo test -e "$backup" || sudo test -L "$backup"; then
+                  sudo cp -a --remove-destination "$backup" "$file" || status=1
+                else
+                  sudo rm -f "$file" || status=1
+                fi
+              done
+              exit "$status"
+            fi
+          condition: always()
+          displayName: Restore LXC configuration
 
       - ${{ if eq(target.os, 'windows') }}:
         - script: npm test

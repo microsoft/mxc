@@ -24,7 +24,7 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc` for runtime)
-- BusyBox with the `udhcpc` applet for networked runs
+- BusyBox with the `udhcpc` applet for MXC-managed IPv4 address reservations
 - Root privileges, or [unprivileged LXC](#running-without-root) for a policy
   that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
@@ -62,11 +62,16 @@ for unprivileged LXC.  Everything else needs root.
 
 ### Container networking
 
-Networked runs require a local `lxc-net` bridge with dnsmasq serving its DHCP
-pool.  Refer to your distribution's manual to configure it.  A config with
-a `network` section fails without it.
+For a networked run using an existing container with configured IPv4 or IPv6
+addresses, MXC preserves its bridge, addresses, gateway, and resolver settings.
+It does not reserve a DHCP address or replace the resolver.  Network filtering
+still applies before the workload starts.
 
-When a run needs networking, MXC reuses the container's reservation or
+Containers without configured addresses require a local `lxc-net` bridge with
+dnsmasq serving its DHCP pool for networked runs.  Refer to your distribution's
+manual to configure it.
+
+For these containers, MXC reuses the container's reservation or
 reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
 MXC writes the reserved address and gateway into the LXC configuration before
 startup, without leaving a renewing DHCP client running.  The reservation
@@ -81,7 +86,13 @@ the bridge.
 **Warning:** Restarting `lxc-net` temporarily interrupts networking for containers
 already connected to the bridge.  The containers remain running.
 
-MXC requests DNS servers and search settings from the host DHCP server.
+If the initial restart fails, MXC attempts to restore the local configuration
+files.  After successful restoration, it attempts one bounded restart with the
+restored settings.  Restoration or recovery failures are reported and may require
+operator intervention.
+
+When managing an address reservation, MXC requests DNS servers and search
+settings from the host DHCP server.
 A configured mount supplying `/etc/resolv.conf` or an ancestor directory
 keeps its own resolver settings.
 

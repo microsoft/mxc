@@ -28,18 +28,15 @@ host, port, timeout = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 start = time.monotonic()
 last = "the peer was never probed"
 while True:
-    probe = socket.socket()
-    probe.settimeout(5)
     try:
-        probe.connect((host, port))
+        with socket.create_connection((host, port), timeout=5):
+            pass
         waited = time.monotonic() - start
         if waited > 1:
             print(f"the peer accepted after {waited:.1f}s", file=sys.stderr)
         sys.exit(0)
     except OSError as exc:
         last = str(exc)
-    finally:
-        probe.close()
     if time.monotonic() - start >= timeout:
         break
     time.sleep(0.2)

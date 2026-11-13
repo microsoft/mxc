@@ -601,19 +601,41 @@ impl LxcScriptRunner {
         let needs_network = needs_network(&request.policy);
 
         if needs_network {
-            let timeout = Duration::from_secs(30);
-            if let Some(response) = self.enforce_network_readiness(
-                &container_name,
-                container_created,
-                timeout,
-                logger,
-                Self::wait_for_network,
-                |release| match release {
-                    ContainerRelease::Destroy => container.destroy(),
-                    ContainerRelease::Stop => container.stop(),
-                },
-            ) {
-                return Err(response);
+            let ipv4_addresses = match container.config_value("lxc.net.0.ipv4.address") {
+                Ok(addresses) => addresses,
+                Err(error) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &error,
+                    ));
+                }
+            };
+            let ipv6_addresses = match container.config_value("lxc.net.0.ipv6.address") {
+                Ok(addresses) => addresses,
+                Err(error) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &error,
+                    ));
+                }
+            };
+            if !ipv4_addresses.is_empty() || ipv6_addresses.is_empty() {
+                let timeout = Duration::from_secs(30);
+                if let Some(response) = self.enforce_network_readiness(
+                    &container_name,
+                    container_created,
+                    timeout,
+                    logger,
+                    Self::wait_for_network,
+                    |release| match release {
+                        ContainerRelease::Destroy => container.destroy(),
+                        ContainerRelease::Stop => container.stop(),
+                    },
+                ) {
+                    return Err(response);
+                }
             }
         }
 

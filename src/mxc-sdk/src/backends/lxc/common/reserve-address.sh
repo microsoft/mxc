@@ -133,11 +133,13 @@ record_stage=
 defaults_backup=
 defaults_stage=
 created_config=
+initialization_state=pre_restart
 
 cleanup()
 {
     status=$?
-    trap - EXIT HUP INT TERM
+    trap - EXIT
+    trap '' HUP INT TERM
     if [ -n "$veth_host" ] && [ -e "/sys/class/net/$veth_host" ]; then
         if [ "$(cat "/sys/class/net/$veth_host/ifalias")" = "$owner" ] ||
             { [ "$marking" = true ] &&
@@ -147,26 +149,50 @@ cleanup()
                     "$(cat "/sys/class/net/$veth_peer/ifindex")" ] &&
                 [ "$(cat "/sys/class/net/$veth_peer/iflink")" = \
                     "$(cat "/sys/class/net/$veth_host/ifindex")" ]; }; then
-            ip link delete dev "$veth_host" || status=1
+            ip link delete dev "$veth_host" || { [ "$status" -ne 0 ] || status=1; }
         else
             echo "Cannot remove an LXC acquisition interface with a different owner" >&2
-            status=1
+            [ "$status" -ne 0 ] || status=1
         fi
     fi
-    if [ -n "$backup" ]; then
-        cp -p -- "$backup" "$LXC_DHCP_CONFILE" || status=1
-        rm -f -- "$backup"
+    rollback_ok=true
+    if [ "$initialization_state" != committed ]; then
+        if [ -n "$backup" ] && ! cp -p -- "$backup" "$LXC_DHCP_CONFILE"; then
+            echo "Failed to restore local lxc-net dnsmasq config; backup retained at $backup" >&2
+            rollback_ok=false
+        fi
+        if [ -n "$defaults_backup" ] && ! cp -p -- "$defaults_backup" "$defaults"; then
+            echo "Failed to restore local lxc-net defaults; backup retained at $defaults_backup" >&2
+            rollback_ok=false
+        fi
+        if [ -n "$created_config" ] && ! rm -f -- "$created_config"; then
+            echo "Failed to remove newly created local lxc-net dnsmasq config: $created_config" >&2
+            rollback_ok=false
+        fi
+        if [ "$initialization_state" = restart_pending ]; then
+            if [ "$rollback_ok" != true ]; then
+                echo "Cannot recover local lxc-net because configuration restoration failed" >&2
+            elif ! timeout --signal=TERM --kill-after=2 30 systemctl restart lxc-net; then
+                echo "Failed to recover local lxc-net after restoring its configuration" >&2
+                rollback_ok=false
+            elif ! server=$(server_pid); then
+                echo "Recovered local lxc-net dnsmasq did not match its original configuration" >&2
+                rollback_ok=false
+            fi
+        fi
     fi
-    if [ -n "$defaults_backup" ]; then
-        cp -p -- "$defaults_backup" "$defaults" || status=1
-        rm -f -- "$defaults_backup"
-    fi
-    if [ -n "$created_config" ]; then
-        rm -f -- "$created_config" || status=1
+    if [ "$rollback_ok" = true ]; then
+        for pending in "$backup" "$defaults_backup"; do
+            if [ -n "$pending" ]; then
+                rm -f -- "$pending" || { [ "$status" -ne 0 ] || status=1; }
+            fi
+        done
+    elif [ "$status" -eq 0 ]; then
+        status=1
     fi
     for pending in "$stage" "$record_stage" "$defaults_stage"; do
         if [ -n "$pending" ]; then
-            rm -f -- "$pending"
+            rm -f -- "$pending" || { [ "$status" -ne 0 ] || status=1; }
         fi
     done
     exit "$status"
@@ -229,11 +255,17 @@ if [ "$server_config" != "$LXC_DHCP_CONFILE" ] ||
         defaults_stage=
     fi
 
+    initialization_state=restart_pending
+
     # Main dnsmasq configuration is not reloaded by SIGHUP.
     timeout --signal=TERM --kill-after=2 30 systemctl restart lxc-net ||
         fail "Failed to enable the LXC reservation directory in local lxc-net"
+    server=$(
+        server_config=$LXC_DHCP_CONFILE
+        server_pid
+    )
+    initialization_state=committed
     server_config=$LXC_DHCP_CONFILE
-    server=$(server_pid)
     if [ -n "$backup" ]; then
         rm -f -- "$backup"
     fi

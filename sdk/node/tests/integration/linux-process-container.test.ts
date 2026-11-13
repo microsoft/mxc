@@ -124,7 +124,9 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
 
   it('should mount readwrite filesystem path', async () => {
     tempDir = createTempDir('mxc-lxc-test');
+    fs.chmodSync(tempDir, 0o755);
     fs.writeFileSync(path.join(tempDir, 'test.txt'), 'original');
+    fs.chmodSync(path.join(tempDir, 'test.txt'), 0o666);
     const policy = { filesystem: { readwritePaths: [tempDir] } };
     const script = `cat ${tempDir}/test.txt && echo 'overwritten' > ${tempDir}/test.txt && cat ${tempDir}/test.txt`;
     const result = await runLxc(script, policy, `lxc-rw-${schemaVersion}`);
@@ -134,7 +136,9 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
 
   it('should mount readonly filesystem path', async () => {
     tempDir = createTempDir('mxc-lxc-test');
+    fs.chmodSync(tempDir, 0o755);
     fs.writeFileSync(path.join(tempDir, 'data.txt'), 'readonly content');
+    fs.chmodSync(path.join(tempDir, 'data.txt'), 0o644);
     const policy = { filesystem: { readonlyPaths: [tempDir] } };
     const result = await runLxc(
       `cat ${tempDir}/data.txt && echo 'Read succeeded'`,
@@ -147,6 +151,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
 
   it('should download file to writable mount', { skip: lxcNetworkSkipReason }, async () => {
     tempDir = createTempDir('mxc-lxc-test');
+    fs.chmodSync(tempDir, 0o777);
     const policy = {
       filesystem: { readwritePaths: [tempDir] },
       network: outboundNetwork(),

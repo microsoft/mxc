@@ -45,11 +45,11 @@ fn cancelling_startup_preserves_a_stopped_container() {
         }
         let hook = directory.join("startup.sh");
 
-        // Hold startup immediately before container init until SIGTERM has been sent.
+        // Keep startup blocked until fixture cleanup.
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$PPID\" > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
                 entered.display(),
                 release.display()
             ),
@@ -64,19 +64,25 @@ fn cancelling_startup_preserves_a_stopped_container() {
         let children = format!("/proc/self/task/{}/children", gettid());
         let canceller = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
-            while !entered.exists() {
+            let monitor_pid = loop {
+                if let Some(pid) = fs::read_to_string(&entered)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<i32>().ok())
+                {
+                    break pid;
+                }
                 if Instant::now() >= deadline {
                     panic!("container did not reach the startup hook");
                 }
                 std::thread::sleep(Duration::from_millis(10));
-            }
+            };
             let pid = fs::read_to_string(children)
                 .expect("read executor child PID")
                 .trim()
                 .parse::<i32>()
                 .expect("one executor child");
             kill(Pid::from_raw(pid), Signal::SIGTERM).expect("cancel executor during startup");
-            fs::write(release, "").expect("release startup after SIGTERM");
+            monitor_pid
         });
         let config = json!({
             "version": "0.9.0-alpha",
@@ -94,24 +100,189 @@ fn cancelling_startup_preserves_a_stopped_container() {
             None,
             Duration::from_secs(40),
         );
-        canceller.join().expect("startup cancellation thread");
-        let state = Command::new("lxc-info")
-            .args(["-n", &name, "-sH"])
+        let monitor_pid = canceller.join().expect("startup cancellation thread");
+        let monitor_reaped = !std::path::Path::new(&format!("/proc/{monitor_pid}"))
+            .try_exists()
+            .expect("observe startup monitor after cancellation");
+        let state = Command::new("/usr/bin/timeout")
+            .args(["--kill-after=1", "5", "lxc-info", "-n", &name, "-sH"])
             .output()
             .expect("read container state after cancellation");
-        (result, state)
+        (result, state, monitor_reaped)
     });
     let _ = fs::write(directory.join("release"), "");
     let _ = Command::new("lxc-stop").args(["-n", &name, "-k"]).output();
     let _ = Command::new("lxc-destroy")
         .args(["-n", &name, "-f"])
         .output();
-    let (result, state) = outcome.expect("startup cancellation fixture failed");
+    let (result, state, monitor_reaped) = outcome.expect("startup cancellation fixture failed");
 
     assert!(
-        result.is_some() && state.status.success()
+        result.is_some()
+            && monitor_reaped
+            && state.status.success()
             && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED",
-        "cancelling startup must preserve a stopped container; state={state:?}, executor={result:?}"
+        "cancelling startup must reap the startup monitor and preserve a stopped container; \
+         monitor_reaped={monitor_reaped}, state={state:?}, executor={result:?}"
+    );
+}
+
+#[test]
+fn failed_startup_exits_when_cleanup_hangs() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::Duration;
+    use wxc_e2e_tests::run_platform_config_value_within_duration;
+
+    if !ready() {
+        return;
+    }
+
+    for (case, hook_body) in [
+        ("startup hook fails immediately", "exit 1"),
+        (
+            "startup hook hangs",
+            "while [ ! -e \"$release\" ]; do sleep 0.01; done",
+        ),
+    ] {
+        let fixture = tempfile::tempdir_in(".").expect("create startup timeout fixture");
+        let directory = fixture.path().canonicalize().expect("startup fixture path");
+        let name = format!("lxc-timeout-startup-{}", std::process::id());
+        let entered = directory.join("entered");
+        let cleanup_entered = directory.join("cleanup-entered");
+        let release = directory.join("release");
+        let outcome = std::panic::catch_unwind(|| {
+            let created = Command::new("lxc-create")
+                .args([
+                    "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
+                    "amd64",
+                ])
+                .output()
+                .expect("create existing container");
+            if !created.status.success() {
+                panic!("container fixture creation failed: {created:?}");
+            }
+            let hook = directory.join("startup.sh");
+            fs::write(
+                &hook,
+                format!(
+                    "#!/bin/sh\ntouch '{}'\nrelease='{}'\n{hook_body}\n",
+                    entered.display(),
+                    release.display()
+                ),
+            )
+            .expect("write startup hook");
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o700))
+                .expect("make hook executable");
+            let definition = format!("/var/lib/lxc/{name}/config");
+            let mut contents = fs::read_to_string(&definition).expect("read existing definition");
+            contents.push_str(&format!("\nlxc.hook.start-host = {}\n", hook.display()));
+            fs::write(&definition, contents).expect("install startup gate");
+            let destroy = directory.join("lxc-destroy");
+
+            // Block destruction until fixture cleanup releases it.
+            fs::write(
+                &destroy,
+                format!(
+                    "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 1\n",
+                    cleanup_entered.display(),
+                    release.display()
+                ),
+            )
+            .expect("write blocked destruction tool");
+            fs::set_permissions(&destroy, fs::Permissions::from_mode(0o700))
+                .expect("make destruction tool executable");
+            let path = format!(
+                "{}:{}",
+                directory.display(),
+                std::env::var("PATH").expect("host command path")
+            );
+            let config = json!({
+                "version": "0.9.0-alpha",
+                "containerId": name,
+                "containment": "lxc",
+                "process": { "commandLine": "echo WORKLOAD_RAN" },
+                "lifecycle": { "destroyOnExit": true },
+                "lxc": { "distribution": "alpine", "release": "3.23" },
+                "network": { "egress": { "default": "allow" } }
+            });
+            let result = run_platform_config_value_within_duration(
+                "LXC startup and cleanup timeout",
+                &config,
+                &[("PATH", &path)],
+                None,
+                Duration::from_secs(75),
+            );
+            let hook_entered = entered.exists();
+            let state = Command::new("/usr/bin/timeout")
+                .args(["--kill-after=1", "5", "lxc-info", "-n", &name, "-sH"])
+                .output()
+                .expect("read container state after startup timeout");
+            (result, state, hook_entered, cleanup_entered.exists())
+        });
+        let _ = fs::write(release, "");
+        let _ = Command::new("lxc-stop").args(["-n", &name, "-k"]).output();
+        let _ = Command::new("lxc-destroy")
+            .args(["-n", &name, "-f"])
+            .output();
+        let (result, state, hook_entered, cleanup_started) =
+            outcome.expect("startup timeout fixture failed");
+
+        assert!(
+            hook_entered
+                && cleanup_started
+                && result.as_ref().is_some_and(|result| {
+                    result.code == Some(124) && !result.combined_output().contains("WORKLOAD_RAN")
+                })
+                && state.status.success()
+                && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED",
+            "failed startup must exit within one minute even when destruction hangs; \
+             case={case}, hook_entered={hook_entered}, cleanup_started={cleanup_started}, \
+             state={state:?}, executor={result:?}"
+        );
+    }
+}
+
+#[test]
+fn successful_startup_does_not_time_out_the_workload() {
+    use std::process::Command;
+    use std::time::Duration;
+    use wxc_e2e_tests::run_platform_config_value_within_duration;
+
+    if !ready() {
+        return;
+    }
+
+    let name = format!("lxc-successful-startup-{}", std::process::id());
+    let config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": name,
+        "containment": "lxc",
+        "process": { "commandLine": "sh -c 'sleep 65 && echo WORKLOAD_FINISHED'" },
+        "lifecycle": { "destroyOnExit": true },
+        "lxc": { "distribution": "alpine", "release": "3.23" }
+    });
+    let result = run_platform_config_value_within_duration(
+        "LXC successful startup with a long-running workload",
+        &config,
+        &[],
+        None,
+        Duration::from_secs(120),
+    );
+    let _ = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=1", "5", "lxc-stop", "-n", &name, "-k"])
+        .output();
+    let _ = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=1", "5", "lxc-destroy", "-n", &name, "-f"])
+        .output();
+
+    assert!(
+        result.as_ref().is_some_and(|result| {
+            result.code == Some(0) && result.combined_output().contains("WORKLOAD_FINISHED")
+        }),
+        "successful startup must not time out a workload lasting longer than one minute; \
+         executor={result:?}"
     );
 }
 

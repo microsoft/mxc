@@ -22,8 +22,16 @@ pub(crate) fn configure(
     logger: &mut Logger,
 ) -> Result<Option<PathBuf>, String> {
     container.drop_network_capabilities()?;
+    container.set_network_startup_config(&[])?;
     let mut entries = Vec::new();
     let plan = plan_network(policy);
+    let reserve_address = if plan.omits_interface() {
+        false
+    } else {
+        let ipv4_addresses = container.config_value("lxc.net.0.ipv4.address")?;
+        let ipv6_addresses = container.config_value("lxc.net.0.ipv6.address")?;
+        ipv4_addresses.is_empty() && ipv6_addresses.is_empty()
+    };
 
     let (egress, ingress, configure_resolver) = if plan.omits_interface() {
         (
@@ -71,9 +79,13 @@ pub(crate) fn configure(
         }
 
         container.set_network_mac_address(&mac)?;
-        let mounts = container.config_value("lxc.mount.entry")?;
-        let fstab = container.config_value("lxc.mount.fstab")?;
-        let configure_resolver = !resolver_is_mounted(&mounts, &fstab)?;
+        let configure_resolver = if reserve_address {
+            let mounts = container.config_value("lxc.mount.entry")?;
+            let fstab = container.config_value("lxc.mount.fstab")?;
+            !resolver_is_mounted(&mounts, &fstab)?
+        } else {
+            false
+        };
         (egress, ingress, configure_resolver)
     };
 
@@ -95,7 +107,7 @@ pub(crate) fn configure(
         }
     }
 
-    if !plan.omits_interface() {
+    if reserve_address {
         entries.extend(network_address::reserve(container, &directory)?);
     }
 
