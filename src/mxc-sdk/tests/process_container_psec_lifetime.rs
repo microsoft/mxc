@@ -73,26 +73,29 @@ fn one_line(text: &str) -> String {
 // PSEC specification
 // ---------------------------------------------------------------------------
 
-fn pack_spec(spec: ProcessSecurityEnvironmentT) -> Vec<u8> {
+/// Minimal PSEC specification with no capabilities, optionally with
+/// read/write paths granted through the broker.
+// The generated type is non-exhaustive outside the crate, so fields are assigned.
+#[allow(clippy::field_reassign_with_default)]
+fn build_spec_version(major: u16, read_write: &[&Path]) -> Vec<u8> {
+    let mut spec = ProcessSecurityEnvironmentT::default();
+    spec.version = SchemaVersionT { major, minor: 0 };
+    if !read_write.is_empty() {
+        spec.fs_read_write = Some(
+            read_write
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        );
+    }
     let mut builder = FlatBufferBuilder::with_capacity(512);
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
     builder.finished_data().to_vec()
 }
 
-/// Minimal PSEC 1.0 specification: no capabilities, optionally with
-/// read/write paths granted through the broker.
 fn build_spec(read_write: &[&Path]) -> Vec<u8> {
-    pack_spec(ProcessSecurityEnvironmentT {
-        version: SchemaVersionT { major: 1, minor: 0 },
-        fs_read_write: (!read_write.is_empty()).then(|| {
-            read_write
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect()
-        }),
-        ..Default::default()
-    })
+    build_spec_version(1, read_write)
 }
 
 fn load_api() -> ProcessSecurityEnvironmentApi {
@@ -767,13 +770,7 @@ fn psec_failures_leave_no_profile_and_do_not_poison_the_handle() {
         format!("{:?}", truncated.as_ref().err()),
     );
     let unsupported = api.create(
-        &pack_spec(ProcessSecurityEnvironmentT {
-            version: SchemaVersionT {
-                major: 99,
-                minor: 0,
-            },
-            ..Default::default()
-        }),
+        &build_spec_version(99, &[]),
         PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     );
     observe(
