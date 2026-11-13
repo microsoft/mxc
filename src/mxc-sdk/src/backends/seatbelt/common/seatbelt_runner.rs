@@ -187,6 +187,7 @@ impl SandboxBackend for SeatbeltScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        let caller_stdio = crate::mxc_common::sandbox_process::open_caller_stdio();
         validate_common(request)?;
         self.validate(request)?;
 
@@ -208,7 +209,14 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // streaming either.
         let gui_access = crate::seatbelt_common::seatbelt_policy::gui_access_effective(request);
 
-        spawn_exec(request, gui_access, stdio, logger, proxy_address)
+        spawn_exec(
+            request,
+            gui_access,
+            stdio,
+            logger,
+            proxy_address,
+            caller_stdio,
+        )
     }
 }
 
@@ -226,6 +234,7 @@ fn spawn_exec(
     stdio: StdioMode,
     logger: &mut Logger,
     proxy_address: Option<&ProxyAddress>,
+    caller_stdio: [bool; 3],
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if gui_access && stdio != StdioMode::Inherit {
         let mode = if stdio == StdioMode::Pipes {
@@ -300,7 +309,10 @@ fn spawn_exec(
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
-            crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(&mut command);
+            crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(
+                &mut command,
+                caller_stdio,
+            );
         }
         StdioMode::Pty(_) => {}
     }
@@ -1438,6 +1450,7 @@ os.close(fd)
             StdioMode::Pty(PtySize::default()),
             &mut logger,
             None,
+            [true; 3],
         )
         .err()
         .expect("guiAccess PTY must be rejected");
