@@ -126,6 +126,8 @@ sudo rm -rf "$PRIVATE_TMP"
 sudo mkdir -p "$PRIVATE_TMP"
 sudo chown "$(id -u):$(id -g)" "$PRIVATE_TMP"
 printf '%s\n' "$PRIVATE_TMP" > "$TOOLS/private-tmp"
+# The overlay root is in both layers; the sandbox must show the host's mode.
+chmod 750 "$BASE"
 mkfifo "$TOOLS/ready" "$TOOLS/continue"
 exec 3<> "$TOOLS/ready" 4<> "$TOOLS/continue"
 (
@@ -153,7 +155,7 @@ config='{
   "containment": "bubblewrap",
   "process": {
     "cwd": "/mnt/masktest/tools",
-    "commandLine": "set -eu; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; PRIVATE_TMP=$(cat private-tmp); printf allowed > \"$PRIVATE_TMP/sibling\"; test \"$(cat \"$PRIVATE_TMP/sibling\")\" = allowed; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; PRIVATE_STORAGE=$(cat private-storage); if cat \"$PRIVATE_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 34; fi; if printf ATTACK > \"$PRIVATE_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 35; fi; echo READONLY_MISSING_DENIALS_OK"
+    "commandLine": "set -eu; if [ \"$(stat -c %a ..)\" != 750 ]; then exit 36; fi; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; PRIVATE_TMP=$(cat private-tmp); printf allowed > \"$PRIVATE_TMP/sibling\"; test \"$(cat \"$PRIVATE_TMP/sibling\")\" = allowed; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; PRIVATE_STORAGE=$(cat private-storage); if cat \"$PRIVATE_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 34; fi; if printf ATTACK > \"$PRIVATE_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 35; fi; echo READONLY_MISSING_DENIALS_OK"
   },
   "filesystem": {
     "readonlyPaths": ["/mnt/masktest"],
@@ -177,7 +179,7 @@ elif [ "$READONLY_STATUS" -eq 0 ] && [ "$PUBLISHER_STATUS" -eq 0 ] \
     && echo "$READONLY_OUT" | grep -qFx "READONLY_MISSING_DENIALS_OK" \
     && [ "$(cat "$BASE/.env.local")" = "LATE_SECRET" ] \
     && [ "$(cat "$BASE/absent/nested/secret")" = "LATE_SECRET" ]; then
-    echo "PASS: missing denials stay masked after host creation; the RW TMPDIR sibling remains writable and overlay backing storage stays hidden."
+    echo "PASS: missing denials stay masked after host creation; the read-only parent keeps its host mode, the RW TMPDIR sibling remains writable and overlay backing storage stays hidden."
 else
     echo "$READONLY_OUT"
     echo "FAIL: missing denial enforcement or read-only-parent controls failed (sandbox $READONLY_STATUS, publisher $PUBLISHER_STATUS)."

@@ -146,6 +146,23 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         .position(|args| args[0] == "--tmpfs" && args[1] == root.join("missing").to_str().unwrap())
         .unwrap();
     assert!(overlay < child && overlay < denied);
+    let layer = mounts
+        .iter()
+        .find_map(|mount| mount.readonly_overlay.as_deref())
+        .unwrap();
+    let source = root.to_str().unwrap();
+    assert!(
+        args.windows(6).any(|args| args
+            == [
+                "--overlay-src",
+                layer,
+                "--overlay-src",
+                source,
+                "--ro-overlay",
+                source
+            ]),
+        "the host source must be the top layer so shared directories keep host metadata: {args:?}"
+    );
     let hidden = std::fs::canonicalize(storage.path()).unwrap();
     let hidden = hidden.to_str().unwrap();
     assert!(args

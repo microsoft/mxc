@@ -375,8 +375,8 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>
             "--dev" | "--proc" | "--remount-ro" => SandboxEntry::Closed,
             "--tmpfs" => SandboxEntry::Tmpfs,
             "--overlay-src" => {
-                let source = args.next()?;
-                overlay_source.get_or_insert(source);
+                // The last source is the top layer.
+                overlay_source = Some(args.next()?);
                 continue;
             }
             "--ro-overlay" => {
@@ -918,12 +918,14 @@ pub(crate) fn build_args_classified_with_mode(
             }
             // Read-only: already covered by the base ro-bind, but listed
             // explicitly so the intent is clear and it overrides any rw parent.
+            // The private layer goes below the host source, so directories in
+            // both layers keep the host's owner and permissions.
             FsIntent::ReadOnly => match &mount.readonly_overlay {
                 Some(layer) => args.extend([
                     "--overlay-src".into(),
-                    mount.source.clone(),
-                    "--overlay-src".into(),
                     layer.clone(),
+                    "--overlay-src".into(),
+                    mount.source.clone(),
                     "--ro-overlay".into(),
                     mount.destination.clone(),
                 ]),
