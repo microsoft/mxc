@@ -248,6 +248,29 @@ fn wslc_accepts_the_same_container_port_behind_distinct_host_ports() {
 }
 
 #[test]
+fn wslc_runtime_config_reaches_common_request() {
+    for (fields, expected) in [
+        ("", None),
+        (r#","runtimeConfig":{}"#, Some(None)),
+        (
+            r#","runtimeConfig":{"networkProxy":"http://proxy.example:8080"}"#,
+            Some(Some("http://proxy.example:8080")),
+        ),
+    ] {
+        let json = source("wslc", fields);
+        let (common, _) = adapt(&json);
+        assert_eq!(
+            common
+                .runtime_config
+                .as_ref()
+                .map(|config| config.network_proxy.as_deref()),
+            expected,
+            "{json}"
+        );
+    }
+}
+
+#[test]
 fn provision_common_fields_are_independent_of_backend_payload() {
     for backend in ["isolation_session", "windows_sandbox", "wslc"] {
         for fields in [

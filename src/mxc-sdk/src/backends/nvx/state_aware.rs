@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, MicroVmProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::{
@@ -146,7 +147,7 @@ impl NvxStateAwareRunner {
         let mut result = super::runner::finish_run(
             primary,
             cleanup,
-            &mut crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer),
+            &mut Logger::inherit_thread_diagnostic_sink(),
         );
         if let (Err(error), Some(id)) = (&mut result, self.provisioned_id.get_mut().take()) {
             // Closing a native host can consume its handle even on failure.
@@ -235,9 +236,14 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
         _config: Option<Self::StartConfig>,
     ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         let sandbox_id = SandboxId::from_mxc(sandbox_id)?;
-        self.client()?
-            .start(&sandbox_id)
-            .map_err(|error| super::runner::protect_native_error(error, "start", true))?;
+        let _ = self.client()?;
+        let client =
+            self.client.get_mut().as_mut().ok_or_else(|| {
+                MxcError::backend_error("NVX lifecycle client was already consumed")
+            })?;
+        let mut logger = Logger::inherit_thread_diagnostic_sink();
+        super::runner::prepare_execution(client, true, None, &mut logger)?;
+        super::runner::start_sandbox(client, &sandbox_id, true, &mut logger)?;
         Ok(StartResult { metadata: None })
     }
 

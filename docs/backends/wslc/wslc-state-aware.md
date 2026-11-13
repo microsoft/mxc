@@ -649,7 +649,7 @@ acknowledges that WSLC cannot independently restrict those directions.
 | Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
 | `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
 | Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
-| `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| `runtimeConfig.networkProxy` | structurally rejected in published contracts; rejected by WSLc in `1.1.0-alpha` | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 | `ui` | rejected | rejected | rejected |
 | `process.env` / `process.inheritDefaultEnv` | n/a | n/a | honored → see [Environment](wsl-container-getting-started.md#environment) |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
@@ -731,8 +731,9 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **10** as of the addition of optional WSLc
-SDK failure detail to lifecycle error responses and exec error frames.
+old one first. `PROTOCOL_VERSION` is **11** as of the addition of
+`network_proxy` to `provision` and `exec`, which moved applying the cooperative
+proxy from the client to the daemon.
 
 ## Daemon idle-timeout env overrides
 

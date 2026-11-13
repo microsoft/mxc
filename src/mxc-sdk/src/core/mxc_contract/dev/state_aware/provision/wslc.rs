@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::mxc_contract::dev::state_aware::provision::ProvisionPhase;
-use crate::mxc_contract::dev::{Filesystem, Network, PortMapping, Telemetry};
+use crate::mxc_contract::dev::{Filesystem, Network, PortMapping, RuntimeConfig, Telemetry};
 use crate::mxc_contract::dev::{OptionalField, Version};
 use serde::Deserialize;
 
@@ -65,6 +65,9 @@ pub struct WslcProvisionRequest {
     /// Optional network policy fixed at provision time.
     #[serde(default)]
     pub network: OptionalField<Network>,
+    /// Optional runtime settings fixed at provision time.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,

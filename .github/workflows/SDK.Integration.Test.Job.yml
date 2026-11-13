@@ -79,6 +79,29 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      - name: Install Linux TLS build dependencies
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Test W365 Dev JSON with an isolated native TLS fixture
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci/run-w365-node-fixture.ps1
+
       - name: Refresh Linux package indexes
         if: matrix.os_label == 'linux'
         shell: bash
