@@ -217,7 +217,7 @@ the caller-owned container remains provisioned and usable. The limit also
 applies when the workload timeout is zero. Cleanup failures are reported
 alongside the original failure. The .NET `RunInContainerJson` and
 `RunInContainerJsonAsync` methods do not enforce this limit; large output can
-consume significant memory. See [huzaifa-d/mxc#17](https://github.com/huzaifa-d/mxc/issues/17).
+consume significant memory.
 
 Lifecycle envelope calls, including validation, explicitly close the native
 host. A close failure after successful work returns `BackendError`; a primary
@@ -236,7 +236,6 @@ These fields are part of the experimental Rust `v1::dev` behaviour and may
 change as the development API evolves.
 
 Node and .NET do not expose the retained container ID in this failure case.
-See [huzaifa-d/mxc#16](https://github.com/huzaifa-d/mxc/issues/16).
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only
