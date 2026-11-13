@@ -146,12 +146,15 @@ async fn read_head(
         }
         buf.extend_from_slice(&chunk[..n]);
     };
-    Ok(parse_head(&String::from_utf8_lossy(&buf[..end])).map(|r| (r, buf[end..].to_vec())))
+    Ok(parse_head(&buf[..end]).map(|r| (r, buf[end..].to_vec())))
 }
 
-fn parse_head(head: &str) -> Option<Request> {
-    let mut lines = head.split("\r\n");
-    let mut parts = lines.next()?.split(' ');
+/// Header values may hold non-UTF-8 bytes, so header lines are forwarded as is.
+fn parse_head(head: &[u8]) -> Option<Request> {
+    let mut lines = head
+        .split(|&b| b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l));
+    let mut parts = std::str::from_utf8(lines.next()?).ok()?.split(' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
 
     if method.eq_ignore_ascii_case("CONNECT") {
@@ -183,29 +186,29 @@ fn parse_head(head: &str) -> Option<Request> {
     };
     // One request per connection, so a reused connection can't reach a host
     // that wasn't checked.
-    let mut out = format!("{method} {path} {version}\r\nHost: {host_header}\r\n");
+    let mut out = format!("{method} {path} {version}\r\nHost: {host_header}\r\n").into_bytes();
     for line in lines.filter(|l| !l.is_empty()) {
         let name = line
-            .split(':')
+            .split(|&b| b == b':')
             .next()
-            .unwrap_or("")
-            .trim()
+            .unwrap_or_default()
+            .trim_ascii()
             .to_ascii_lowercase();
-        let dropped = name == "host"
-            || name.starts_with("proxy-")
-            || name == "connection"
-            || name == "keep-alive";
+        let dropped = name == b"host"
+            || name.starts_with(b"proxy-")
+            || name == b"connection"
+            || name == b"keep-alive";
         if !dropped {
-            out.push_str(line);
-            out.push_str("\r\n");
+            out.extend_from_slice(line);
+            out.extend_from_slice(b"\r\n");
         }
     }
-    out.push_str("Connection: close\r\n\r\n");
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
     Some(Request {
         connect: false,
         host,
         port,
-        head: out.into_bytes(),
+        head: out,
     })
 }
 
@@ -428,14 +431,14 @@ mod tests {
     #[test]
     fn connect_requests_name_the_target_and_default_to_port_443() {
         let r =
-            parse_head("CONNECT example.com.:8443 HTTP/1.1\r\nHost: example.com\r\n\r\n").unwrap();
+            parse_head(b"CONNECT example.com.:8443 HTTP/1.1\r\nHost: example.com\r\n\r\n").unwrap();
         assert_eq!(
             (r.connect, r.host.as_str(), r.port),
             (true, "example.com", 8443)
         );
         assert!(r.head.is_empty());
         assert_eq!(
-            parse_head("CONNECT example.com HTTP/1.1\r\n\r\n")
+            parse_head(b"CONNECT example.com HTTP/1.1\r\n\r\n")
                 .unwrap()
                 .port,
             443
@@ -445,8 +448,8 @@ mod tests {
     #[test]
     fn http_requests_are_rewritten_for_one_request_per_connection() {
         let r = parse_head(
-            "GET http://10.1.2.3:8080/a?b HTTP/1.1\r\nHost: 10.1.2.3\r\nProxy-Authorization: x\r\n\
-             Connection: keep-alive\r\nKeep-Alive: 5\r\nAccept: */*\r\n\r\n",
+            b"GET http://10.1.2.3:8080/a?b HTTP/1.1\r\nHost: 10.1.2.3\r\nProxy-Authorization: x\r\n\
+              Connection: keep-alive\r\nKeep-Alive: 5\r\nX-Label: caf\xE9\r\nAccept: */*\r\n\r\n",
         )
         .unwrap();
         assert_eq!(
@@ -454,14 +457,22 @@ mod tests {
             (false, "10.1.2.3", 8080)
         );
         assert_eq!(
-            String::from_utf8(r.head).unwrap(),
-            "GET /a?b HTTP/1.1\r\nHost: 10.1.2.3:8080\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            r.head,
+            b"GET /a?b HTTP/1.1\r\nHost: 10.1.2.3:8080\r\nX-Label: caf\xE9\r\nAccept: */*\r\n\
+              Connection: close\r\n\r\n"
+        );
+        // A bare LF ends the line, so it can't smuggle a Host header upstream.
+        let r =
+            parse_head(b"GET http://a.example/ HTTP/1.1\r\nX: y\nHost: b.example\r\n\r\n").unwrap();
+        assert_eq!(
+            r.head,
+            b"GET / HTTP/1.1\r\nHost: a.example\r\nX: y\r\nConnection: close\r\n\r\n"
         );
         for (target, path) in [
             ("http://example.com", "/"),
             ("HTTP://example.com?x=1", "/?x=1"),
         ] {
-            let r = parse_head(&format!("GET {target} HTTP/1.1\r\n\r\n")).unwrap();
+            let r = parse_head(format!("GET {target} HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
             assert_eq!((r.host.as_str(), r.port), ("example.com", 80));
             assert!(
                 r.head.starts_with(
@@ -484,7 +495,11 @@ mod tests {
             "GET http://user@example.com/ HTTP/1.1\r\n\r\n",
             "GARBAGE\r\n\r\n",
         ] {
-            assert_eq!(parse_head(head), None, "{head:?}");
+            assert_eq!(parse_head(head.as_bytes()), None, "{head:?}");
         }
+        assert_eq!(
+            parse_head(b"GET http://caf\xE9.com/ HTTP/1.1\r\n\r\n"),
+            None
+        );
     }
 }
