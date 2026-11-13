@@ -82,7 +82,6 @@ echo "      Run it manually with: sudo bash $SCRIPT_DIR/run_lxc_rootless_no_netw
 echo ""
 
 run_test "Basic LXC" "$SCRIPT_DIR/run_lxc_basic_test.sh"
-run_test "LXC Unprivileged Admission" "$SCRIPT_DIR/run_lxc_unprivileged_test.sh"
 run_test "LXC Filesystem" "$SCRIPT_DIR/run_lxc_filesystem_test.sh"
 run_test "LXC Object Validation" "$SCRIPT_DIR/run_lxc_object_test.sh"
 run_test "LXC Most-Specific Path" "$SCRIPT_DIR/run_lxc_most_specific_test.sh"

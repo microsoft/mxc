@@ -34,11 +34,12 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::lxc_common::availability::LxcTooling;
 use crate::lxc_common::filesystem_mounts;
-use crate::lxc_common::host_network::HostNetwork;
 use crate::lxc_common::loopback_relay::LoopbackRelay;
 use crate::lxc_common::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::lxc_common::network_ingress::IngressManager;
-use crate::lxc_common::network_iptables::{plan_network, EgressHookPoint, NetworkIptablesManager};
+use crate::lxc_common::network_iptables::{
+    needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
+};
 use crate::lxc_common::signal_cleanup;
 
 const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
@@ -174,7 +175,6 @@ impl ContainerNameClaim {
 
 impl Drop for ContainerNameClaim {
     fn drop(&mut self) {
-        signal_cleanup::clear_active_registration(&self.name);
         lock_live_container_names().remove(&self.name);
     }
 }
@@ -303,25 +303,14 @@ impl LxcScriptRunner {
         &self,
         container: &LxcContainer,
         container_created: bool,
-        network: &mut HostNetwork,
         logger: &mut Logger,
-    ) -> Vec<String> {
+    ) {
         let release = self.release_kind(container_created);
         let result = match release {
-            ContainerRelease::Destroy => container.destroy_owned(),
-            ContainerRelease::Stop => container.stop_owned(),
+            ContainerRelease::Destroy => container.destroy(),
+            ContainerRelease::Stop => container.stop(),
         };
-        let mut failures = Vec::new();
-        match &result {
-            Ok(()) => {
-                if let Err(error) = network.remove() {
-                    failures.push(error);
-                }
-            }
-            Err(error) => failures.push(format!("failed to {} container: {error}", release.verb())),
-        }
         Self::report_release_failure(release, result, logger);
-        failures
     }
 
     /// Release a sandbox whose workload never got a handle to own its cleanup,
@@ -329,34 +318,19 @@ impl LxcScriptRunner {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn abandon_prepared(&self, prepared: &mut PreparedSandbox, logger: &mut Logger) -> Vec<String> {
         prepared.relay = None;
-        if let Some(network) = &mut prepared.host_network {
-            let release = self.release_kind(prepared.container_created);
-            let result = match release {
-                ContainerRelease::Destroy => prepared.container.destroy_owned(),
-                ContainerRelease::Stop if prepared.force_stopped => Ok(()),
-                ContainerRelease::Stop => prepared.container.stop_owned(),
-            };
-            return match result {
-                Ok(()) => {
-                    prepared.released = matches!(release, ContainerRelease::Destroy);
-                    network.remove().err().into_iter().collect()
-                }
-                Err(error) => vec![format!("failed to {} container: {error}", release.verb())],
-            };
-        }
 
         // Namespace-scoped chains come out before the container does.
         let mut failures = prepared.remove_in_container_state(self.cleanup_policy, logger);
 
         let release = self.release_kind(prepared.container_created);
         let result = match release {
-            ContainerRelease::Destroy => prepared.container.destroy_owned(),
+            ContainerRelease::Destroy => prepared.container.destroy(),
 
             // Already down, and `lxc-stop` against a container that is not
             // running reports a failure with nothing behind it.
             ContainerRelease::Stop if prepared.force_stopped => Ok(()),
 
-            ContainerRelease::Stop => prepared.container.stop_owned(),
+            ContainerRelease::Stop => prepared.container.stop(),
         };
         match &result {
             Ok(()) => {
@@ -413,7 +387,6 @@ impl LxcScriptRunner {
         }
     }
 
-    #[cfg(test)]
     fn enforce_network_readiness<P, R>(
         &self,
         container_name: &str,
@@ -505,6 +478,9 @@ impl LxcScriptRunner {
             }
         }
 
+        if self.destroy_on_exit {
+            signal_cleanup::set_active(&container_name);
+        }
         let _ = writeln!(logger, "Container name: {}", container_name);
         let _ = writeln!(
             logger,
@@ -523,14 +499,6 @@ impl LxcScriptRunner {
         }
 
         let container = LxcContainer::new(&container_name, None);
-        let mut host_network = HostNetwork::claim(&container)
-            .map_err(|error| ScriptResponse::failed(FailurePhase::LaunchFailed, &error))?;
-        signal_cleanup::set_active_lifecycle(
-            &container_name,
-            self.destroy_on_exit,
-            self.cleanup_policy,
-        );
-        signal_cleanup::set_active_host_network(host_network.clone());
         let mut container_created = false;
 
         if !container.is_defined() {
@@ -550,45 +518,32 @@ impl LxcScriptRunner {
         if let Err(e) =
             filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
         {
-            let failures = self.release_after_failure(
-                &container,
-                container_created,
-                &mut host_network,
-                logger,
-            );
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
             return Err(ScriptResponse::failed(
                 FailurePhase::LaunchFailed,
-                &launch_failure_message(&format!("Failed to configure filesystem: {e}"), &failures),
+                &format!("Failed to configure filesystem: {}", e),
             ));
         }
 
         // LXC reads the network section only at start.  A container an earlier
         // run left running is still on that run's topology.
-        let stopped = container_created
-            || container
-                .is_stopped()
-                .map_err(|error| ScriptResponse::failed(FailurePhase::LaunchFailed, &error))?;
-        if !stopped {
+        if container.is_running() {
             let _ = writeln!(
                 logger,
                 "Container already running; stopping it so this run's network policy applies."
             );
-            if let Err(e) = container.stop_owned() {
-                let failures = self.release_after_failure(
-                    &container,
-                    container_created,
-                    &mut host_network,
-                    logger,
-                );
+            if let Err(e) = container.stop() {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
                 return Err(ScriptResponse::failed(
                     FailurePhase::LaunchFailed,
-                    &launch_failure_message(
-                        &format!(
-                            "Failed to stop a container left running by an earlier run: {}. \
+                    &format!(
+                        "Failed to stop a container left running by an earlier run: {}. \
                          Its network policy is the earlier run's, so the script was not run.",
-                            e
-                        ),
-                        &failures,
+                        e
                     ),
                 ));
             }
@@ -606,56 +561,72 @@ impl LxcScriptRunner {
             StartNetwork::FromContainerConfig
         };
 
-        if let Err(error) =
-            host_network.configure(&container, &request.policy, plan.omits_interface(), logger)
-        {
-            let failures = self.release_after_failure(
-                &container,
-                container_created,
-                &mut host_network,
-                logger,
-            );
-            return Err(ScriptResponse::failed(
-                FailurePhase::LaunchFailed,
-                &launch_failure_message(&error, &failures),
-            ));
-        }
+        let resolver = match signal_cleanup::with_container_startup(&container, || {
+            crate::lxc_common::network_startup::configure(&container, &request.policy, logger)
+        }) {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!("Failed to configure container network startup: {error}"),
+                ));
+            }
+        };
 
         let _ = writeln!(logger, "Starting LXC container...");
         if let Err(e) = container.start(network) {
-            let reason = host_network.startup_failure(&e);
-            let failures = self.release_after_failure(
-                &container,
-                container_created,
-                &mut host_network,
-                logger,
-            );
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
             return Err(ScriptResponse::failed(
                 FailurePhase::LaunchFailed,
-                &launch_failure_message(&format!("Failed to start container: {reason}"), &failures),
+                &format!("Failed to start container: {}", e),
             ));
         }
         let _ = writeln!(logger, "Container started successfully.");
 
-        if let Err(error) = host_network.verify_started() {
-            let failures = self.release_after_failure(
-                &container,
+        if let Some(resolver) = resolver {
+            if let Err(error) =
+                crate::lxc_common::network_resolver::configure(&container, &resolver)
+            {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::failed(
+                    FailurePhase::PostLaunchFailed,
+                    &error,
+                ));
+            }
+        }
+
+        let needs_network = needs_network(&request.policy);
+
+        if needs_network {
+            let timeout = Duration::from_secs(30);
+            if let Some(response) = self.enforce_network_readiness(
+                &container_name,
                 container_created,
-                &mut host_network,
+                timeout,
                 logger,
-            );
+                Self::wait_for_network,
+                |release| match release {
+                    ContainerRelease::Destroy => container.destroy(),
+                    ContainerRelease::Stop => container.stop(),
+                },
+            ) {
+                return Err(response);
+            }
+        }
+
+        // The init PID names the container's network namespace.
+        let netns_pid = container.init_pid();
+        let Some(hook_point) = egress_hook_point(netns_pid, plan.installs_firewall()) else {
+            self.release_after_failure(&container, container_created, logger);
             return Err(ScriptResponse::failed(
                 FailurePhase::PostLaunchFailed,
-                &launch_failure_message(&error, &failures),
+                "Failed to discover the container init PID; cannot manage its network \
+                 namespace or the startup firewall. The script was not run.",
             ));
-        }
-
-        if !plan.omits_interface() && NetworkIptablesManager::permits_ipv4_dhcp(&request.policy) {
-            // DHCP runs behind the installed policy; an absent lease does not forbid local commands.
-            let _ = Self::wait_for_network(&container_name, Duration::from_secs(30), logger);
-        }
-
-        let netns_pid = container.init_pid();
+        };
 
         if let Some(pid) = netns_pid {
             let _ = writeln!(logger, "Container init PID: {}", pid);
@@ -671,22 +642,14 @@ impl LxcScriptRunner {
                 .map_err(|e| e.to_string())
         });
         if let Err(reason) = stale_pin_error {
-            let failures = self.release_after_failure(
-                &container,
-                container_created,
-                &mut host_network,
-                logger,
-            );
+            self.release_after_failure(&container, container_created, logger);
             return Err(ScriptResponse::failed(
                 FailurePhase::PostLaunchFailed,
-                &launch_failure_message(
-                    &format!(
-                        "Failed to clear a stale network proxy pin from the container's \
+                &format!(
+                    "Failed to clear a stale network proxy pin from the container's \
                      /etc/hosts: {}. The script was not run, because it could have resolved \
                      the pinned hostname to an address this policy did not authorize.",
-                        reason
-                    ),
-                    &failures,
+                    reason
                 ),
             ));
         }
@@ -699,8 +662,6 @@ impl LxcScriptRunner {
         };
         let exec_env = resolved_env(request);
 
-        // Started last, after every step that can fail and release the
-        // container, and before the workload can try to reach the proxy.
         let relay = match &request.policy.network_proxy.address {
             Some(address) if request.policy.runtime_network_proxy_specified => {
                 let started = netns_pid
@@ -709,21 +670,13 @@ impl LxcScriptRunner {
                 match started {
                     Ok(relay) => Some(relay),
                     Err(e) => {
-                        let failures = self.release_after_failure(
-                            &container,
-                            container_created,
-                            &mut host_network,
-                            logger,
-                        );
+                        self.release_after_failure(&container, container_created, logger);
                         return Err(ScriptResponse::failed(
                             FailurePhase::PostLaunchFailed,
-                            &launch_failure_message(
-                                &format!(
+                            &format!(
                                 "LXC: cannot relay runtimeConfig.networkProxy into the container: \
                              {}. The script was not run.",
                                 e
-                            ),
-                                &failures,
                             ),
                         ));
                     }
@@ -732,10 +685,32 @@ impl LxcScriptRunner {
             _ => None,
         };
 
+        let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
+        let mut ingress_manager = None;
+        if plan.installs_firewall() {
+            let ipv6 = match crate::lxc_common::network_startup::installed_ipv6(&container) {
+                Ok(ipv6) => ipv6,
+                Err(error) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &error,
+                    ));
+                }
+            };
+            fw_manager.record_startup_rules(ipv6);
+            fw_manager.set_preserve_policy(!self.cleanup_policy);
+            if let Some(pid) = netns_pid {
+                let mut manager = IngressManager::new(&container_name, pid);
+                manager.record_startup_rules(ipv6);
+                manager.set_preserve_policy(!self.cleanup_policy);
+                ingress_manager = Some(manager);
+            }
+        }
+
         Ok(PreparedSandbox {
-            fw_manager: NetworkIptablesManager::new(&container_name, EgressHookPoint::Unhooked),
-            ingress_manager: None,
-            host_network: Some(host_network),
+            fw_manager,
+            ingress_manager,
             container,
             container_created,
             relay,
@@ -768,12 +743,7 @@ impl LxcScriptRunner {
             prepared.timeout,
         );
 
-        let stop_failure = if result.is_err() {
-            prepared.force_stop().err()
-        } else {
-            None
-        };
-        let mut response = match result {
+        let response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {
                 exit_code,
                 standard_out: stdout,
@@ -784,18 +754,7 @@ impl LxcScriptRunner {
             Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
         };
 
-        let mut failures = prepared.tear_down(self.cleanup_policy, self.destroy_on_exit, logger);
-        if let Some(error) = stop_failure {
-            failures.push(format!(
-                "failed to stop container after execution failure: {error}"
-            ));
-        }
-        if !failures.is_empty() {
-            response.error_message = launch_failure_message(&response.error_message, &failures);
-            if response.exit_code == 0 {
-                response.exit_code = 1;
-            }
-        }
+        prepared.tear_down(self.cleanup_policy, self.destroy_on_exit, logger);
 
         response
     }
@@ -869,7 +828,6 @@ impl LxcScriptRunner {
 struct PreparedSandbox {
     fw_manager: NetworkIptablesManager,
     ingress_manager: Option<IngressManager>,
-    host_network: Option<HostNetwork>,
     container: LxcContainer,
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -967,28 +925,6 @@ impl PreparedSandbox {
     ) -> Vec<String> {
         let mut failures = Vec::new();
         self.relay = None;
-        if let Some(network) = &mut self.host_network {
-            if destroy_on_exit && !self.released {
-                let _ = writeln!(logger, "Destroying container...");
-                match self.container.destroy_owned() {
-                    Ok(()) => self.released = true,
-                    Err(error) => {
-                        return vec![format!(
-                            "failed to destroy container: {error}; host filtering retained"
-                        )];
-                    }
-                }
-            }
-            if self.stop_failed && !self.released {
-                return vec!["the container could not be stopped; host filtering retained".into()];
-            }
-            if cleanup_policy || self.released {
-                if let Err(error) = network.remove() {
-                    failures.push(error);
-                }
-            }
-            return failures;
-        }
 
         // Destroying takes the network namespace down with it. Chains that
         // were never hooked live on the host and still have to come out below.
@@ -1000,7 +936,7 @@ impl PreparedSandbox {
 
         if destroying {
             let _ = writeln!(logger, "Destroying container...");
-            match self.container.destroy_owned() {
+            match self.container.destroy() {
                 Ok(()) => {
                     self.released = true;
                     self.note_namespace_gone();
@@ -1032,12 +968,14 @@ impl PreparedSandbox {
         }
     }
 
+    /// Kill every process in the container, which is the only way to reach a
+    /// workload that lives in its PID namespace.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn force_stop(&mut self) -> Result<(), String> {
         if self.force_stopped {
             return Ok(());
         }
-        if let Err(e) = self.container.stop_owned() {
+        if let Err(e) = self.container.stop() {
             self.stop_failed = true;
             return Err(e);
         }
@@ -1275,6 +1213,8 @@ impl LxcScriptRunner {
                 (out, out_canceller, err, err_canceller)
             }
             (out_result, err_result) => {
+                // The workload is already running and no handle exists to own
+                // its cleanup, so it comes down here.
                 if prepared.force_stop().is_err() {
                     let _ = child.kill();
                 }
@@ -1353,7 +1293,15 @@ struct LxcChild {
 #[cfg(target_os = "linux")]
 impl LxcChild {
     fn terminate(&mut self) -> std::io::Result<()> {
+        // Killed first so the reap, and the stream drains waiting on it, are
+        // never parked behind a stop that is slow or wedged. The workload is
+        // orphaned for as long as the stop takes, with its chains still up.
         let _ = self.child.kill();
+
+        // `lxc-attach` is a host process while the workload runs in the
+        // container's PID namespace under container init, so nothing aimed at
+        // the host process or its group reaches the workload; only stopping the
+        // container does.
         self.prepared.force_stop().map_err(std::io::Error::other)
     }
 }
@@ -1530,7 +1478,7 @@ impl SandboxProcess for LxcSandboxProcess {
             if let Err(error) = self.kill_for_timeout() {
                 let error = format!(
                     "LXC: script timed out, and the container could not be stopped, so the \
-                 workload may still be running: {error}"
+                     workload may still be running: {error}"
                 );
                 self.inner.termination_error = Some(error.clone());
                 return Err(std::io::Error::other(error));
@@ -1551,6 +1499,8 @@ impl SandboxProcess for LxcSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        // Only a clean teardown releases the container, so a failed one leaves
+        // this latch open and still reaches the stop below.
         if self.teardown_done {
             return Ok(());
         }
@@ -1618,6 +1568,9 @@ impl SandboxProcess for LxcSandboxProcess {
             match wait_with_timeout(&mut self.inner.child, remaining_timeout) {
                 Ok(status) => Ok(status.code().unwrap_or(-1)),
                 Err(WaitError::Timeout) => {
+                    // Stopping the container releases the pipe write ends a
+                    // backgrounded descendant would otherwise hold past the
+                    // deadline, so the drains below can finish.
                     if let Err(error) = self.kill_for_timeout() {
                         let error = format!(
                             "LXC: script timed out, and the container could not be stopped, so \
@@ -1678,7 +1631,6 @@ fn uuid_simple() -> String {
 
 /// Where egress rules attach, or `None` when a firewall is needed and the
 /// container's network namespace cannot be found.
-#[cfg(test)]
 fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<EgressHookPoint> {
     match netns_pid {
         Some(pid) => Some(EgressHookPoint::ContainerNetns(pid)),
@@ -1952,57 +1904,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_stopped_survivor_retains_its_preserved_host_policy() {
-        let fake = crate::lxc_common::network_iptables::test_firewall::install();
-        let mut prepared = prepared_with_applied_rules("stopped-preserved-host");
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("host-network-tests")
-            .join(uuid_simple());
-        let config = root.join(prepared.container.name()).join("config");
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, "lxc.net.0.type = veth\nlxc.net.0.link = lxcbr0\n").unwrap();
-        prepared.container =
-            LxcContainer::new(prepared.container.name(), Some(root.to_str().unwrap()));
-        let mut network = HostNetwork::claim(&prepared.container).unwrap();
-        network
-            .configure(
-                &prepared.container,
-                &ContainerPolicy::default(),
-                false,
-                &mut Logger::new(Mode::Buffer),
-            )
-            .unwrap();
-        let directory = std::fs::read_dir(root.join(".mxc-network"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        std::fs::write(directory.join("up-0.ready"), b"ready").unwrap();
-        network.verify_started().unwrap();
-        let configured = std::fs::read_to_string(&config).unwrap();
-        prepared.host_network = Some(network);
-        prepared.force_stopped = true;
-        let issued = fake.issued();
-
-        let failures = prepared.tear_down(false, false, &mut Logger::new(Mode::Buffer));
-        let attempted = fake.issued();
-        drop(prepared);
-
-        assert!(failures.is_empty(), "{failures:?}");
-        assert_eq!(std::fs::read_to_string(config).unwrap(), configured);
-        for file in ["policy.json", "up-0.sh", "up-0.ready"] {
-            assert!(directory.join(file).is_file(), "removed retained {file}");
-        }
-        std::fs::remove_dir_all(root).unwrap();
-        assert_eq!(
-            attempted, issued,
-            "stopping a survivor removed its preserved host policy"
-        );
-    }
-
     /// Install a hooked egress chain on a prepared sandbox, so the
     /// netns-scoped state has something to forget. Ingress is left alone: its
     /// manager drives `nsenter` through a runner the iptables fake does not
@@ -2235,7 +2136,6 @@ mod tests {
             ingress_manager,
             container: LxcContainer::new(&name, Some("/var/lib/lxc")),
             container_created: false,
-            host_network: None,
             relay: None,
             released: false,
             force_stopped: false,

@@ -1,134 +1,245 @@
 #!/bin/bash
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LXC_EXEC="${LXC_EXEC:-$REPO_DIR/src/target/release/lxc-exec}"
-if [ "$LXC_EXEC" = "$REPO_DIR/src/target/release/lxc-exec" ] && [ ! -f "$LXC_EXEC" ]; then
+LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
+
+if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
-fail() {
+SKIP_EXIT=77
+skip()
+{
+    echo "SKIP: $1"
+    exit "$SKIP_EXIT"
+}
+
+fail()
+{
     echo "FAIL: $1"
     exit 1
 }
 
-# shellcheck source=lib/lxc_peer_listener.sh
-. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
+[ "$(id -u)" -eq 0 ] || skip "requires root for LXC and the probe interfaces."
+command -v nsenter >/dev/null 2>&1 || skip "nsenter is not installed."
+command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
+command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v lxc-info >/dev/null 2>&1 || skip "LXC (lxc-info) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed."
+[ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
-CONTAINER="mxc-inbound-traffic-$$"
-CONFIG="$REPO_DIR/tests/configs/.lxc-inbound-$$.json"
-RUN_LOG="$REPO_DIR/tests/configs/.lxc-inbound-$$.log"
-LISTENER_V4_LOG="$REPO_DIR/tests/configs/.lxc-inbound-v4-$$.log"
-LISTENER_V6_LOG="$REPO_DIR/tests/configs/.lxc-inbound-v6-$$.log"
-HOST_V6="fd00:77:78::1"
-GUEST_V6="fd00:77:78::2"
-PORT=$((30000 + $$ % 10000))
+CONFIG="$REPO_DIR/tests/configs/lxc_inbound_traffic_deny.json"
+[ -f "$CONFIG" ] || skip "missing config $CONFIG."
+
+CONTAINER="$(python3 - "$CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as fixture:
+    config = json.load(fixture)
+assert config["network"] == {
+    "egress": {"default": "allow"},
+    "ingress": {"default": "deny", "hostLoopback": "deny"},
+}, "the inbound traffic fixture must allow egress and deny ingress"
+print(config["containerId"])
+PY
+)"
+
+VETH_HOST="mxcprobe0"
+VETH_PEER="mxcprobe1"
+PROBE_HOST_V4="10.77.78.1"
+PROBE_NS_V4="10.77.78.2"
+PROBE_HOST_V6="fd00:77:78::1"
+PROBE_NS_V6="fd00:77:78::2"
+PROBE_PORT=7777
+
+RUN_LOG="$SCRIPT_DIR/.lxc-inbound-traffic-$$.log"
 RUN_PID=""
-LISTENER_V4_PID=""
-LISTENER_V6_PID=""
-HOST_V6_ADDED=false
-cleanup() {
-    local status=$?
-    if [ -n "$RUN_PID" ]; then
+LISTENER_PID=""
+VETH_CREATED=0
+
+cleanup()
+{
+    if [ -n "$LISTENER_PID" ]; then
+        kill -TERM "$LISTENER_PID" 2>/dev/null || true
+        wait "$LISTENER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$RUN_PID" ] && kill -0 "$RUN_PID" 2>/dev/null; then
         kill -TERM "$RUN_PID" 2>/dev/null || true
         wait "$RUN_PID" 2>/dev/null || true
     fi
-    for pid in "$LISTENER_V4_PID" "$LISTENER_V6_PID"; do
-        if [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
-    if lxc-info -n "$CONTAINER" >/dev/null 2>&1; then
-        python3 - "$CONFIG" <<'PY'
-import json, sys
-path = sys.argv[1]
-config = json.load(open(path))
-config["process"]["commandLine"] = "true"
-config["lifecycle"] = {"destroyOnExit": True, "preservePolicy": False}
-with open(path, "w") as stream:
-    json.dump(config, stream)
-PY
-        "$LXC_EXEC" "$CONFIG" >/dev/null 2>&1 || { echo "FAIL: MXC could not clean up the ingress fixture."; status=1; }
+    if [ "$VETH_CREATED" = 1 ]; then
+        ip link del "$VETH_HOST" >/dev/null 2>&1 || true
     fi
-    if [ "$HOST_V6_ADDED" = true ]; then
-        ip -6 address del "$HOST_V6/64" dev lxcbr0
-    fi
-    rm -f "$CONFIG" "$RUN_LOG" "$LISTENER_V4_LOG" "$LISTENER_V6_LOG"
-    exit "$status"
+    "$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
+    rm -f "$RUN_LOG"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Address the existing managed interface rather than add an unfiltered one.
-read -r GUEST_V4 PREFIX < <(
-    ip -j -4 address show dev lxcbr0 | python3 -c '
-import ipaddress, json, sys
-address = json.load(sys.stdin)[0]["addr_info"][0]
-network = ipaddress.ip_network(f"{address['\''local'\'']}/{address['\''prefixlen'\'']}", strict=False)
-print(network.broadcast_address - 2, network.prefixlen)
-')
-[ -n "$GUEST_V4" ] && [ -n "$PREFIX" ] || fail "could not address the test guest."
-ip -6 address add "$HOST_V6/64" dev lxcbr0 nodad
-HOST_V6_ADDED=true
-python3 - "$CONTAINER" >"$CONFIG" <<'PY'
-import json, sys
-print(json.dumps({
-    "version": "1.0.0",
-    "containerId": sys.argv[1],
-    "containment": "lxc",
-    "process": {"commandLine": "sh -c 'echo MXC_INBOUND_READY; while [ ! -f /mxc-inbound-finish ]; do sleep 1; done'"},
-    "lifecycle": {"destroyOnExit": False, "preservePolicy": False},
-    "lxc": {"distribution": "alpine", "release": "3.23"},
-    "network": {"egress": {"default": "allow"}, "ingress": {"default": "deny", "hostLoopback": "deny"}}
-}))
-PY
-: >"$RUN_LOG"
+"$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
+
+echo "Running LXC inbound traffic test..."
+
 "$LXC_EXEC" "$CONFIG" >"$RUN_LOG" 2>&1 &
 RUN_PID=$!
-for ((attempt = 0; attempt < 600; attempt++)); do
-    grep -Fq MXC_INBOUND_READY "$RUN_LOG" && break
-    kill -0 "$RUN_PID" 2>/dev/null || { cat "$RUN_LOG"; fail "the ingress workload exited before readiness."; }
+
+STARTED=$SECONDS
+while true; do
+    if ! kill -0 "$RUN_PID" 2>/dev/null; then
+        echo "--- lxc-exec output ---"
+        cat "$RUN_LOG"
+        fail "lxc-exec exited before the HTTP probe became ready."
+    fi
+    NETNS_PID="$(lxc-info -n "$CONTAINER" -p -H 2>/dev/null || true)"
+    if [[ "$NETNS_PID" =~ ^[1-9][0-9]*$ ]]; then
+        if [ -z "$LISTENER_PID" ]; then
+            nsenter -t "$NETNS_PID" -n python3 - "$PROBE_PORT" >>"$RUN_LOG" 2>&1 <<'PY' &
+import http.server
+import socket
+import sys
+
+class InboundResponseHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"inbound-listener"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+class IPv6HTTPServer(http.server.HTTPServer):
+    address_family = socket.AF_INET6
+
+with IPv6HTTPServer(("::", int(sys.argv[1])), InboundResponseHandler, bind_and_activate=False) as server:
+
+    # Accept IPv4-mapped connections on the IPv6 listener.
+    server.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    server.server_bind()
+    server.server_activate()
+    server.serve_forever()
+PY
+            LISTENER_PID=$!
+        fi
+        if ! kill -0 "$LISTENER_PID" 2>/dev/null; then
+            echo "--- probe output ---"
+            cat "$RUN_LOG"
+            fail "the Python HTTP listener exited before accepting requests."
+        fi
+        if nsenter -t "$NETNS_PID" -n python3 -c '
+import urllib.request
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open("http://127.0.0.1:7777/", timeout=1) as response:
+    assert response.read() == b"inbound-listener"
+' >/dev/null 2>&1; then
+            break
+        fi
+    fi
+    if [ "$((SECONDS - STARTED))" -ge 300 ]; then
+        echo "--- lxc-exec output ---"
+        cat "$RUN_LOG"
+        fail "the HTTP probe did not accept requests within 300s."
+    fi
     sleep 0.5
 done
-grep -Fq MXC_INBOUND_READY "$RUN_LOG" || fail "the ingress workload never became ready."
-INIT_PID="$(lxc-info -n "$CONTAINER" -p -H)"
-nsenter -t "$INIT_PID" -n ip address replace "$GUEST_V4/$PREFIX" dev eth0
-nsenter -t "$INIT_PID" -n ip -6 address add "$GUEST_V6/64" dev eth0 nodad
-nsenter -t "$INIT_PID" -n ip link set eth0 up
-nsenter -t "$INIT_PID" -n iptables -F
-nsenter -t "$INIT_PID" -n iptables -X
-nsenter -t "$INIT_PID" -n iptables -P INPUT ACCEPT
-nsenter -t "$INIT_PID" -n ip6tables -F
-nsenter -t "$INIT_PID" -n ip6tables -X
-nsenter -t "$INIT_PID" -n ip6tables -P INPUT ACCEPT
 
-nsenter -t "$INIT_PID" -n python3 -m http.server "$PORT" --bind "$GUEST_V4" >"$LISTENER_V4_LOG" 2>&1 &
-LISTENER_V4_PID=$!
-nsenter -t "$INIT_PID" -n python3 -m http.server "$PORT" --bind "$GUEST_V6" >"$LISTENER_V6_LOG" 2>&1 &
-LISTENER_V6_PID=$!
-for target in "$GUEST_V4" "$GUEST_V6"; do
-    nsenter -t "$INIT_PID" -n timeout 5 bash -c \
-        "until (exec 3<>/dev/tcp/$target/$PORT) 2>/dev/null; do sleep 0.1; done" \
-        || fail "the guest listener at $target:$PORT never became reachable locally."
-    if timeout 3 bash -c "exec 3<>/dev/tcp/$target/$PORT"; then
-        fail "unsolicited ingress to $target succeeded after the guest firewall was flushed."
-    fi
-done
-peer_listener_running "$LISTENER_V4_PID" && peer_listener_running "$LISTENER_V6_PID" \
-    || fail "a guest listener exited."
+in_container_net()
+{
+    nsenter -t "$NETNS_PID" -n "$@"
+}
 
-lxc-attach -n "$CONTAINER" -- touch /mxc-inbound-finish
-if ! wait "$RUN_PID"; then
-    cat "$RUN_LOG"
-    fail "the ingress workload failed."
-fi
-RUN_PID=""
-[ "$(lxc-info -n "$CONTAINER" -s -H)" = RUNNING ] || fail "the ingress test container did not survive."
+# Use a private link to avoid depending on the bridge's DHCP or forwarding.
+ip link add "$VETH_HOST" type veth peer name "$VETH_PEER" \
+    || fail "could not create the probe veth pair."
+VETH_CREATED=1
+ip link set "$VETH_PEER" netns "$NETNS_PID" \
+    || fail "could not move the probe interface into the container namespace."
 
-# The same listeners must be reachable over the managed interface after teardown.
-for target in "$GUEST_V4" "$GUEST_V6"; do
-    timeout 5 bash -c "until (exec 3<>/dev/tcp/$target/$PORT) 2>/dev/null; do sleep 0.1; done" \
-        || fail "ingress to $target did not recover when preservePolicy=false removed the policy."
-done
-echo "PASS: IPv4 and IPv6 ingress survived guest firewall flushing and ended with policy teardown."
+ip addr add "$PROBE_HOST_V4/24" dev "$VETH_HOST"
+ip -6 addr add "$PROBE_HOST_V6/64" dev "$VETH_HOST" nodad
+ip link set "$VETH_HOST" up
+
+in_container_net ip addr add "$PROBE_NS_V4/24" dev "$VETH_PEER"
+in_container_net ip -6 addr add "$PROBE_NS_V6/64" dev "$VETH_PEER" nodad
+in_container_net ip link set "$VETH_PEER" up
+
+python3 - "$NETNS_PID" "$PROBE_HOST_V4" "$PROBE_NS_V4" \
+    "$PROBE_HOST_V6" "$PROBE_NS_V6" "$PROBE_PORT" <<'PY'
+import socket
+import subprocess
+import sys
+
+pid, host_v4, target_v4, host_v6, target_v6, port = sys.argv[1:]
+fetch = [
+    "nsenter", "-t", pid, "-n", "python3", "-c",
+    "import sys, urllib.request; "
+    "opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); "
+    "response = opener.open(sys.argv[1], timeout=10); "
+    "sys.stdout.buffer.write(response.read())",
+]
+
+for family, host, target in (
+    (socket.AF_INET, host_v4, target_v4),
+    (socket.AF_INET6, host_v6, target_v6),
+):
+    label = "IPv4" if family == socket.AF_INET else "IPv6"
+    listener_url = f"http://{target if family == socket.AF_INET else '[' + target + ']'}:{port}/"
+    control = subprocess.check_output([*fetch, listener_url], timeout=15)
+    if control != b"inbound-listener":
+        raise SystemExit(f"{label}: the workload listener did not return its control response")
+
+    with socket.socket(family) as server:
+        server.settimeout(15)
+        server.bind((host, 0))
+        server.listen(1)
+        host_url = host if family == socket.AF_INET else f"[{host}]"
+        outbound = subprocess.Popen(
+            [*fetch, f"http://{host_url}:{server.getsockname()[1]}/"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            connection, address = server.accept()
+            with connection:
+                connection.settimeout(15)
+                if address[0] != target:
+                    raise SystemExit(f"{label}: outbound control used {address[0]}, not {target}")
+                with connection.makefile("rb") as request:
+                    while request.readline() not in (b"\r\n", b""):
+                        pass
+
+                with socket.socket(family) as incoming:
+                    incoming.settimeout(4)
+                    try:
+                        incoming.connect((target, int(port)))
+                    except (TimeoutError, ConnectionRefusedError):
+                        pass
+                    except OSError as error:
+                        raise SystemExit(f"{label}: inbound probe failed without proving denial: {error}")
+                    else:
+                        raise SystemExit(f"{label}: a new inbound connection reached the workload listener")
+
+                body = b"outbound-response"
+                connection.sendall(
+                    b"HTTP/1.0 200 OK\r\nContent-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+            output, _ = outbound.communicate(timeout=15)
+            if outbound.returncode != 0 or output != body:
+                raise SystemExit(f"{label}: the allowed outbound response did not return: {output!r}")
+        finally:
+            if outbound.poll() is None:
+                outbound.kill()
+            outbound.wait()
+
+    if subprocess.check_output([*fetch, listener_url], timeout=15) != b"inbound-listener":
+        raise SystemExit(f"{label}: the workload listener stopped serving during the inbound probe")
+    print(f"PASS: {label} denies new inbound connections and returns allowed outbound responses")
+PY
+
+echo "PASS: LXC inbound traffic test."

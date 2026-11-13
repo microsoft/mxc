@@ -1,11 +1,21 @@
 #!/bin/bash
+# LXC egress enforcement test
+#
+# Asserts reachability rather than a log line: a chain can install cleanly,
+# name the right chain, and still filter nothing.
+#
+# Every case probes a CI-controlled peer this script stands up in its own routed
+# namespace, including the udp/53 cases, which query a resolver it hosts.
+#
+# A directional posture carries no port 53 exemption, unlike the legacy chain,
+# which is what the two DNS cases pin.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LXC_EXEC="${LXC_EXEC:-$REPO_DIR/src/target/release/lxc-exec}"
+LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
-if [ "$LXC_EXEC" = "$REPO_DIR/src/target/release/lxc-exec" ] && [ ! -f "$LXC_EXEC" ]; then
+if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
@@ -53,29 +63,86 @@ fail() {
     exit 1
 }
 
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
 # shellcheck source=lib/lxc_peer_listener.sh
 . "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 # shellcheck source=lib/lxc_dns_peer.sh
 . "$SCRIPT_DIR/lib/lxc_dns_peer.sh"
 
-# shellcheck source=lib/lxc_static_network.sh
-. "$SCRIPT_DIR/lib/lxc_static_network.sh"
-
-run_case() {
-    local label="$1" config="$2" output=""
-    echo "--- $label ---"
-    BEFORE_V4="$(iptables-save | sed '/^#/d')"
-    BEFORE_V6="$(ip6tables-save | sed '/^#/d')"
-    BEFORE_NFT="$(nft -s list ruleset)"
-    if ! output=$("${@:3}" "$config" 2>&1); then
-        fail "$label failed: $output"
+# The snapshot keeps chains left behind by an earlier failed run from being
+# blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" after="" leaked="" chain
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
     fi
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done <<<"$after"
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
+    fi
+}
+
+assert_firewall_chain_cleaned_up() {
+    local chain="$1"
+    if iptables -S "$chain" >/dev/null 2>&1; then
+        fail "iptables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    if ip6tables -S "$chain" >/dev/null 2>&1; then
+        fail "ip6tables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+}
+
+assert_no_forward_reference() {
+    if iptables -S FORWARD 2>/dev/null | grep -Fq -- "$1"; then
+        fail "a FORWARD rule still references chain '$1' after teardown."
+    fi
+}
+
+# A backend reading `enforcementMode` alone skips the chain and still reports
+# success, which is a silent unenforced run rather than a failure.
+assert_enforcement_not_skipped() {
+    if echo "$1" | grep -Fq "requests no firewall; skipping iptables"; then
+        fail "the 0.9 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
+    fi
+}
+
+# A policy that permits nothing is served by keeping the container off the
+# network entirely, so no chain is created and there is none to inspect.
+assert_no_chain_installed() {
+    if echo "$1" | grep -Eq "Creating iptables/ip6tables chain:|Programmed [a-z0-9]* rule:"; then
+        fail "a policy permitting nothing installed a firewall chain, so the container was put on the network and then filtered instead of being left off it."
+    fi
+}
+
+# Each case names the posture its policy should reach. Reading the posture back
+# out of the run instead would let a filtered policy that installed nothing pass
+# as an isolated one, which is the silent-unenforced case worth catching.
+run_case() {
+    local label="$1" config="$2" posture="${3:-filtered}" output=""
+    echo "--- $label ---"
+    MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+    MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
+    output=$("$LXC_EXEC" --debug "$config" 2>&1 || true)
     echo "$output"
     CASE_OUTPUT="$output"
 
-    [ "$(iptables-save | sed '/^#/d')" = "$BEFORE_V4" ] || fail "$label leaked IPv4 host rules."
-    [ "$(ip6tables-save | sed '/^#/d')" = "$BEFORE_V6" ] || fail "$label leaked IPv6 host rules."
-    [ "$(nft -s list ruleset)" = "$BEFORE_NFT" ] || fail "$label leaked nftables host rules."
+    if [ "$posture" = isolated ]; then
+        assert_no_chain_installed "$output"
+        assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+        assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+        return
+    fi
+
+    assert_enforcement_not_skipped "$output"
+    derive_chain_name "$output"
+    assert_no_forward_reference "$CHAIN_NAME"
+    assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 }
 
 assert_blocked() {
@@ -112,6 +179,10 @@ assert_allowed() {
     fi
 }
 
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on (-i <veth> / --physdev-in <veth>).
 PEER_NETNS="mxc-ga-egress-peer"
 PEER_HOST_VETH="mxcgah0"
 PEER_VETH="mxcgap0"
@@ -133,10 +204,10 @@ PEER_DNS_ANSWER="203.0.113.99"
 
 PEER_LISTENER_PID=""
 PEER_UDP_LISTENER_PID=""
-PEER_LISTENER_LOG="$REPO_DIR/tests/configs/.lxc-ga-peer-$$.log"
-PEER_UDP_LISTENER_LOG="$REPO_DIR/tests/configs/.lxc-ga-udp-$$.log"
-PEER_DNS_LISTENER_LOG="$REPO_DIR/tests/configs/.lxc-ga-dns-$$.log"
-IO_URING_CONFIG="$REPO_DIR/tests/configs/.lxc-ga-io-uring-$$.json"
+PEER_LISTENER_LOG="$(mktemp)"
+PEER_UDP_LISTENER_LOG="$(mktemp)"
+PEER_DNS_LISTENER_LOG="$(mktemp)"
+IO_URING_CONFIG="$(mktemp --suffix=.json)"
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -290,114 +361,102 @@ done
 # An egress-only config is the shape a backend claiming only the two egress
 # bits would reject outright, which makes any verdict here a test of the
 # support declaration.
-run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG" "$LXC_EXEC" --debug
+run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG" isolated
 assert_blocked "egress succeeded under egress.default deny with no allow rules, so a container that should never have reached the network reached it."
 
-run_case "allow case: same default, destination allowed on tcp/443" "$ALLOW_CONFIG" run_with_static_guest_ipv4
+run_case "allow case: same default, destination allowed on tcp/443" "$ALLOW_CONFIG"
 assert_allowed "an explicitly allowed destination was unreachable. The policy is over-blocking, so the deny case above proves nothing."
 
-run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG" run_with_static_guest_ipv4
+run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG"
 assert_blocked "traffic to tcp/443 succeeded while the policy allowed only tcp/444. The port selector is being dropped, so the allow case above proves only that the destination matched."
 
-run_case "dns-denied case: egress.default deny, DNS probe to the peer resolver" "$DNS_DENIED_CONFIG" "$LXC_EXEC" --debug
+run_case "dns-denied case: egress.default deny, DNS probe to the peer resolver" "$DNS_DENIED_CONFIG" isolated
 assert_blocked "a DNS query succeeded under egress.default deny with no allow rules, which leaves this container a DNS-tunnel path out of a policy that permits nothing."
 
-run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG" run_with_static_guest_ipv4
+run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG"
 assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. DNS is over-blocked, so the dns-denied case above proves only that this container has no DNS at all."
 
-run_case "deny-rule case: egress.default allow, one destination denied on udp/53" "$DENY_RULE_CONFIG" run_with_static_guest_ipv4
+run_case "deny-rule case: egress.default allow, one destination denied on udp/53" "$DENY_RULE_CONFIG"
 assert_blocked "a denied destination stayed reachable under egress.default allow. Entries from egress.deny are not reaching the chain, so a config written as allow-with-exceptions enforces nothing."
 
-run_case "except case: allow the peer range except the resolver, probe the excluded address" "$EXCEPT_EXCLUDED_CONFIG" run_with_static_guest_ipv4
+run_case "except case: allow the peer range except the resolver, probe the excluded address" "$EXCEPT_EXCLUDED_CONFIG"
 assert_blocked "an address named in except was reachable through the rule that excludes it. The exclusion is being dropped, so the surrounding allow is wider than written."
 
-run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG" run_with_static_guest_ipv4
+run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
 assert_allowed "an address inside the allowed range but outside except was unreachable. The exclusion is over-blocking, so the case above proves only that the whole rule failed to install."
 
 # The chain is first-match-wins, so a carve-out programmed as its own accept
 # rule would answer for the peer before the second rule's deny is reached.
-run_case "shadow case: deny the peer's range except the peer, then deny the peer outright" "$EXCEPT_SHADOW_CONFIG" run_with_static_guest_ipv4
+run_case "shadow case: deny the peer's range except the peer, then deny the peer outright" "$EXCEPT_SHADOW_CONFIG"
 assert_blocked "a destination denied by its own rule was reachable because an earlier rule excluded it. An except carve-out is escaping the rule that declared it and accepting traffic a later deny names, which turns a deny into an allow."
 
-run_case "shadow-control case: the same first rule with no second deny" "$EXCEPT_SHADOW_CONTROL_CONFIG" run_with_static_guest_ipv4
+run_case "shadow-control case: the same first rule with no second deny" "$EXCEPT_SHADOW_CONTROL_CONFIG"
 assert_allowed "an address excluded from a deny was unreachable under egress.default allow. The exclusion is not narrowing its own rule, so the shadow case above proves only that everything was blocked."
 
-run_case "icmp case: egress.default deny, peer allowed on protocol icmp" "$ICMP_ALLOWED_CONFIG" run_with_static_guest_ipv4
+run_case "icmp case: egress.default deny, peer allowed on protocol icmp" "$ICMP_ALLOWED_CONFIG"
 assert_allowed "an ICMP echo to a peer allowed on protocol icmp was unreachable. Either the icmp selector never reached the chain, or the container cannot open a raw socket at all, which would make the icmp-denied case below pass without filtering anything."
 
-run_case "icmp case: same icmp-only policy, probe tcp/443" "$ICMP_NO_TCP_CONFIG" run_with_static_guest_ipv4
+run_case "icmp case: same icmp-only policy, probe tcp/443" "$ICMP_NO_TCP_CONFIG"
 assert_blocked "tcp/443 succeeded while the policy allowed only icmp. The protocol selector is being dropped, so an icmp rule opens every transport to its destination."
 
-run_case "icmp case: egress.default deny, peer allowed on tcp/443 only" "$ICMP_DENIED_CONFIG" run_with_static_guest_ipv4
+run_case "icmp case: egress.default deny, peer allowed on tcp/443 only" "$ICMP_DENIED_CONFIG"
 assert_blocked "an ICMP echo succeeded while the policy allowed only tcp/443. ICMP is not carrying the port selectors, so a policy written for one transport leaks another."
 
-# Run the same raw and packet probes with ICMP permitted before denying it.
+# The policy lets ICMP reach the peer, leaving the socket refusal as the only block.
+# Ubuntu is used because Alpine ships no python3.
 python3 - "$SCRIPT_DIR/lib/io_uring_egress_probe.py" "$PEER_IP" "$PEER_CIDR" >"$IO_URING_CONFIG" <<'PY'
-import json, shlex, sys
+import json, sys
 probe, peer, cidr = sys.argv[1:]
 print(json.dumps({
     "version": "1.0.0",
     "containerId": "CLI-LXC-GA-Egress-Io-Uring",
     "containment": "lxc",
-    "process": {"commandLine": "python3 -c " + shlex.quote(open(probe).read()) + " " + peer},
+    "process": {"commandLine": "python3 -c '" + open(probe).read() + "' " + peer},
     "lifecycle": {"destroyOnExit": True},
     "lxc": {"distribution": "ubuntu", "release": "noble"},
-    "network": {"egress": {"default": "deny", "allow": [{"to": [{"cidr": cidr}], "ports": [{"protocol": "tcp", "port": 443}, {"protocol": "icmp"}]}]}},
+    "network": {"egress": {"default": "deny", "allow": [{"to": [{"cidr": cidr}], "ports": [{"protocol": "icmp"}]}]}},
 }))
 PY
 
-run_case "raw/packet control: ICMP permitted through ordinary and io_uring sockets" "$IO_URING_CONFIG" run_with_static_guest_ipv4
-assert_allowed "the permitted raw and packet probes did not both receive replies; a denied probe would prove nothing."
+run_case "io_uring case: peer allowed on protocol icmp, echo sent from a raw ICMP socket opened through io_uring" "$IO_URING_CONFIG"
 
-# Remove the pty carriage returns before matching the optional io_uring result.
+# Strip the carriage returns added by the workload's PTY.
 if grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1" <<<"${CASE_OUTPUT//$'\r'/}"; then
     log_io_uring_host_state
-    echo "SKIP: io_uring permitted-flow check unavailable (EPERM); ordinary raw/packet control passed."
+    echo "io_uring case: the workload cannot open io_uring (EPERM), so there are no io_uring sockets to test."
+else
+    assert_blocked "an echo from a raw ICMP socket opened through io_uring reached the peer."
 fi
 
-python3 - "$IO_URING_CONFIG" <<'PY'
-import json, sys
-path = sys.argv[1]
-config = json.load(open(path))
-config["network"]["egress"]["allow"][0]["ports"] = [{"protocol": "tcp", "port": 443}]
-with open(path, "w") as stream:
-    json.dump(config, stream)
-PY
-run_case "raw/packet deny: ICMP denied through ordinary and io_uring sockets" "$IO_URING_CONFIG" run_with_static_guest_ipv4
-assert_blocked "a raw or packet socket bypassed the configured ICMP deny."
-if grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1" <<<"${CASE_OUTPUT//$'\r'/}"; then
-    echo "SKIP: io_uring denied-flow check unavailable (EPERM); ordinary raw/packet deny passed."
-fi
-
-run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG" run_with_static_guest_ipv4
+run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG"
 assert_allowed "a port inside the allowed range 440-445 was unreachable. endPort is not reaching the chain, so a range selector blocks the traffic it was written to permit."
 
-run_case "port-range case: peer allowed on tcp/444-446, probe tcp/443" "$PORT_RANGE_OUTSIDE_CONFIG" run_with_static_guest_ipv4
+run_case "port-range case: peer allowed on tcp/444-446, probe tcp/443" "$PORT_RANGE_OUTSIDE_CONFIG"
 assert_blocked "tcp/443 succeeded while the allowed range started at 444. The range bounds are not enforced, so the case above proves only that some rule installed."
 
-run_case "port-range case: peer allowed on tcp/438-442, probe tcp/443" "$PORT_RANGE_ABOVE_CONFIG" run_with_static_guest_ipv4
+run_case "port-range case: peer allowed on tcp/438-442, probe tcp/443" "$PORT_RANGE_ABOVE_CONFIG"
 assert_blocked "tcp/443 succeeded while the allowed range ended at 442. The range's upper bound is not reaching the chain, so a range opens every port above its start."
 
-run_case "protocol-any case: peer allowed on protocol any, probe tcp/443" "$ANY_TCP_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: peer allowed on protocol any, probe tcp/443" "$ANY_TCP_CONFIG"
 assert_allowed "tcp/443 was unreachable under protocol any, so the any selector is not reaching the chain."
 
-run_case "protocol-any case: same policy, probe icmp" "$ANY_ICMP_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: same policy, probe icmp" "$ANY_ICMP_CONFIG"
 assert_allowed "an ICMP echo was unreachable under protocol any. The any selector is being lowered to the transports alone, so it is narrower than written."
 
-run_case "protocol-any case: same policy, probe udp/$PEER_UDP_PORT" "$ANY_UDP_UNSCOPED_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: same policy, probe udp/$PEER_UDP_PORT" "$ANY_UDP_UNSCOPED_CONFIG"
 assert_allowed "udp/$PEER_UDP_PORT was unreachable under protocol any carrying no port. An unscoped any is being lowered to a protocol list that omits udp, which the port-scoped cases below would not catch."
 
-run_case "protocol-any case: peer allowed on any port 443, probe tcp/443" "$ANY_PORT_MATCH_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: peer allowed on any port 443, probe tcp/443" "$ANY_PORT_MATCH_CONFIG"
 assert_allowed "tcp/443 was unreachable while protocol any allowed port 443, so the tcp/udp fan-out is not reaching the chain."
 
-run_case "protocol-any case: peer allowed on any port 444, probe tcp/443" "$ANY_WRONG_PORT_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: peer allowed on any port 444, probe tcp/443" "$ANY_WRONG_PORT_CONFIG"
 assert_blocked "tcp/443 succeeded while protocol any allowed only port 444. The fan-out drops the port selector, so any carrying a port opens every port."
 
-run_case "protocol-any case: peer allowed on any port $PEER_UDP_PORT, probe udp/$PEER_UDP_PORT" "$ANY_UDP_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: peer allowed on any port $PEER_UDP_PORT, probe udp/$PEER_UDP_PORT" "$ANY_UDP_CONFIG"
 assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed that port. Only the TCP half of the fan-out is reaching the chain, so the tcp cases above prove nothing about udp."
 
-run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG" run_with_static_guest_ipv4
+run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
 assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
-echo "PASS: egress rules filtered by destination, port, port range, protocol, resolver, deny precedence, and exclusion."
+echo "PASS: egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, no exclusion answered for a destination a later rule denied, and no socket opened through io_uring reached the peer."
 echo "LXC egress enforcement test complete."

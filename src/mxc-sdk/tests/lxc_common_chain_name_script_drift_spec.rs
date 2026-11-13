@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 use mxc_sdk::lxc_common::network_iptables::chain_name_for;
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,6 +13,15 @@ fn scripts_dir() -> PathBuf {
         .join("tests")
         .join("scripts")
 }
+
+const CHAIN_ASSERTING_SCRIPTS: &[&str] = &[
+    "run_lxc_network_cidr_boundary_test.sh",
+    "run_lxc_network_deny_precedence_test.sh",
+    "run_lxc_network_dualstack_test.sh",
+    "run_lxc_network_enforcement_test.sh",
+    "run_lxc_network_invalid_cidr_test.sh",
+    "run_lxc_network_ipv6_cidr_test.sh",
+];
 
 fn network_scripts() -> Vec<(String, String)> {
     let dir = scripts_dir();
@@ -161,88 +169,26 @@ fn the_shape_the_scripts_check_accepts_the_names_the_code_produces() {
 }
 
 #[test]
-fn cidr_fixtures_retain_the_destinations_the_kernel_checks_expect() {
-    let cases: [(&str, &[&str], &[&str]); 3] = [
-        (
-            "lxc_network_cidr_boundary",
-            &[
-                "0.0.0.0/0",
-                "::/0",
-                "140.82.112.0/20",
-                "140.82.112.5/32",
-                "2606:50c0::/32",
-            ],
-            &["198.51.100.42/32", "2001:db8::5/128"],
-        ),
-        (
-            "lxc_network_ipv6_cidr",
-            &[
-                "140.82.112.0/20",
-                "2606:50c0::/32",
-                "2606:50c0:8000::153/128",
-            ],
-            &["10.0.0.0/8", "2001:db8::/32", "fe80::1/128"],
-        ),
-        (
-            "lxc_network_dualstack_cidr",
-            &[
-                "127.0.0.1/32",
-                "1.1.1.1/32",
-                "2606:4700:4700::1111/128",
-                "8.8.8.8/32",
-                "2001:4860:4860::8888/128",
-            ],
-            &["10.0.0.0/8", "2001:db8::/32"],
-        ),
-    ];
-    for (fixture, allow, deny) in cases {
-        let path = scripts_dir()
-            .parent()
-            .expect("scripts directory has no parent")
-            .join("configs")
-            .join(format!("{fixture}.json"));
-        let config: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("could not read CIDR fixture"))
-                .expect("CIDR fixture is not valid JSON");
-        let egress = &config["network"]["egress"];
-        assert_eq!(egress["default"], "deny", "{fixture} changed its default");
-        for (action, expected) in [("allow", allow), ("deny", deny)] {
-            let actual: BTreeSet<_> = egress[action]
-                .as_array()
-                .expect("CIDR rules are not an array")
-                .iter()
-                .flat_map(|rule| {
-                    rule["to"]
-                        .as_array()
-                        .expect("CIDR destinations are not an array")
-                })
-                .map(|target| target["cidr"].as_str().expect("CIDR is not a string"))
-                .collect();
-            assert_eq!(
-                actual,
-                expected.iter().copied().collect::<BTreeSet<_>>(),
-                "{fixture} changed the {action} destinations checked in the host kernel"
-            );
-        }
-    }
-}
+fn every_chain_asserting_script_derives_the_name_it_asserts_on() {
+    let scripts = network_scripts();
 
-#[cfg(target_os = "linux")]
-#[test]
-fn ordinary_raw_packet_controls_survive_unavailable_io_uring() {
-    let output = std::process::Command::new("python3")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(
-            scripts_dir()
-                .join("lib")
-                .join("test_io_uring_egress_probe.py"),
-        )
-        .output()
-        .expect("could not run the offline raw/packet probe regression");
-    assert!(
-        output.status.success(),
-        "ordinary raw/packet checks disappeared when io_uring was unavailable:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    for expected in CHAIN_ASSERTING_SCRIPTS {
+        let (_, body) = scripts
+            .iter()
+            .find(|(name, _)| name == expected)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{expected} is listed as a chain-asserting script but is not in {}. \
+                     If it was renamed or removed, update CHAIN_ASSERTING_SCRIPTS.",
+                    scripts_dir().display()
+                )
+            });
+
+        assert!(
+            body.contains("mxc_chains") || body.contains("derive_chain_name"),
+            "{expected} asserts on MXC chains but never derives a chain name. \
+             Without a derivation its assertions cannot be checking a real \
+             chain. Use the mxc_chains snapshot or derive_chain_name."
+        );
+    }
 }

@@ -110,7 +110,7 @@ jobs:
           # installs a similar but narrower set and sets the same skip
           # env var for the same reason (compounded by 1ES Hosted Pool
           # egress filtering).
-          packages: bubblewrap lxc lxc-utils uidmap dnsmasq-base iptables bridge-utils
+          packages: bubblewrap lxc busybox-static uidmap dnsmasq-base iptables bridge-utils
           version: 1.5
 
       - name: Verify or repair Linux containment dependencies
@@ -122,8 +122,7 @@ jobs:
           packages=(
             bubblewrap
             lxc
-            lxc-utils
-            uidmap
+            busybox-static
             dnsmasq-base
             iptables
             bridge-utils
@@ -133,11 +132,10 @@ jobs:
             bwrap
             lxc-start
             lxc-create
-            newuidmap
-            newgidmap
             dnsmasq
             iptables
             brctl
+            busybox
           )
 
           missing_commands=()
@@ -146,6 +144,10 @@ jobs:
               missing_commands+=("$command")
             fi
           done
+
+          if ! busybox --list 2>/dev/null | grep -Fxq udhcpc; then
+            missing_commands+=("busybox udhcpc")
+          fi
 
           if [ "${#missing_commands[@]}" -ne 0 ]; then
             echo "::warning::Cached dependency installation was incomplete; missing commands: ${missing_commands[*]}"
@@ -176,22 +178,7 @@ jobs:
           for command in "${required_commands[@]}"; do
             command -v "$command"
           done
-
-      - name: Configure unprivileged LXC
-        if: matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
-            sudo cp -a "$file" "$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
-          done
-          sudo bash -c 'echo "root:100000:65536" >> /etc/subuid'
-          sudo bash -c 'echo "root:100000:65536" >> /etc/subgid'
-
-          # Remove existing mappings before adding the test-only UID/GID range.
-          sudo sed -i '/idmap/d' /etc/lxc/default.conf
-          sudo bash -c 'echo "lxc.idmap = u 0 100000 65536" >> /etc/lxc/default.conf'
-          sudo bash -c 'echo "lxc.idmap = g 0 100000 65536" >> /etc/lxc/default.conf'
+          busybox --list | grep -Fx udhcpc
 
       - name: Start LXC services (cache restore skips postinst hooks)
         if: matrix.os_label == 'linux'
@@ -236,15 +223,3 @@ jobs:
           else
             npm test
           fi
-
-      - name: Restore LXC configuration
-        if: always() && matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
-            backup="$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
-            if [ -f "$backup" ]; then
-              sudo mv "$backup" "$file"
-            fi
-          done

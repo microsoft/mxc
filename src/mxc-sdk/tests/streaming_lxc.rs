@@ -216,8 +216,8 @@ fn container_is_running(name: &str) -> bool {
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains("RUNNING")
 }
 
-/// An LXC streaming request with no network and the given command, container
-/// name, and timeout (ms; `0` == run until exit).
+/// An LXC streaming request (`/tmp` read-write, no network) with the given
+/// command, container name, and timeout (ms; `0` == run until exit).
 ///
 /// Cases that end in `wait()` pass [`LIVE_TIMEOUT_MS`] rather than `0`: with no
 /// script timeout the backend waits on `lxc-attach` forever, so a wedged attach
@@ -257,7 +257,7 @@ fn lxc_request_with_network(
 ) -> mxc_sdk::v1::ContainerRequest {
     ContainerRequest {
         filesystem: Some(FilesystemPolicy {
-            readwrite_paths: vec![],
+            readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
             clear_policy_on_exit: None,
@@ -643,6 +643,8 @@ fn streaming_lxc_tears_down_a_networked_container() {
     let _guard = exclusive();
     let name = container_name("network");
 
+    // Outbound access puts the container on the bridge and installs egress
+    // chains, so this is the case whose teardown has firewall rules to remove.
     let network = NetworkPolicy {
         egress: Some(NetworkEgressPolicy {
             default: Some(NetworkAction::Allow),
@@ -661,5 +663,7 @@ fn streaming_lxc_tears_down_a_networked_container() {
     assert!(out.contains("NETWORKED"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+    // The chains live in the container's own network namespace, so destroying
+    // the container is what proves they are gone.
     assert_container_released(&name);
 }

@@ -99,6 +99,7 @@ fn port_matches(selector: &str, packet_port: u16) -> bool {
             let end = parse_port(end);
             (start..=end).contains(&packet_port)
         }
+
         None => parse_port(selector) == packet_port,
     }
 }
@@ -113,21 +114,25 @@ fn matching_emitted_rule<'a>(
         if rule.iter().any(|argument| argument.contains("ESTABLISHED")) {
             continue;
         }
+
         if argument_after(rule, "-d")
             .is_some_and(|rule_destination| !destination_matches(rule_destination, destination))
         {
             continue;
         }
+
         if argument_after(rule, "-p")
             .is_some_and(|rule_protocol| rule_protocol != "all" && rule_protocol != protocol)
         {
             continue;
         }
+
         if argument_after(rule, "--dport")
             .is_some_and(|selector| !port.is_some_and(|value| port_matches(selector, value)))
         {
             continue;
         }
+
         if argument_after(rule, "-j").is_some() {
             return Some(rule);
         }
@@ -509,6 +514,7 @@ fn any_with_a_port_expands_to_tcp_and_udp_rules() {
             rules.ipv4
         );
     }
+
     assert!(
         matching_emitted_rule(&rules.ipv4, address, "icmp", Some(443)).is_none(),
         "input=default deny, allow=[{{to:{destination}, ports:[any/443]}}], packet=192.0.2.25/icmp; expected no emitted rule match; output={:?}",
@@ -819,6 +825,7 @@ fn a_parsed_request_without_a_network_section_drops_the_dns_exemption() {
         "input=v0.9 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }
+
 #[test]
 fn an_exclusion_does_not_shadow_a_later_rule_that_names_it() {
     let policy = directional_policy(

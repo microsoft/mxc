@@ -1,11 +1,25 @@
 #!/bin/bash
+# LXC network policy enforcement test
+#
+# Every other network script asserts that the OUTPUT hook was *installed*.
+# That is a log line, and a hook can install cleanly, name the right chain,
+# and still match no packet -- which is exactly how a fully populated deny-all
+# chain that filtered nothing once passed every script in this directory.
+#
+# This script asserts the guarantee itself rather than the log: a destination
+# the policy does not allow must be unreachable from inside the container.
+#
+# Both directions are required, and the allow case is not decoration. A
+# blocked-only assertion would also pass on a host with no working network at
+# all, or on a change that broke egress outright, so it proves nothing on its
+# own.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LXC_EXEC="${LXC_EXEC:-$REPO_DIR/src/target/release/lxc-exec}"
+LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 
-if [ "$LXC_EXEC" = "$REPO_DIR/src/target/release/lxc-exec" ] && [ ! -f "$LXC_EXEC" ]; then
+if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
@@ -32,12 +46,64 @@ fail() {
     exit 1
 }
 
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
 # shellcheck source=lib/lxc_peer_listener.sh
 . "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 
-# shellcheck source=lib/lxc_static_network.sh
-. "$SCRIPT_DIR/lib/lxc_static_network.sh"
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" after="" leaked="" chain
+    # Captured before iterating rather than piped in from a process
+    # substitution, whose exit status is not the loop's. A failed enumeration
+    # would otherwise read as zero chains and pass this assertion while
+    # verifying nothing.
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
+    fi
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done <<<"$after"
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
+    fi
+}
 
+# The named chain must be gone, and the run must not have leaked any other
+# MXC-owned chain either. The first check is specific to the container this
+# case ran; the second catches a rename or a partial rollback that leaves a
+# differently named chain behind.
+assert_firewall_chain_cleaned_up() {
+    local chain="$1"
+    if iptables -S "$chain" >/dev/null 2>&1; then
+        fail "iptables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    if ip6tables -S "$chain" >/dev/null 2>&1; then
+        fail "ip6tables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+}
+
+# A hook that references the chain but survives teardown leaves the next
+# container's traffic running through a stale rule, so the reference count
+# matters as much as the chain itself.
+assert_no_forward_reference() {
+    if iptables -S FORWARD 2>/dev/null | grep -Fq -- "$1"; then
+        fail "a FORWARD rule still references chain '$1' after teardown."
+    fi
+}
+
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on.
+#
+# Both cases must aim at this one address: the deny case shows a destination
+# that is demonstrably reachable becoming unreachable under policy, rather than
+# merely failing to reach something.
 PEER_NETNS="mxc-enforce-peer"
 PEER_HOST_VETH="mxcenh0"
 PEER_VETH="mxcenp0"
@@ -49,7 +115,7 @@ PEER_IP="198.51.100.2"
 PEER_PREFIX="29"
 PEER_PORT="443"
 PEER_LISTENER_PID=""
-PEER_LISTENER_LOG="$REPO_DIR/tests/configs/.lxc-enforcement-peer-$$.log"
+PEER_LISTENER_LOG="$(mktemp)"
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -124,12 +190,9 @@ echo "Running LXC network policy enforcement test..."
 # code, so a wrapper that swallows or rewrites the status cannot turn a
 # reachable destination into an apparent block.
 echo "--- deny case: default policy blocks, nothing allowed ---"
-BEFORE_V4="$(iptables-save | sed '/^#/d')"
-BEFORE_V6="$(ip6tables-save | sed '/^#/d')"
-BEFORE_NFT="$(nft -s list ruleset)"
-if ! DENY_OUTPUT=$("$LXC_EXEC" --debug "$DENY_CONFIG" 2>&1); then
-    fail "the deny fixture failed: $DENY_OUTPUT"
-fi
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
+DENY_OUTPUT=$("$LXC_EXEC" --debug "$DENY_CONFIG" 2>&1 || true)
 echo "$DENY_OUTPUT"
 
 if echo "$DENY_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
@@ -145,14 +208,16 @@ if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_OK"; then
     fail "the deny case returned no loopback verdict; the in-container listener did not run."
 fi
 
-[ "$(iptables-save | sed '/^#/d')" = "$BEFORE_V4" ] || fail "the isolated run leaked IPv4 host rules."
-[ "$(ip6tables-save | sed '/^#/d')" = "$BEFORE_V6" ] || fail "the isolated run leaked IPv6 host rules."
-[ "$(nft -s list ruleset)" = "$BEFORE_NFT" ] || fail "the isolated run leaked nftables host rules."
+# A policy permitting nothing is withheld by giving the container no interface
+# at all, which installs no chain and leaves no name to derive.  Comparing the
+# snapshots still catches anything left behind.
+assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 
 echo "--- allow case: same default, destination explicitly allowed ---"
-if ! ALLOW_OUTPUT=$(run_with_static_guest_ipv4 "$ALLOW_CONFIG" 2>&1); then
-    fail "the allow fixture failed: $ALLOW_OUTPUT"
-fi
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
+ALLOW_OUTPUT=$("$LXC_EXEC" --debug "$ALLOW_CONFIG" 2>&1 || true)
 echo "$ALLOW_OUTPUT"
 
 if echo "$ALLOW_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
@@ -162,9 +227,9 @@ if ! echo "$ALLOW_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
     fail "the allow case produced no verdict at all; the container command did not run."
 fi
 
-[ "$(iptables-save | sed '/^#/d')" = "$BEFORE_V4" ] || fail "the allowed run leaked IPv4 host rules."
-[ "$(ip6tables-save | sed '/^#/d')" = "$BEFORE_V6" ] || fail "the allowed run leaked IPv6 host rules."
-[ "$(nft -s list ruleset)" = "$BEFORE_NFT" ] || fail "the allowed run leaked nftables host rules."
+derive_chain_name "$ALLOW_OUTPUT"
+assert_no_forward_reference "$CHAIN_NAME"
+assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
 echo "PASS: a disallowed destination was blocked, an allowed destination was reachable,"
 echo "      and the blocked container still reached its own loopback."

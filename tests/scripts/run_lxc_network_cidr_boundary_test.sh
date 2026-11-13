@@ -3,97 +3,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LXC_EXEC="${LXC_EXEC:-$REPO_DIR/src/target/release/lxc-exec}"
-if [ "$LXC_EXEC" = "$REPO_DIR/src/target/release/lxc-exec" ] && [ ! -f "$LXC_EXEC" ]; then
-    LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
-fi
+TEST_NAME=cidr-boundary
 
-fail() {
-    echo "FAIL: $1"
-    exit 1
-}
+# shellcheck source=lib/lxc_cidr_http_peer.sh
+. "$SCRIPT_DIR/lib/lxc_cidr_http_peer.sh"
 
-CONFIG="$REPO_DIR/tests/configs/${1:-lxc_network_cidr_boundary}.json"
-BEFORE_FILE="$REPO_DIR/tests/configs/.lxc-cidr-before-$$.json"
-LIVE_FILE="$REPO_DIR/tests/configs/.lxc-cidr-live-$$.json"
-BEFORE_NFT="$(nft -s list ruleset)"
-nft -j list ruleset >"$BEFORE_FILE"
-mapfile -t CONFIGS < <(python3 - "$CONFIG" "$$" <<'PY'
-import base64, json, sys
-config = json.load(open(sys.argv[1]))
-assert config["network"]["egress"]["default"] == "deny"
-config["containerId"] += "-" + sys.argv[2]
-config["process"]["commandLine"] = "true"
-for destroy, preserve in ((False, True), (True, False)):
-    config["lifecycle"] = {"destroyOnExit": destroy, "preservePolicy": preserve}
-    print(base64.b64encode(json.dumps(config).encode()).decode())
-PY
-)
-[ "${#CONFIGS[@]}" = 2 ] || fail "could not prepare the CIDR fixture."
+python3 - "$REPO_DIR/tests/configs/lxc_network_cidr_boundary.json" \
+    "$WORK_DIR" "$CONTAINER" "$HTTP_PROBE_COMMAND" <<'PY'
+import json
+import pathlib
+import shlex
+import sys
 
-cleanup() {
-    "$LXC_EXEC" --config-base64 "${CONFIGS[1]}" >/dev/null 2>&1 || true
-    rm -f "$BEFORE_FILE" "$LIVE_FILE"
-}
-trap cleanup EXIT
-
-OUTPUT=$("$LXC_EXEC" --config-base64 "${CONFIGS[0]}" 2>&1) \
-    || fail "the valid CIDR fixture was refused: $OUTPUT"
-nft -j list ruleset >"$LIVE_FILE"
-
-python3 - "$CONFIG" "$BEFORE_FILE" "$LIVE_FILE" <<'PY'
-import ipaddress, json, pathlib, sys
-config = json.load(open(sys.argv[1]))
-expected = {
-    "lxc_network_cidr_boundary": (
-        {"0.0.0.0/0", "::/0", "140.82.112.0/20", "140.82.112.5/32", "2606:50c0::/32"},
-        {"198.51.100.42/32", "2001:db8::5/128"}
-    ),
-    "lxc_network_ipv6_cidr": (
-        {"140.82.112.0/20", "2606:50c0::/32", "2606:50c0:8000::153/128"},
-        {"10.0.0.0/8", "2001:db8::/32", "fe80::1/128"}
-    ),
-    "lxc_network_dualstack_cidr": (
-        {"127.0.0.1/32", "1.1.1.1/32", "2606:4700:4700::1111/128", "8.8.8.8/32", "2001:4860:4860::8888/128"},
-        {"10.0.0.0/8", "2001:db8::/32"}
-    )
-}[pathlib.Path(sys.argv[1]).stem]
-for action, destinations in zip(("allow", "deny"), expected):
-    actual = {target["cidr"] for rule in config["network"]["egress"][action] for target in rule["to"]}
-    assert actual == destinations, f"{action} destinations drifted in the CIDR fixture"
-before = json.load(open(sys.argv[2]))["nftables"]
-after = json.load(open(sys.argv[3]))["nftables"]
-identifiers = {
-    (item["rule"]["family"], item["rule"]["table"], item["rule"]["chain"], item["rule"]["handle"])
-    for item in before if "rule" in item
-}
-rules = [
-    item["rule"] for item in after if "rule" in item
-    and (item["rule"]["family"], item["rule"]["table"], item["rule"]["chain"], item["rule"]["handle"]) not in identifiers
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+directory = pathlib.Path(sys.argv[2])
+egress = config["network"]["egress"]
+denied = ["198.51.100.42", "2001:db8::5"]
+neighbors = ["198.51.100.43", "2001:db8::6"]
+cases = [
+    ("control", {"default": "allow"}, [(host, "allowed") for host in denied + neighbors]),
+    ("boundary", egress,
+     [(host, "blocked") for host in denied] + [(host, "allowed") for host in neighbors]),
 ]
-for action, verdict in (("allow", "accept"), ("deny", "drop")):
-    for configured in config["network"]["egress"][action]:
-        for destination in configured["to"]:
-            expected = ipaddress.ip_network(destination["cidr"])
-            protocol = "ip" if expected.version == 4 else "ip6"
-            found = False
-            for rule in rules:
-                if {verdict: None} not in rule["expr"]:
-                    continue
-                for statement in rule["expr"]:
-                    match = statement.get("match", {})
-                    if match.get("left") != {"payload": {"protocol": protocol, "field": "daddr"}} or match.get("op") != "==":
-                        continue
-                    value = match["right"]
-                    if isinstance(value, dict) and "prefix" in value:
-                        value = f"{value['prefix']['addr']}/{value['prefix']['len']}"
-                    if ipaddress.ip_network(value) == expected:
-                        found = True
-            assert found, f"host kernel has no {protocol} destination rule for {expected} -> {verdict}"
+for name, policy, probes in cases:
+    command = sys.argv[4] + "\n" + "\n".join(
+        f"probe_http {shlex.quote(host)} {expected}" for host, expected in probes
+    )
+    config["containerId"] = sys.argv[3]
+    config["process"]["commandLine"] = "sh -c " + shlex.quote(command)
+    config["network"]["egress"] = policy
+    (directory / f"{name}.json").write_text(json.dumps(config))
+(directory / "targets").write_text("\n".join(denied + neighbors) + "\n")
 PY
 
-"$LXC_EXEC" --config-base64 "${CONFIGS[1]}" || fail "the CIDR fixture could not be destroyed."
-[ "$(nft -s list ruleset)" = "$BEFORE_NFT" ] || fail "CIDR fixture cleanup left host rules."
-trap - EXIT
-rm -f "$BEFORE_FILE" "$LIVE_FILE"
-echo "PASS: configured IPv4 and IPv6 destinations and verdicts reached the host kernel."
+for case in control boundary; do
+    run_cidr_http_case "$case"
+done
+
+echo "PASS: /0 permits HTTP while /32 and /128 deny only their exact destinations."

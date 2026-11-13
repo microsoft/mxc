@@ -18,43 +18,35 @@ Creates an LXC container to provide:
 
 - **Process isolation** via Linux namespaces (PID, mount, network, user)
 - **Filesystem isolation** via bind mounts with read-only/read-write/denied enforcement
-- **Network isolation** via host-owned nftables bridge rules on the container's network interfaces
+- **Network isolation** via iptables rules inside the container's own network namespace
 
 ## Prerequisites
 
-- Linux kernel >= 3.12.
-- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime).
-- Bash and nftables (`nft`) for filtered networking.
-- Host kernel support for nftables bridge filtering and connection tracking
-  (`CONFIG_NF_TABLES_BRIDGE` and `CONFIG_NF_CONNTRACK_BRIDGE`).
-  Installing the nftables package alone does not provide missing kernel support.
-- Root access to run MXC and to configure LXC.
-  Filtering egress or ingress installs rules in the host's network namespace,
-  which requires root.
-- Valid UID and GID root mappings to run LXC containers unprivileged.  See [LXC Getting Started](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-root-with-shared-uid-and-gid-ranges).
-
-MXC requires LXC containers to run unprivileged.  After starting the container,
-MXC reads `/proc/<pid>/uid_map` for the container's init process directly on the
-host before running the requested command.  MXC accepts the container when a
-readable range maps container root to a nonzero parent UID.
+- Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
+- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc` for runtime)
+- BusyBox with the `udhcpc` applet for networked runs
+- Root privileges, or [unprivileged LXC](#running-without-root) for a policy
+  that asks for no network.
+  Filtering egress or ingress installs iptables rules in the container's
+  network namespace, which requires root.
 
 ### Installation
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install lxc lxc-utils liblxc-dev nftables
+sudo apt install lxc liblxc-dev busybox-static
 ```
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install lxc lxc-templates dnsmasq lxc-devel nftables
+sudo dnf install lxc lxc-templates dnsmasq lxc-devel busybox
 ```
 RHEL needs EPEL enabled first — see
 [Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup).
 
 **Arch Linux:**
 ```bash
-sudo pacman -S lxc nftables
+sudo pacman -S lxc
 ```
 
 ### Running without root
@@ -64,12 +56,34 @@ for unprivileged LXC.  Everything else needs root.
 
 1. Follow LXC's
    [Create Unprivileged Containers as a User](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-a-user).
+2. Let the container's root user reach its files under your home directory:
+   `chmod o+x ~`.
 
 
 ### Container networking
 
-Refer to your distribution's manual to configure networking for LXC
-containers.  A config with a `network` section fails without it.
+Networked runs require a local `lxc-net` bridge with dnsmasq serving its DHCP
+pool.  Refer to your distribution's manual to configure it.  A config with
+a `network` section fails without it.
+
+When a run needs networking, MXC reuses the container's reservation or
+reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
+MXC writes the reserved address and gateway into the LXC configuration before
+startup, without leaving a renewing DHCP client running.  The reservation
+remains after the container stops or MXC exits.  MXC removes it when it
+destroys the container.  A container first run without networking can obtain
+a reservation on a later networked run.
+
+If reservation support is not enabled, MXC enables it and restarts the shared
+`lxc-net` service.  Later reservations reload dnsmasq without restarting
+the bridge.
+
+**Warning:** Restarting `lxc-net` temporarily interrupts networking for containers
+already connected to the bridge.  The containers remain running.
+
+MXC requests DNS servers and search settings from the host DHCP server.
+A configured mount supplying `/etc/resolv.conf` or an ancestor directory
+keeps its own resolver settings.
 
 ## Configuration
 
@@ -162,40 +176,13 @@ not reachable through `process.env`.
 
 ## Network Policy
 
-MXC filters traffic on the host-side interfaces of the container, not inside
-the container.  For each bridge-attached veth interface, MXC generates a
-host-owned Bash script and registers it through `lxc.net.<index>.script.up`.
-Existing interface-up hooks run first.  The generated hook installs inbound
-and outbound nftables bridge rules before container init starts.
-Both IPv4 and IPv6 traffic pass through these rules.  Unsupported interface
-topologies or unavailable host filtering reject startup.
+Directional `network.egress` rules govern port 53 like any other destination;
+there is no implicit DNS exemption.
 
-MXC does not remove `CAP_NET_ADMIN` or `CAP_NET_RAW` from container processes.
-Init, attached commands, and workloads can use the capabilities their container
-provides without controlling the host-owned filters.  Flushing the guest's
-firewall does not remove those filters.
-
-Directional `network.egress` rules govern DNS and DHCP like other traffic;
-neither receives an implicit exemption.  DHCP replies are admitted only for
-requests allowed by the policy.  Denying DHCP prevents DHCP address assignment;
-other permitted traffic needs an address and route configured separately.
-
-`preservePolicy` retains installed filtering, startup hooks, and generated
-scripts after the run, including when the container is stopped.  Restarting
-the retained container reinstalls filtering before init starts.  A subsequent
-MXC run replaces retained filtering with the new request's policy.
-
-| `preservePolicy` | `destroyOnExit` | After the run |
-|---|---|---|
-| `false` | `false` | Leave the container running; remove owned filtering, hooks, and scripts. |
-| `true` | `false` | Leave the container running; retain owned filtering, hooks, and scripts. |
-| `false` | `true` | Destroy the container, then remove owned host filtering and support files. |
-| `true` | `true` | Destroy the container, then remove owned host filtering and support files. |
-
-A timeout or `kill()` stops the whole container; preservation still retains
-its installed policy.  Failed destruction reports an error and retains the
-surviving container's filtering and support files.  An incompletely installed
-policy is not preserved.
+`preservePolicy` leaves the inbound and outbound chains in place after the run.
+The chains live in the container's network namespace, so they last only as long
+as the container keeps running; stopping or destroying it takes them with it.  A
+partially installed chain from a failed run is torn down regardless.
 
 ### Proxy
 
@@ -309,9 +296,8 @@ container init, where nothing aimed at the host `lxc-attach` process reaches it.
 LXC reads a run's network section only when the container starts. Omit
 `containerId` for a generated name. The claim is released when the handle drops.
 
-**Teardown is owed on every terminal path,** including a drop without `wait`,
-and follows the [network policy lifecycle settings](#network-policy).
-A reused container
+**Teardown is owed on every terminal path,** including a drop without `wait`:
+the network chains come down, and the container is released. A reused container
 also has any stale proxy address mapping in its hosts file cleared before its
 new workload launches. MXC checks for marked lines inside the running
 container using `lxc-attach` and removes them if present. A failed check
@@ -319,10 +305,9 @@ refuses to run the workload.
 A teardown failure is reported through `Sandbox::warnings`, which a bare drop
 leaves no handle to read.
 
-**An ordinary run keeps the container up while the handle lives.** A timeout
-or `kill()` can stop it earlier.  `lxc-exec` is short-lived by comparison.
-Weigh that against the threat model before embedding streaming in a long-lived
-service.
+**The container stays up for as long as the handle lives.** `lxc-exec` is
+short-lived by comparison. Weigh that against the threat model before embedding
+streaming in a long-lived service.
 
 ## Building
 
@@ -349,7 +334,7 @@ service.
 
 2. **Install LXC and the pieces it needs at runtime.**
    ```bash
-   sudo dnf install -y lxc lxc-templates dnsmasq iptables nftables
+   sudo dnf install -y lxc lxc-templates dnsmasq iptables
    ```
 
    Add `lxc-devel` as well if you are building MXC against liblxc rather than
@@ -378,13 +363,13 @@ These failures carry the `backend_error` code and exit `-1`.
 
 ## Limitations
 
-- **Cross-container reply isolation has an unfixed defect.** A container that
-  adopts another container's IP and Ethernet addresses can receive that
-  container's permitted reply despite its own policy denying the endpoint.
-  This was reproduced with UDP on a shared bridge.  The host filter recognizes
-  tracked replies without verifying that the receiving interface belongs to
-  the container that originated the request.  Host-owned filtering does not
-  yet provide the required reply isolation between those containers.
+- **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
+  ICMP type through the firewall, but the command MXC runs can originate only Echo
+  requests, the ones `ping` sends.
+- **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
+  installs and reports success, but no IPv6 traffic reaches that destination.
+  Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
+  host that provides one.
 - **A container reaches the proxy only while a run lasts.** See [Proxy](#proxy).
 - **No container lifecycle operations.** LXC implements `ScriptRunner` (create-and-run execution) and
   `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not

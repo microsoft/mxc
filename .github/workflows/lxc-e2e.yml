@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates busybox-static iptables debootstrap uidmap bridge-utils
 
       - name: Configure unprivileged LXC
         run: |
@@ -49,6 +49,8 @@ jobs:
           sudo sed -i '/idmap/d' /etc/lxc/default.conf
           sudo bash -c 'echo "lxc.idmap = u 0 100000 65536" >> /etc/lxc/default.conf'
           sudo bash -c 'echo "lxc.idmap = g 0 100000 65536" >> /etc/lxc/default.conf'
+
+
 
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.
@@ -147,6 +149,7 @@ jobs:
               sudo mv "$backup" "$file"
             fi
           done
+
 
       - name: Show leftover firewall state on failure
         if: failure()
