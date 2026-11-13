@@ -4,7 +4,7 @@
   "containerId": "CLI-LXC-Network-Proxy",
   "containment": "lxc",
   "process": {
-    "commandLine": "echo THIS_MUST_NEVER_RUN"
+    "commandLine": "wget -qO- http://mxc.invalid/"
   },
   "lifecycle": {
     "destroyOnExit": true

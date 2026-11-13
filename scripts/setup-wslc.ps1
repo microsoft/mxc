@@ -9,15 +9,20 @@
     Warms the WSLC SDK image cache ahead of time. A run pulls on a cache miss
     by itself, so this is an optimisation rather than a prerequisite — it moves
     the download off the critical path of a later run, and it is how you
-    populate a cache for a host that cannot reach a registry. Each image is
-    pulled via `wxc-exec.exe --setup-wslc --image <name>`, which opens a minimal
-    WSLC session against the configured `storage_path` and invokes
-    `WslcPullSessionImage`. The pulled images persist in that storage path
-    and become visible to subsequent runtime executions.
+    populate a cache for a host that cannot reach a registry. All images are
+    pulled via a single `wxc-exec.exe --setup-wslc --image <name> ...`
+    invocation per store, which opens one WSLC session against that store and
+    invokes `WslcPullSessionImage` for each image. The pulled images persist in
+    that storage path and become visible to subsequent runtime executions.
 
     The storage path you pass here MUST match the value used at run time
     (the `wslc.storagePath` field of the config, or the
     runner's default of `%TEMP%\mxc-wslc-sessions` when omitted).
+
+    Container lifecycle operations do not read that store. The lifecycle
+    daemon leases its store from a pool under
+    %LOCALAPPDATA%\mxc\wslc-store-slots, so -DaemonSlots warms those slots
+    separately.
 
 .PARAMETER Image
     One or more image references to pre-pull. Defaults to a small
@@ -33,13 +38,27 @@
 .PARAMETER StoragePath
     WSLC storage path to populate. When omitted, the runner default
     (`%TEMP%\mxc-wslc-sessions`) is used. Set this if your runtime configs
-    override `wslc.storagePath`.
+    override `wslc.storagePath`. This reaches create-and-run execution only;
+    use -DaemonSlots for the container-lifecycle store.
+.PARAMETER DaemonSlots
+    How many container-lifecycle store slots to warm as well, from slot 0 up.
+    The lifecycle daemon leases its store from a separate pool under
+    %LOCALAPPDATA%\mxc\wslc-store-slots, which -StoragePath does not reach, and
+    a slot that has never been leased holds no images. Defaults to 0, matching
+    `wxc-exec.exe --wslc-daemon-slots`, so warming a create-and-run cache stays
+    one pull per image. Pass 1 before running container lifecycle operations
+    against an isolated posture, and one slot per session you expect to run at
+    once beyond that — a session that leases a cold slot cannot resolve an
+    uncached image under that posture. Each slot costs another pull and another
+    multi-GiB store.
 
 .PARAMETER DebugLogs
     Enable verbose logging from wxc-exec (passes `--debug`).
 
 .PARAMETER Force
-    Continue pulling subsequent images even if one fails.
+    Retained for compatibility. Every image is now pulled in one `wxc-exec`
+    invocation per store, which always attempts them all and reports each
+    failure, so there is no longer a run to continue past.
 
 .EXAMPLE
     .\setup-wslc.ps1
@@ -52,6 +71,10 @@
 .EXAMPLE
     .\setup-wslc.ps1 -StoragePath C:\wslc-cache
     Pulls into a non-default cache directory.
+
+.EXAMPLE
+    .\setup-wslc.ps1 -DaemonSlots 1
+    Also warms the store slot the container-lifecycle daemon leases.
 #>
 
 [CmdletBinding()]
@@ -59,6 +82,8 @@ param(
     [string[]]$Image = @("alpine:latest", "python:3.12-alpine"),
     [string]$WxcExecPath,
     [string]$StoragePath,
+    [ValidateRange(0, 64)]
+    [int]$DaemonSlots = 0,
     [switch]$DebugLogs,
     [switch]$Force
 )
@@ -99,37 +124,44 @@ if ($StoragePath) {
 } else {
     Write-Host "Storage path : (default) %TEMP%\mxc-wslc-sessions" -ForegroundColor Gray
 }
+if ($DaemonSlots -gt 0) {
+    Write-Host "Daemon slots : $DaemonSlots (%LOCALAPPDATA%\mxc\wslc-store-slots)" -ForegroundColor Gray
+} else {
+    Write-Host "Daemon slots : none" -ForegroundColor Gray
+}
 Write-Host "Images       : $($Image -join ', ')`n" -ForegroundColor Gray
 
 $failed = @()
+Write-Host "  pulling $($Image.Count) image(s) ... " -NoNewline
+
+$wxcArgs = @("--setup-wslc")
 foreach ($img in $Image) {
-    Write-Host "  $img ... " -NoNewline
-    $wxcArgs = @("--setup-wslc", "--image", $img)
-    if ($StoragePath) {
-        $wxcArgs += @("--storage-path", $StoragePath)
-    }
-    if ($DebugLogs) {
-        $wxcArgs += "--debug"
-    }
+    $wxcArgs += @("--image", $img)
+}
+if ($StoragePath) {
+    $wxcArgs += @("--storage-path", $StoragePath)
+}
+if ($DaemonSlots -gt 0) {
+    $wxcArgs += @("--wslc-daemon-slots", "$DaemonSlots")
+}
+if ($DebugLogs) {
+    $wxcArgs += "--debug"
+}
 
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $WxcExec @wxcArgs 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevPref
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$output = & $WxcExec @wxcArgs 2>&1 | Out-String
+$exitCode = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
 
-    if ($exitCode -eq 0) {
-        Write-Host "OK" -ForegroundColor Green
-    } else {
-        Write-Host "FAIL (exit $exitCode)" -ForegroundColor Red
-        $output -split "`n" | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
-            Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
-        }
-        $failed += $img
-        if (-not $Force) {
-            break
-        }
+if ($exitCode -eq 0) {
+    Write-Host "OK" -ForegroundColor Green
+} else {
+    Write-Host "FAIL (exit $exitCode)" -ForegroundColor Red
+    $output -split "`n" | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
+        Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
     }
+    $failed += $Image
 }
 
 Write-Host ""

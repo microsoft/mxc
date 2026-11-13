@@ -30,15 +30,6 @@ fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     }
 }
 
-fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
-    let contract::Fallback {
-        allow_dacl_mutation,
-    } = value;
-    wire::Fallback {
-        allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
 fn convert_clipboard(value: contract::UiClipboard) -> wire::ClipboardPolicy {
     match value {
         contract::UiClipboard::None => wire::ClipboardPolicy::None,
@@ -189,10 +180,10 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
         gui_access: gui_access.into_option(),
-        launch_method: None,
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        capture_denials: None,
     }
 }
 
@@ -256,7 +247,7 @@ pub(super) fn into_common_request_ir(
         lifecycle,
         process,
         filesystem,
-        fallback,
+        fallback: _,
         network,
         lxc,
         process_container,
@@ -282,7 +273,6 @@ pub(super) fn into_common_request_ir(
         lxc: lxc.into_option().map(convert_lxc),
         wslc: wslc.into_option().map(convert_wslc),
         filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: telemetry.into_option().map(convert_telemetry),
@@ -291,6 +281,7 @@ pub(super) fn into_common_request_ir(
         test_feature: None,
         windows_sandbox: None,
         hyperlight: None,
+        microvm: None,
     }
 }
 

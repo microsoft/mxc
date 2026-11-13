@@ -34,13 +34,14 @@
 
 pub mod analyze;
 pub(crate) mod capture_diagnostics;
+pub mod capture_output;
 pub mod emit;
 pub mod model;
 pub mod paired_output;
 pub mod summary;
 pub mod verbose_logging;
 
-pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
+pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use paired_output::{
@@ -49,8 +50,8 @@ pub use paired_output::{
 };
 pub use summary::DenialSummary;
 pub use verbose_logging::{
-    verbose_logging_sibling_path, write_verbose_logging_document, VerboseLoggingAggregate,
-    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingOutcomeReason,
-    VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
-    MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+    capture_sibling_path, verbose_logging_sibling_path, write_verbose_logging_document,
+    VerboseLoggingAggregate, VerboseLoggingDocument, VerboseLoggingDocumentSummary,
+    VerboseLoggingOutcomeReason, VerboseLoggingProvider, VerboseLoggingSignature,
+    VerboseLoggingSummary, MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };

@@ -5,6 +5,8 @@
 //!
 //! Host-dependent tests skip when the backend is unavailable, so this file is
 //! safe to run on any host.
+//! They share a serial_test lock to avoid overlapping independent session
+//! lifecycles. Policy-refusal tests do not create sessions and remain parallel.
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
@@ -104,6 +106,7 @@ macro_rules! skip_unless_supported {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn a_single_threaded_apartment_drives_the_full_lifecycle() {
     skip_unless_supported!();
 
@@ -188,6 +191,7 @@ fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_run_captures_output() {
     skip_unless_supported!();
     let request = iso_request("echo marker-oneshot", None);
@@ -205,6 +209,7 @@ fn one_shot_run_captures_output() {
 /// A one-shot exec's exit code reaches the caller unchanged. Paired with the
 /// test above so a backend that always reported success could not satisfy both.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_run_propagates_a_nonzero_exit() {
     skip_unless_supported!();
     let request = iso_request("exit 7", None);
@@ -212,6 +217,59 @@ fn one_shot_run_propagates_a_nonzero_exit() {
     let output = mxc_internal::v1::run(request, Default::default())
         .expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_internal::v1::WaitResult::Exited(7));
+}
+
+#[test]
+#[serial_test::serial(isolation_session)]
+fn dev_json_one_shot_pty_supports_interactive_input() {
+    use mxc_internal::v1::dev::{self, PtyJsonOptions};
+    use mxc_internal::v1::{MxcPtySize, WaitResult};
+    use std::io::{Read, Write};
+
+    skip_unless_supported!();
+    let request = r#"{
+        "version":"1.1.0-alpha",
+        "containment":"isolation_session",
+        "network":{
+            "egress":{"default":"allow"},
+            "ingress":{"default":"allow","hostLoopback":"allow"}
+        },
+        "process":{"commandLine":"cmd.exe /q","timeout":30000}
+    }"#;
+    let terminal = dev::spawn_with_pty_json(
+        request,
+        PtyJsonOptions {
+            experimental: true,
+            size: MxcPtySize {
+                rows: 30,
+                cols: 90,
+                ..Default::default()
+            },
+        },
+    )
+    .expect("exact-JSON PTY");
+    let mut reader = terminal.try_clone_reader().expect("PTY output");
+    let output = std::thread::spawn(move || {
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read PTY");
+        text
+    });
+    terminal
+        .resize(MxcPtySize {
+            rows: 40,
+            cols: 100,
+            ..Default::default()
+        })
+        .expect("resize PTY");
+    let mut writer = terminal.take_writer().expect("PTY input");
+    writer
+        .write_all(b"set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n")
+        .expect("write PTY");
+    let result = terminal.wait().expect("wait for PTY");
+    drop(writer);
+    drop(terminal);
+    assert_eq!(result, WaitResult::Exited(13));
+    assert!(output.join().expect("PTY reader").contains("DEV_PTY_OK"));
 }
 
 /// What a held sibling established. Kept apart so a failure names which one
@@ -250,6 +308,7 @@ impl Held {
 /// be a line produced earlier. A sibling whose session had been reached would
 /// fall silent, lose its marker, or exit non-zero.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn concurrent_one_shot_runs_stay_isolated() {
     skip_unless_supported!();
     const RUNS: usize = 3;
@@ -498,6 +557,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
 /// there. `kill` reports whether the session stopped, which is what that
 /// refusal breaks.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -519,6 +579,7 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
 /// Fails if teardown is made under the finishing thread's impersonation, whose
 /// token cannot be duplicated at `SecurityImpersonation` level.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_its_session() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -546,6 +607,7 @@ fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_
 /// it *succeeded* is not observable here — the surface returns no identity to
 /// attribute an account to.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn an_abandoned_one_shot_handle_completes_teardown() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -570,6 +632,7 @@ fn an_abandoned_one_shot_handle_completes_teardown() {
 /// assertion, because dropping it would tear the session down and produce the
 /// same EOF without `kill` having done anything.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_kill_stops_the_workload() {
     skip_unless_supported!();
     // Long enough that a prompt EOF proves the kill worked, rather than racing
@@ -646,6 +709,165 @@ fn one_shot_kill_stops_the_workload() {
 struct Teardown(String);
 
 #[test]
+#[serial_test::serial(isolation_session)]
+fn dev_json_lifecycle_preserves_execution_and_caller_ownership() {
+    use mxc_internal::v1::dev::{self, JsonOptions, PtyJsonOptions};
+    use mxc_internal::v1::{MxcPtySize, WaitResult};
+    use std::io::{Read, Write};
+
+    skip_unless_supported!();
+    let assert_empty = |reply: Result<String, mxc_internal::v1::Error>| {
+        let response: serde_json::Value =
+            serde_json::from_str(&reply.expect("lifecycle response")).expect("response JSON");
+        assert_eq!(response["result"], serde_json::json!({}));
+    };
+    let options = JsonOptions::default();
+    let provision = r#"{
+        "version":"1.1.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{
+            "egress":{"default":"allow"},
+            "ingress":{"default":"allow","hostLoopback":"allow"}
+        }
+    }"#;
+    assert_empty(dev::validate_provision_json(provision, options));
+    let provisioned: serde_json::Value = serde_json::from_str(
+        &dev::provision_container_json(provision, options).expect("exact-JSON provision"),
+    )
+    .expect("provision JSON");
+    let id = provisioned["result"]["sandboxId"]
+        .as_str()
+        .expect("provisioned identifier");
+    let teardown = Teardown(id.to_string());
+    let metadata = &provisioned["result"]["metadata"];
+    assert!(!metadata["agentUserName"]
+        .as_str()
+        .expect("agent name")
+        .is_empty());
+    assert!(!metadata["agentUserSid"]
+        .as_str()
+        .expect("agent SID")
+        .is_empty());
+    let workspace = std::path::Path::new(
+        metadata["ephemeralWorkspacePath"]
+            .as_str()
+            .expect("shared workspace"),
+    );
+    assert!(workspace.is_dir());
+    let phase =
+        |name| serde_json::json!({"version":"1.0.0","phase":name,"sandboxId":id}).to_string();
+    let exec = |command: &str, timeout: u32| {
+        serde_json::json!({
+            "version":"1.1.0-alpha","phase":"exec","sandboxId":id,
+            "process":{"commandLine":command,"timeout":timeout},
+        })
+        .to_string()
+    };
+    assert_empty(dev::validate_start_json(&phase("start"), options));
+    assert_empty(dev::start_container_json(
+        &phase("start"),
+        JsonOptions { experimental: true },
+    ));
+    let validation_file = workspace.join("dev-must-not-run.txt");
+    assert_empty(dev::validate_process_json(
+        &exec(
+            &format!("echo MUST_NOT_RUN> \"{}\"", validation_file.display()),
+            30000,
+        ),
+        options,
+    ));
+    assert!(!validation_file.exists());
+    let captured = dev::run_in_container_json(
+        &exec(
+            "echo DEV_EXEC_OUT & echo DEV_EXEC_ERR 1>&2 & exit /b 7",
+            30000,
+        ),
+        options,
+    )
+    .expect("captured exec");
+    assert_eq!(captured.outcome, WaitResult::Exited(7));
+    assert!(String::from_utf8_lossy(&captured.stdout).contains("DEV_EXEC_OUT"));
+    assert!(String::from_utf8_lossy(&captured.stderr).contains("DEV_EXEC_ERR"));
+
+    let mut pipe = dev::spawn_in_container_json(
+        &exec(
+            "cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"",
+            30000,
+        ),
+        options,
+    )
+    .expect("piped exec");
+    let mut stdin = pipe.take_stdin().expect("exec stdin");
+    stdin.write_all(b"ping-pong\r\n").expect("write exec input");
+    drop(stdin);
+    let output = pipe.wait_with_output().expect("piped output");
+    assert_eq!(output.outcome, WaitResult::Exited(9));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("DEV_PIPE:ping-pong"));
+
+    let terminal = dev::spawn_in_container_with_pty_json(
+        &exec("cmd.exe /q", 30000),
+        PtyJsonOptions {
+            size: MxcPtySize {
+                rows: 30,
+                cols: 90,
+                ..Default::default()
+            },
+            experimental: true,
+        },
+    )
+    .expect("PTY exec");
+    let mut reader = terminal.try_clone_reader().expect("PTY output");
+    let output = std::thread::spawn(move || {
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read PTY");
+        text
+    });
+    let mut writer = terminal.take_writer().expect("PTY input");
+    writer
+        .write_all(b"set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n")
+        .expect("write PTY");
+    let outcome = terminal.wait().expect("wait for PTY");
+    drop(writer);
+    drop(terminal);
+    assert_eq!(outcome, WaitResult::Exited(13));
+    assert!(output.join().expect("PTY reader").contains("DEV_PTY_OK"));
+
+    let began = std::time::Instant::now();
+    let timed_out = dev::run_in_container_json(
+        &exec(
+            "echo DEV_TIMEOUT_PARTIAL & start /b cmd.exe /c ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul",
+            750,
+        ),
+        options,
+    )
+    .expect("captured timeout");
+    assert_eq!(timed_out.outcome, WaitResult::TimedOut);
+    assert!(String::from_utf8_lossy(&timed_out.stdout).contains("DEV_TIMEOUT_PARTIAL"));
+    assert!(began.elapsed() < std::time::Duration::from_secs(10));
+
+    assert_empty(dev::validate_stop_json(&phase("stop"), options));
+    let retained =
+        dev::run_in_container_json(&exec("echo DEV_CALLER_OWNS_CONTAINER", 30000), options)
+            .expect("caller retains its container");
+    assert_eq!(retained.outcome, WaitResult::Exited(0));
+    assert!(String::from_utf8_lossy(&retained.stdout).contains("DEV_CALLER_OWNS_CONTAINER"));
+    assert_empty(dev::stop_container_json(&phase("stop"), options));
+    assert_empty(dev::validate_deprovision_json(
+        &phase("deprovision"),
+        options,
+    ));
+    assert_empty(dev::deprovision_container_json(
+        &phase("deprovision"),
+        options,
+    ));
+    teardown.defuse();
+    assert!(!workspace.exists());
+    let stale =
+        dev::start_container_json(&phase("start"), options).expect_err("retired identifier");
+    assert_eq!(stale.code, ErrorCode::StaleId);
+}
+
+#[test]
+#[serial_test::serial(isolation_session)]
 fn typed_lifecycle_returns_metadata_and_warnings() {
     use mxc_internal::v1::{
         container, ExecutionRequest, ProvisionMetadata, ProvisionRequest, WaitResult,
@@ -724,6 +946,7 @@ impl Drop for Teardown {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_lifecycle_runs_end_to_end() {
     skip_unless_supported!();
 
@@ -842,6 +1065,7 @@ fn account_of(whoami_output: &str) -> String {
 /// The workload must run as the isolated agent user. Every other host-gated test
 /// here would also pass against an unsandboxed `cmd.exe`; this one would not.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn exec_runs_as_the_isolated_agent_user() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -857,6 +1081,7 @@ fn exec_runs_as_the_isolated_agent_user() {
 /// The ephemeral workspace is readable and writable from both sides, and
 /// deprovision removes it synchronously.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -911,6 +1136,7 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_exec_propagates_a_non_zero_exit_code() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -932,6 +1158,7 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_exec_can_be_killed() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -971,6 +1198,7 @@ fn state_aware_exec_can_be_killed() {
 /// Ignored: the platform keeps a stdin write handle open that this crate cannot
 /// reach, so the workload never sees EOF. Tracked as an OS bug.
 #[test]
+#[serial_test::serial(isolation_session)]
 #[ignore = "blocked on an OS fix: a platform-held stdin write handle prevents EOF"]
 fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     skip_unless_supported!();
@@ -1013,6 +1241,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
 /// that descendant's lifetime. The descendant inherits the agent's write ends,
 /// so the output relays reach no EOF and must be ended by cancellation.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
     skip_unless_supported!();
     let started = provision_and_start();

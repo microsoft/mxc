@@ -1,0 +1,12 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision-session",
+    "containment": "wslc",
+    "wslc": {
+        "provisionSession": {
+            "cpuCount": 1,
+            "memoryMb": 3072
+        }
+    }
+}

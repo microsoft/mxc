@@ -4,7 +4,7 @@
 //! The SDK's own error type — a crate-owned facade over the internal
 //! `mxc_common` error, so the public API never exposes the foundation crate.
 
-use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
+use crate::mxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
 
 /// Error codes returned by the SDK, corresponding one-for-one to the
 /// snake_case codes reported by MXC.
@@ -50,6 +50,26 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+impl ErrorCode {
+    /// The internal code this facade code stands for.
+    fn to_internal(self) -> MxcErrorCode {
+        match self {
+            Self::MalformedRequest => MxcErrorCode::MalformedRequest,
+            Self::UnsupportedContainment => MxcErrorCode::UnsupportedContainment,
+            Self::UnsupportedPhase => MxcErrorCode::UnsupportedPhase,
+            Self::BackendUnavailable => MxcErrorCode::BackendUnavailable,
+            Self::MalformedId => MxcErrorCode::MalformedId,
+            Self::StaleId => MxcErrorCode::StaleId,
+            Self::NotProvisioned => MxcErrorCode::NotProvisioned,
+            Self::NotStarted => MxcErrorCode::NotStarted,
+            Self::AlreadyStarted => MxcErrorCode::AlreadyStarted,
+            Self::AlreadyStopped => MxcErrorCode::AlreadyStopped,
+            Self::PolicyValidation => MxcErrorCode::PolicyValidation,
+            Self::BackendError => MxcErrorCode::BackendError,
+        }
+    }
+}
+
 impl From<MxcErrorCode> for ErrorCode {
     fn from(code: MxcErrorCode) -> Self {
         match code {
@@ -71,13 +91,14 @@ impl From<MxcErrorCode> for ErrorCode {
 
 /// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
-/// Details such as `operation` and `native_code` are top-level fields, not
-/// nested in another object. The Node and .NET SDKs and errors returned through
-/// `mxc_ffi` expose the same fields.
+/// `operation`, `native_code`, and `remediation` are top-level fields also
+/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
+/// in Rust errors and executor JSON error envelopes. The C error structure
+/// does not expose them.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Error {
     /// The SDK error code.
@@ -93,6 +114,22 @@ pub struct Error {
     pub native_code: Option<String>,
     /// An actionable "how to fix it" hint, when the failure carries one.
     pub remediation: Option<String>,
+    /// Backend-specific structured context. May contain sensitive recovery
+    /// identifiers; inspect it explicitly rather than logging it wholesale.
+    pub details: Option<Box<serde_json::Value>>,
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Error")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("operation", &self.operation)
+            .field("native_code", &self.native_code)
+            .field("remediation", &self.remediation)
+            .field("details", &self.details.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Error {
@@ -105,6 +142,7 @@ impl Error {
             operation: None,
             native_code: None,
             remediation: None,
+            details: None,
         }
     }
 }
@@ -143,7 +181,33 @@ impl From<MxcError> for Error {
             operation,
             native_code,
             remediation: error.remediation,
+            details: error.details.map(Box::new),
         }
+    }
+}
+
+impl Error {
+    /// Recover the internal error this facade error stands for, so an
+    /// in-repo binary can emit the typed envelope and exit status its code
+    /// implies.
+    ///
+    /// Deliberately an inherent method rather than `impl From<Error> for
+    /// MxcError`: a second `MxcError: From<_>` impl makes `?` ambiguous
+    /// wherever the error type is inferred.
+    ///
+    #[doc(hidden)]
+    pub fn into_mxc_error(self) -> MxcError {
+        let mut error = MxcError::new(self.code.to_internal(), self.message);
+        if let Some(operation) = self.operation {
+            let mut failure = ApiFailure::new(operation);
+            failure.native_code = self.native_code;
+            error = error.with_api_failure(failure);
+        }
+        if let Some(remediation) = self.remediation {
+            error = error.with_remediation(remediation);
+        }
+        error.details = self.details.map(|details| *details);
+        error
     }
 }
 
@@ -151,7 +215,6 @@ impl From<MxcError> for Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
-
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

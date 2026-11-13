@@ -8,8 +8,8 @@
 //! `deprovision`) runs as a separate short-lived `wxc-exec` process, but the
 //! WSLc SDK has no cross-process re-attach for its `WslcSession` /
 //! `WslcContainer` handles. This daemon holds those handles on a single worker
-//! thread ([`session_manager`]) and serves the phase processes over an
-//! owner-only named pipe ([`control_server`]).
+//! thread (`session_manager`) and serves the phase processes over an
+//! owner-only named pipe (`control_server`).
 //!
 //! Boot sequence:
 //! 1. Secure the record root and mint a unique pipe name.
@@ -20,10 +20,25 @@
 //!    in-flight requests past the idle timeout, shut down.
 //! 5. On exit, remove the record.
 
+#[cfg(all(windows, not(test)))]
+#[path = "../../lib.rs"]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "Sidecars compile the implementation privately"
+)]
+mod implementation;
+#[cfg(all(windows, not(test)))]
+pub(crate) use implementation::*;
+#[cfg(all(windows, test))]
+pub(crate) use mxc_internal::*;
+
 #[cfg(windows)]
 mod control_server;
 #[cfg(windows)]
 mod session_manager;
+#[cfg(windows)]
+mod stdin_writer;
 
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -38,9 +53,9 @@ use anyhow::{Context, Result};
 use tokio::sync::Notify;
 
 #[cfg(windows)]
-use mxc_internal::wslc_common::daemon_protocol::PROTOCOL_VERSION;
+use crate::wslc_common::daemon_protocol::PROTOCOL_VERSION;
 #[cfg(windows)]
-use mxc_internal::wslc_common::daemon_record::{
+use crate::wslc_common::daemon_record::{
     mint_pipe_name, process_creation_time, remove_daemon_record, secure_record_root,
     write_daemon_record, DaemonRecord, TransitionLock, RECORD_SCHEMA_VERSION,
 };

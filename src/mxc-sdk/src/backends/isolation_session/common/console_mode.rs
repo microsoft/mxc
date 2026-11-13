@@ -10,6 +10,7 @@
 //!   wxc-exec's local console, used to seed the agent's ConPTY size.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Console::{
@@ -173,6 +174,17 @@ impl Drop for ConsoleModeRestorer {
 /// integer payload.
 static STDIN_STOP_EVENT_RAW: AtomicIsize = AtomicIsize::new(0);
 
+/// Serializes the console Ctrl handler against `CtrlHandlerGuard`
+/// install/teardown so it does not use STDIN_STOP_EVENT_RAW after it has
+/// been closed (and the handle potentially recycled by the OS).
+static CTRL_HANDLER_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_ctrl_handler() -> std::sync::MutexGuard<'static, ()> {
+    CTRL_HANDLER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Process-wide console-ctrl handler. Win32 callback signature; cannot
 /// capture environment, so reads its target from `STDIN_STOP_EVENT_RAW`.
 ///
@@ -182,7 +194,12 @@ static STDIN_STOP_EVENT_RAW: AtomicIsize = AtomicIsize::new(0);
 /// returns; no other state is touched.
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
     if ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
+        // Guard against use-after-free of STDIN_STOP_EVENT_RAW.
+        let _lock = lock_ctrl_handler();
+
         let raw = STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst);
+        #[cfg(test)]
+        tests::ctrl_handler_pause_point();
         if raw != 0 {
             let h = HANDLE(raw as *mut core::ffi::c_void);
             let _ = SetEvent(h);
@@ -201,7 +218,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 ///
 /// Only one guard is alive at a time in wxc-exec's lifecycle (calls into
 /// the manager are sequential per invocation). The static target handle
-/// is set at install and cleared at drop.
+/// is set at install and cleared at drop, both under [`CTRL_HANDLER_LOCK`].
 pub(super) struct CtrlHandlerGuard {
     installed: bool,
 }
@@ -213,6 +230,7 @@ impl CtrlHandlerGuard {
     /// ordering. A failure to install is silently swallowed; the guard's
     /// `Drop` becomes a no-op in that case.
     pub(super) fn install(stop_event: HANDLE) -> Self {
+        let _lock = lock_ctrl_handler();
         STDIN_STOP_EVENT_RAW.store(stop_event.0 as isize, Ordering::SeqCst);
         let installed = unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), true) }.is_ok();
         if !installed {
@@ -224,6 +242,12 @@ impl CtrlHandlerGuard {
 
 impl Drop for CtrlHandlerGuard {
     fn drop(&mut self) {
+        // Unregister and clear the target under the lock. A handler blocked on
+        // the lock here will, on resume, read the zeroed raw and do nothing; a
+        // handler already past the lock finishes against the still-open handle
+        // because this guard drops before `create_process`'s owning
+        // `OwnedHandle` closes it.
+        let _lock = lock_ctrl_handler();
         if self.installed {
             unsafe {
                 let _ = SetConsoleCtrlHandler(Some(ctrl_handler), false);
@@ -257,13 +281,17 @@ pub(super) fn get_local_console_size() -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use crate::mxc_common::process_util::OwnedHandle;
+    use windows::Win32::Foundation::WAIT_OBJECT_0;
     use windows::Win32::System::Console::{
         CTRL_BREAK_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     };
-    use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        CreateEventW, ResetEvent, SetEvent, WaitForSingleObject,
+    };
     use windows_core::PCWSTR;
 
     /// All `CtrlHandlerGuard` / `ctrl_handler` tests must serialize against
@@ -271,6 +299,33 @@ mod tests {
     /// `SetConsoleCtrlHandler` registry. Other tests in the workspace do
     /// not touch these, so a module-local mutex is sufficient.
     static CTRL_HANDLER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// One-shot pause installed by a test: `(loaded_tx, resume_rx)`. When set,
+    /// the next `ctrl_handler` call reports that it has loaded its target (while
+    /// still holding `CTRL_HANDLER_LOCK`) and blocks until the test resumes it.
+    type PausePoint = (mpsc::Sender<()>, mpsc::Receiver<()>);
+    static CTRL_HANDLER_PAUSE: Mutex<Option<PausePoint>> = Mutex::new(None);
+
+    /// Called by `ctrl_handler` between loading its target and `SetEvent`.
+    /// Must not panic: it runs inside an `extern "system"` function.
+    pub(super) fn ctrl_handler_pause_point() {
+        let pause = CTRL_HANDLER_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some((loaded_tx, resume_rx)) = pause {
+            let _ = loaded_tx.send(());
+            let _ = resume_rx.recv();
+        }
+    }
+
+    /// Create a per-execution manual-reset stop event, mirroring the one
+    /// `create_process` owns via `OwnedHandle`.
+    fn make_stop_event() -> OwnedHandle {
+        let handle = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .expect("create manual-reset test event");
+        OwnedHandle::new(handle)
+    }
 
     #[test]
     fn test_get_local_console_size_does_not_panic() {
@@ -302,7 +357,8 @@ mod tests {
         // a console attached) and that the static target is cleared on drop.
         let _lock = CTRL_HANDLER_TEST_LOCK.lock().unwrap();
 
-        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()).unwrap() };
+        let owned = make_stop_event();
+        let event = owned.get();
 
         {
             let _guard = CtrlHandlerGuard::install(event);
@@ -313,10 +369,6 @@ mod tests {
 
         // After drop, the static must be cleared.
         assert_eq!(STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst), 0);
-
-        unsafe {
-            let _ = CloseHandle(event);
-        }
     }
 
     #[test]
@@ -327,7 +379,8 @@ mod tests {
         // its default behavior (which would `ExitProcess` on close).
         let _lock = CTRL_HANDLER_TEST_LOCK.lock().unwrap();
 
-        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()).unwrap() };
+        let owned = make_stop_event();
+        let event = owned.get();
         let _guard = CtrlHandlerGuard::install(event);
 
         for signal in [CTRL_C_EVENT, CTRL_CLOSE_EVENT] {
@@ -355,11 +408,152 @@ mod tests {
                 signal
             );
         }
-
         drop(_guard);
-        unsafe {
-            let _ = CloseHandle(event);
+    }
+
+    #[test]
+    fn test_ctrl_handler_is_inert_after_guard_teardown() {
+        // After the guard drops it zeros the cached raw under the lock, so a
+        // handler that fires post-teardown signals nothing. With per-exec
+        // events this is what keeps a late handler from reaching into a
+        // closed/recycled handle: there is simply no live target to touch.
+        let _lock = CTRL_HANDLER_TEST_LOCK.lock().unwrap();
+
+        let owned = make_stop_event();
+        let event = owned.get();
+
+        {
+            let _guard = CtrlHandlerGuard::install(event);
+            assert_ne!(STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst), 0);
         }
+        assert_eq!(STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst), 0);
+
+        unsafe {
+            ResetEvent(event).unwrap();
+        }
+        let result = unsafe { ctrl_handler(CTRL_C_EVENT) };
+        assert!(
+            result.as_bool(),
+            "handler still suppresses the OS default after teardown"
+        );
+        let post = unsafe { WaitForSingleObject(event, 0) };
+        assert_ne!(
+            post, WAIT_OBJECT_0,
+            "a handler after teardown must not signal the retired event"
+        );
+    }
+
+    #[test]
+    fn test_guard_teardown_waits_for_in_flight_handler() {
+        // Regression for the callback/teardown race. Pause the real handler
+        // after it has loaded its target (holding CTRL_HANDLER_LOCK), start
+        // guard teardown on another thread, and verify teardown cannot finish
+        // until the handler has signaled. Without the lock, teardown would
+        // complete while the handler still held the raw value, and production
+        // would then close the event out from under the pending SetEvent.
+        let _lock = CTRL_HANDLER_TEST_LOCK.lock().unwrap();
+
+        // Owner outlives teardown, matching create_process's drop order.
+        let owned = make_stop_event();
+        let event = owned.get();
+        let guard = CtrlHandlerGuard::install(event);
+
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *CTRL_HANDLER_PAUSE.lock().unwrap() = Some((loaded_tx, resume_rx));
+
+        let handler = std::thread::spawn(|| unsafe { ctrl_handler(CTRL_C_EVENT) }.as_bool());
+        loaded_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("handler should reach the pause point");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let teardown = std::thread::spawn(move || {
+            drop(guard);
+            let _ = done_tx.send(());
+        });
+
+        assert!(
+            matches!(
+                done_rx.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "guard teardown must block while the handler is between load and SetEvent"
+        );
+        assert_ne!(
+            STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst),
+            0,
+            "target must not be cleared while the handler is in flight"
+        );
+
+        resume_tx.send(()).unwrap();
+        assert!(handler.join().unwrap(), "handler must return TRUE");
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("teardown should finish once the handler is done");
+        teardown.join().unwrap();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(event, 0) },
+            WAIT_OBJECT_0,
+            "the in-flight handler signals the still-open event"
+        );
+        assert_eq!(STDIN_STOP_EVENT_RAW.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_ctrl_handler_after_rollover_targets_only_current_execution() {
+        // A handler that runs after execution A has torn down and execution B
+        // has installed reads B's target, so it signals only B's event. A's
+        // retired event is never touched.
+        let _lock = CTRL_HANDLER_TEST_LOCK.lock().unwrap();
+
+        let owned_a = make_stop_event();
+        drop(CtrlHandlerGuard::install(owned_a.get()));
+
+        let owned_b = make_stop_event();
+        let guard_b = CtrlHandlerGuard::install(owned_b.get());
+
+        assert!(unsafe { ctrl_handler(CTRL_C_EVENT) }.as_bool());
+
+        assert_ne!(
+            unsafe { WaitForSingleObject(owned_a.get(), 0) },
+            WAIT_OBJECT_0,
+            "the retired execution's event must not be signaled"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(owned_b.get(), 0) },
+            WAIT_OBJECT_0,
+            "the current execution's event is signaled"
+        );
+        drop(guard_b);
+    }
+
+    #[test]
+    fn test_per_execution_stop_events_are_independent() {
+        // Regression for reviewer finding (2): a stdin relay that outlived its
+        // bounded join watches its own execution's event. Signaling one
+        // execution's stop event must neither set nor clear another's, so the
+        // surviving relay sees only its own stop and never consumes the next
+        // execution's input.
+        let owned_a = make_stop_event();
+        let owned_b = make_stop_event();
+
+        unsafe {
+            // Execution A's teardown signals A's event only.
+            SetEvent(owned_a.get()).unwrap();
+        }
+
+        let a_state = unsafe { WaitForSingleObject(owned_a.get(), 0) };
+        let b_state = unsafe { WaitForSingleObject(owned_b.get(), 0) };
+        assert_eq!(
+            a_state, WAIT_OBJECT_0,
+            "A's own event is signaled for A's relay"
+        );
+        assert_ne!(
+            b_state, WAIT_OBJECT_0,
+            "B's event is independent and stays unsignaled"
+        );
     }
 
     #[test]

@@ -154,7 +154,7 @@ function buildLinuxProcessConfig(
 /**
  * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
  *
- * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
+ * The seatbelt backend applies a TinyScheme profile
  * generated server-side by `seatbelt_common::profile_builder`, so the SDK
  * only needs to set the containment type and ensure the top-level `seatbelt`
  * config block exists — the policy fields on `ContainerConfig` (filesystem /
@@ -421,7 +421,11 @@ function toExecutionResult(result: BindingRunResult): ExecutionResult {
   return output;
 }
 
-/** Create a container request and asynchronously return its live process. */
+/**
+ * Create a container request and asynchronously return its live process. A
+ * WSLC command reads end-of-file on stdin; use {@link spawnWithStdin} to give
+ * it input.
+ */
 export async function spawn(
   request: ContainerRequest,
   options: SpawnOptions = {},
@@ -430,6 +434,22 @@ export async function spawn(
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
     false,
+  );
+}
+
+/**
+ * {@link spawn} with a writable `standardInput` whose end gives the command
+ * end-of-file.
+ */
+export async function spawnWithStdin(
+  request: ContainerRequest,
+  options: SpawnOptions = {},
+): Promise<MxcProcess> {
+  validateOperationOptions('spawnWithStdin', options, false);
+  return spawnBindingSandboxProcess(
+    prepareContainerRequest(request, options.telemetry),
+    false,
+    true,
   );
 }
 

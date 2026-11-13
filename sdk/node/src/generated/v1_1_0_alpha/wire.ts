@@ -64,6 +64,8 @@ export interface DeprovisionRequest {
   version: Version;
 }
 
+export type DeprovisionSessionPhase = "deprovision-session";
+
 export type ExecPhase = "exec";
 
 /**
@@ -109,11 +111,11 @@ export interface ExecRequest {
 }
 
 /**
- * Operator consent for containment fallback behavior.
+ * Fallback settings accepted for 1.x compatibility and ignored.
  */
 export interface Fallback {
   /**
-   * Whether the runtime may mutate host filesystem DACLs as a fallback.
+   * Accepted for compatibility and ignored.
    */
   allowDaclMutation?: boolean;
 }
@@ -137,6 +139,8 @@ export interface Filesystem {
 }
 
 export type HyperlightRuntime = "agent" | "python" | "python-shell" | "node" | "bash" | "dotnet-jit";
+
+export type ImageReference = string;
 
 export type IsolationSessionContainment = "isolation_session";
 
@@ -258,6 +262,34 @@ export interface Lxc {
   release: string;
 }
 
+export type MicroVmContainment = "microvm";
+
+/**
+ * MicroVM creation settings shared by create-and-run and provision requests.
+ */
+export interface MicroVmProvision {
+  /**
+   * Guest memory in MiB. Zero is rejected by semantic validation.
+   */
+  memoryMib?: number;
+}
+
+/**
+ * A complete development provision request for the MicroVM backend.
+ */
+export interface MicroVmProvisionRequest {
+  $schema?: string;
+  _comment?: unknown;
+  containment: MicroVmContainment;
+  filesystem?: Filesystem;
+  microvm: StateAwareMicroVm;
+  network?: Network;
+  phase: ProvisionPhase;
+  runtimeConfig?: RuntimeConfig;
+  telemetry?: Telemetry;
+  version: Version;
+}
+
 /**
  * Network access policy shared by the stable containment backends.
  */
@@ -369,6 +401,20 @@ export interface OneShotHyperlight {
 }
 
 /**
+ * Creation settings for the development MicroVM backend.
+ */
+export interface OneShotMicroVm {
+  /**
+   * Image reference including its registry, resolved by the signed NVX agent.
+   */
+  image: ImageReference;
+  /**
+   * Optional settings applied when creating the MicroVM.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
  * A complete one-shot `1.1.0-alpha` configuration request.
  */
 export interface OneShotRequest {
@@ -389,7 +435,7 @@ export interface OneShotRequest {
    */
   containment?: OneShotContainment;
   /**
-   * Optional fallback consent.
+   * Legacy settings accepted for 1.x compatibility and ignored.
    */
   fallback?: Fallback;
   /**
@@ -408,6 +454,10 @@ export interface OneShotRequest {
    * Optional LXC distribution settings.
    */
   lxc?: Lxc;
+  /**
+   * Required image selection when containment is MicroVM.
+   */
+  microvm?: OneShotMicroVm;
   /**
    * Optional network policy.
    */
@@ -640,6 +690,8 @@ export type ProcessContainerUiSystemSettings = "none" | "parameters" | "display"
 
 export type ProvisionPhase = "provision";
 
+export type ProvisionSessionPhase = "provision-session";
+
 /**
  * Runtime configuration supplied alongside the sandbox policy.
  */
@@ -654,6 +706,10 @@ export interface RuntimeConfig {
  * macOS Seatbelt backend settings.
  */
 export interface Seatbelt {
+  /**
+   * Records sandbox denials to a JSON report.
+   */
+  captureDenials?: SeatbeltCaptureDenials;
   /**
    * Additional Mach service global names the process may resolve.
    */
@@ -674,6 +730,24 @@ export interface Seatbelt {
    * Optional override of the generated sandbox profile.
    */
   profileOverride?: string;
+}
+
+/**
+ * macOS Seatbelt denial-capture settings.
+ */
+export interface SeatbeltCaptureDenials {
+  /**
+   * How each ungranted access is handled while it is recorded.
+   */
+  mode?: CaptureDenialsMode;
+  /**
+   * Optional absolute file path for the denial report; may start with `~/`.
+   */
+  outputPath?: string;
+  /**
+   * Whether to keep the run's raw `log stream` lines as `.seatbelt.log` next to the report. The trace can contain sensitive paths; callers are responsible for deleting it.
+   */
+  retainEtl?: boolean;
 }
 
 export type StartPhase = "start";
@@ -719,6 +793,30 @@ export interface StateAwareIsolationSession {
 }
 
 /**
+ * State-aware MicroVM settings.
+ */
+export interface StateAwareMicroVm {
+  /**
+   * Image reference including its registry, fixed for this container's lifetime.
+   */
+  image: ImageReference;
+  /**
+   * Optional provision-phase settings.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
+ * A closed W365 settings object containing only checkout settings.
+ */
+export interface StateAwareW365AgentsProvision {
+  /**
+   * Optional provision settings; an empty wrapper remains distinct from omission.
+   */
+  provision?: W365AgentsProvision;
+}
+
+/**
  * State-aware WSLC settings.
  */
 export interface StateAwareWslc {
@@ -726,6 +824,13 @@ export interface StateAwareWslc {
    * Optional provision-phase settings.
    */
   provision?: WslcProvision;
+}
+
+/**
+ * WSLc settings for provisioning a shared utility VM.
+ */
+export interface StateAwareWslcSession {
+  provisionSession?: WslcProvisionSession;
 }
 
 export type StopPhase = "stop";
@@ -804,6 +909,64 @@ export type UiClipboard = "none" | "read" | "write" | "all";
 
 export type Version = "1.1.0-alpha";
 
+export type W365AgentsContainment = "w365_agents";
+
+export type W365AgentsGuid = string;
+
+/**
+ * W365 checkout settings. Defaults and resolved service validation belong to the backend.
+ */
+export interface W365AgentsProvision {
+  /**
+   * Required pool identifier; no automatic pool selection.
+   */
+  poolId: W365AgentsGuid;
+  /**
+   * Optional user object identifier.
+   */
+  userObjectId?: W365AgentsGuid;
+  /**
+   * Optional user type.
+   */
+  userType?: W365AgentsUserType;
+}
+
+/**
+ * The complete development W365 provision request, excluding unenforceable local policy.
+ */
+export interface W365AgentsProvisionRequest {
+  /**
+   * Optional editor schema reference.
+   */
+  $schema?: string;
+  /**
+   * Optional annotation.
+   */
+  _comment?: unknown;
+  /**
+   * W365 containment marker.
+   */
+  containment: W365AgentsContainment;
+  /**
+   * Provision phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry settings.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Development contract version.
+   */
+  version: Version;
+  /**
+   * Optional provision settings; missing configuration is not defaulted by parsing.
+   */
+  w365Agents?: StateAwareW365AgentsProvision;
+}
+
+export type W365AgentsUserType = "Local" | "HumanUser" | "Agentic";
+
 export type WindowsSandboxContainment = "windows_sandbox";
 
 /**
@@ -843,6 +1006,28 @@ export interface WindowsSandboxProvisionRequest {
 export type WslcContainment = "wslc";
 
 /**
+ * Request to release an empty WSLc session.
+ */
+export interface WslcDeprovisionSessionRequest {
+  /**
+   * JSON Schema URL for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  containment: WslcContainment;
+  phase: DeprovisionSessionPhase;
+  /**
+   * Session identifier returned by provision-session.
+   */
+  sessionId: string;
+  telemetry?: Telemetry;
+  version: Version;
+}
+
+/**
  * WSLC settings accepted during provisioning.
  */
 export interface WslcProvision {
@@ -858,6 +1043,10 @@ export interface WslcProvision {
    * Optional host-to-container TCP port mappings.
    */
   portMappings?: PortMapping[];
+  /**
+   * Session to join; omitted to use the shared default VM.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -903,6 +1092,43 @@ export interface WslcProvisionRequest {
 }
 
 /**
+ * Utility VM sizing shared by every sandbox in the session.
+ */
+export interface WslcProvisionSession {
+  /**
+   * Virtual CPUs available to the session's utility VM.
+   */
+  cpuCount?: number;
+  /**
+   * Enable GPU passthrough for the session's utility VM.
+   */
+  gpu?: boolean;
+  /**
+   * Utility VM memory ceiling, in megabytes.
+   */
+  memoryMb?: number;
+}
+
+/**
+ * Request to create a WSLc session.
+ */
+export interface WslcProvisionSessionRequest {
+  /**
+   * JSON Schema URL for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  containment: WslcContainment;
+  phase: ProvisionSessionPhase;
+  telemetry?: Telemetry;
+  version: Version;
+  wslc?: StateAwareWslcSession;
+}
+
+/**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | W365AgentsProvisionRequest | WslcProvisionRequest | MicroVmProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

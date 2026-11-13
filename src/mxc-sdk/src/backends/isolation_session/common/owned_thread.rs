@@ -15,13 +15,10 @@
 use std::sync::Arc;
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+use crate::mxc_common::process_util::{duplicate_thread_token, SendOwnedHandle};
+use crate::mxc_common::telemetry::session;
 
-use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE};
-use windows::Win32::Security::{
-    DuplicateTokenEx, SecurityImpersonation, TokenImpersonation, TOKEN_DUPLICATE, TOKEN_IMPERSONATE,
-};
-use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken, SetThreadToken};
+use windows::Win32::System::Threading::SetThreadToken;
 use windows_core::RuntimeType;
 use windows_future::IAsyncOperation;
 
@@ -61,10 +58,12 @@ pub(super) fn call<T: Send>(
     let _mta = MtaReference::acquire()?;
     let sink = Logger::inherit_thread_diagnostic_sink();
     let sink = sink.has_diagnostic_sink().then_some(sink);
+    let telemetry_context = session::capture();
     let joined = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name(THREAD_NAME.to_string())
             .spawn_scoped(scope, move || {
+                let _session = session::resume(telemetry_context);
                 if let Some(token) = &impersonation.token {
                     // SAFETY: `token` is a live impersonation token; `None`
                     // targets the current thread.
@@ -99,52 +98,27 @@ pub(super) fn wait_for<T: RuntimeType>(
         .map_err(|e| transport_err(operation, "wait failed", &e))
 }
 
-/// Duplicates the calling thread's impersonation token for another thread to
-/// set as its own. `None` when the thread is not impersonating.
-fn duplicate_thread_token() -> windows_core::Result<Option<SendOwnedHandle>> {
-    let mut token = HANDLE::default();
-    // SAFETY: the out-parameter is a valid, writable local.
-    let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_DUPLICATE, true, &mut token) };
-    match opened {
-        Ok(()) => {}
-        Err(e) if e.code() == ERROR_NO_TOKEN.to_hresult() => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let token = OwnedHandle::new(token);
-
-    let mut duplicate = HANDLE::default();
-    // SAFETY: `token` is a live token handle; the out-parameter is a valid,
-    // writable local.
-    unsafe {
-        DuplicateTokenEx(
-            token.get(),
-            TOKEN_IMPERSONATE,
-            None,
-            SecurityImpersonation,
-            TokenImpersonation,
-            &mut duplicate,
-        )
-    }?;
-    let mut duplicate = OwnedHandle::new(duplicate);
-    Ok(Some(SendOwnedHandle::take(&mut duplicate)))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::mxc_common::logger::Mode;
+    use crate::mxc_common::process_util::OwnedHandle;
 
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::{
-        CreateRestrictedToken, CreateWellKnownSid, GetTokenInformation, ImpersonateSelf,
-        IsTokenRestricted, RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
-        WinWorldSid, CREATE_RESTRICTED_TOKEN_FLAGS, PSID, SECURITY_IMPERSONATION_LEVEL,
-        SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_QUERY,
+        CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
+        ImpersonateSelf, IsTokenRestricted, RevertToSelf, SecurityIdentification,
+        SecurityImpersonation, TokenImpersonation, TokenImpersonationLevel, WinWorldSid,
+        CREATE_RESTRICTED_TOKEN_FLAGS, PSID, SECURITY_IMPERSONATION_LEVEL, SECURITY_MAX_SID_SIZE,
+        SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
     };
     use windows::Win32::System::Com::{
         CoGetApartmentType, CoInitializeEx, CoUninitialize, APTTYPE, APTTYPEQUALIFIER,
         APTTYPEQUALIFIER_IMPLICIT_MTA, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA,
         COINIT_APARTMENTTHREADED,
     };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    };
 
     use super::*;
     use crate::isolation_session_common::error::LifecycleFailure;
@@ -297,6 +271,86 @@ mod tests {
 
     fn sees_a_sink() -> bool {
         Logger::inherit_thread_diagnostic_sink().has_diagnostic_sink()
+    }
+
+    #[test]
+    fn piped_exec_workers_preserve_telemetry_authorization_and_attribution() {
+        use std::os::windows::io::AsRawHandle;
+
+        use crate::mxc_common::exec_stream::ExecSandboxProcess;
+        use crate::mxc_common::sandbox_process::SandboxProcess;
+        use crate::mxc_common::state_aware_backend::{null_pipe_handle, ExecHandle, ExecOutcome};
+        use crate::mxc_common::telemetry::{self, events::test_sink, LearningMode, ProcessEvent};
+
+        let store = tempfile::tempdir().unwrap();
+        let environment = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        environment.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        let mut logger = Logger::new(Mode::Buffer);
+        let _other_request = session::start_with_learning_mode(
+            true,
+            "",
+            None,
+            LearningMode::Enforcement,
+            &mut logger,
+        );
+        assert!(crate::mxc_telemetry::init("test", "dev"));
+
+        for (active, vector) in [(true, ""), (false, ""), (true, "invalid")] {
+            let _invocation = session::start_with_learning_mode(
+                active,
+                vector,
+                Some(crate::mxc_contract::ContractVersion::V1_1_0Alpha),
+                LearningMode::Learning,
+                &mut logger,
+            );
+            let expected_id = session::current();
+            let expected_mode = session::learning_mode();
+            let expected_critical = session::critical_events();
+            let impersonation = Impersonation::of_this_thread().unwrap();
+            let (stdout_read, stdout_write) = std::io::pipe().unwrap();
+            let handle = ExecHandle {
+                stdout: HANDLE(stdout_read.as_raw_handle()),
+                stderr: null_pipe_handle(),
+                stdin: null_pipe_handle(),
+                stdin_closer: None,
+                waiter: Box::new(move || {
+                    call(&impersonation, || {
+                        assert_eq!(session::current(), expected_id);
+                        assert_eq!(session::learning_mode(), expected_mode);
+                        assert_eq!(session::critical_events(), expected_critical);
+                        assert_eq!(session::invocation_disabled(), !active);
+                        test_sink::install();
+                        telemetry::log_process_event("synthetic", 42, ProcessEvent::Exited(7));
+                        let events = test_sink::take_requirements();
+                        test_sink::clear();
+                        let collected =
+                            active && crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE;
+                        assert_eq!(events.len(), usize::from(collected));
+                        if collected {
+                            assert_eq!(
+                                events[0].session_id,
+                                expected_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            );
+                            assert_eq!(events[0].name, "MXC.ProcessExited");
+                        }
+                        Ok(())
+                    })
+                    .map_err(super::super::error::map_lifecycle_error)?;
+                    Ok(ExecOutcome::Exited(7))
+                }),
+                terminator: Box::new(|| Ok(())),
+            };
+            let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+            drop(stdout_write);
+            assert_eq!(process.wait().unwrap(), 7);
+            assert_eq!(session::current(), expected_id);
+            assert_eq!(session::invocation_disabled(), !active);
+        }
+        crate::mxc_telemetry::shutdown();
     }
 
     #[test]

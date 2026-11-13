@@ -142,7 +142,8 @@ export class MxcProcess {
 
   /**
    * Returns stdin and transfers responsibility for closing it to the caller.
-   * Returns `null` when the selected backend does not expose stdin.
+   * Returns `null` when the selected backend does not expose stdin, as for a
+   * WSLC command in a container not started by `spawnInContainerWithStdin`.
    */
   get standardInput(): Writable | null {
     this.throwIfDisposed();
@@ -244,7 +245,7 @@ export class MxcProcess {
     destroyNativeStream(this.outputStream);
     destroyNativeStream(this.errorOutputStream);
     if (previousPhase === 'active') {
-      void this.cleanupDisposedProcess(firstError === undefined);
+      void this.cleanupDisposedProcess();
     }
     if (previousPhase !== 'terminal') {
       this.rejectWait(new Error('sandbox process was disposed before completion'));
@@ -366,14 +367,9 @@ export class MxcProcess {
     }
   }
 
-  private async cleanupDisposedProcess(waitForExit: boolean): Promise<void> {
-    if (waitForExit) {
-      try {
-        await this.driver.wait();
-      } catch {
-        // Freeing the handle still performs final process-tree cleanup.
-      }
-    }
+  // A native wait here would write a denial report the caller never sees.
+  // Freeing the handle still kills and cleans up the process tree.
+  private async cleanupDisposedProcess(): Promise<void> {
     try {
       await this.driver.free();
     } catch (error) {

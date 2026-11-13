@@ -10,10 +10,21 @@ configures the backend.
 
 `v1` is the only public SDK namespace. Implementation modules, including
 `mxc_common`, backend helpers, and native binding hooks, are private.
-Repository tools and tests use the non-published `mxc-internal` workspace crate;
+Repository implementation consumers use the non-published `mxc-internal` workspace crate;
 it is not an SDK dependency or supported consumer API.
 
 See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
+
+On Windows, ProcessContainer requires an enabled native PSEC contract.
+Platform discovery reports ProcessContainer only when native PSEC is available;
+other backends are detected independently. `mxc_sdk::v1::probe(Some(&request))`
+checks request compatibility without creating a container. An incompatible
+request has no selected tier and an explanatory error, while host facts remain
+available.
+
+Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
+for caller-authored MXC request JSON. It supports execution, container
+lifecycle operations, and validation through the in-process engine.
 
 ## Run to completion and spawn
 
@@ -39,7 +50,9 @@ println!("{}", String::from_utf8_lossy(&output.stdout));
 ```
 
 `spawn` returns an `MxcProcess` with separate standard streams, wait and
-termination methods. `run` captures stdout and stderr and returns an
+termination methods. A WSLC command started by `spawn` reads end-of-file on
+stdin; `spawn_with_stdin` gives it a writable stdin. `run` captures stdout and
+stderr and returns an
 `ExecutionResult` with its `WaitResult`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 Captured execution drains both streams concurrently. Output-read failures are
@@ -107,7 +120,9 @@ v1::container::deprovision_container(&id, Default::default())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Use `v1::container::spawn_in_container` for live piped execution.
+Use `v1::container::spawn_in_container` for live piped execution. A WSLC
+command started this way reads end-of-file on stdin;
+`v1::container::spawn_in_container_with_stdin` gives it a writable stdin.
 `v1::container::spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
@@ -142,7 +157,7 @@ operation options and return no execution output.
 `v1::spawn_with_pty` creates a container with a caller-controlled terminal.
 Create-and-run PTY support is available for IsolationSession on Windows, Bubblewrap
 and LXC on Linux, and Seatbelt direct execution on macOS. LXC requires root.
-Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
+Seatbelt rejects PTY mode with `guiAccess`.
 `wait()` requests canonical-mode terminal EOF for untaken input; raw-mode
 applications must use their own completion protocol. Untaken merged output is
 drained and discarded without waiting indefinitely for descendants that keep
@@ -180,25 +195,42 @@ the configured diagnostic sink. `user_profile_policy` discovers standard
 per-user tool locations, and `temporary_files_policy` returns existing
 temporary storage without creating directories.
 
+On Windows, finding `pwsh.exe` on `PATH` adds the PSReadLine history directory
+as read-write. Discovery does not implicitly grant read access to a drive root.
+
+For PowerShell startup failures, see
+[troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).
+
 ## Internal modules and executor binaries
+
+### Experimental MicroVM support
+
+Enable the `microvm` Cargo feature on Windows x64 for experimental captured
+create-and-run execution with `v1::dev::run_json`. Supply a MicroVM JSON
+request and set `JsonOptions { experimental: true }`. Typed V1 APIs do not
+expose MicroVM selection. Distribute the complete staged `aci-edge-sandboxes/`
+directory beside the application executable. See the
+[NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for host requirements, image references, and supported operations and policy.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes
 only `v1`.
 
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` packages remain thin process
-entry points that depend on the non-published `mxc-internal` workspace crate.
-It compiles the same implementation sources as the SDK and owns the internal
-integration tests, debug examples, Windows Sandbox guest and daemon, and
-WSLC daemon.
+entry points that depend on the non-published `mxc-internal` workspace crate,
+which compiles the same implementation sources as the SDK. The Windows Sandbox
+guest and daemon, plus the WSLC daemon when `wslc` is enabled, remain published
+`mxc-sdk` binary targets and compile the implementation privately.
+Their unit tests belong to `mxc-internal`.
 
-Cargo workspace builds include the sidecar targets declared in
-`src/mxc-internal/Cargo.toml`. They can also be selected directly:
+Cargo builds include the sidecar targets declared in `src/mxc-sdk/Cargo.toml`.
+They can also be selected directly:
 
 ```text
-cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --bin wxc-windows-sandbox-daemon
-cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --bin wxc-windows-sandbox-guest
-cargo build --manifest-path src/Cargo.toml -p mxc-internal --release --features wslc --bin wxc-wslc-daemon
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-daemon
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-guest
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --features wslc --bin wxc-wslc-daemon
 ```
 
 `required-features = ["wslc"]` prevents Cargo from building the WSLC daemon

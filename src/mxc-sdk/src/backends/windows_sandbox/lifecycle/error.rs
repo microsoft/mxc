@@ -59,12 +59,9 @@ impl OneShotError {
         };
 
         ScriptResponse {
-            exit_code: -1,
             standard_err: summary.to_string(),
-            error_message: summary.to_string(),
             extended_error: detail,
-            failure_phase,
-            ..Default::default()
+            ..ScriptResponse::failed(failure_phase, summary)
         }
     }
 
@@ -72,10 +69,11 @@ impl OneShotError {
     /// whether a retry could ever succeed.
     fn failure_phase(&self) -> FailurePhase {
         match self {
-            // Non-retryable preflight: the request/config cannot be honored or a
-            // required host prerequisite is missing. Retrying the same input on
-            // the same host will not succeed.
-            OneShotError::SandboxUnavailable(_) | OneShotError::Policy(_) => FailurePhase::Rejected,
+            // The optional OS feature is absent or disabled, so the host has to
+            // be provisioned; no change to the request reaches it.
+            OneShotError::SandboxUnavailable(_) => FailurePhase::BackendUnavailable,
+            // The request asks for something this backend will not do.
+            OneShotError::Policy(_) => FailurePhase::Rejected,
             // Launch attempt failed (incl. transient single-instance contention,
             // async-runtime setup, capture-proof, rendezvous wait, and the
             // initial guest connect) — generally worth retrying.
@@ -91,6 +89,7 @@ impl OneShotError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     #[test]
     fn busy_maps_to_launch_failed_with_detail() {
@@ -102,18 +101,23 @@ mod tests {
     }
 
     #[test]
-    fn policy_and_prereq_errors_map_to_rejected() {
-        for err in [
-            OneShotError::Policy("denied path in share".to_string()),
-            OneShotError::SandboxUnavailable("feature off".to_string()),
-        ] {
-            let resp = err.into_response();
-            assert_eq!(
-                resp.failure_phase,
-                FailurePhase::Rejected,
-                "non-retryable preflight should map to Rejected"
-            );
-        }
+    fn a_refused_policy_is_told_apart_from_a_host_that_cannot_run_it() {
+        let refused = OneShotError::Policy("denied path in share".to_string()).into_response();
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
+        assert_eq!(
+            refused.failure_phase.error_code(),
+            MxcErrorCode::PolicyValidation
+        );
+
+        let unavailable =
+            OneShotError::SandboxUnavailable("feature off".to_string()).into_response();
+        assert_eq!(unavailable.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(unavailable.exit_code, -1);
+        assert_eq!(
+            unavailable.failure_phase.error_code(),
+            MxcErrorCode::BackendUnavailable
+        );
     }
 
     #[test]

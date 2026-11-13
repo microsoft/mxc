@@ -3,20 +3,24 @@
 
 //! Container image resolution shared by the one-shot runner and the state-aware daemon.
 
-use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::ScriptResponse;
+use crate::mxc_common::mxc_error::ApiFailure;
 use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
-use crate::wslc_common::container_steps::{cstr_bytes, sdk_error};
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::container_steps::{
+    self, cstr_bytes, sdk_step_error, sdk_step_error_with_context, validate_store_access,
+    StoredImage,
+};
+use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::registry_policy;
 use crate::wslc_common::sdk_init;
+use crate::wslc_common::store_slots;
 use crate::wslc_common::wslc_bindings::*;
 
 /// How long a single pull may run before it is abandoned.
@@ -43,7 +47,7 @@ const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// back by the SDK as the pull's own result.
 const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
 
-/// How long a pull may run, honouring [`PULL_TIMEOUT_ENV`].
+/// How long a pull may run, honouring `PULL_TIMEOUT_ENV`.
 pub fn pull_budget() -> Duration {
     std::env::var(PULL_TIMEOUT_ENV)
         .ok()
@@ -57,7 +61,7 @@ pub fn pull_budget() -> Duration {
 /// How long a pull the daemon is waiting on may run.
 ///
 /// Capped under the client's response deadline, so raising
-/// [`PULL_TIMEOUT_ENV`] past that gap takes effect only once the client
+/// `PULL_TIMEOUT_ENV` past that gap takes effect only once the client
 /// deadline is raised with it.
 pub fn daemon_pull_budget() -> Duration {
     capped_for_daemon(
@@ -147,10 +151,10 @@ pub unsafe fn pull_image(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
-    storage_path: Option<&str>,
+    store: &StoreHint,
     log_prefix: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     let budget = pull_budget();
     let _ = writeln!(
         logger,
@@ -188,7 +192,7 @@ pub unsafe fn pull_image(
     if hr != S_OK {
         return Err(pull_failure(
             image,
-            storage_path,
+            store,
             hr,
             &pull_err.to_string_lossy(),
             budget,
@@ -199,18 +203,38 @@ pub unsafe fn pull_image(
     Ok(())
 }
 
-/// Off-thread pulls that have not returned.
+/// Off-thread pulls that have not returned, across every session in this
+/// process.
 ///
 /// The session outlives the daemon's worker only if nothing is still using it,
 /// so teardown consults this before releasing the handle.
 static PULLS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts one pull against a caller's own counter for as long as it runs.
+struct PullCount(Arc<AtomicUsize>);
+
+impl PullCount {
+    /// Enter the count, if the caller asked for one.
+    fn enter(counter: Option<Arc<AtomicUsize>>) -> Option<Self> {
+        counter.map(|counter| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Self(counter)
+        })
+    }
+}
+
+impl Drop for PullCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Everything an off-thread pull needs, in a form that can cross a thread.
 struct PullJob {
     sdk: *const WslcSdk,
     session: WslcSession,
     image: String,
-    storage_path: Option<String>,
+    store: StoreHint,
 }
 
 // SAFETY: the SDK is apartment-affine, not thread-affine. Both this thread and
@@ -237,26 +261,62 @@ pub unsafe fn start_pull<F>(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
-    storage_path: Option<&str>,
+    store: &StoreHint,
     log_prefix: &str,
     on_done: F,
-) -> Result<(), ScriptResponse>
+) -> Result<(), WslcStepError>
 where
-    F: FnOnce(Result<(), ScriptResponse>) + Send + 'static,
+    F: FnOnce(Result<(), WslcStepError>) + Send + 'static,
+{
+    // SAFETY: forwarded unchanged; this shares `start_pull_counted`'s contract.
+    unsafe { start_pull_counted(sdk, session, image, store, log_prefix, None, on_done) }
+}
+
+/// [`start_pull`], additionally counting the pull against `counter` until it has
+/// reported.
+///
+/// A caller holding several sessions needs to know whether a pull is still
+/// using *this* session, which the process-wide count cannot answer. `counter`
+/// is kept alongside `PULLS_IN_FLIGHT`, never in place of it.
+///
+/// `counter` is released only once `on_done` has returned, so a caller that
+/// observes it at zero can rely on the report having been delivered.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle,
+/// both outliving the pull.
+pub unsafe fn start_pull_counted<F>(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    store: &StoreHint,
+    log_prefix: &str,
+    counter: Option<Arc<AtomicUsize>>,
+    on_done: F,
+) -> Result<(), WslcStepError>
+where
+    F: FnOnce(Result<(), WslcStepError>) + Send + 'static,
 {
     let job = PullJob {
         sdk: sdk as *const WslcSdk,
         session,
         image: image.to_string(),
-        storage_path: storage_path.map(str::to_string),
+        store: store.clone(),
     };
     let prefix = log_prefix.to_string();
 
+    // Entered before the spawn so a spawn failure unwinds it, rather than
+    // leaving a count for a thread that never started.
+    let counted = PullCount::enter(counter);
     PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("wslc-pull".to_string())
         .spawn(move || {
             let job = job;
+
+            // Outlives `on_done` below, so a caller that sees this counter at
+            // zero knows the report has already been handed over.
+            let _counted = counted;
             let apartment = PullApartment::enter();
             let outcome = match apartment {
                 Err(e) => Err(e),
@@ -269,7 +329,7 @@ where
                             &*job.sdk,
                             job.session,
                             &job.image,
-                            job.storage_path.as_deref(),
+                            &job.store,
                             &prefix,
                             &mut log,
                         )
@@ -285,7 +345,7 @@ where
         return Err(WslcError::Host(format!(
             "could not start a thread to pull WSLC image '{image}': {e}"
         ))
-        .into_response());
+        .into_step_error());
     }
     Ok(())
 }
@@ -310,13 +370,14 @@ pub fn wait_for_pulls_in_flight(budget: Duration) -> bool {
 struct PullApartment;
 
 impl PullApartment {
-    fn enter() -> Result<Self, ScriptResponse> {
+    fn enter() -> Result<Self, WslcStepError> {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
         // SAFETY: called once on a freshly spawned thread; `Drop` below pairs it.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
-            return Err(sdk_error(
+            return Err(sdk_step_error_with_context(
+                "CoInitializeEx",
                 "could not join the COM apartment for a WSLC pull",
                 hr.0,
                 "",
@@ -336,7 +397,7 @@ impl Drop for PullApartment {
 }
 
 /// Report a pull the caller stopped waiting for.
-pub fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
+pub fn pull_deadline_expired(image: &str, budget: Duration) -> WslcStepError {
     WslcError::Host(format!(
         "WSLC image '{}' did not finish pulling within {}s. The transfer was \
          abandoned and this sandbox was not created. Retry, raise {} (a \
@@ -347,17 +408,18 @@ pub fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
         PULL_TIMEOUT_ENV,
         crate::wslc_common::daemon_client::CALL_TIMEOUT_ENV,
     ))
-    .into_response()
+    .into_step_error()
+    .with_api_failure(ApiFailure::new("WslcPullSessionImage"))
 }
 
 /// Classify a `WslcPullSessionImage` failure and render it for the caller.
 fn pull_failure(
     image: &str,
-    storage_path: Option<&str>,
+    store: &StoreHint,
     hr: HRESULT,
     sdk_msg: &str,
     budget: Duration,
-) -> ScriptResponse {
+) -> WslcStepError {
     let sanitized = sanitize_sdk_message(sdk_msg);
     let detail = if sanitized.is_empty() {
         format!("HRESULT 0x{:08X}", hr as u32)
@@ -376,7 +438,7 @@ fn pull_failure(
             budget.as_secs(),
             PULL_TIMEOUT_ENV,
             image,
-            storage_arg(storage_path),
+            store.warm_instruction(),
         )),
         WSLC_E_IMAGE_NOT_FOUND => WslcError::Rejected(format!(
             "WSLC image '{}' could not be pulled: {}. Check the image name and tag. \
@@ -402,10 +464,11 @@ fn pull_failure(
             image,
             detail,
             image,
-            storage_arg(storage_path),
+            store.warm_instruction(),
         )),
     }
-    .into_response()
+    .into_step_error()
+    .with_api_failure(sdk_api_failure("WslcPullSessionImage", hr))
 }
 
 /// Longest run of registry-supplied text kept in a user-facing message.
@@ -427,12 +490,45 @@ fn sanitize_sdk_message(sdk_msg: &str) -> String {
     }
 }
 
-/// Render a storage-path override as a `--storage-path` argument for the
-/// suggested command, or nothing when the run uses the default path.
-fn storage_arg(storage_path: Option<&str>) -> String {
-    match storage_path {
-        None => String::new(),
-        Some(sp) => format!(" --storage-path \"{}\"", sp),
+/// Which store a resolution is reading, so a failure can name the command that
+/// warms *that* store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreHint {
+    /// The create-and-run store, carrying any `wslc.storagePath` override.
+    CreateAndRun(Option<String>),
+
+    /// Store slot `index` of the container-lifecycle pool.
+    DaemonSlot(usize),
+}
+
+impl StoreHint {
+    /// The store directory this names.
+    fn store_path(&self) -> String {
+        match self {
+            StoreHint::CreateAndRun(Some(path)) => path.clone(),
+            StoreHint::CreateAndRun(None) => std::env::temp_dir()
+                .join("mxc-wslc-sessions")
+                .to_string_lossy()
+                .to_string(),
+            StoreHint::DaemonSlot(index) => {
+                store_slots::slot_path(*index).to_string_lossy().to_string()
+            }
+        }
+    }
+
+    /// The arguments that point `--setup-wslc` at this store, naming the
+    /// directory when the arguments leave it to be re-resolved from the
+    /// environment of whoever runs them.
+    fn warm_instruction(&self) -> String {
+        match self {
+            StoreHint::CreateAndRun(Some(path)) => format!(" --storage-path \"{}\"", path),
+            StoreHint::CreateAndRun(None) => format!(" (which fills {})", self.store_path()),
+            StoreHint::DaemonSlot(index) => format!(
+                " --wslc-daemon-slots {} (which fills {})",
+                index + 1,
+                self.store_path()
+            ),
+        }
     }
 }
 
@@ -514,14 +610,13 @@ fn detect_tar_format(path: &str) -> std::io::Result<TarFormat> {
 ///
 /// Supports both rootfs tars (`docker export`) and Docker image archives
 /// (`docker save`). The format is auto-detected via `detect_tar_format`.
-/// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
 pub(crate) unsafe fn import_image_from_tar(
     sdk: &WslcSdk,
     session: WslcSession,
     image_name: &str,
     tar_path: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     let path = std::path::Path::new(tar_path);
     if !path.exists() {
         return Err(WslcError::Rejected(format!(
@@ -529,7 +624,7 @@ pub(crate) unsafe fn import_image_from_tar(
              (via 'docker export') or Docker image archive (via 'docker save').",
             tar_path
         ))
-        .into_response());
+        .into_step_error());
     }
 
     // Resolve to absolute path, following symlinks. Fall back to the
@@ -544,7 +639,7 @@ pub(crate) unsafe fn import_image_from_tar(
                 "Failed to read tar file '{}': {}",
                 tar_path, e
             ))
-            .into_response());
+            .into_step_error());
         }
     };
     let wide_path: Vec<u16> = to_wide(&tar_path);
@@ -569,7 +664,8 @@ pub(crate) unsafe fn import_image_from_tar(
             );
             if hr != S_OK {
                 let msg = err_msg.to_string_lossy();
-                return Err(sdk_error(
+                return Err(sdk_step_error_with_context(
+                    "WslcLoadSessionImageFromFile",
                     &format!("Failed to load Docker image archive from '{}'", tar_path),
                     hr,
                     &msg,
@@ -607,7 +703,8 @@ pub(crate) unsafe fn import_image_from_tar(
             );
             if hr != S_OK {
                 let msg = err_msg.to_string_lossy();
-                return Err(sdk_error(
+                return Err(sdk_step_error_with_context(
+                    "WslcImportSessionImageFromFile",
                     &format!("Failed to import image '{}' from tar", image_name),
                     hr,
                     &msg,
@@ -625,7 +722,7 @@ pub(crate) unsafe fn import_image_from_tar(
                  (via 'docker export') or a Docker image archive (via 'docker save').",
                 tar_path
             ))
-            .into_response());
+            .into_step_error());
         }
     }
 
@@ -666,11 +763,11 @@ pub unsafe fn begin_resolve(
     session: WslcSession,
     image: &str,
     image_tar_path: Option<&str>,
-    storage_path: Option<&str>,
+    store: &StoreHint,
     registry: RegistryAccess,
     log_prefix: &str,
     logger: &mut Logger,
-) -> Result<ImageStep, ScriptResponse> {
+) -> Result<ImageStep, WslcStepError> {
     let cached = list_cached_images(sdk, session)?;
     let matched = cached.iter().find(|entry| entry.satisfies(image));
     let policy = registry_policy::get_policy();
@@ -711,21 +808,36 @@ pub unsafe fn begin_resolve(
         }
         ImageAction::Pull => Ok(ImageStep::Pull),
         ImageAction::RefuseByPolicy => {
-            Err(WslcError::Rejected(policy.refusal(image)).into_response())
+            Err(WslcError::Rejected(policy.refusal(image)).into_step_error())
         }
-        ImageAction::RefuseNoEgress => Err(WslcError::Rejected(format!(
-            "WSLC image '{}' is not cached, and this sandbox declares no egress. \
-             Pulling it would reach the registry on the host's network, before the \
-             container exists and outside the policy the request declares. Warm the \
-             cache first with wxc-exec.exe --setup-wslc --image {}{}, set \
-             wslc.imageTarPath to a local tar, or allow egress. \
-             See docs/backends/wslc/wsl-container-getting-started.md.",
-            image,
-            image,
-            storage_arg(storage_path),
-        ))
-        .into_response()),
+        ImageAction::RefuseNoEgress => Err(no_egress_refusal(image, store)),
     }
+}
+
+fn no_egress_refusal(image: &str, store: &StoreHint) -> WslcStepError {
+    if let StoreHint::DaemonSlot(index) = store {
+        return WslcError::Rejected(format!(
+            "WSLC isolated provision refused: daemon image store slot {index} at '{}' is cold \
+             for image '{image}'. No container was created. Release the session or let it \
+             expire before warming this store with wxc-exec.exe --setup-wslc --image {image}{}. \
+             Alternatively, import a local tar with wslc.provision.imageTarPath or allow egress.",
+            store.store_path(),
+            store.warm_instruction(),
+        ))
+        .into_step_error();
+    }
+    WslcError::Rejected(format!(
+        "WSLC image '{}' is not cached, and this sandbox declares no egress. \
+         Pulling it would reach the registry on the host's network, before the \
+         container exists and outside the policy the request declares. Warm the \
+         cache first with wxc-exec.exe --setup-wslc --image {}{}, set \
+         wslc.imageTarPath to a local tar, or allow egress. \
+         See docs/backends/wslc/wsl-container-getting-started.md.",
+        image,
+        image,
+        store.warm_instruction(),
+    ))
+    .into_step_error()
 }
 
 /// Record which content a completed pull produced.
@@ -742,7 +854,7 @@ pub unsafe fn report_pulled_digest(
     image: &str,
     log_prefix: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     if let Some(entry) = list_cached_images(sdk, session)?
         .iter()
         .find(|entry| entry.satisfies(image))
@@ -775,17 +887,17 @@ pub unsafe fn resolve_image(
     session: WslcSession,
     image: &str,
     image_tar_path: Option<&str>,
-    storage_path: Option<&str>,
+    store: &StoreHint,
     registry: RegistryAccess,
     log_prefix: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     match begin_resolve(
         sdk,
         session,
         image,
         image_tar_path,
-        storage_path,
+        store,
         registry,
         log_prefix,
         logger,
@@ -796,16 +908,9 @@ pub unsafe fn resolve_image(
             // deadline cannot fire on a registry that sends no further chunk.
             let budget = pull_budget();
             let (done, finished) = std::sync::mpsc::channel();
-            start_pull(
-                sdk,
-                session,
-                image,
-                storage_path,
-                log_prefix,
-                move |outcome| {
-                    let _ = done.send(outcome);
-                },
-            )?;
+            start_pull(sdk, session, image, store, log_prefix, move |outcome| {
+                let _ = done.send(outcome);
+            })?;
 
             match finished.recv_timeout(budget) {
                 Ok(outcome) => outcome?,
@@ -816,13 +921,7 @@ pub unsafe fn resolve_image(
     }
 }
 
-/// An image the session's store already holds.
-pub struct CachedImage {
-    name: String,
-    sha256: [u8; 32],
-}
-
-impl CachedImage {
+impl StoredImage {
     /// Whether this entry satisfies a request for `requested`.
     ///
     /// A reference pinning a digest never does. The store reports the config
@@ -859,36 +958,9 @@ fn digest_of(reference: &str) -> Option<&str> {
 unsafe fn list_cached_images(
     sdk: &WslcSdk,
     session: WslcSession,
-) -> Result<Vec<CachedImage>, ScriptResponse> {
-    let mut images: *mut WslcImageInfo = ptr::null_mut();
-    let mut image_count: u32 = 0;
-    let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
-    if hr != S_OK {
-        return Err(sdk_error("WslcListSessionImages failed", hr, ""));
-    }
-    if images.is_null() {
-        return Ok(Vec::new());
-    }
-
-    let mut cached = Vec::with_capacity(image_count as usize);
-    for info in std::slice::from_raw_parts(images, image_count as usize) {
-        // `info.name` is a fixed-size, possibly-unterminated C buffer; read up
-        // to the first NUL, or the whole buffer if there is none.
-        let name_bytes =
-            std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-        let end = name_bytes
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_bytes.len());
-        if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-            cached.push(CachedImage {
-                name: name.to_string(),
-                sha256: info.sha256,
-            });
-        }
-    }
-    windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
-    Ok(cached)
+) -> Result<Vec<StoredImage>, WslcStepError> {
+    container_steps::list_stored_images(sdk, session)
+        .map_err(|hr| sdk_step_error("WslcListSessionImages", hr, ""))
 }
 
 /// How `resolve_image` satisfies the request once the cache has been consulted.
@@ -943,15 +1015,25 @@ fn with_implicit_tag(name: &str) -> String {
     }
 }
 
-/// Warm a storage path's image cache with `image_name` and release the session,
-/// backing `wxc-exec.exe --setup-wslc`.
+/// Warm the create-and-run store's image cache with `images`, and the first
+/// `daemon_slots` container-lifecycle store slots with them too, backing
+/// `wxc-exec.exe --setup-wslc`.
+///
+/// Each store is opened once and filled with every image, so warming M images
+/// across N slots costs N+1 sessions rather than M×(N+1).
+///
+/// The lifecycle daemon leases its store from a separate pool, so warming the
+/// create-and-run store does not warm the daemon's. A slot that has never been
+/// leased holds no images at all, and an uncached image under the default
+/// deny-egress posture is refused before the VM is reached.
 ///
 /// # Safety
 /// Must be called once per process before any other WSLC SDK functions
 /// (it initialises COM via `init_and_load_sdk`).
 pub unsafe fn setup_pull_image(
-    image_name: &str,
+    images: &[&str],
     storage_path: Option<&str>,
+    daemon_slots: usize,
     logger: &mut Logger,
 ) -> Result<(), String> {
     let sdk = match sdk_init::init_and_load_sdk(logger) {
@@ -959,12 +1041,94 @@ pub unsafe fn setup_pull_image(
         Err(resp) => return Err(resp.error_message),
     };
 
-    let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
-        std::env::temp_dir()
-            .join("mxc-wslc-sessions")
-            .to_string_lossy()
-            .to_string()
-    });
+    let mut targets = vec![StoreHint::CreateAndRun(storage_path.map(str::to_string))];
+    targets.extend((0..daemon_slots).map(StoreHint::DaemonSlot));
+
+    warm_each(&targets, |target| {
+        if let StoreHint::DaemonSlot(index) = target {
+            let slot = store_slots::slot_path(*index);
+            std::fs::create_dir_all(&slot).map_err(|e| {
+                format!(
+                    "could not create the WSLc store slot at {}: {e}",
+                    slot.display()
+                )
+            })?;
+        }
+        warm_store(sdk, images, target, logger)
+    })
+}
+
+/// Warm every target, reporting what failed rather than stopping at the first.
+///
+/// The create-and-run store and the lifecycle slots are independent, so one
+/// being held says nothing about whether the others can be filled.
+fn warm_each(
+    targets: &[StoreHint],
+    mut warm: impl FnMut(&StoreHint) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+
+    for target in targets {
+        if let Err(e) = warm(target) {
+            failures.push(match target {
+                StoreHint::CreateAndRun(_) => e,
+                StoreHint::DaemonSlot(index) => format!("daemon store slot {index}: {e}"),
+            });
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// What one warm attempt leaves behind.
+enum PullStep {
+    /// The image landed, or failed in a way that leaves the session usable.
+    Continue(Result<(), String>),
+
+    /// The pull was abandoned and may still be writing into the session, so
+    /// nothing further may be pulled on it.
+    Abandoned(String),
+}
+
+/// Pull every image on one session, stopping only once the session is no longer
+/// usable.
+fn pull_each(images: &[&str], mut pull: impl FnMut(&str) -> PullStep) -> Result<(), String> {
+    let mut failures = Vec::new();
+
+    for image in images {
+        match pull(image) {
+            PullStep::Continue(Ok(())) => {}
+            PullStep::Continue(Err(e)) => failures.push(e),
+            PullStep::Abandoned(e) => {
+                failures.push(e);
+                break;
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// Pull `images` into the store `store` names, on one session.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and COM must be initialised on this
+/// thread.
+unsafe fn warm_store(
+    sdk: &'static WslcSdk,
+    images: &[&str],
+    store: &StoreHint,
+    logger: &mut Logger,
+) -> Result<(), String> {
+    let storage_path_str = store.store_path();
     let session_name: Vec<u16> = to_wide("mxc-setup-wslc");
     let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
 
@@ -997,32 +1161,41 @@ pub unsafe fn setup_pull_image(
         sdk.release_session_fn(),
     );
 
-    let _ = writeln!(logger, "[WSLC setup] Target store: {}", storage_path_str);
-    let budget = pull_budget();
-    let (done, finished) = std::sync::mpsc::channel();
-    start_pull(
-        sdk,
-        session,
-        image_name,
-        storage_path,
-        "[WSLC setup]",
-        move |outcome| {
-            let _ = done.send(outcome);
-        },
-    )
-    .map_err(|resp| resp.error_message)?;
-
-    match finished.recv_timeout(budget) {
-        Ok(outcome) => outcome.map_err(|resp| resp.error_message),
-        Err(_) => {
-            // Leak the session if the pull never drained: dropping the guard
-            // closes a session the SDK is still writing into.
-            if !wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
-                std::mem::forget(session_guard);
-            }
-            Err(pull_deadline_expired(image_name, budget).error_message)
-        }
+    // A slot admits one live session, and a conflict is invisible until the
+    // store is touched, so a held slot would otherwise surface partway through
+    // the pull.
+    if matches!(store, StoreHint::DaemonSlot(_)) {
+        validate_store_access(sdk, session, &storage_path_str)
+            .map_err(|resp| resp.error_message)?;
     }
+
+    let _ = writeln!(logger, "[WSLC setup] Target store: {}", storage_path_str);
+
+    // Taken when a pull is abandoned, so the session is leaked rather than
+    // released.
+    let mut session_guard = Some(session_guard);
+
+    pull_each(images, |image| {
+        let budget = pull_budget();
+        let (done, finished) = std::sync::mpsc::channel();
+        if let Err(resp) = start_pull(sdk, session, image, store, "[WSLC setup]", move |outcome| {
+            let _ = done.send(outcome);
+        }) {
+            return PullStep::Continue(Err(resp.error_message));
+        }
+
+        match finished.recv_timeout(budget) {
+            Ok(outcome) => PullStep::Continue(outcome.map_err(|resp| resp.error_message)),
+            Err(_) => {
+                if !wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+                    if let Some(guard) = session_guard.take() {
+                        std::mem::forget(guard);
+                    }
+                }
+                PullStep::Abandoned(pull_deadline_expired(image, budget).error_message)
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1035,13 +1208,8 @@ mod tests {
     const E_FAIL: HRESULT = -2147467259;
 
     /// `pull_failure` at the production budget, which most cases do not care about.
-    fn failure(
-        image: &str,
-        storage_path: Option<&str>,
-        hr: HRESULT,
-        sdk_msg: &str,
-    ) -> ScriptResponse {
-        pull_failure(image, storage_path, hr, sdk_msg, PULL_TIMEOUT)
+    fn failure(image: &str, store: &StoreHint, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
+        pull_failure(image, store, hr, sdk_msg, PULL_TIMEOUT)
     }
 
     #[test]
@@ -1089,7 +1257,7 @@ mod tests {
     fn an_abort_is_reported_as_a_budget_overrun_not_a_registry_failure() {
         let resp = pull_failure(
             "alpine:latest",
-            None,
+            &StoreHint::CreateAndRun(None),
             E_ABORT,
             "operation aborted",
             Duration::from_secs(90),
@@ -1122,8 +1290,8 @@ mod tests {
         );
     }
 
-    fn cached(name: &str) -> CachedImage {
-        CachedImage {
+    fn cached(name: &str) -> StoredImage {
+        StoredImage {
             name: name.to_string(),
             sha256: [0u8; 32],
         }
@@ -1214,6 +1382,9 @@ mod tests {
             "a state-aware operator needs the coupled deadline: {}",
             resp.error_message
         );
+        let api_failure = resp.api_failure.as_deref().expect("pull operation");
+        assert_eq!(api_failure.operation, "WslcPullSessionImage");
+        assert!(api_failure.native_code.is_none());
     }
 
     #[test]
@@ -1221,7 +1392,7 @@ mod tests {
         let mut sha = [0u8; 32];
         sha[0] = 0x0e;
         sha[31] = 0xff;
-        let hex = CachedImage {
+        let hex = StoredImage {
             name: "x".to_string(),
             sha256: sha,
         }
@@ -1369,15 +1540,23 @@ mod tests {
 
     #[test]
     fn a_refused_reference_is_not_worth_retrying() {
-        let resp = failure("ghcr.io/nope:1", None, WSLC_E_IMAGE_NOT_FOUND, "denied");
+        let resp = failure(
+            "ghcr.io/nope:1",
+            &StoreHint::CreateAndRun(None),
+            WSLC_E_IMAGE_NOT_FOUND,
+            "denied",
+        );
         assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        let api_failure = resp.api_failure.as_deref().expect("pull operation");
+        assert_eq!(api_failure.operation, "WslcPullSessionImage");
+        assert_eq!(api_failure.native_code.as_deref(), Some("0x80040601"));
     }
 
     #[test]
     fn a_blocked_registry_is_not_worth_retrying() {
         let resp = failure(
             "ghcr.io/nope:1",
-            None,
+            &StoreHint::CreateAndRun(None),
             WSLC_E_REGISTRY_BLOCKED_BY_POLICY,
             "blocked",
         );
@@ -1386,13 +1565,23 @@ mod tests {
 
     #[test]
     fn an_unreachable_registry_is_retryable() {
-        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            "no such host",
+        );
         assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
     }
 
     #[test]
     fn an_unreachable_registry_says_how_to_work_offline() {
-        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            "no such host",
+        );
         assert!(resp.error_message.contains("retry once it is available"));
         assert!(resp.error_message.contains("imageTarPath"));
     }
@@ -1401,7 +1590,12 @@ mod tests {
     fn an_unrecognised_failure_does_not_diagnose_the_network() {
         // A full disk reaches this arm too, so the wording offers the network
         // as one possibility rather than asserting it.
-        let resp = failure("alpine:latest", None, E_FAIL, "no space left on device");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            "no space left on device",
+        );
         assert!(
             resp.error_message
                 .contains("If the registry was unreachable"),
@@ -1413,7 +1607,12 @@ mod tests {
     #[test]
     fn registry_text_cannot_smuggle_control_characters() {
         let hostile = "denied\u{1b}[2Jcleared\u{7}\nnext";
-        let resp = failure("alpine:latest", None, E_FAIL, hostile);
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            hostile,
+        );
         assert!(!resp.error_message.contains('\u{1b}'));
         assert!(!resp.error_message.contains('\u{7}'));
         assert!(!resp.error_message.contains('\n'));
@@ -1423,7 +1622,12 @@ mod tests {
     #[test]
     fn registry_text_is_capped() {
         let flood = "x".repeat(5_000);
-        let resp = failure("alpine:latest", None, E_FAIL, &flood);
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            &flood,
+        );
         assert!(resp.error_message.contains('…'));
         assert!(
             resp.error_message.len() < 1_500,
@@ -1436,14 +1640,24 @@ mod tests {
     fn a_multibyte_registry_message_is_cut_on_a_character_boundary() {
         // Slicing by byte offset here would panic mid-character.
         let flood = "é".repeat(5_000);
-        let resp = failure("alpine:latest", None, E_FAIL, &flood);
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            &flood,
+        );
         assert!(resp.error_message.contains('…'));
     }
 
     #[test]
     fn an_unreachable_registry_does_not_prescribe_the_pull_that_just_failed() {
         // `--setup-wslc` shares `pull_image`, so it fails the same way here.
-        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            "no such host",
+        );
         let advice = &resp.error_message;
         let setup = advice
             .find("--setup-wslc")
@@ -1459,20 +1673,210 @@ mod tests {
 
     #[test]
     fn an_overridden_store_travels_with_the_suggested_command() {
-        let resp = failure("alpine:latest", Some(r"C:\store"), E_FAIL, "down");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(Some(r"C:\store".to_string())),
+            E_FAIL,
+            "down",
+        );
         assert!(resp.error_message.contains(r#"--storage-path "C:\store""#));
     }
 
     #[test]
-    fn a_default_store_adds_no_path_argument() {
-        let resp = failure("alpine:latest", None, E_FAIL, "down");
+    fn a_default_store_names_its_directory_without_a_path_argument() {
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            E_FAIL,
+            "down",
+        );
         assert!(!resp.error_message.contains("--storage-path"));
+        assert!(
+            resp.error_message
+                .contains(&StoreHint::CreateAndRun(None).store_path()),
+            "a reader whose TEMP differs warms a different store unless the \
+             default is named: {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn a_lifecycle_store_is_warmed_by_slot_rather_than_by_path() {
+        let resp = failure("alpine:latest", &StoreHint::DaemonSlot(0), E_FAIL, "down");
+
+        assert!(
+            resp.error_message.contains("--wslc-daemon-slots 1"),
+            "the daemon leases its own store, so --storage-path would warm the \
+             wrong one: {}",
+            resp.error_message
+        );
+        assert!(!resp.error_message.contains("--storage-path"));
+    }
+
+    #[test]
+    fn an_uncached_image_without_egress_names_the_store_it_needs_warmed() {
+        let create_and_run = no_egress_refusal("alpine:latest", &StoreHint::CreateAndRun(None));
+        assert!(!create_and_run.error_message.contains("--wslc-daemon-slots"));
+
+        let lifecycle = no_egress_refusal("alpine:latest", &StoreHint::DaemonSlot(0));
+
+        assert!(
+            lifecycle.error_message.contains("--wslc-daemon-slots 1"),
+            "a lifecycle caller sent to warm the create-and-run store retries \
+             against the same cold slot: {}",
+            lifecycle.error_message
+        );
+    }
+
+    #[test]
+    fn an_isolated_provision_names_the_selected_cold_store_and_how_to_warm_it() {
+        let refusal = no_egress_refusal("alpine:latest", &StoreHint::DaemonSlot(1));
+        let message = &refusal.error_message;
+        assert_eq!(
+            refusal.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(message.contains("daemon image store slot 1"));
+        assert!(message.contains(store_slots::slot_path(1).to_string_lossy().as_ref()));
+        assert!(message.contains("cold for image 'alpine:latest'"));
+        assert!(message.contains("No container was created"));
+        assert!(message.contains("--wslc-daemon-slots 2"));
+        assert!(message.contains("wslc.provision.imageTarPath"));
+    }
+
+    #[test]
+    fn a_higher_slot_asks_for_enough_slots_to_reach_it() {
+        let instruction = StoreHint::DaemonSlot(2).warm_instruction();
+        assert!(
+            instruction.starts_with(" --wslc-daemon-slots 3"),
+            "warming is counted from slot 0, so reaching slot 2 takes 3 slots: \
+             {instruction}"
+        );
+    }
+
+    #[test]
+    fn a_slot_remediation_names_the_store_it_fills() {
+        let slot = StoreHint::DaemonSlot(1);
+        let instruction = slot.warm_instruction();
+
+        assert!(
+            instruction.contains(&slot.store_path()),
+            "--wslc-daemon-slots re-resolves the pool from the environment of \
+             whoever runs it, so a remediation that does not name the store can \
+             warm a different one: {instruction}"
+        );
+    }
+
+    #[test]
+    fn a_busy_create_and_run_store_still_lets_the_slots_warm() {
+        let targets = [
+            StoreHint::CreateAndRun(None),
+            StoreHint::DaemonSlot(0),
+            StoreHint::DaemonSlot(1),
+        ];
+        let mut warmed = Vec::new();
+
+        let outcome = warm_each(&targets, |target| match target {
+            StoreHint::CreateAndRun(_) => Err("store is held".to_string()),
+            StoreHint::DaemonSlot(index) => {
+                warmed.push(*index);
+                Ok(())
+            }
+        });
+
+        assert_eq!(
+            warmed,
+            [0, 1],
+            "the two stores are independent, so a held create-and-run store \
+             must not leave a free lifecycle slot cold"
+        );
+        assert_eq!(
+            outcome,
+            Err("store is held".to_string()),
+            "an unreachable store is still a failure, not a silent skip"
+        );
+    }
+
+    #[test]
+    fn every_store_that_failed_is_named() {
+        let targets = [StoreHint::CreateAndRun(None), StoreHint::DaemonSlot(1)];
+
+        let outcome = warm_each(&targets, |target| match target {
+            StoreHint::CreateAndRun(_) => Err("temp store is held".to_string()),
+            StoreHint::DaemonSlot(_) => Err("slot is held".to_string()),
+        });
+
+        assert_eq!(
+            outcome,
+            Err("temp store is held; daemon store slot 1: slot is held".to_string())
+        );
+    }
+
+    #[test]
+    fn warming_every_store_reports_success() {
+        let targets = [StoreHint::CreateAndRun(None), StoreHint::DaemonSlot(0)];
+
+        assert_eq!(warm_each(&targets, |_| Ok(())), Ok(()));
+    }
+
+    #[test]
+    fn one_image_failing_still_pulls_the_rest() {
+        let mut attempted = Vec::new();
+
+        let outcome = pull_each(&["alpine:latest", "nope:1", "python:3"], |image| {
+            attempted.push(image.to_string());
+            if image == "nope:1" {
+                PullStep::Continue(Err("not found".to_string()))
+            } else {
+                PullStep::Continue(Ok(()))
+            }
+        });
+
+        assert_eq!(attempted, ["alpine:latest", "nope:1", "python:3"]);
+        assert_eq!(outcome, Err("not found".to_string()));
+    }
+
+    #[test]
+    fn an_abandoned_pull_stops_the_rest() {
+        let mut attempted = Vec::new();
+
+        let outcome = pull_each(&["alpine:latest", "slow:1", "python:3"], |image| {
+            attempted.push(image.to_string());
+            if image == "slow:1" {
+                PullStep::Abandoned("gave up".to_string())
+            } else {
+                PullStep::Continue(Ok(()))
+            }
+        });
+
+        assert_eq!(
+            attempted,
+            ["alpine:latest", "slow:1"],
+            "an abandoned pull may still be writing into the session, so nothing \
+             further may be pulled on it"
+        );
+        assert_eq!(outcome, Err("gave up".to_string()));
+    }
+
+    #[test]
+    fn pulling_every_image_reports_success() {
+        assert_eq!(
+            pull_each(&["alpine:latest", "python:3"], |_| PullStep::Continue(Ok(
+                ()
+            ))),
+            Ok(())
+        );
     }
 
     #[test]
     fn every_rejection_names_a_way_forward() {
         for hr in [WSLC_E_IMAGE_NOT_FOUND, WSLC_E_REGISTRY_BLOCKED_BY_POLICY] {
-            let resp = failure("ghcr.io/nope:1", None, hr, "denied");
+            let resp = failure(
+                "ghcr.io/nope:1",
+                &StoreHint::CreateAndRun(None),
+                hr,
+                "denied",
+            );
             assert!(
                 resp.error_message.contains("imageTarPath"),
                 "a rejection that only diagnoses leaves the caller stuck: {}",
@@ -1483,7 +1887,12 @@ mod tests {
 
     #[test]
     fn a_failure_without_an_sdk_message_still_reports_the_code() {
-        let resp = failure("alpine:latest", None, WSLC_E_IMAGE_NOT_FOUND, "");
+        let resp = failure(
+            "alpine:latest",
+            &StoreHint::CreateAndRun(None),
+            WSLC_E_IMAGE_NOT_FOUND,
+            "",
+        );
         assert!(resp.error_message.contains("0x80040601"));
     }
 

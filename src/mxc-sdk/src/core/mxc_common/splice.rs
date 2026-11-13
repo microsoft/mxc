@@ -164,20 +164,20 @@ impl CommandSource<'_> {
     pub(crate) fn splice_lifecycle_routing(
         &self,
         phase: &str,
-        sandbox_id: Option<&str>,
+        target_id: Option<(&str, &str)>,
     ) -> Option<String> {
         let phase = serde_json::to_string(phase).ok()?;
         let phase_member = format!(r#""phase":{phase}"#);
         let with_phase = insert_member(self.json, &self.root, &phase_member)?;
 
-        let Some(sandbox_id) = sandbox_id else {
+        let Some((member, id)) = target_id else {
             return Some(with_phase);
         };
 
-        let sandbox_id = serde_json::to_string(sandbox_id).ok()?;
-        let sandbox_id_member = format!(r#""sandboxId":{sandbox_id}"#);
+        let id = serde_json::to_string(id).ok()?;
+        let id_member = format!(r#""{member}":{id}"#);
         let root: RawObject<'_> = serde_json::from_str(&with_phase).ok()?;
-        insert_member(&with_phase, &root, &sandbox_id_member)
+        insert_member(&with_phase, &root, &id_member)
     }
 
     pub(crate) fn splice_command(&self, command: &str) -> Option<Spliced> {
@@ -245,7 +245,7 @@ mod tests {
     fn lifecycle_routing_is_added_without_removing_existing_members() {
         let source = CommandSource::parse(r#"{"version":"0.9.0-alpha"}"#).unwrap();
         let spliced = source
-            .splice_lifecycle_routing("start", Some("iso:abcd"))
+            .splice_lifecycle_routing("start", Some(("sandboxId", "iso:abcd")))
             .unwrap();
 
         assert_eq!(
@@ -265,11 +265,31 @@ mod tests {
         )
         .unwrap();
         let spliced = source
-            .splice_lifecycle_routing("start", Some("iso:new"))
+            .splice_lifecycle_routing("start", Some(("sandboxId", "iso:new")))
             .unwrap();
 
         assert_eq!(spliced.matches(r#""phase""#).count(), 2);
         assert_eq!(spliced.matches(r#""sandboxId""#).count(), 2);
+    }
+
+    #[test]
+    fn lifecycle_routing_carries_a_session_id_in_its_own_member() {
+        let source = CommandSource::parse(r#"{"version":"1.1.0-alpha"}"#).unwrap();
+        let spliced = source
+            .splice_lifecycle_routing(
+                "deprovision-session",
+                Some(("sessionId", "wslcsess:0123456789abcdef0123456789abcdef")),
+            )
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&spliced).unwrap(),
+            serde_json::json!({
+                "version": "1.1.0-alpha",
+                "phase": "deprovision-session",
+                "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+            })
+        );
     }
 
     #[test]

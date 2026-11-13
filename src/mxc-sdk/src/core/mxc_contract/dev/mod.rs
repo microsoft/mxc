@@ -219,6 +219,7 @@ string_enum! {
 }
 
 mod experimental;
+mod microvm;
 mod network;
 /// The development `1.1.0-alpha` one-shot configuration contract.
 mod one_shot;
@@ -236,8 +237,8 @@ pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,
 };
-pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
-pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
+pub use one_shot::{Containment as OneShotContainment, OneShotMicroVm, Request as OneShotRequest};
+pub use primitives::{ImageReference, NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;
@@ -245,19 +246,29 @@ pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, Lifecycle, Lxc, Process,
     ProcessContainer, ProcessContainerCapability, ProcessContainerFilesystem,
     ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation,
-    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, Telemetry, Ui, UiClipboard,
+    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, SeatbeltCaptureDenials, Telemetry,
+    Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};
 pub use state_aware::{DeprovisionPhase, DeprovisionRequest};
+pub use state_aware::{DeprovisionSessionPhase, WslcDeprovisionSessionRequest};
 pub use state_aware::{ExecPhase, ExecRequest};
 pub use state_aware::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
+pub use state_aware::{
+    ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
+};
 pub use state_aware::{StartPhase, StartRequest};
+pub use state_aware::{
+    StateAwareW365AgentsProvision, W365AgentsContainment, W365AgentsGuid, W365AgentsProvision,
+    W365AgentsProvisionRequest, W365AgentsUserType,
+};
 pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use state_aware::{StopPhase, StopRequest};
 pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

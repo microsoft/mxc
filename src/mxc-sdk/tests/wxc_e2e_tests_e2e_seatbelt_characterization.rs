@@ -13,7 +13,7 @@
 //! policy path. If they turn RED, the env/cwd model has drifted.
 //!
 //! They run in the existing macOS CI job (`cargo test --target
-//! aarch64-apple-darwin`) with no extra infrastructure: `sandbox-exec` needs no
+//! aarch64-apple-darwin`) with no extra infrastructure: `sandbox_init` needs no
 //! elevation. Each test skips cleanly if `mxc-exec-mac` has not been built.
 #![cfg(target_os = "macos")]
 

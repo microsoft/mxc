@@ -5,5 +5,8 @@
         "commandLine": "raise ValueError('intentional test error')",
         "timeout": 30000
     },
-    "containment": "microvm"
+    "containment": "microvm",
+    "microvm": {
+        "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+    }
 }

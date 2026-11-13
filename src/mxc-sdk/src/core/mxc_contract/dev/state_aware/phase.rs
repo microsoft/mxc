@@ -4,6 +4,8 @@
 /// Lifecycle phase declared by a state-aware configuration request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
+    ProvisionSession,
+
     /// Provision a new sandbox.
     Provision,
     /// Start a provisioned sandbox.
@@ -14,17 +16,20 @@ pub enum Phase {
     Stop,
     /// Release a provisioned sandbox and its resources.
     Deprovision,
+    DeprovisionSession,
 }
 
 impl Phase {
     /// Returns the exact registered spelling of this phase.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Phase::ProvisionSession => "provision-session",
             Phase::Provision => "provision",
             Phase::Start => "start",
             Phase::Exec => "exec",
             Phase::Stop => "stop",
             Phase::Deprovision => "deprovision",
+            Phase::DeprovisionSession => "deprovision-session",
         }
     }
 
@@ -33,11 +38,13 @@ impl Phase {
     /// Returns `None` when `value` is not an exact supported spelling.
     pub fn parse_exact(value: &str) -> Option<Self> {
         match value {
+            "provision-session" => Some(Phase::ProvisionSession),
             "provision" => Some(Phase::Provision),
             "start" => Some(Phase::Start),
             "exec" => Some(Phase::Exec),
             "stop" => Some(Phase::Stop),
             "deprovision" => Some(Phase::Deprovision),
+            "deprovision-session" => Some(Phase::DeprovisionSession),
             _ => None,
         }
     }
@@ -137,6 +144,50 @@ mod tests {
         let json = r#"{"phase": "deprovision"}"#;
         let phase = probe_phase(json).unwrap();
         assert_eq!(phase.unwrap().as_str(), "deprovision");
+    }
+
+    #[test]
+    fn probe_accepts_both_session_phases() {
+        for (json, expected) in [
+            (r#"{"phase": "provision-session"}"#, Phase::ProvisionSession),
+            (
+                r#"{"phase": "deprovision-session"}"#,
+                Phase::DeprovisionSession,
+            ),
+        ] {
+            assert_eq!(probe_phase(json).unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn probe_keeps_the_sandbox_phases_distinct_from_the_session_phases() {
+        assert_eq!(
+            probe_phase(r#"{"phase": "provision"}"#).unwrap(),
+            Some(Phase::Provision)
+        );
+        assert_eq!(
+            probe_phase(r#"{"phase": "deprovision"}"#).unwrap(),
+            Some(Phase::Deprovision)
+        );
+        assert!(matches!(
+            probe_phase(r#"{"phase": "provision-sessions"}"#),
+            Err(PhaseProbeError::UnsupportedPhase(_))
+        ));
+    }
+
+    #[test]
+    fn every_phase_round_trips_through_its_registered_spelling() {
+        for phase in [
+            Phase::ProvisionSession,
+            Phase::Provision,
+            Phase::Start,
+            Phase::Exec,
+            Phase::Stop,
+            Phase::Deprovision,
+            Phase::DeprovisionSession,
+        ] {
+            assert_eq!(Phase::parse_exact(phase.as_str()), Some(phase));
+        }
     }
 
     #[test]

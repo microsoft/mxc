@@ -32,9 +32,6 @@ $configJson = @"
         "readonlyPaths": $((ConvertTo-Json -InputObject @($gitRoot, $env:SystemRoot) -Compress)),
         "readwritePaths": []
     },
-    "fallback": {
-        "allowDaclMutation": true
-    },
     "ui": {
         "disable": false
     }

@@ -42,11 +42,12 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{PortMapping, ScriptResponse};
+use crate::mxc_common::mxc_error::ApiFailure;
 use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::wslc_common::daemon_protocol::ExecTerminal;
 
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::policy_mapping::VolumeMount;
 use crate::wslc_common::process_env::{self, EnvScope};
 use crate::wslc_common::sdk_init;
@@ -56,11 +57,119 @@ use crate::wslc_common::wslc_bindings::*;
 // Shared error helper
 // ---------------------------------------------------------------------------
 
+/// `ERROR_SHARING_VIOLATION`, which the SDK reports when a call reaches a store
+/// whose VHDX another live session already has mounted.
+const E_SHARING_VIOLATION: HRESULT = 0x8007_0020_u32 as HRESULT;
+
+/// VM/session boot budget, in milliseconds.
+///
+/// Deliberately independent of any per-command runtime deadline, so a short
+/// command timeout cannot abort a cold VM boot.
+pub const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
+
+/// How a session's WSL2 utility VM is sized.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionSizing {
+    /// Virtual CPUs, or `None` for the host default.
+    pub cpu_count: Option<u32>,
+
+    /// Memory in MB, or `None` for the host default.
+    pub memory_mb: Option<u64>,
+
+    /// Whether to enable GPU passthrough.
+    pub gpu: bool,
+}
+
+/// What the host has installed, rather than what is currently free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapacity {
+    /// Physical memory installed, in MB.
+    pub total_memory_mb: u64,
+
+    /// Logical processors the machine has.
+    pub logical_cpus: u32,
+}
+
+/// Read what this host has installed.
+fn host_capacity() -> Option<HostCapacity> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows::Win32::System::Threading::{GetActiveProcessorCount, ALL_PROCESSOR_GROUPS};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+
+    // SAFETY: `status` is a valid `MEMORYSTATUSEX` whose `dwLength` is set, as
+    // the API requires.
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+
+    // Every processor group, not just the caller's: `GetSystemInfo` reports one
+    // group and caps at 64, so a host with more would refuse a size it can run.
+    // A job object narrowing what mxc may run on does not narrow what the
+    // hypervisor can give a VM either.
+    let logical_cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+
+    Some(HostCapacity {
+        total_memory_mb: status.ullTotalPhys / (1024 * 1024),
+        logical_cpus,
+    })
+}
+
+/// Reject a session asking for more processors than the host has.
+///
+/// `memory_mb` is deliberately not checked: it is a ceiling the host backs on
+/// demand, so asking for more memory than is installed works.
+fn sizing_fits_host(sizing: SessionSizing, host: HostCapacity) -> Result<(), ScriptResponse> {
+    // The SDK reads `0` as "use the default" rather than as a size.
+    let Some(cpu_count) = sizing.cpu_count.filter(|cpus| *cpus > 0) else {
+        return Ok(());
+    };
+
+    if cpu_count > host.logical_cpus {
+        return Err(WslcError::Rejected(format!(
+            "cpu_count {cpu_count} exceeds the {} logical processors this host has; \
+             WSLc does not oversubscribe processors, though memory_mb may exceed \
+             installed memory because it is a ceiling rather than a reservation",
+            host.logical_cpus
+        ))
+        .into_response());
+    }
+
+    Ok(())
+}
+
+/// Reject a session sized past this host, when the host can be measured.
+///
+/// A host that cannot be measured is allowed through, since refusing real work
+/// over a failed diagnostic call would be the worse failure.
+pub fn check_sizing_against_host(sizing: SessionSizing) -> Result<(), ScriptResponse> {
+    match host_capacity() {
+        Some(host) => sizing_fits_host(sizing, host),
+        None => Ok(()),
+    }
+}
+
 /// Build a `ScriptResponse` error from an HRESULT failure with an optional
 /// SDK-provided message. Thin wrapper over [`WslcError::Sdk`], which owns the
 /// message formatting and the `LaunchFailed` phase attribution.
 pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
     WslcError::sdk(context, hr, sdk_msg).into_response()
+}
+
+pub(crate) fn sdk_step_error(operation: &str, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
+    sdk_step_error_with_context(operation, &format!("{operation} failed"), hr, sdk_msg)
+}
+
+pub(crate) fn sdk_step_error_with_context(
+    operation: &str,
+    context: &str,
+    hr: HRESULT,
+    sdk_msg: &str,
+) -> WslcStepError {
+    WslcError::sdk(context, hr, sdk_msg)
+        .into_step_error()
+        .with_api_failure(sdk_api_failure(operation, hr))
 }
 
 /// NUL-terminate `value` for a C string the WSLc SDK will read, rejecting an
@@ -136,6 +245,20 @@ pub enum OutStream {
 /// stalling teardown. Keep the two paths separate for those reasons; share only
 /// the leaf primitives ([`OutStream`], [`IoContext`]).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
+
+/// Takes a process's stdin write end once the process exists and returns
+/// control over it.
+pub type StdinConsumer =
+    Box<dyn FnOnce(std::fs::File) -> std::io::Result<Box<dyn StdinControl>> + Send>;
+
+/// Control over a process's stdin after a [`StdinConsumer`] has taken it.
+pub trait StdinControl: Send {
+    /// Stop giving the process input or end-of-file, leaving stdin open.
+    fn freeze(&self);
+
+    /// Close stdin now, dropping input not yet written.
+    fn close(self: Box<Self>);
+}
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
@@ -262,7 +385,7 @@ pub(crate) unsafe fn set_command_line_and_env(
     scope: EnvScope,
     env: &[String],
     script_code: &str,
-) -> Result<CommandLineBuffers, ScriptResponse> {
+) -> Result<CommandLineBuffers, WslcStepError> {
     let argv_cstrings = process_env::argv_words(scope, env, script_code)
         .iter()
         .map(|word| cstr_bytes("command", word))
@@ -270,7 +393,7 @@ pub(crate) unsafe fn set_command_line_and_env(
     let argv: Vec<PCSTR> = argv_cstrings.iter().map(|w| w.as_ptr() as PCSTR).collect();
     let hr = sdk.WslcSetProcessSettingsCmdLine(settings, argv.as_ptr(), argv.len());
     if hr != S_OK {
-        return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
+        return Err(sdk_step_error("WslcSetProcessSettingsCmdLine", hr, ""));
     }
 
     let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
@@ -283,11 +406,7 @@ pub(crate) unsafe fn set_command_line_and_env(
         let hr =
             sdk.WslcSetProcessSettingsEnvVariables(settings, env_ptrs.as_ptr(), env_ptrs.len());
         if hr != S_OK {
-            return Err(sdk_error(
-                "WslcSetProcessSettingsEnvVariables failed",
-                hr,
-                "",
-            ));
+            return Err(sdk_step_error("WslcSetProcessSettingsEnvVariables", hr, ""));
         }
     }
 
@@ -372,7 +491,7 @@ impl ProcessSettings {
         scope: EnvScope,
         working_directory: &str,
         sink: Option<OutputSink>,
-    ) -> Result<Self, ScriptResponse> {
+    ) -> Result<Self, WslcStepError> {
         Self::build_inner(sdk, script_code, env, scope, working_directory, true, sink)
     }
 
@@ -388,7 +507,7 @@ impl ProcessSettings {
         env: &[String],
         scope: EnvScope,
         working_directory: &str,
-    ) -> Result<Self, ScriptResponse> {
+    ) -> Result<Self, WslcStepError> {
         Self::build_inner(sdk, script_code, env, scope, working_directory, false, None)
     }
 
@@ -400,11 +519,11 @@ impl ProcessSettings {
         working_directory: &str,
         register_callbacks: bool,
         sink: Option<OutputSink>,
-    ) -> Result<Self, ScriptResponse> {
+    ) -> Result<Self, WslcStepError> {
         let mut raw = std::mem::zeroed::<WslcProcessSettings>();
         let hr = sdk.WslcInitProcessSettings(&mut raw);
         if hr != S_OK {
-            return Err(sdk_error("WslcInitProcessSettings failed", hr, ""));
+            return Err(sdk_step_error("WslcInitProcessSettings", hr, ""));
         }
 
         let io_ctx = Arc::new(IoContext {
@@ -433,7 +552,7 @@ impl ProcessSettings {
             if hr != S_OK {
                 // The SDK never took ownership; reclaim the reference now.
                 drop(Arc::from_raw(io_ctx_raw as *const IoContext));
-                return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
+                return Err(sdk_step_error("WslcSetProcessSettingsCallbacks", hr, ""));
             }
             sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
@@ -449,13 +568,13 @@ impl ProcessSettings {
                 return Err(WslcError::Rejected(format!(
                     "working_directory must be an absolute in-container path (got {working_directory:?})"
                 ))
-                .into_response());
+                .into());
             }
             let c = cstr_bytes("working_directory", working_directory)?;
             let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
             if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetProcessSettingsWorkingDirectory failed",
+                return Err(sdk_step_error(
+                    "WslcSetProcessSettingsWorkingDirectory",
                     hr,
                     "",
                 ));
@@ -532,12 +651,12 @@ impl ContainerSettings {
         net_mode: WslcContainerNetworkingMode,
         flags: WslcContainerFlags,
         logger: &mut Logger,
-    ) -> Result<Self, ScriptResponse> {
+    ) -> Result<Self, WslcStepError> {
         let image_cstr = cstr_bytes("image", image)?;
         let mut raw = std::mem::zeroed::<WslcContainerSettings>();
         let hr = sdk.WslcInitContainerSettings(image_cstr.as_ptr() as PCSTR, &mut raw);
         if hr != S_OK {
-            return Err(sdk_error("WslcInitContainerSettings failed", hr, ""));
+            return Err(sdk_step_error("WslcInitContainerSettings", hr, ""));
         }
 
         // Port mappings (host<->container). Empty list = no forwarding. The
@@ -565,8 +684,8 @@ impl ContainerSettings {
                 port_vec.len() as u32,
             );
             if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetContainerSettingsPortMappings failed",
+                return Err(sdk_step_error(
+                    "WslcSetContainerSettingsPortMappings",
                     hr,
                     "",
                 ));
@@ -607,7 +726,7 @@ impl ContainerSettings {
                 volumes.len() as u32,
             );
             if hr != S_OK {
-                return Err(sdk_error("WslcSetContainerSettingsVolumes failed", hr, ""));
+                return Err(sdk_step_error("WslcSetContainerSettingsVolumes", hr, ""));
             }
             let _ = writeln!(
                 logger,
@@ -618,8 +737,8 @@ impl ContainerSettings {
 
         let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut raw, net_mode);
         if hr != S_OK {
-            return Err(sdk_error(
-                "WslcSetContainerSettingsNetworkingMode failed",
+            return Err(sdk_step_error(
+                "WslcSetContainerSettingsNetworkingMode",
                 hr,
                 "",
             ));
@@ -628,7 +747,7 @@ impl ContainerSettings {
 
         let hr = sdk.WslcSetContainerSettingsFlags(&mut raw, flags);
         if hr != S_OK {
-            return Err(sdk_error("WslcSetContainerSettingsFlags failed", hr, ""));
+            return Err(sdk_step_error("WslcSetContainerSettingsFlags", hr, ""));
         }
 
         Ok(ContainerSettings {
@@ -682,24 +801,37 @@ pub const KEEPALIVE_SCRIPT: &str = "while true; do sleep 86400; done";
 /// COM must already be initialised on the calling thread and the SDK DLL must be
 /// resolvable. The returned [`WslcSdk`] holds raw function pointers; keep it
 /// alive for the duration of all SDK use.
-pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
-    let sdk = WslcSdk::load().map_err(|e| WslcError::Unavailable(e).into_response())?;
+pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, WslcStepError> {
+    let sdk = WslcSdk::load().map_err(|e| WslcError::Unavailable(e).into_step_error())?;
 
     let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
     let hr = sdk.WslcGetMissingComponents(&mut missing);
     if hr != S_OK {
-        return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
+        return Err(sdk_step_error("WslcGetMissingComponents", hr, ""));
     }
     if missing.any_missing() {
-        return Err(WslcError::Unavailable(sdk_init::prerequisite_error(missing)).into_response());
+        return Err(WslcError::Unavailable(sdk_init::prerequisite_error(missing)).into());
     }
     let _ = writeln!(logger, "[WSLC][daemon] Runtime check passed");
     Ok(sdk)
 }
 
-/// Create the shared daemon session (the WSL2 utility VM). Minimal by design —
-/// no per-request cpu/memory/timeout/gpu tuning (those are one-shot `WslcConfig`
-/// knobs; the daemon amortises a single session across sandboxes).
+#[derive(Debug)]
+pub struct SessionCreateFailure {
+    pub response: WslcStepError,
+    pub store_may_be_held: bool,
+}
+
+impl From<WslcStepError> for SessionCreateFailure {
+    fn from(response: WslcStepError) -> Self {
+        Self {
+            response,
+            store_may_be_held: false,
+        }
+    }
+}
+
+/// Create the shared daemon session (the WSL2 utility VM).
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and COM must be initialised on this
@@ -708,8 +840,9 @@ pub unsafe fn create_daemon_session(
     sdk: &WslcSdk,
     session_name: &str,
     storage_path: &str,
+    sizing: SessionSizing,
     logger: &mut Logger,
-) -> Result<WslcSessionGuard, ScriptResponse> {
+) -> Result<WslcSessionGuard, SessionCreateFailure> {
     // Both wide buffers must outlive `WslcCreateSession` (the SDK stores pointers
     // into them at `WslcInitSessionSettings` time); they are function locals held
     // through the create call below.
@@ -719,23 +852,241 @@ pub unsafe fn create_daemon_session(
     let mut settings = std::mem::zeroed::<WslcSessionSettings>();
     let hr = sdk.WslcInitSessionSettings(name_wide.as_ptr(), storage_wide.as_ptr(), &mut settings);
     if hr != S_OK {
-        return Err(sdk_error("WslcInitSessionSettings failed", hr, ""));
+        return Err(sdk_step_error("WslcInitSessionSettings", hr, "").into());
     }
+    apply_session_sizing(sdk, &mut settings, sizing)?;
 
     let mut session: WslcSession = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();
+    let started = Instant::now();
     let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
+    let created_in = started.elapsed();
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcCreateSession failed", hr, &msg));
+        return Err(sdk_step_error("WslcCreateSession", hr, &msg).into());
     }
-    let _ = writeln!(logger, "[WSLC][daemon] Session created");
 
-    Ok(WslcSessionGuard::from_raw(
+    let guard = WslcSessionGuard::from_raw(
         session,
         sdk.terminate_session_fn(),
         sdk.release_session_fn(),
-    ))
+    );
+
+    // Timed separately from the create: a host that cannot supply the session
+    // accepts it here in under a second and spends minutes failing in the
+    // probe, so one figure would hide where the time went.
+    let probed = Instant::now();
+    let probe = validate_store_access(sdk, guard.as_raw(), storage_path);
+    let probed_in = probed.elapsed();
+
+    // Logged before the probe is allowed to fail, because the failing case is
+    // the one whose timing matters.
+    let _ = writeln!(
+        logger,
+        "[WSLC][daemon] Session '{session_name}' on store {storage_path}: create \
+         {:.1}s, store probe {:.1}s, probe {}",
+        created_in.as_secs_f32(),
+        probed_in.as_secs_f32(),
+        if probe.is_ok() { "ok" } else { "failed" }
+    );
+
+    if let Err(response) = probe {
+        // Dropping the guard would ignore a failed terminate, and the caller
+        // must know whether this VM may still hold the store.
+        let store_may_be_held = match release_daemon_session(guard, session_name, logger) {
+            Ok(()) => false,
+            Err(release) => {
+                let _ = writeln!(logger, "[WSLC][daemon] {}", release.error_message);
+                true
+            }
+        };
+        return Err(SessionCreateFailure {
+            response,
+            store_may_be_held,
+        });
+    }
+
+    Ok(guard)
+}
+
+/// Apply a session's sizing and its boot deadline to `settings`.
+///
+/// The boot timeout is applied even when the caller asked for no sizing, since
+/// `WslcCreateSession` is otherwise unbounded.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `settings` must be initialised.
+unsafe fn apply_session_sizing(
+    sdk: &WslcSdk,
+    settings: &mut WslcSessionSettings,
+    sizing: SessionSizing,
+) -> Result<(), WslcStepError> {
+    check_sizing_against_host(sizing)?;
+
+    if let Some(cpu) = sizing.cpu_count {
+        let hr = sdk.WslcSetSessionSettingsCpuCount(settings, cpu);
+        if hr != S_OK {
+            return Err(sdk_step_error("WslcSetSessionSettingsCpuCount", hr, ""));
+        }
+    }
+
+    if let Some(memory_mb) = sizing.memory_mb {
+        let memory_mb = u32::try_from(memory_mb).map_err(|_| {
+            WslcError::Rejected(format!(
+                "memory_mb {memory_mb} exceeds the {} MB the WSLc SDK accepts",
+                u32::MAX
+            ))
+            .into_step_error()
+        })?;
+        let hr = sdk.WslcSetSessionSettingsMemory(settings, memory_mb);
+        if hr != S_OK {
+            return Err(sdk_step_error("WslcSetSessionSettingsMemory", hr, ""));
+        }
+    }
+
+    let hr = sdk.WslcSetSessionSettingsTimeout(settings, SESSION_BOOT_TIMEOUT_MS);
+    if hr != S_OK {
+        return Err(sdk_step_error("WslcSetSessionSettingsTimeout", hr, ""));
+    }
+
+    if sizing.gpu {
+        let hr = sdk.WslcSetSessionSettingsFeatureFlags(
+            settings,
+            WslcSessionFeatureFlags::WSLC_SESSION_FEATURE_FLAG_ENABLE_GPU,
+        );
+        if hr != S_OK {
+            return Err(sdk_step_error("WslcSetSessionSettingsFeatureFlags", hr, ""));
+        }
+    }
+
+    Ok(())
+}
+
+/// Terminate and release a session, reporting a terminate the SDK refused.
+///
+/// A session whose VM did not stop still holds its image store, so reporting
+/// success would hand back a store slot the next lease cannot open.
+pub fn release_daemon_session(
+    session: WslcSessionGuard,
+    session_name: &str,
+    logger: &mut Logger,
+) -> Result<(), WslcStepError> {
+    let hr = session.release_checked();
+    if hr != S_OK {
+        return Err(sdk_step_error(
+            "WslcTerminateSession",
+            hr,
+            &format!(
+                "the WSL2 utility VM for session '{session_name}' may still be running, so its \
+                 image store cannot be reused yet"
+            ),
+        ));
+    }
+
+    let _ = writeln!(logger, "[WSLC][daemon] Session '{session_name}' released");
+    Ok(())
+}
+
+/// Confirm a session just created can reach the store it was given.
+///
+/// A store's VHDX admits one live session, and the SDK does not report a
+/// conflict at create time: `WslcCreateSession` against a held store returns a
+/// healthy-looking handle, and the violation appears on first use as
+/// `HRESULT 0x80070020`. Probing here turns that into a create failure, so a
+/// caller never mints a sandbox id against a session that would die at an
+/// arbitrary later phase.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub unsafe fn validate_store_access(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    storage_path: &str,
+) -> Result<(), WslcStepError> {
+    list_stored_images(sdk, session)
+        .map(|_| ())
+        .map_err(|hr| store_access_failure(hr, storage_path))
+}
+
+/// Render a failed store probe, telling a sharing violation apart from any
+/// other reason the store could not be read.
+fn store_access_failure(hr: HRESULT, storage_path: &str) -> WslcStepError {
+    if hr == E_SHARING_VIOLATION {
+        sdk_step_error_with_context(
+            "WslcListSessionImages",
+            "WSLc store unavailable",
+            hr,
+            &format!(
+                "the image store at {storage_path} is already held by another live session. \
+                 A running wxc-wslc-daemon.exe releases it after its idle timeout; a \
+                 create-and-run execution releases it when the run ends; a slot being \
+                 warmed by --setup-wslc releases it when the warm finishes"
+            ),
+        )
+    } else {
+        sdk_step_error_with_context(
+            "WslcListSessionImages",
+            "WslcListSessionImages failed",
+            hr,
+            &format!("could not read the image store at {storage_path}"),
+        )
+    }
+}
+
+/// One entry of a session's image store.
+pub(crate) struct StoredImage {
+    pub(crate) name: String,
+    pub(crate) sha256: [u8; 32],
+}
+
+/// Read a session's image store, preserving the `HRESULT` so a caller can tell
+/// a sharing violation from any other failure.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub(crate) unsafe fn list_stored_images(
+    sdk: &WslcSdk,
+    session: WslcSession,
+) -> Result<Vec<StoredImage>, HRESULT> {
+    let mut images: *mut WslcImageInfo = ptr::null_mut();
+    let mut count: u32 = 0;
+    let hr = sdk.WslcListSessionImages(session, &mut images, &mut count);
+    if hr != S_OK {
+        return Err(hr);
+    }
+    if images.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut stored = Vec::with_capacity(count as usize);
+    for info in std::slice::from_raw_parts(images, count as usize) {
+        // `info.name` is a fixed-size, possibly-unterminated C buffer; read up
+        // to the first NUL, or the whole buffer if there is none.
+        let bytes = std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        if let Ok(name) = std::str::from_utf8(&bytes[..end]) {
+            stored.push(StoredImage {
+                name: name.to_string(),
+                sha256: info.sha256,
+            });
+        }
+    }
+    windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
+
+    Ok(stored)
+}
+
+/// The flags a lifecycle container is created with.
+///
+/// GPU is set on the session *and* the container; a session sized for a GPU
+/// whose containers lack the flag gets no passthrough and reports nothing.
+/// Auto-remove stays one-shot-only, since a lifecycle sandbox outlives its runs.
+fn container_flags(gpu: bool) -> WslcContainerFlags {
+    if gpu {
+        WslcContainerFlags::WSLC_CONTAINER_FLAG_ENABLE_GPU
+    } else {
+        WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE
+    }
 }
 
 /// Create a daemon-owned container with `keepalive` as its init process, so it
@@ -753,25 +1104,25 @@ pub unsafe fn create_daemon_container(
     mounts: &[VolumeMount],
     port_mappings: &[PortMapping],
     net_mode: WslcContainerNetworkingMode,
+    gpu: bool,
     keepalive: &mut ProcessSettings,
     logger: &mut Logger,
-) -> Result<WslcContainerGuard, ScriptResponse> {
-    // The container flags (auto-remove / gpu / privileged) are one-shot-only.
+) -> Result<WslcContainerGuard, WslcStepError> {
     let mut container_settings = ContainerSettings::build(
         sdk,
         image,
         mounts,
         port_mappings,
         net_mode,
-        WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE,
+        container_flags(gpu),
         logger,
     )?;
 
     let hr =
         sdk.WslcSetContainerSettingsInitProcess(container_settings.raw_mut(), keepalive.raw_mut());
     if hr != S_OK {
-        return Err(sdk_error(
-            "WslcSetContainerSettingsInitProcess failed",
+        return Err(sdk_step_error(
+            "WslcSetContainerSettingsInitProcess",
             hr,
             "",
         ));
@@ -787,7 +1138,7 @@ pub unsafe fn create_daemon_container(
     );
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcCreateContainer failed", hr, &msg));
+        return Err(sdk_step_error("WslcCreateContainer", hr, &msg));
     }
     let _ = writeln!(logger, "[WSLC][daemon] Container created");
 
@@ -807,7 +1158,7 @@ pub unsafe fn start_daemon_container(
     sdk: &WslcSdk,
     container: WslcContainer,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     let mut err_msg = CoTaskMemPWSTR::null();
     let hr = sdk.WslcStartContainer(
         container,
@@ -816,7 +1167,7 @@ pub unsafe fn start_daemon_container(
     );
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcStartContainer failed", hr, &msg));
+        return Err(sdk_step_error("WslcStartContainer", hr, &msg));
     }
     let _ = writeln!(logger, "[WSLC][daemon] Container started");
     Ok(())
@@ -973,6 +1324,23 @@ fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> 
     }
 }
 
+fn unconfirmed_api_failure(
+    completion: ProcessCompletion,
+    kill_hr: HRESULT,
+    exit_code_hr: HRESULT,
+) -> Option<Box<ApiFailure>> {
+    if completion != ProcessCompletion::TerminationUnconfirmed {
+        return None;
+    }
+    [
+        ("WslcSignalProcess", kill_hr),
+        ("WslcGetProcessExitCode", exit_code_hr),
+    ]
+    .into_iter()
+    .find(|&(_, hr)| hr != S_OK)
+    .map(|(operation, hr)| Box::new(sdk_api_failure(operation, hr)))
+}
+
 /// Result of a daemon `exec`, including captured output retained by callbacks.
 #[derive(Debug)]
 pub struct ExecOutcome {
@@ -981,13 +1349,23 @@ pub struct ExecOutcome {
     pub stderr: Vec<u8>,
     /// Specific post-process-creation failure that made termination
     /// unobservable. The daemon uses this context when quarantining.
-    pub post_launch_error: Option<ScriptResponse>,
+    pub post_launch_error: Option<WslcStepError>,
+
+    /// For an unconfirmed termination, the first SDK call that failed while
+    /// stopping the process or reading its exit code.
+    pub unconfirmed_api_failure: Option<Box<ApiFailure>>,
+
+    /// The process's stdin, still open because its termination was not
+    /// confirmed.
+    pub held_stdin: Option<StdinHold>,
 }
 
 /// Run `script_code` (under `/bin/sh -c`) as a fresh process inside a started
 /// daemon container and wait for it to complete. On timeout the *process* is
 /// killed (SIGKILL) — NOT the container — so the keepalive init survives for
 /// subsequent execs.
+///
+/// Without `stdin`, the process reads end-of-file immediately.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `container` must be a live,
@@ -1006,13 +1384,23 @@ pub unsafe fn exec_in_container(
     timeout_ms: u32,
     cancellation: &AtomicBool,
     sink: Option<OutputSink>,
+    stdin: Option<StdinConsumer>,
     logger: &mut Logger,
-) -> Result<ExecOutcome, ScriptResponse> {
+) -> Result<ExecOutcome, WslcStepError> {
     // `process_settings` owns every buffer the SDK reads at
     // `WslcCreateContainerProcess` time plus the I/O-capture context; it is held
     // as a stationary local until after the process exits below.
     let mut process_settings =
         ProcessSettings::build(sdk, script_code, env, scope, working_directory, sink)?;
+    if stdin.is_some() {
+        let hr = sdk.WslcSetProcessSettingsFlags(
+            process_settings.raw_mut(),
+            WslcProcessFlags::WSLC_PROCESS_FLAG_STDIN,
+        );
+        if hr != S_OK {
+            return Err(sdk_step_error("WslcSetProcessSettingsFlags", hr, ""));
+        }
+    }
 
     let mut process: WslcProcess = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();
@@ -1024,12 +1412,38 @@ pub unsafe fn exec_in_container(
     );
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcCreateContainerProcess failed", hr, &msg));
+        return Err(sdk_step_error("WslcCreateContainerProcess", hr, &msg));
     }
     let process_guard = WslcProcessGuard::from_raw(process, sdk.release_process_fn());
     // The process now owns the SDK's IoContext reference; `exit_callback` will
     // reclaim it. Disarm the settings guard so it is not freed underneath the SDK.
     process_settings.mark_process_created();
+
+    let mut stdin_guard = StdinHold::default();
+    let forwards_stdin = stdin.is_some();
+    if let Some(consumer) = stdin {
+        match attach_stdin(sdk, process_guard.as_raw(), consumer) {
+            Ok(close) => stdin_guard = StdinHold::new(close),
+            Err(error) => {
+                // A process holding a stdin nobody writes or closes would never
+                // see end-of-file, so it is killed rather than left to run.
+                let kill_hr =
+                    sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+                if wait_for_exit_callback(process_settings.io_ctx()) {
+                    return Err(error);
+                }
+                let completion = ProcessCompletion::TerminationUnconfirmed;
+                return Ok(ExecOutcome {
+                    completion,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    post_launch_error: Some(error),
+                    unconfirmed_api_failure: unconfirmed_api_failure(completion, kill_hr, S_OK),
+                    held_stdin: None,
+                });
+            }
+        }
+    }
 
     let mut exit_event: HANDLE = ptr::null_mut();
     let hr = sdk.WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
@@ -1038,7 +1452,9 @@ pub unsafe fn exec_in_container(
             completion: ProcessCompletion::TerminationUnconfirmed,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            post_launch_error: Some(sdk_error("WslcGetProcessExitEvent failed", hr, "")),
+            post_launch_error: Some(sdk_step_error("WslcGetProcessExitEvent", hr, "")),
+            unconfirmed_api_failure: None,
+            held_stdin: Some(stdin_guard),
         });
     }
 
@@ -1063,22 +1479,37 @@ pub unsafe fn exec_in_container(
         ExitWait::Interrupted(interruption) => Some(interruption),
         _ => None,
     };
+    let mut kill_hr = S_OK;
     if let Some(interruption) = interruption {
-        let _ = writeln!(
-            logger,
-            "[WSLC][daemon] exec {} — killing process",
-            interruption.get_interruption_word()
-        );
-        // Kill only this process; the keepalive init keeps the container up.
-        let kill_hr =
-            sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
-        if kill_hr != S_OK {
+        if forwards_stdin {
+            stdin_guard.freeze();
+
+            // Signalling the process closes its stdin even when the signal is
+            // not delivered, which would let it act on input that was cut short.
             let _ = writeln!(
                 logger,
-                "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
-                 process may still be running",
-                kill_hr as u32
+                "[WSLC][daemon] exec {} — not signalling a process that reads forwarded \
+                 stdin; it is stopped with its container",
+                interruption.get_interruption_word()
             );
+        } else {
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] exec {} — killing process",
+                interruption.get_interruption_word()
+            );
+
+            // Kill only this process; the keepalive init keeps the container up.
+            kill_hr =
+                sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+            if kill_hr != S_OK {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
+                     process may still be running",
+                    kill_hr as u32
+                );
+            }
         }
     }
 
@@ -1100,16 +1531,16 @@ pub unsafe fn exec_in_container(
     }
 
     let mut exit_code: i32 = -1;
-    let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
-    if hr != S_OK {
+    let exit_code_hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+    if exit_code_hr != S_OK {
         if natural_exit_confirmed(exit_wait, confirmed) {
-            return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
+            return Err(sdk_step_error("WslcGetProcessExitCode", exit_code_hr, ""));
         }
         let _ = writeln!(
             logger,
             "[WSLC][daemon] Warning: WslcGetProcessExitCode failed while termination was \
              unconfirmed (hr=0x{:08X})",
-            hr as u32
+            exit_code_hr as u32
         );
     }
 
@@ -1160,11 +1591,97 @@ pub unsafe fn exec_in_container(
         ProcessCompletion::TerminationUnconfirmed => {}
     }
 
+    // A process that may still be running keeps its stdin open, so it cannot
+    // take a cut-short input as complete before it is stopped.
+    let held_stdin = match completion {
+        ProcessCompletion::Confirmed(_) => {
+            drop(stdin_guard);
+            None
+        }
+        ProcessCompletion::TerminationUnconfirmed => Some(stdin_guard),
+    };
+
     Ok(ExecOutcome {
         completion,
         stdout,
         stderr,
         post_launch_error: None,
+        unconfirmed_api_failure: unconfirmed_api_failure(completion, kill_hr, exit_code_hr),
+        held_stdin,
+    })
+}
+
+/// A process's stdin, closed when this is dropped.
+#[derive(Default)]
+pub struct StdinHold(Mutex<Option<Box<dyn StdinControl>>>);
+
+impl StdinHold {
+    fn new(control: Box<dyn StdinControl>) -> Self {
+        Self(Mutex::new(Some(control)))
+    }
+
+    fn freeze(&self) {
+        if let Some(control) = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            control.freeze();
+        }
+    }
+}
+
+impl Drop for StdinHold {
+    fn drop(&mut self) {
+        let control = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(control) = control {
+            control.close();
+        }
+    }
+}
+
+impl std::fmt::Debug for StdinHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StdinHold")
+    }
+}
+
+/// Hand `process`'s stdin write end to `consumer`.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `process` must be a live handle
+/// created with `WSLC_PROCESS_FLAG_STDIN`.
+unsafe fn attach_stdin(
+    sdk: &WslcSdk,
+    process: WslcProcess,
+    consumer: StdinConsumer,
+) -> Result<Box<dyn StdinControl>, WslcStepError> {
+    use std::os::windows::io::FromRawHandle;
+
+    let mut handle: HANDLE = ptr::null_mut();
+    let hr = sdk.WslcGetProcessIOHandle(
+        process,
+        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDIN,
+        &mut handle,
+    );
+    if hr != S_OK || handle.is_null() {
+        return Err(sdk_step_error_with_context(
+            "WslcGetProcessIOHandle",
+            "WslcGetProcessIOHandle(stdin) failed",
+            hr,
+            "",
+        ));
+    }
+
+    // SAFETY: the SDK transfers ownership of the returned handle to the caller.
+    let stdin = std::fs::File::from_raw_handle(handle);
+    consumer(stdin).map_err(|error| {
+        WslcError::Runtime(format!("could not start forwarding stdin: {error}")).into_step_error()
     })
 }
 
@@ -1177,7 +1694,7 @@ pub unsafe fn stop_daemon_container(
     sdk: &WslcSdk,
     container: WslcContainer,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     let mut err_msg = CoTaskMemPWSTR::null();
     let hr = sdk.WslcStopContainer(
         container,
@@ -1187,7 +1704,7 @@ pub unsafe fn stop_daemon_container(
     );
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcStopContainer failed", hr, &msg));
+        return Err(sdk_step_error("WslcStopContainer", hr, &msg));
     }
     let _ = writeln!(logger, "[WSLC][daemon] Container stopped");
     Ok(())
@@ -1201,7 +1718,7 @@ pub unsafe fn delete_daemon_container(
     sdk: &WslcSdk,
     container: WslcContainer,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), WslcStepError> {
     let mut err_msg = CoTaskMemPWSTR::null();
     let hr = sdk.WslcDeleteContainer(
         container,
@@ -1210,7 +1727,7 @@ pub unsafe fn delete_daemon_container(
     );
     if hr != S_OK {
         let msg = err_msg.to_string_lossy();
-        return Err(sdk_error("WslcDeleteContainer failed", hr, &msg));
+        return Err(sdk_step_error("WslcDeleteContainer", hr, &msg));
     }
     let _ = writeln!(logger, "[WSLC][daemon] Container deleted");
     Ok(())
@@ -1219,6 +1736,164 @@ pub unsafe fn delete_daemon_container(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::models::FailurePhase;
+
+    /// A modest machine: 16 GB and 8 logical processors.
+    const TEST_HOST: HostCapacity = HostCapacity {
+        total_memory_mb: 16 * 1024,
+        logical_cpus: 8,
+    };
+
+    #[test]
+    fn a_processor_count_the_host_cannot_supply_is_refused() {
+        let refused = sizing_fits_host(
+            SessionSizing {
+                cpu_count: Some(TEST_HOST.logical_cpus + 1),
+                ..SessionSizing::default()
+            },
+            TEST_HOST,
+        )
+        .expect_err("more processors than the host has must be refused");
+
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert!(
+            refused.error_message.contains('9') && refused.error_message.contains('8'),
+            "the refusal must name both what was asked and what the host has: {}",
+            refused.error_message
+        );
+    }
+
+    #[test]
+    fn a_processor_count_the_host_can_supply_is_allowed() {
+        for cpus in [1, TEST_HOST.logical_cpus] {
+            assert!(
+                sizing_fits_host(
+                    SessionSizing {
+                        cpu_count: Some(cpus),
+                        ..SessionSizing::default()
+                    },
+                    TEST_HOST,
+                )
+                .is_ok(),
+                "{cpus} processors is within the host's {}",
+                TEST_HOST.logical_cpus
+            );
+        }
+    }
+
+    /// `memory_mb` is a ceiling the host backs on demand, not a reservation,
+    /// so a request past installed memory is legitimate.
+    #[test]
+    fn memory_past_installed_is_allowed_because_it_is_a_ceiling() {
+        assert!(
+            sizing_fits_host(
+                SessionSizing {
+                    memory_mb: Some(TEST_HOST.total_memory_mb * 8),
+                    ..SessionSizing::default()
+                },
+                TEST_HOST,
+            )
+            .is_ok(),
+            "memory_mb is a ceiling the host backs on demand, not a reservation"
+        );
+    }
+
+    /// The SDK documents `0` as "reset to the default" for both figures, so it
+    /// is a sentinel rather than a size and must not be measured against the
+    /// host.
+    #[test]
+    fn zero_is_a_default_sentinel_rather_than_a_size() {
+        assert!(sizing_fits_host(
+            SessionSizing {
+                cpu_count: Some(0),
+                memory_mb: Some(0),
+                gpu: false,
+            },
+            TEST_HOST,
+        )
+        .is_ok());
+    }
+
+    /// A request that names no sizing takes the host defaults and has nothing
+    /// to check.
+    #[test]
+    fn absent_sizing_is_allowed() {
+        assert!(sizing_fits_host(SessionSizing::default(), TEST_HOST).is_ok());
+    }
+
+    /// A session sized for a GPU whose containers lack the flag gets no
+    /// passthrough and reports nothing, so the two halves must agree.
+    #[test]
+    fn a_gpu_session_creates_gpu_containers() {
+        assert_eq!(
+            container_flags(true),
+            WslcContainerFlags::WSLC_CONTAINER_FLAG_ENABLE_GPU
+        );
+        assert_eq!(
+            container_flags(false),
+            WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE
+        );
+    }
+
+    #[test]
+    fn a_held_store_is_reported_as_held_rather_than_as_a_failed_call() {
+        let resp = store_access_failure(E_SHARING_VIOLATION, r"C:\slots\slot-0");
+
+        assert!(
+            resp.error_message
+                .contains("already held by another live session"),
+            "a sharing violation is the one store failure a caller can wait out: {}",
+            resp.error_message
+        );
+        assert!(resp.error_message.contains(r"C:\slots\slot-0"));
+        assert!(resp.error_message.contains("idle timeout"));
+        assert!(
+            resp.error_message.contains("--setup-wslc"),
+            "warming holds a slot's store too, and that holder clears on its own: {}",
+            resp.error_message
+        );
+        assert!(resp.error_message.contains("80070020"));
+    }
+
+    #[test]
+    fn any_other_store_failure_keeps_the_call_that_produced_it() {
+        let resp = store_access_failure(-2147467259, r"C:\slots\slot-0");
+
+        assert!(
+            resp.error_message.contains("WslcListSessionImages failed"),
+            "an unrecognised failure must not be attributed to another holder: {}",
+            resp.error_message
+        );
+        assert!(!resp.error_message.contains("already held"));
+        assert!(resp.error_message.contains(r"C:\slots\slot-0"));
+    }
+
+    #[test]
+    fn a_failed_sdk_call_keeps_its_message_and_names_the_call() {
+        let error = sdk_step_error(
+            "WslcStartContainer",
+            0x8007_2740_u32 as HRESULT,
+            "Only one usage of each socket address is normally permitted.",
+        );
+
+        assert_eq!(
+            error.error_message,
+            "WslcStartContainer failed: Only one usage of each socket address is normally \
+             permitted. (HRESULT 0x80072740)"
+        );
+        let failure = error.api_failure.as_deref().expect("api failure");
+        assert_eq!(failure.operation, "WslcStartContainer");
+        assert_eq!(failure.native_code.as_deref(), Some("0x80072740"));
+    }
+
+    #[test]
+    fn a_store_failure_is_attributed_to_bring_up() {
+        assert_eq!(
+            store_access_failure(E_SHARING_VIOLATION, "store").failure_phase,
+            FailurePhase::LaunchFailed,
+            "a held store frees up on its own, so this must not read as a rejection"
+        );
+    }
 
     #[test]
     fn cstr_bytes_nul_terminates_a_plain_value() {
@@ -1342,6 +2017,34 @@ mod tests {
         assert_eq!(
             classify_completion(ExitWait::NoEvent, false, -1),
             ProcessCompletion::TerminationUnconfirmed
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_run_names_its_first_failed_kill_or_exit_code_call() {
+        let unconfirmed = ProcessCompletion::TerminationUnconfirmed;
+        let kill_failed = 0x8007_001f_u32 as HRESULT;
+        let kill_failure = ApiFailure::new("WslcSignalProcess").with_native_code("0x8007001f");
+        let exit_code_failure =
+            ApiFailure::new("WslcGetProcessExitCode").with_native_code("0x80004005");
+
+        assert_eq!(
+            unconfirmed_api_failure(unconfirmed, kill_failed, E_FAIL).as_deref(),
+            Some(&kill_failure)
+        );
+        assert_eq!(
+            unconfirmed_api_failure(unconfirmed, S_OK, E_FAIL).as_deref(),
+            Some(&exit_code_failure)
+        );
+        assert_eq!(unconfirmed_api_failure(unconfirmed, S_OK, S_OK), None);
+        assert_eq!(
+            unconfirmed_api_failure(
+                ProcessCompletion::Confirmed(ExecTerminal::TimedOut),
+                kill_failed,
+                E_FAIL,
+            ),
+            None,
+            "a confirmed timeout must stay a timeout"
         );
     }
 

@@ -110,6 +110,8 @@ pub struct PtySize {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct LivePty {
     primary: std::fs::File,
+    #[cfg(target_os = "macos")]
+    secondary_path: std::path::PathBuf,
     access: Mutex<PtyAccess>,
     size: Mutex<PtySize>,
     eof: PtyEof,
@@ -357,6 +359,8 @@ impl LivePty {
             ws_ypixel: size.pixel_height,
         });
         let (master, slave) = open_pty(winsize.as_ref())?;
+        #[cfg(target_os = "macos")]
+        let secondary_path = nix::unistd::ttyname(&slave).map_err(std::io::Error::from)?;
         let eof = if forward_eof {
             PtyEof::Forwarded(terminal_discipline(&slave)?)
         } else {
@@ -393,6 +397,8 @@ impl LivePty {
         let writer = primary.try_clone()?;
         Ok(Self {
             primary,
+            #[cfg(target_os = "macos")]
+            secondary_path,
             access: Mutex::new(PtyAccess {
                 writer: Some(writer),
                 reader_claimed: false,
@@ -403,10 +409,31 @@ impl LivePty {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn secondary_path(&self) -> &std::path::Path {
+        &self.secondary_path
+    }
+
     /// Clone the merged terminal output reader.
     pub fn try_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
         self.try_clone_reader_with_canceller()
             .map(|(reader, _)| reader)
+    }
+
+    /// Read buffered startup diagnostics without waiting for more output.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn read_available_output(&self, limit: u64) -> std::io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        match (&self.primary).take(limit).read_to_end(&mut output) {
+            Ok(_) => Ok(output),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(libc::EIO) =>
+            {
+                Ok(output)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Clone the merged terminal output reader with an out-of-band canceller.
@@ -463,13 +490,7 @@ impl LivePty {
 
         let input_primary = self.primary.try_clone()?;
         let (input_read_fd, input_write_fd) = create_pipe()?;
-        #[cfg(target_os = "linux")]
         let input_reader = InterruptibleReader::new(input_read_fd)?;
-        #[cfg(target_os = "macos")]
-        let input_reader = InterruptibleReader::new_with_periodic_eof_probe(
-            input_read_fd,
-            std::time::Duration::from_millis(50),
-        )?;
         let input_canceller = input_reader.canceller();
         let input_shutdown = BridgeShutdown::new()?;
 
@@ -506,17 +527,26 @@ impl LivePty {
                         }
                     }
                     let mut reader = output_reader;
-                    let mut writer = File::from(output_write_fd);
+                    let mut writer = Some(File::from(output_write_fd));
                     let mut buffer = [0_u8; 8192];
                     loop {
                         let count = match reader.read(&mut buffer) {
                             Ok(0) | Err(_) => return,
                             Ok(count) => count,
                         };
-                        if write_all_until_shutdown(&mut writer, &buffer[..count], &output_shutdown)
+                        let Some(sink) = writer.as_mut() else {
+                            continue;
+                        };
+                        if write_all_until_shutdown(sink, &buffer[..count], &output_shutdown)
                             .is_err()
                         {
-                            return;
+                            if output_shutdown.is_cancelled() {
+                                return;
+                            }
+                            // The consumer closed its end. Keep draining the
+                            // terminal anyway: on Darwin the child cannot exit
+                            // while its output sits in the primary's queue.
+                            writer = None;
                         }
                     }
                 }
@@ -1111,90 +1141,19 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
     }
     #[cfg(target_os = "macos")]
     {
-        create_cloexec_fifo()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
-    use std::ffi::{CStr, CString};
-
-    struct FifoPath {
-        directory: CString,
-        fifo: CString,
-        created: bool,
-    }
-
-    impl Drop for FifoPath {
-        fn drop(&mut self) {
-            if self.created {
-                // SAFETY: both paths remain valid NUL-terminated strings.
-                unsafe {
-                    libc::unlink(self.fifo.as_ptr());
-                    libc::rmdir(self.directory.as_ptr());
-                }
-            }
-        }
-    }
-
-    let mut template = b"/tmp/mxc-pty-pipe.XXXXXX\0".to_vec();
-    // SAFETY: `template` is writable and ends with six X bytes plus NUL as
-    // required by `mkdtemp`.
-    let directory = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
-    if directory.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: successful `mkdtemp` returns a NUL-terminated pointer into
-    // `template`, which remains alive for this conversion.
-    let directory = unsafe { CStr::from_ptr(directory) }.to_owned();
-    let mut fifo = directory.as_bytes().to_vec();
-    fifo.extend_from_slice(b"/pipe");
-    let fifo = CString::new(fifo).expect("temporary FIFO path contains no NUL");
-    let mut path = FifoPath {
-        directory,
-        fifo,
-        created: true,
-    };
-
-    // SAFETY: `path.fifo` is a valid path in a private mode-0700 directory.
-    if unsafe { libc::mkfifo(path.fifo.as_ptr(), 0o600) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let read = open_fifo_endpoint(&path.fifo, libc::O_RDONLY | libc::O_NONBLOCK)?;
-    let write = open_fifo_endpoint(&path.fifo, libc::O_WRONLY)?;
-    set_blocking(read.as_raw_fd())?;
-
-    // SAFETY: open descriptors retain the FIFO after its directory entry is removed.
-    if unsafe { libc::unlink(path.fifo.as_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: the private directory is empty after unlinking the FIFO.
-    if unsafe { libc::rmdir(path.directory.as_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    path.created = false;
-    Ok((read, write))
-}
-
-#[cfg(target_os = "macos")]
-fn open_fifo_endpoint(
-    path: &std::ffi::CStr,
-    access: libc::c_int,
-) -> std::io::Result<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
-
-    loop {
-        // SAFETY: `path` is a valid FIFO path and O_CLOEXEC is applied as part
-        // of descriptor creation.
-        let fd = unsafe { libc::open(path.as_ptr(), access | libc::O_CLOEXEC) };
-        if fd >= 0 {
-            // SAFETY: `open` returned a new owned descriptor.
-            return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+        // macOS has no `pipe2`, and `O_CLOEXEC` applies only to `open`, so
+        // close-on-exec must be set in a second call. A `fork`+`exec` racing
+        // on another thread can inherit the ends in between and hold them
+        // open, delaying EOF.
+        //
+        // Accepted rather than fixed: Rust's own `Stdio::piped()` has the same
+        // window on macOS, so the descriptors carrying a workload's streams
+        // already have it, and spawns owned by the embedding application are
+        // outside this crate's control either way.
+        let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
+        set_cloexec(read.as_raw_fd())?;
+        set_cloexec(write.as_raw_fd())?;
+        Ok((read, write))
     }
 }
 
@@ -1220,14 +1179,14 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn set_blocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+fn set_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
     // SAFETY: `fd` is a valid open descriptor; these commands only update its flags.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: `fd` remains open and clearing O_NONBLOCK is valid for F_SETFL.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+    // SAFETY: `fd` remains open and `flags | FD_CLOEXEC` is valid for F_SETFD.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -1571,6 +1530,154 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     static RUN_WITH_PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Reads a PTY-backed stream on a worker thread so the child is never
+    /// blocked by a full terminal output queue.
+    ///
+    /// Darwin blocks the final close of the secondary until the primary's
+    /// output queue drains, and `SIGKILL` does not release it. So a drain must
+    /// already be running before anything waits for the child.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct PtyDrain {
+        collected: Arc<Mutex<Vec<u8>>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        finished: std::sync::mpsc::Receiver<()>,
+        canceller: Option<PtyReadCanceller>,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl PtyDrain {
+        const TIMEOUT: Duration = Duration::from_secs(20);
+        /// How long [`Drop`] waits for an uncancellable worker before leaving
+        /// it running. Only reached while unwinding.
+        const DROP_GRACE: Duration = Duration::from_secs(2);
+
+        /// Only for native-pipe readers, which have no canceller. Drains of a
+        /// PTY reader must use [`Self::start_cancellable`] so [`Drop`] can
+        /// unblock the worker.
+        fn start(source: Box<dyn Read + Send>) -> Self {
+            Self::start_inner(source, None)
+        }
+
+        /// The canceller lets [`Drop`] unblock the worker, so a failing test
+        /// cannot leave it parked holding the primary.
+        fn start_cancellable(source: (Box<dyn Read + Send>, PtyReadCanceller)) -> Self {
+            Self::start_inner(source.0, Some(source.1))
+        }
+
+        fn start_inner(
+            mut source: Box<dyn Read + Send>,
+            canceller: Option<PtyReadCanceller>,
+        ) -> Self {
+            let collected = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&collected);
+            let (done, finished) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                while let Ok(count) = source.read(&mut buffer) {
+                    if count == 0 {
+                        break;
+                    }
+                    sink.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&buffer[..count]);
+                }
+                let _ = done.send(());
+            });
+            Self {
+                collected,
+                worker: Some(worker),
+                finished,
+                canceller,
+            }
+        }
+
+        /// Everything drained so far, as lossy UTF-8.
+        fn snapshot(&self) -> String {
+            let bytes = self.collected.lock().unwrap_or_else(|e| e.into_inner());
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        /// Blocks until `marker` appears in the drained output.
+        fn wait_for(&self, marker: &str) -> String {
+            let deadline = std::time::Instant::now() + Self::TIMEOUT;
+            loop {
+                let seen = self.snapshot();
+                if seen.contains(marker) {
+                    return seen;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "terminal output never contained {marker:?}; got: {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// Cancels the read so a parked worker reaches end of input.
+        fn cancel(&self) {
+            if let Some(canceller) = &self.canceller {
+                canceller.close();
+            }
+        }
+
+        /// Waits for end of input and returns the full output.
+        fn finish(mut self) -> String {
+            self.finished
+                .recv_timeout(Self::TIMEOUT)
+                .unwrap_or_else(|_| panic!("terminal drain did not reach end of input"));
+            if let Some(worker) = self.worker.take() {
+                worker.join().expect("terminal drain thread");
+            }
+            self.snapshot()
+        }
+    }
+
+    /// Releases the worker rather than detaching it. A detached PTY worker
+    /// still owns the reader, so dropping `LivePty` would not close the final
+    /// primary and a failing test would hang instead of failing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for PtyDrain {
+        fn drop(&mut self) {
+            let Some(worker) = self.worker.take() else {
+                return;
+            };
+            if let Some(canceller) = &self.canceller {
+                // Cancelling unblocks the read, so the join cannot outlast it.
+                canceller.close();
+                let _ = worker.join();
+                return;
+            }
+            // A native-pipe drain has nothing to cancel: only the bridge closes
+            // the write end, and while unwinding it outlives this drop. Joining
+            // would hang, so wait briefly and otherwise leave the worker to
+            // finish on its own. It holds a pipe read end, not the primary, so
+            // dropping `LivePty` still closes the terminal.
+            if self.finished.recv_timeout(Self::DROP_GRACE).is_ok() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// Waits for `child` with a deadline instead of hanging the whole suite.
+    ///
+    /// Deliberately does not fall back to `kill`: a child stuck in the Darwin
+    /// terminal drain ignores `SIGKILL`. Unwinding drops `LivePty`, which
+    /// closes the primary and releases it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit within the test deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn default_options() {
         let opts = PtyOptions::default();
@@ -1582,6 +1689,36 @@ mod tests {
     #[test]
     fn poll_interval_is_500ms() {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pty_reads_bounded_startup_output_without_waiting() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'namespace refused' >&2"]);
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        assert!(terminal
+            .read_available_output(1024)
+            .expect("empty PTY")
+            .is_empty());
+        let mut child = command.spawn().expect("spawn diagnostic child");
+        drop(command);
+        assert!(wait_for_exit(&mut child).success());
+        assert_eq!(
+            terminal.read_available_output(9).expect("bounded read"),
+            b"namespace"
+        );
+        assert_eq!(
+            terminal
+                .read_available_output(1024)
+                .expect("remaining output"),
+            b" refused"
+        );
+        assert!(terminal
+            .read_available_output(1024)
+            .expect("closed PTY")
+            .is_empty());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1614,15 +1751,18 @@ mod tests {
 
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let mut reader = terminal.try_clone_reader().expect("clone reader");
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         let mut writer = terminal.take_writer().expect("take writer");
         writer.write_all(b"hello\r").expect("write input");
         drop(writer);
 
-        let status = child.wait().expect("wait child");
-        assert!(status.success());
-        let mut output = String::new();
-        reader.read_to_string(&mut output).expect("read output");
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
         assert!(output.contains("40 120"), "got: {output:?}");
         assert!(output.contains("reply:hello"), "got: {output:?}");
     }
@@ -1638,7 +1778,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let mut reader = terminal.try_clone_reader().expect("clone reader");
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let mut writer = terminal.take_writer().expect("take writer");
         writer
@@ -1646,23 +1790,163 @@ mod tests {
             .expect("write partial line");
         drop(writer);
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().expect("poll child") {
-                assert!(status.success());
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("child did not observe canonical terminal EOF");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        let mut output = String::new();
-        reader.read_to_string(&mut output).expect("read output");
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
         assert!(output.contains("terminal-eof-observed"), "got: {output:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn close_writer_sends_canonical_terminal_eof() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("cat >/dev/null; printf 'closed-writer-eof\\n'");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        terminal.close_writer();
+        // Closing again is a no-op, and the writer can no longer be taken.
+        terminal.close_writer();
+        assert_eq!(
+            terminal
+                .take_writer()
+                .err()
+                .expect("writer was already closed")
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
+        assert!(output.contains("closed-writer-eof"), "got: {output:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn close_writer_after_take_writer_leaves_the_taken_writer_usable() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("read value; printf 'reply:%s\\n' \"$value\"");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        let mut writer = terminal.take_writer().expect("take writer");
+        terminal.close_writer();
+        writer.write_all(b"still-writable\r").expect("write input");
+        drop(writer);
+
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
+        assert!(output.contains("reply:still-writable"), "got: {output:?}");
+    }
+
+    /// The drain-before-wait pattern every backend uses: nothing claimed a
+    /// reader, so the runner claims one and discards output while it waits.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn take_unclaimed_reader_drains_output_so_waiting_cannot_deadlock() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("head -c 200000 /dev/zero; printf 'drained-to-exit\\n'");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+
+        terminal.close_writer();
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .take_unclaimed_reader()
+                .expect("take unclaimed reader")
+                .expect("reader was unclaimed"),
+        );
+        assert!(
+            terminal
+                .take_unclaimed_reader()
+                .expect("second take")
+                .is_none(),
+            "the reader is claimed after the first take"
+        );
+
+        assert!(wait_for_exit(&mut child).success());
+        let seen = drain.wait_for("drained-to-exit");
+        assert!(seen.contains("drained-to-exit"), "got: {seen:?}");
+        drain.cancel();
+        drop(terminal);
+        let _ = drain.finish();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn take_unclaimed_reader_yields_nothing_once_a_reader_is_claimed() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("printf claimed");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        assert!(
+            terminal
+                .take_unclaimed_reader()
+                .expect("take unclaimed reader")
+                .is_none(),
+            "a cloned reader belongs to the caller"
+        );
+
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
+        assert!(output.contains("claimed"), "got: {output:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn take_unclaimed_reader_yields_nothing_after_native_stdio() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("printf bridged");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+
+        assert!(
+            terminal
+                .take_unclaimed_reader()
+                .expect("take unclaimed reader")
+                .is_none(),
+            "the native bridge owns terminal output"
+        );
+
+        assert!(wait_for_exit(&mut child).success());
+        terminal.finish_native_bridge();
+        drop(stdio);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1674,7 +1958,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let _reader = terminal.try_clone_reader().expect("clone reader");
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let started = std::time::Instant::now();
         drop(terminal.take_writer().expect("take writer"));
@@ -1685,6 +1973,8 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+        drop(terminal);
+        let _ = drain.finish();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1696,6 +1986,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let mut fill = terminal
             .access
@@ -1721,7 +2016,13 @@ mod tests {
                 Err(error) => panic!("fill PTY input queue: {error}"),
             }
         }
+        // Linux reports `EWOULDBLOCK` once the terminal input queue is full;
+        // Darwin's `ttyinput` silently discards the excess instead. Either way
+        // the queue is saturated, which is what the drop path must survive.
+        #[cfg(target_os = "linux")]
         assert!(queue_full, "PTY input queue did not reach backpressure");
+        #[cfg(target_os = "macos")]
+        let _ = queue_full;
         drop(fill);
 
         let started = std::time::Instant::now();
@@ -1733,6 +2034,8 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+        drop(terminal);
+        let _ = drain.finish();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1746,45 +2049,32 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let mut output: Box<dyn Read> = if native {
+        let (mut writer, drain): (Box<dyn Write + Send>, PtyDrain) = if native {
             let stdio = terminal.take_native_stdio().expect("take native stdio");
-            let mut output = std::fs::File::from(stdio.stdout);
-            let mut ready = [0_u8; 5];
-            output.read_exact(&mut ready).expect("read readiness");
-            assert_eq!(&ready, b"ready");
-            let mut writer = std::fs::File::from(stdio.stdin);
-            writer.write_all(input).expect("write terminal input");
-            drop(writer);
-            Box::new(output)
+            (
+                Box::new(std::fs::File::from(stdio.stdin)),
+                PtyDrain::start(Box::new(std::fs::File::from(stdio.stdout))),
+            )
         } else {
-            let mut output = terminal.try_clone_reader().expect("clone reader");
-            let mut ready = [0_u8; 5];
-            output.read_exact(&mut ready).expect("read readiness");
-            assert_eq!(&ready, b"ready");
-            let mut writer = terminal.take_writer().expect("take writer");
-            writer.write_all(input).expect("write terminal input");
-            drop(writer);
-            output
+            (
+                Box::new(terminal.take_writer().expect("take writer")),
+                PtyDrain::start_cancellable(
+                    terminal
+                        .try_clone_reader_with_canceller()
+                        .expect("clone reader"),
+                ),
+            )
         };
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().expect("poll child") {
-                assert!(status.success());
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("child did not observe canonical terminal EOF");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        drain.wait_for("ready");
+        writer.write_all(input).expect("write terminal input");
+        drop(writer);
+
+        assert!(wait_for_exit(&mut child).success());
         terminal.finish_native_bridge();
         drop(terminal);
 
-        let mut text = String::new();
-        output.read_to_string(&mut text).expect("read output");
+        let text = drain.finish();
         assert!(text.contains("terminal-eof-observed"), "got: {text:?}");
     }
 
@@ -1851,29 +2141,37 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        if native {
+        let (writer, drain): (Option<Box<dyn Write + Send>>, PtyDrain) = if native {
             let stdio = terminal.take_native_stdio().expect("take native stdio");
-            let mut output = std::fs::File::from(stdio.stdout);
-            let mut ready = [0_u8; 5];
-            output.read_exact(&mut ready).expect("read readiness");
-            assert_eq!(&ready, b"ready");
-            drop(stdio.stdin);
-            std::thread::sleep(Duration::from_millis(200));
-            assert!(child.try_wait().expect("poll child").is_none());
-            let _ = child.kill();
-            let _ = child.wait();
-            terminal.finish_native_bridge();
+            (
+                Some(Box::new(std::fs::File::from(stdio.stdin))),
+                PtyDrain::start(Box::new(std::fs::File::from(stdio.stdout))),
+            )
         } else {
-            let mut output = terminal.try_clone_reader().expect("clone reader");
-            let mut ready = [0_u8; 5];
-            output.read_exact(&mut ready).expect("read readiness");
-            assert_eq!(&ready, b"ready");
-            drop(terminal.take_writer().expect("take writer"));
-            std::thread::sleep(Duration::from_millis(200));
-            assert!(child.try_wait().expect("poll child").is_none());
-            let _ = child.kill();
-            let _ = child.wait();
+            (
+                None,
+                PtyDrain::start_cancellable(
+                    terminal
+                        .try_clone_reader_with_canceller()
+                        .expect("clone reader"),
+                ),
+            )
+        };
+
+        drain.wait_for("ready");
+        match writer {
+            Some(writer) => drop(writer),
+            None => drop(terminal.take_writer().expect("take writer")),
         }
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(child.try_wait().expect("poll child").is_none());
+        let _ = child.kill();
+        let _ = child.wait();
+        terminal.finish_native_bridge();
+        drop(terminal);
+        let text = drain.finish();
+        assert!(!text.contains("injected"), "got: {text:?}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1923,14 +2221,20 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let _reader = terminal.try_clone_reader().expect("clone reader");
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         let mut writer = terminal.take_writer().expect("take writer");
         let mut input = b"x\n".repeat(128 * 1024);
         input.extend_from_slice(b"partial-line");
         writer.write_all(&input).expect("write large partial input");
         drop(writer);
 
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let _ = drain.finish();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1944,20 +2248,21 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let (mut reader, closer) = terminal
-            .try_clone_reader_with_canceller()
-            .expect("clone reader");
 
-        assert!(child.wait().expect("wait child").success());
-        let reader_thread = std::thread::spawn(move || {
-            let mut output = String::new();
-            reader.read_to_string(&mut output).expect("read output");
-            output
-        });
-        std::thread::sleep(Duration::from_millis(50));
-        closer.close();
+        // The drain must already be running: on Darwin the foreground shell
+        // cannot exit while its output sits in the terminal queue.
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+        assert!(wait_for_exit(&mut child).success());
+        drain.wait_for("foreground-exited");
 
-        let output = reader_thread.join().expect("reader thread");
+        // The backgrounded `sleep` still holds the secondary open, so the read
+        // parks until it is cancelled.
+        drain.cancel();
+        let output = drain.finish();
         assert!(output.contains("foreground-exited"), "got: {output:?}");
     }
 
@@ -1983,7 +2288,7 @@ mod tests {
         input.write_all(b"hello").expect("write partial input");
         drop(input);
 
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
         terminal.finish_native_bridge();
         let mut text = String::new();
         output.read_to_string(&mut text).expect("read output");
@@ -2012,7 +2317,7 @@ mod tests {
             stdio.stdout
         });
 
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
         terminal.finish_native_bridge();
         let stdout = input_thread.join().expect("input thread");
         let mut output = std::fs::File::from(stdout);
@@ -2029,42 +2334,18 @@ mod tests {
         command.arg("-c").arg("(sleep 30) & printf 'done\\n'");
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
+        let session = child.id() as libc::pid_t;
         drop(command);
         let stdio = terminal.take_native_stdio().expect("take native stdio");
         drop(stdio.stdin);
 
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
         let start = std::time::Instant::now();
         terminal.finish_native_bridge();
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "native bridge did not cancel promptly"
         );
-
-        let mut output = std::fs::File::from(stdio.stdout);
-        let mut text = String::new();
-        output.read_to_string(&mut text).expect("read output");
-        assert!(text.contains("done"), "got: {text:?}");
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_bridge_cancellation_does_not_inject_eof() {
-        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("(read value; printf eof-injected) & printf 'done\\n'");
-        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
-        let mut child = command.spawn().expect("spawn child");
-        let session = child.id() as libc::pid_t;
-        drop(command);
-        let stdio = terminal.take_native_stdio().expect("take native stdio");
-        let input = stdio.stdin;
-
-        assert!(child.wait().expect("wait child").success());
-        terminal.finish_native_bridge();
-        drop(input);
         // SAFETY: the child created its own session with its PID as the process-group ID.
         unsafe {
             libc::kill(-session, libc::SIGKILL);
@@ -2073,6 +2354,115 @@ mod tests {
         let mut output = std::fs::File::from(stdio.stdout);
         let mut text = String::new();
         output.read_to_string(&mut text).expect("read output");
+        assert!(text.contains("done"), "got: {text:?}");
+    }
+
+    /// Reads whatever is already buffered on `fd` without blocking.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn drain_available(fd: std::os::fd::RawFd) -> String {
+        // SAFETY: `fd` is owned by the caller and stays open across the call.
+        let previous = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if previous < 0 {
+            return String::new();
+        }
+        // SAFETY: as above.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, previous | libc::O_NONBLOCK) };
+        let mut collected = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            // SAFETY: `buffer` is a valid writable slice for the length passed.
+            let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if count <= 0 {
+                break;
+            }
+            collected.extend_from_slice(&buffer[..count as usize]);
+        }
+        // SAFETY: restores the descriptor flags sampled above.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, previous) };
+        String::from_utf8_lossy(&collected).into_owned()
+    }
+
+    /// Collects output until `marker` arrives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn wait_for_marker(fd: std::os::fd::RawFd, marker: &str) -> String {
+        const MARKER_TIMEOUT: Duration = Duration::from_secs(10);
+        const MARKER_POLL: Duration = Duration::from_millis(10);
+
+        let deadline = std::time::Instant::now() + MARKER_TIMEOUT;
+        let mut collected = String::new();
+        while std::time::Instant::now() < deadline {
+            collected.push_str(&drain_available(fd));
+            if collected.contains(marker) {
+                return collected;
+            }
+            std::thread::sleep(MARKER_POLL);
+        }
+        panic!("timed out waiting for {marker:?}; got: {collected:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_cancellation_does_not_inject_eof() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        // The reader has to stay in the foreground process group. A
+        // backgrounded reader is orphaned once the parent shell exits, and
+        // reading a controlling terminal from an orphaned group fails with
+        // EIO, which looks exactly like the injected end-of-input this test
+        // is meant to catch.
+        command
+            .arg("-c")
+            .arg("printf 'done\\n'; read value; printf 'eof-injected'");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        let session = child.id() as libc::pid_t;
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+        let input = stdio.stdin;
+
+        // The shell is now blocked in `read`, so any end-of-input it observes
+        // has to come from the bridge.
+        let mut text = wait_for_marker(stdio.stdout.as_raw_fd(), "done");
+
+        terminal.finish_native_bridge();
+        drop(input);
+
+        // The bridge has stopped copying, so watch the primary directly and
+        // keep draining it. An undrained terminal would wedge the shell mid
+        // exit, which looks exactly like it never left its `read`.
+        let watch = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < watch {
+            text.push_str(&drain_available(stdio.stdout.as_raw_fd()));
+            text.push_str(&drain_available(terminal.primary.as_raw_fd()));
+            assert!(!text.contains("eof-injected"), "got: {text:?}");
+            assert!(
+                child.try_wait().expect("poll child").is_none(),
+                "cancellation ended the shell's `read`; got: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // SAFETY: the child created its own session with its PID as the process-group ID.
+        unsafe {
+            libc::kill(-session, libc::SIGKILL);
+        }
+
+        // Reap on a deadline, still draining: a Darwin child stuck writing to a
+        // full terminal does not die until the queue drains.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            text.push_str(&drain_available(stdio.stdout.as_raw_fd()));
+            text.push_str(&drain_available(terminal.primary.as_raw_fd()));
+            if child.try_wait().expect("poll child").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell did not exit after SIGKILL; got: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         assert!(text.contains("done"), "got: {text:?}");
         assert!(!text.contains("eof-injected"), "got: {text:?}");
     }
@@ -2097,7 +2487,7 @@ mod tests {
             output.read_to_end(&mut bytes).expect("read output");
             bytes
         });
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
         terminal.finish_native_bridge();
 
         let output = output_thread.join().expect("output thread");
@@ -2125,7 +2515,7 @@ mod tests {
             let buffer = vec![b'x'; 1024 * 1024];
             let _ = input.write_all(&buffer);
         });
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
 
         let start = std::time::Instant::now();
         terminal.finish_native_bridge();
@@ -2149,7 +2539,32 @@ mod tests {
         drop(stdio.stdin);
         drop(stdio.stdout);
 
-        assert!(child.wait().expect("wait child").success());
+        assert!(wait_for_exit(&mut child).success());
+        terminal.finish_native_bridge();
+    }
+
+    /// The closed-consumer case above drains the child's whole output in one
+    /// read, so it only catches a bridge that stops draining because Darwin
+    /// blocks the secondary's close. Gate a bulk write behind the close so the
+    /// child also blocks on a full terminal queue, which catches it anywhere.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_keeps_draining_after_the_output_consumer_closes() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("read go; head -c 1000000 /dev/zero");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+
+        // Close the consumer first so the echoed input already triggers EPIPE.
+        drop(stdio.stdout);
+        let mut input = std::fs::File::from(stdio.stdin);
+        input.write_all(b"go\n").expect("write input");
+        drop(input);
+
+        assert!(wait_for_exit(&mut child).success());
         terminal.finish_native_bridge();
     }
 
@@ -2196,6 +2611,282 @@ mod tests {
             "full output bridge did not cancel promptly"
         );
         drop(stdio.stdout);
+    }
+
+    /// macOS has no `F_SETPIPE_SZ`, so fill the output pipe by volume instead.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_bridge_cancels_when_the_output_pipe_fills() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("head -c 1000000 /dev/zero");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+        drop(stdio.stdin);
+
+        // Never read stdout: the pipe fills, the bridge parks in its
+        // cancellable write, and the child blocks on the terminal behind it.
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "child should still be blocked behind the full output pipe"
+        );
+
+        // Run the join off-thread so a bridge that ignores cancellation fails
+        // the test instead of hanging it.
+        let (done, finished) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                terminal.finish_native_bridge();
+                let _ = done.send(());
+            });
+            let cancelled = finished.recv_timeout(Duration::from_secs(5)).is_ok();
+            if !cancelled {
+                // Drain so the parked bridge can finish and the scope can join.
+                let mut sink = std::fs::File::from(stdio.stdout.try_clone().expect("clone stdout"));
+                let mut scratch = [0u8; 8192];
+                while sink.read(&mut scratch).unwrap_or(0) > 0 {}
+            }
+            assert!(cancelled, "full output bridge did not cancel promptly");
+        });
+
+        drop(stdio.stdout);
+        drop(terminal);
+        let _ = wait_for_exit(&mut child);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn size_reports_the_last_applied_dimensions() {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("true");
+        let initial = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let terminal = LivePty::attach(&mut command, initial, &[]).expect("attach PTY");
+        assert_eq!(terminal.size(), initial);
+
+        let resized = PtySize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        terminal.resize(resized).expect("resize PTY");
+        assert_eq!(terminal.size(), resized);
+
+        // A rejected resize must not disturb the recorded size.
+        assert_eq!(
+            terminal
+                .resize(PtySize {
+                    rows: 0,
+                    cols: 0,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect_err("zero dimensions are rejected")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(terminal.size(), resized);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn is_canonical_mode_follows_the_terminal_discipline() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("printf 'ready\\n'; read go; stty -icanon; printf 'canonical-off\\n'; read done");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+        let mut writer = terminal.take_writer().expect("take writer");
+
+        drain.wait_for("ready");
+        assert!(terminal.is_canonical_mode().expect("read discipline"));
+
+        writer.write_all(b"go\r").expect("write input");
+        drain.wait_for("canonical-off");
+        assert!(!terminal.is_canonical_mode().expect("read discipline"));
+
+        drop(writer);
+        let _ = child.kill();
+        let _ = wait_for_exit(&mut child);
+        drop(terminal);
+        let _ = drain.finish();
+    }
+
+    /// `resize` must notify the foreground process group, not just set the
+    /// kernel's window size.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn resize_signals_the_foreground_process_group() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            "trap 'stty size; exit 0' WINCH; printf 'ready\\n'; \
+             i=0; while [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done",
+        );
+        let terminal = LivePty::attach(
+            &mut command,
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &[],
+        )
+        .expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        drain.wait_for("ready");
+        terminal
+            .resize(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize PTY");
+
+        let seen = drain.wait_for("40 120");
+        assert!(seen.contains("40 120"), "got: {seen:?}");
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let _ = drain.finish();
+    }
+
+    /// A forwarding process switches the terminal to raw mode, so the live
+    /// discipline no longer reports an EOF character. `attach_forwarded`
+    /// captures it up front and still delivers it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn forwarded_eof_is_delivered_through_a_raw_mode_terminal() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            "stty raw -echo; printf 'ready\\r\\n'; \
+             head -c 1 | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+        );
+        let terminal = LivePty::attach_forwarded(&mut command, PtySize::default(), &[])
+            .expect("attach forwarded PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        drain.wait_for("ready");
+        drop(terminal.take_writer().expect("take writer"));
+
+        assert!(wait_for_exit(&mut child).success());
+        drop(terminal);
+        let output = drain.finish();
+        assert!(output.contains("04"), "expected ^D byte; got: {output:?}");
+    }
+
+    /// The contrast to the test above: the default discipline reads the live
+    /// termios, which reports no EOF character once the terminal is raw.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_canonical_eof_is_skipped_for_a_raw_mode_terminal() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("stty raw -echo; printf 'ready\\r\\n'; head -c 1 >/dev/null");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
+
+        drain.wait_for("ready");
+        drop(terminal.take_writer().expect("take writer"));
+
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "no EOF byte should reach a raw-mode terminal"
+        );
+
+        let _ = child.kill();
+        let _ = wait_for_exit(&mut child);
+        drop(terminal);
+        let _ = drain.finish();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn raw_secondary_guard_sets_raw_mode_and_restores_on_drop() {
+        use nix::sys::termios::{self, LocalFlags};
+
+        let (primary, secondary) = open_pty(None).expect("open PTY pair");
+        let before = termios::tcgetattr(&secondary).expect("read termios");
+        assert!(before.local_flags.contains(LocalFlags::ICANON));
+
+        {
+            let _raw = RawSecondaryGuard::install(secondary.as_raw_fd()).expect("install raw mode");
+            let during = termios::tcgetattr(&secondary).expect("read termios");
+            assert!(!during.local_flags.contains(LocalFlags::ICANON));
+            assert!(!during.local_flags.contains(LocalFlags::ECHO));
+        }
+
+        let after = termios::tcgetattr(&secondary).expect("read termios");
+        // PENDIN is kernel-managed status, not settable state.
+        let settable = |flags: LocalFlags| flags - LocalFlags::PENDIN;
+        assert_eq!(settable(after.local_flags), settable(before.local_flags));
+        assert_eq!(after.input_flags, before.input_flags);
+        assert_eq!(after.output_flags, before.output_flags);
+        drop(primary);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn raw_secondary_guard_declines_a_non_tty() {
+        let (read, write) = create_pipe().expect("create pipe");
+        assert!(RawSecondaryGuard::install(read.as_raw_fd()).is_none());
+        drop((read, write));
+    }
+
+    /// A failed `exec` must still surface as a spawn error after `attach`
+    /// has rewired stdio onto the terminal.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn attach_still_reports_a_failed_exec() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut command = Command::new("/nonexistent/mxc-pty-missing-binary");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let error = command
+            .spawn()
+            .expect_err("missing binary must fail to spawn");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        drop(terminal);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

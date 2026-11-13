@@ -16,17 +16,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::time::{timeout, Instant};
 
-use mxc_internal::windows_sandbox_lifecycle::bridge::{
+use crate::windows_sandbox_lifecycle::bridge::{
     host_watchdog_deadline, reconnect_data_streams, stream_exec_on_guest, write_exit_frame,
     GuestConnection, HOST_WATCHDOG_GRACE,
 };
-use mxc_internal::windows_sandbox_lifecycle::control_plane::{
+use crate::windows_sandbox_lifecycle::control_plane::{
     parse_client_protocol, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_ERR_PROTOCOL, IPC_EXEC,
     IPC_PING, IPC_PROTOCOL_VERSION, IPC_STOP,
 };
-use mxc_internal::windows_sandbox_lifecycle::ipc_exec;
+use crate::windows_sandbox_lifecycle::ipc_exec;
 
-use mxc_internal::windows_sandbox_common::auth::Nonce as GuestNonce;
+use crate::windows_sandbox_common::auth::Nonce as GuestNonce;
 
 /// Maximum time to wait for a client request line.
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -255,7 +255,7 @@ async fn handle_client(
     }
 }
 
-/// Handle an `EXEC` after the auth line: read the framed [`ExecStart`], acquire
+/// Handle an `EXEC` after the auth line: read the framed [`ipc_exec::ExecStart`], acquire
 /// the single-flight guest slot, emit a status line, and (on admission) stream
 /// the guest's output back as [`ipc_exec`] frames.
 async fn handle_exec(
@@ -462,8 +462,8 @@ async fn handle_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxc_internal::windows_sandbox_common::auth::generate_nonce;
-    use mxc_internal::windows_sandbox_lifecycle::ipc_exec::ExecStart;
+    use crate::windows_sandbox_common::auth::generate_nonce;
+    use crate::windows_sandbox_lifecycle::ipc_exec::ExecStart;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;

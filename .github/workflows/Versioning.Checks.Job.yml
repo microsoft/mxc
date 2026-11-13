@@ -48,7 +48,7 @@ jobs:
         working-directory: src
         run: |
           cargo test --locked -p mxc-internal --features schema-gen --lib mxc_contract::
-          cargo test --locked -p mxc-internal --features schema-gen --test mxc_contract_v0_9_0_alpha --test mxc_contract_v1_0_0 --test mxc_contract_v1_1_0_alpha --test mxc_contract_version_boundaries
+          cargo test --locked -p mxc-sdk --features schema-gen --test mxc_contract_v0_9_0_alpha --test mxc_contract_v1_0_0 --test mxc_contract_v1_1_0_alpha --test mxc_contract_version_boundaries
 
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js
@@ -78,6 +78,10 @@ jobs:
       - name: Check crate publishing metadata
         shell: pwsh
         run: ./scripts/ci/Invoke-CratePackage.ps1 -ValidateOnly
+
+      - name: Smoke-test mxc-sdk crate packaging
+        shell: pwsh
+        run: ./scripts/ci/Invoke-CratePackage.ps1 -OutDir (Join-Path $env:RUNNER_TEMP 'crates')
 
       - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
         run: node scripts/check-dotnet-errorcode-parity.js

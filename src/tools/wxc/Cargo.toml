@@ -17,6 +17,7 @@ serde_json.workspace = true
 windows.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+chrono.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
@@ -34,5 +35,3 @@ microvm = ["mxc-internal/microvm"]
 wslc = ["mxc-internal/wslc"]
 hyperlight = ["mxc-internal/hyperlight"]
 isolation_session = ["mxc-internal/isolation_session"]
-force-tier-testing = ["mxc-internal/force-tier-testing"]
-tier2_bfs = ["mxc-internal/tier2_bfs"]

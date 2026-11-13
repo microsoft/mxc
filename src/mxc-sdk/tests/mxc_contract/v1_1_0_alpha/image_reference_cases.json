@@ -1,0 +1,162 @@
+[
+  {
+    "image": "docker.io/library/python:3.12-alpine",
+    "valid": true
+  },
+  {
+    "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+    "valid": true
+  },
+  {
+    "image": "localhost/python:3.12",
+    "valid": true
+  },
+  {
+    "image": "localhost:5000/python:3.12",
+    "valid": true
+  },
+  {
+    "image": "registry:5000/team/python@sha256:abc",
+    "valid": true
+  },
+  {
+    "image": "[::1]:5000/team/python",
+    "valid": true
+  },
+  {
+    "image": "registry.example/repo??",
+    "valid": true
+  },
+  {
+    "image": ".host.example/repo",
+    "valid": true
+  },
+  {
+    "image": "..a/repo",
+    "valid": true
+  },
+  {
+    "image": "a../repo",
+    "valid": true
+  },
+  {
+    "image": ".a.b/repo",
+    "valid": true
+  },
+  {
+    "image": ".:5000/repo",
+    "valid": true
+  },
+  {
+    "image": "registry.example:tag/repo",
+    "valid": true
+  },
+  {
+    "image": "..../repo",
+    "valid": true
+  },
+  {
+    "image": "./repo",
+    "valid": false
+  },
+  {
+    "image": "../repo",
+    "valid": false
+  },
+  {
+    "image": ".a./repo",
+    "valid": false
+  },
+  {
+    "image": ".a/repo",
+    "valid": false
+  },
+  {
+    "image": "python:3.12-alpine",
+    "valid": false
+  },
+  {
+    "image": "library/python:3.12-alpine",
+    "valid": false
+  },
+  {
+    "image": "registry:tag/python",
+    "valid": false
+  },
+  {
+    "image": "registry:/python",
+    "valid": false
+  },
+  {
+    "image": ":5000/python",
+    "valid": false
+  },
+  {
+    "image": "localhost",
+    "valid": false
+  },
+  {
+    "image": "localhost/",
+    "valid": false
+  },
+  {
+    "image": "example.com/",
+    "valid": false
+  },
+  {
+    "image": "example.com//repo",
+    "valid": false
+  },
+  {
+    "image": "example.com/:tag",
+    "valid": false
+  },
+  {
+    "image": "example.com/@sha256:abc",
+    "valid": false
+  },
+  {
+    "image": ".example/repo",
+    "valid": false
+  },
+  {
+    "image": "example./repo",
+    "valid": false
+  },
+  {
+    "image": "/repo",
+    "valid": false
+  },
+  {
+    "image": "",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/python:3.12\n",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py thon",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py\u0000thon",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py\u0085thon",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py\u00a0thon",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py\u2028thon",
+    "valid": false
+  },
+  {
+    "image": "docker.io/library/py\ufeffthon",
+    "valid": false
+  }
+]

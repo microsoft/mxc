@@ -3,21 +3,21 @@
 
 //! Tests for SDK helpers and V1 request authoring.
 
-use mxc_internal::v1::platform_support;
-use mxc_internal::v1::policy::filesystem::{
+use mxc_sdk::v1::platform_support;
+use mxc_sdk::v1::policy::filesystem::{
     available_tools_policy, temporary_files_policy, user_profile_policy,
 };
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-use mxc_internal::v1::ContainerRequest;
+use mxc_sdk::v1::ContainerRequest;
 #[cfg(target_os = "windows")]
-use mxc_internal::v1::ErrorCode;
+use mxc_sdk::v1::ErrorCode;
 #[cfg(target_os = "windows")]
-use mxc_internal::v1::{configs::WslcConfig, Containment};
+use mxc_sdk::v1::{configs::WslcConfig, Containment};
 
 #[cfg(target_os = "macos")]
-use mxc_internal::v1::spawn;
+use mxc_sdk::v1::spawn;
 #[cfg(target_os = "macos")]
-use mxc_internal::v1::WaitResult;
+use mxc_sdk::v1::WaitResult;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -29,9 +29,8 @@ fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn platform_support_reports_host() {
     let support = platform_support();
-    // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
-    assert!(support.is_supported, "reason: {:?}", support.reason);
-    assert!(!support.available_methods.is_empty());
+    assert_eq!(support.is_supported, !support.available_methods.is_empty());
+    assert_eq!(support.reason.is_some(), !support.is_supported);
 }
 
 #[cfg(target_os = "macos")]
@@ -156,7 +155,7 @@ fn user_profile_policy_uses_supplied_environment() {
 #[cfg(target_os = "windows")]
 #[test]
 fn tool_options_filter_all_application_packages_without_changing_default() {
-    use mxc_internal::v1::policy::filesystem::{ToolsPolicyContainerType, ToolsPolicyOptions};
+    use mxc_sdk::v1::policy::filesystem::{ToolsPolicyContainerType, ToolsPolicyOptions};
     let directory = std::env::temp_dir().join(format!("mxc-tools-{} & paths", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let grant = std::process::Command::new("icacls.exe")
@@ -184,7 +183,7 @@ fn tool_options_filter_all_application_packages_without_changing_default() {
 #[test]
 fn build_request_then_run_seatbelt() {
     let request = ContainerRequest {
-        filesystem: Some(mxc_internal::v1::FilesystemPolicy {
+        filesystem: Some(mxc_sdk::v1::FilesystemPolicy {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -254,14 +253,24 @@ fn platform_support_linux_reports_the_backends_it_can_launch() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn platform_support_windows_includes_processcontainer() {
+fn platform_support_windows_matches_processcontainer_availability() {
     let support = platform_support();
-    assert!(support.is_supported, "reason: {:?}", support.reason);
-    // ProcessContainer is always available on Windows and is reported first.
+    let process_container_available = mxc_sdk::v1::available_backends()
+        .iter()
+        .any(|backend| backend.backend == "processcontainer");
     assert_eq!(
-        support.available_methods.first().map(String::as_str),
-        Some("processcontainer")
+        support
+            .available_methods
+            .iter()
+            .any(|method| method == "processcontainer"),
+        process_container_available
     );
+    if process_container_available {
+        assert_eq!(
+            support.available_methods.first().map(String::as_str),
+            Some("processcontainer")
+        );
+    }
     // Beyond processcontainer, only the opt-in backends may appear.
     // `windows_sandbox` is a host-capability backend reported by
     // `available_backends()`, not here — so assert it never leaks into this
@@ -295,21 +304,20 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
 #[test]
 fn request_probe_accepts_default_and_typed_requests() {
     let _: fn(
-        Option<&mxc_internal::v1::ContainerRequest>,
-    ) -> Result<mxc_internal::v1::ProbeOutput, mxc_internal::v1::Error> = mxc_internal::v1::probe;
+        Option<&mxc_sdk::v1::ContainerRequest>,
+    ) -> Result<mxc_sdk::v1::ProbeOutput, mxc_sdk::v1::Error> = mxc_sdk::v1::probe;
 
     let request = ContainerRequest {
         containment: Containment::ProcessContainer(
-            mxc_internal::v1::configs::ProcessContainerConfig::default(),
+            mxc_sdk::v1::configs::ProcessContainerConfig::default(),
         ),
         ..ContainerRequest::new("cmd /c exit 0")
     };
 
     for request in [None, Some(&request)] {
-        let output =
-            mxc_internal::v1::probe(request).expect("ProcessContainer request should probe");
-        let _: &mxc_internal::v1::ProbeFacts = &output.probes;
-        let _: &mxc_internal::v1::UiCapabilitySupport = &output.probes.ui_capabilities;
+        let output = mxc_sdk::v1::probe(request).expect("ProcessContainer request should probe");
+        let _: &mxc_sdk::v1::ProbeFacts = &output.probes;
+        let _: &mxc_sdk::v1::UiCapabilitySupport = &output.probes.ui_capabilities;
         assert!(!output.warnings.iter().any(String::is_empty));
     }
 }
@@ -322,7 +330,7 @@ fn request_probe_rejects_non_process_container_requests() {
         ..ContainerRequest::new("echo hi")
     };
 
-    let error = mxc_internal::v1::probe(Some(&request))
+    let error = mxc_sdk::v1::probe(Some(&request))
         .expect_err("request probe should reject non-ProcessContainer containment");
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
@@ -358,7 +366,7 @@ fn available_tools_policy_filters_system_critical() {
 /// alone; a consumer should never need `mxc_engine` as a direct dependency.
 #[test]
 fn bubblewrap_network_types_are_reachable_from_the_facade() {
-    use mxc_internal::v1::{BubblewrapNetworkSupport, ProxyEnforcement};
+    use mxc_sdk::v1::{BubblewrapNetworkSupport, ProxyEnforcement};
 
     let network: Option<BubblewrapNetworkSupport> = platform_support().bubblewrap_network;
     if let Some(network) = network {

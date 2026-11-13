@@ -4,7 +4,7 @@
   "maxSupported": "1.1.0-alpha",
   "stateAware": "0.9.0-alpha",
   "stateAwareWindowsSandbox": "1.1.0-alpha",
-  "stateAwareWslc": "0.9.0-alpha",
+  "stateAwareWslc": "1.1.0-alpha",
   "stableLatest": "1.0.0",
   "sdkMajorTargets": {
     "1": "1.0.0"

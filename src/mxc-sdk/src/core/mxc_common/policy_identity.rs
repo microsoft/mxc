@@ -78,7 +78,8 @@ use serde_json::{Map, Value};
 
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -98,12 +99,7 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
     hash_canonical_json(&canonical)
 }
 
-/// Compute a state-aware policy identity from the backend resolved from the
-/// lifecycle request and its typed operation.
-///
-/// Only allow-listed provision fields enter the hash. An absent config remains
-/// JSON `null`, a present config with no fields remains `{}`, and explicit empty
-/// strings remain distinct, preserving identities for exact accepted requests.
+/// Hash the declared lifecycle policy without resolving the session's CPU, memory, or GPU settings.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
     backend: &str,
@@ -124,8 +120,6 @@ pub fn state_aware_policy_hash(
     hash_canonical_json(&canonical_json(&projection))
 }
 
-/// Exhaustive matching forces new operation/config fields to be classified
-/// explicitly instead of accidentally hashing a newly added secret.
 fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
     match operation {
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
@@ -140,6 +134,7 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
             image,
             image_tar_path,
+            session_id,
             port_mappings,
         }))) => {
             let mut config = Map::new();
@@ -148,6 +143,11 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             if let Some(image_tar_path) = image_tar_path {
                 config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+
+            // Session IDs are capabilities, so record their presence without their values.
+            if session_id.is_some() {
+                config.insert("joinsNamedSession".into(), Value::Bool(true));
             }
 
             // A forwarded host port is policy, so it belongs in the identity.
@@ -166,12 +166,44 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             Value::Object(config)
         }
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(
+            MicroVmProvisionConfig { image, memory_mib },
+        ))) => {
+            let mut config = Map::new();
+            config.insert("image".into(), Value::String(image.clone()));
+            if let Some(memory_mib) = memory_mib {
+                config.insert("memoryMib".into(), Value::from(*memory_mib));
+            }
+            Value::Object(config)
+        }
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
+            | StateAwareProvision::MicroVm(None)
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
-        // Sandbox IDs are not policy and can contain account identities.
+
+        StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
+            cpu_count,
+            memory_mb,
+            gpu,
+        })) => {
+            let mut config = Map::new();
+            if let Some(cpu_count) = cpu_count {
+                config.insert("cpuCount".into(), Value::from(*cpu_count));
+            }
+            if let Some(memory_mb) = memory_mb {
+                config.insert("memoryMb".into(), Value::from(*memory_mb));
+            }
+            if let Some(gpu) = gpu {
+                config.insert("gpu".into(), Value::Bool(*gpu));
+            }
+            Value::Object(config)
+        }
+        StateAwareOperation::ProvisionSession(None) => Value::Null,
+
+        // Sandbox and session IDs are not policy and can contain account
+        // identities.
         StateAwareOperation::Start {
             sandbox_id: _excluded_sandbox_id,
         }
@@ -183,6 +215,9 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         }
         | StateAwareOperation::Deprovision {
             sandbox_id: _excluded_sandbox_id,
+        } => Value::Null,
+        StateAwareOperation::DeprovisionSession {
+            session_id: _excluded_session_id,
         } => Value::Null,
     }
 }
@@ -218,6 +253,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        microvm_image,
+        microvm_memory_mib,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -238,6 +275,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     } = request;
 
     let mut root = Map::new();
+    if let Some(image) = microvm_image {
+        let mut config = serde_json::json!({"image": image});
+        if let Some(memory) = microvm_memory_mib {
+            config["provision"] = serde_json::json!({"memoryMib": memory});
+        }
+        root.insert("microvm".into(), config);
+    }
 
     root.insert(
         "containment".into(),
@@ -279,10 +323,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         "lxc".into(),
         serde_json::to_value(lxc_config).unwrap_or(Value::Null),
     );
-    root.insert(
-        "seatbelt".into(),
-        serde_json::to_value(seatbelt).unwrap_or(Value::Null),
-    );
+    let mut seatbelt_value = serde_json::to_value(seatbelt).unwrap_or(Value::Null);
+    if let Value::Object(seatbelt_map) = &mut seatbelt_value {
+        if let Some(Value::Object(cd)) = seatbelt_map.get_mut("captureDenials") {
+            cd.remove("output_path");
+        }
+    }
+    root.insert("seatbelt".into(), seatbelt_value);
     root.insert(
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
@@ -441,7 +488,7 @@ pub const ENTRA_UPN_MARKER: &str = "entra-upn";
 /// Whether `identity` looks like a UPN (or a `<prefix>:<upn>` sandbox id).
 ///
 /// An `@` is the discriminator: none of the identity shapes MXC mints itself
-/// (`sandbox-<hex>`, `wxc-<token>`, `wsb:<hex>`) contains one, and every UPN
+/// (`wxc-<token>`, `wsb:<hex>`) contains one, and every UPN
 /// does.
 fn is_upn_shaped(identity: &str) -> bool {
     identity.contains('@')
@@ -492,6 +539,26 @@ mod tests {
         let mut changed = request();
         changed.source_contract = None;
         assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn creation_memory_is_hashed_at_its_permanent_optional_location() {
+        let mut request = request();
+        request.microvm_image = Some("docker.io/library/python:3.12-alpine".to_owned());
+        let absent = policy_projection(&request);
+        assert_eq!(
+            absent["microvm"],
+            serde_json::json!({"image":"docker.io/library/python:3.12-alpine"})
+        );
+        request.microvm_memory_mib = Some(512);
+        let explicit = policy_projection(&request);
+        assert_eq!(
+            explicit["microvm"],
+            serde_json::json!({
+                "image":"docker.io/library/python:3.12-alpine","provision":{"memoryMib":512}
+            })
+        );
+        assert_ne!(absent, explicit);
     }
 
     #[test]
@@ -687,6 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_capture_denials_output_path_does_not_change_the_hash() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode, SeatbeltConfig};
+
+        let with_path = |output_path: Option<&str>, mode| {
+            let mut r = request();
+            r.seatbelt = Some(SeatbeltConfig {
+                capture_denials: Some(CaptureDenialsConfig {
+                    mode,
+                    output_path: output_path.map(str::to_string),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let base = with_path(None, CaptureDenialsMode::Block);
+        assert_eq!(
+            base,
+            with_path(Some("/tmp/denials.json"), CaptureDenialsMode::Block)
+        );
+        assert_ne!(base, with_path(None, CaptureDenialsMode::Allow));
+    }
+
+    #[test]
     fn telemetry_settings_do_not_change_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
@@ -804,7 +895,7 @@ mod tests {
 
     #[test]
     fn mxc_minted_identities_pass_through_unredacted() {
-        for id in ["sandbox-a3f1c8e40029bd17", "wsb:deadbeef", "CLI", ""] {
+        for id in ["wsb:deadbeef", "CLI", ""] {
             assert_eq!(redact_identity(id), id);
         }
     }
@@ -877,6 +968,139 @@ mod tests {
             cfg.memory_mb = Some(4096);
         }
         assert_ne!(policy_hash(&changed), policy_hash(&more));
+    }
+
+    #[test]
+    fn state_aware_session_hash_preserves_exact_sizing_shape() {
+        let request = request();
+        let sizing = |cpu_count, memory_mb, gpu| {
+            Some(WslcProvisionSessionConfig {
+                cpu_count,
+                memory_mb,
+                gpu,
+            })
+        };
+        let mut hashes = std::collections::HashSet::new();
+        for (config, expected_config) in [
+            (None, Value::Null),
+            (sizing(None, None, None), serde_json::json!({})),
+            (
+                sizing(Some(4), None, None),
+                serde_json::json!({"cpuCount": 4}),
+            ),
+            (
+                sizing(Some(8), None, None),
+                serde_json::json!({"cpuCount": 8}),
+            ),
+            (
+                sizing(None, Some(4), None),
+                serde_json::json!({"memoryMb": 4}),
+            ),
+            (
+                sizing(None, Some(4096), None),
+                serde_json::json!({"memoryMb": 4096}),
+            ),
+            (
+                sizing(None, None, Some(false)),
+                serde_json::json!({"gpu": false}),
+            ),
+            (
+                sizing(None, None, Some(true)),
+                serde_json::json!({"gpu": true}),
+            ),
+            (
+                sizing(Some(4), Some(4), Some(true)),
+                serde_json::json!({"cpuCount": 4, "memoryMb": 4, "gpu": true}),
+            ),
+        ] {
+            let operation = StateAwareOperation::ProvisionSession(config);
+            assert_eq!(
+                state_aware_config_projection(&operation),
+                expected_config,
+                "{operation:?}"
+            );
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
+            assert_eq!(
+                hash,
+                expected_state_aware_hash(&request, "wslc", "provision-session", expected_config),
+                "{operation:?}"
+            );
+            assert!(
+                hashes.insert(hash),
+                "absent, empty and supplied sizing fields must stay distinct, even when two \
+                 fields carry the same value: {operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_session_hash_excludes_the_session_id() {
+        let request = request();
+        for session_id in ["wslcsess:aaaa", "wslcsess:bbbb"] {
+            let operation = StateAwareOperation::DeprovisionSession {
+                session_id: session_id.into(),
+            };
+            assert_eq!(
+                state_aware_policy_hash(&request, "wslc", &operation),
+                expected_state_aware_hash(&request, "wslc", "deprovision-session", Value::Null),
+                "the session id must not enter the policy identity"
+            );
+        }
+    }
+
+    #[test]
+    fn joining_a_session_is_recorded_without_distinguishing_which_session() {
+        let base = request();
+        let joined = |session_id: Option<&str>| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(
+                    WslcProvisionConfig {
+                        image: Some("alpine:latest".to_string()),
+                        session_id: session_id.map(str::to_string),
+                        ..Default::default()
+                    },
+                ))),
+            )
+        };
+
+        let implicit = joined(None);
+        let named = joined(Some("wslcsess:aaaa"));
+        assert_ne!(
+            implicit, named,
+            "a sandbox sized by the host defaults must not share an identity with one whose \
+             sizing was chosen by another request"
+        );
+        assert_eq!(
+            named,
+            joined(Some("wslcsess:bbbb")),
+            "the session id is a bearer capability and must not reach the identity"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_session_leaves_the_provision_identity_untouched() {
+        let base = request();
+        let hash = |config: WslcProvisionConfig| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(config))),
+            )
+        };
+
+        assert_eq!(
+            hash(WslcProvisionConfig {
+                image: Some("alpine:latest".to_string()),
+                ..Default::default()
+            }),
+            hash(WslcProvisionConfig {
+                image: Some("alpine:latest".to_string()),
+                session_id: None,
+                ..Default::default()
+            })
+        );
     }
 
     fn parse_state_aware(
@@ -1081,38 +1305,48 @@ mod tests {
         let mut hashes = std::collections::HashSet::new();
         for (operation, expected_phase) in [
             (
-                StateAwareOperation::Provision(StateAwareProvision::WindowsSandbox),
+                StateAwareOperation::ProvisionSession(None),
+                "provision-session",
+            ),
+            (
+                StateAwareOperation::Provision(StateAwareProvision::Wslc(None)),
                 "provision",
             ),
             (
                 StateAwareOperation::Start {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "start",
             ),
             (
                 StateAwareOperation::Exec {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "exec",
             ),
             (
                 StateAwareOperation::Stop {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "stop",
             ),
             (
                 StateAwareOperation::Deprovision {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "deprovision",
             ),
+            (
+                StateAwareOperation::DeprovisionSession {
+                    session_id: "wslcsess:deadbeef".into(),
+                },
+                "deprovision-session",
+            ),
         ] {
-            let hash = state_aware_policy_hash(&request, "windows_sandbox", &operation);
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
             assert_eq!(
                 hash,
-                expected_state_aware_hash(&request, "windows_sandbox", expected_phase, Value::Null)
+                expected_state_aware_hash(&request, "wslc", expected_phase, Value::Null)
             );
             assert!(hashes.insert(hash), "phase must affect the policy hash");
         }

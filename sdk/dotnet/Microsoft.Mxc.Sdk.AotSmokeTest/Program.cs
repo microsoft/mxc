@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 
 static void Check(bool condition, string what)
 {
@@ -34,6 +35,13 @@ static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 }
 
 var initialPtySize = new MxcPtySize(40, 120);
+CheckRoundTrip(new Dev.JsonOptions { Experimental = true },
+    x => x.Experimental, "dev JSON options experimental authorization");
+CheckRoundTrip(new Dev.PtyJsonOptions(),
+    x => !x.Experimental && x.Size is null, "dev PTY options without initial dimensions");
+CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },
+    x => x.Experimental && x.Size == initialPtySize,
+    "dev PTY options experimental authorization and initial dimensions");
 CheckRoundTrip(new TelemetryConfig(), x => x.Enabled is null, "omitted telemetry enabled");
 CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false, "explicit disabled telemetry");
 foreach (var enabled in new bool?[] { null, true, false })
@@ -163,17 +171,21 @@ using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(wslcRequest)))
 const string backendsJson = """
 [
   {"backend":"processcontainer","tier":"base-container","capabilities":["captureDenials"]},
-  {"backend":"lxc"}
+  {"backend":"lxc"},
+  {"backend":"microvm"}
 ]
 """;
 var backends = MxcJson.Deserialize<NativeAvailableBackend[]>(backendsJson);
-Check(backends is { Length: 2 }, "two backends parsed");
+Check(backends is { Length: 3 }, "three backends parsed");
 Check(backends![0].Capabilities.Length == 1, "first backend capability parsed");
 Check(backends[1].Capabilities.Length == 0, "omitted capabilities default to empty, not null");
 Check(backends[1].Warnings.Length == 0, "omitted warnings default to empty, not null");
 var publicBackends = MxcPlatform.ParseAvailableBackends(backendsJson);
-Check(publicBackends.Count == 2, "root discovery facade parses both backends");
+Check(publicBackends.Count == 3, "root discovery facade parses all backends");
 Check(publicBackends[1].Backend == ContainmentBackend.Lxc, "root discovery maps LXC");
+Check(publicBackends[2].Backend == ContainmentBackend.MicroVm, "root discovery maps NVX");
+Check(publicBackends[2].Tier is null && publicBackends[2].Capabilities.Count == 0
+    && publicBackends[2].Warnings.Count == 0, "NVX discovery preserves omitted optional fields");
 
 // 4. Deserialize platform support.
 const string supportJson = """{"isSupported":true,"availableMethods":["processcontainer"]}""";

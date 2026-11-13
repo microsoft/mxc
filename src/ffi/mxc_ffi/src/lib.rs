@@ -15,9 +15,13 @@
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_json`] accepts the same
 //!   document and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) —
-//!   [`mxc_run_state_aware_json`] drives the envelope phases (provision /
-//!   start / stop / deprovision), and [`mxc_exec_state_aware_json`] runs the
-//!   exec phase as a live streaming handle (reusing the streaming externs).
+//!   [`mxc_run_state_aware_json`] drives the envelope phases (provision-session /
+//!   provision / start / stop / deprovision / deprovision-session), and
+//!   [`mxc_exec_state_aware_json`] runs the exec phase as a live streaming handle
+//!   (reusing the streaming externs).
+//!
+//! MicroVM JSON streaming and lifecycle operations use the shared engine.
+//! They require the MicroVM build feature, host support, and experimental opt-in.
 //!
 //! ## Ingress rule
 //!
@@ -86,6 +90,8 @@ mod error_detail;
 mod pty;
 mod state_aware;
 mod streaming;
+#[cfg(feature = "test-support")]
+mod test_fake_sandbox;
 pub use error_detail::*;
 pub use pty::*;
 pub use state_aware::*;

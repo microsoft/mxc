@@ -34,15 +34,6 @@ fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     }
 }
 
-fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
-    let contract::Fallback {
-        allow_dacl_mutation,
-    } = value;
-    wire::Fallback {
-        allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
 fn convert_clipboard(value: contract::UiClipboard) -> wire::ClipboardPolicy {
     match value {
         contract::UiClipboard::None => wire::ClipboardPolicy::None,
@@ -192,15 +183,32 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        capture_denials,
     } = value;
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
         gui_access: gui_access.into_option(),
-        // Removed from the 0.9 contract: the inner process is always exec'd.
-        launch_method: None,
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        capture_denials: capture_denials
+            .into_option()
+            .map(convert_seatbelt_capture_denials),
+    }
+}
+
+fn convert_seatbelt_capture_denials(
+    value: contract::SeatbeltCaptureDenials,
+) -> wire::SeatbeltCaptureDenials {
+    let contract::SeatbeltCaptureDenials {
+        mode,
+        output_path,
+        retain_etl,
+    } = value;
+    wire::SeatbeltCaptureDenials {
+        mode: mode.into_option().map(convert_capture_denials_mode),
+        output_path: output_path.into_option(),
+        retain_etl: retain_etl.into_option(),
     }
 }
 
@@ -284,7 +292,7 @@ pub(super) fn into_common_request_ir(
         lifecycle,
         process,
         filesystem,
-        fallback,
+        fallback: _,
         network,
         lxc,
         process_container,
@@ -296,6 +304,7 @@ pub(super) fn into_common_request_ir(
         windows_sandbox,
         wslc,
         hyperlight,
+        microvm,
     } = request;
     crate::mxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
@@ -313,7 +322,6 @@ pub(super) fn into_common_request_ir(
         lxc: lxc.into_option().map(convert_lxc),
         wslc: wslc.into_option().map(convert_wslc),
         filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: telemetry.into_option().map(convert_telemetry),
@@ -322,6 +330,13 @@ pub(super) fn into_common_request_ir(
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
+        microvm: microvm.into_option().map(|config| wire::MicroVm {
+            image: config.image.into_inner(),
+            memory_mib: config
+                .provision
+                .into_option()
+                .and_then(|provision| provision.memory_mib.into_option()),
+        }),
     }
 }
 

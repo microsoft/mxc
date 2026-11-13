@@ -24,7 +24,7 @@ pub enum Phase {
 pub enum Containment {
     /// OS-native process sandbox (resolved per host).
     Process,
-    /// Windows AppContainer / BaseContainer.
+    /// Windows native ProcessContainer (PSEC).
     #[serde(rename = "processcontainer", alias = "appcontainer")]
     ProcessContainer,
     /// VM-class isolation (resolved per host).
@@ -292,14 +292,6 @@ pub struct Filesystem {
     pub denied_paths: Option<Vec<String>>,
 }
 
-/// AppContainer DACL-mutation fallback policy.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Fallback {
-    /// Allow the runner to mutate DACLs as a fallback.
-    pub allow_dacl_mutation: Option<bool>,
-}
-
 /// Network access policy.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -420,25 +412,27 @@ pub struct Seatbelt {
     pub profile_override: Option<String>,
     /// Allow GUI (WindowServer) access.
     pub gui_access: Option<bool>,
-    /// Inner process launch method.
-    pub launch_method: Option<LaunchMethod>,
     /// Attach the inner process to a nested pty (default true).
     pub nested_pty: Option<bool>,
     /// Allow Keychain access.
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
+    /// Seatbelt denial capture (development contract only).
+    pub capture_denials: Option<SeatbeltCaptureDenials>,
 }
 
-/// Seatbelt inner-process launch method.
+/// macOS Seatbelt denial-capture settings.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LaunchMethod {
-    /// sandbox_init() + exec (default). Works for third-party GUI apps.
-    Exec,
-    /// Launch via macOS LaunchServices (`open`), then apply the sandbox to the
-    /// inner shell via sandbox-exec. Required for apps with launch constraints.
-    Open,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCaptureDenials {
+    /// Defaults to `block` when omitted.
+    pub mode: Option<CaptureDenialsMode>,
+    /// Absolute path for the JSON denials report; a run id is inserted into
+    /// the file stem. Its parent directory must exist.
+    pub output_path: Option<String>,
+    /// Keep the raw `log stream` trace next to the report. Defaults to `false`.
+    pub retain_etl: Option<bool>,
 }
 
 /// Telemetry configuration (`telemetry`).
@@ -479,6 +473,13 @@ pub struct Hyperlight {
     /// Guest runtime that `process.commandLine` is source for; `agent` is
     /// the default.
     pub runtime: Option<crate::mxc_common::models::HyperlightRuntime>,
+}
+
+/// MicroVM creation settings retained by contract adapters before normalization.
+#[derive(Debug, Clone)]
+pub(crate) struct MicroVm {
+    pub(crate) image: String,
+    pub(crate) memory_mib: Option<u32>,
 }
 
 /// WSL container backend config.

@@ -71,7 +71,7 @@ pub(crate) const PRIVACY_LEARNING_MODE_PROVIDER: GUID = GUID {
 };
 
 pub(crate) const NETWORK_DECISION_PROVIDER: GUID =
-    GUID::from_u128(0x71237669_21c3_4101_bd2f_ff38945d725a);
+    GUID::from_u128(0x301ec03d_2951_5efb_6d99_59c64628bbfc);
 pub(crate) const NETWORK_DECISION_EVENT_ID: u16 = 1;
 
 pub(crate) const ACCESS_CHECK_EVENT_ID: u16 = 14;
@@ -84,7 +84,7 @@ const COM_CALL_OBJECT_TYPE: &str = "ComCallOnInterface";
 /// Pre-decoded event payload handed to the extractors.
 ///
 /// The trace consumer decodes each raw `EVENT_RECORD` into this shape via
-/// [`crate::learning_mode_windows::tdh_decode::decode_event_parts`] before routing it here. The
+/// `crate::learning_mode_windows::tdh_decode::decode_event_parts` before routing it here. The
 /// extractors take only this representation so they stay unit-testable.
 #[derive(Debug, Clone)]
 pub struct DecodedEventParts {

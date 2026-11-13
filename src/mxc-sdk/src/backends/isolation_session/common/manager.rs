@@ -7,6 +7,7 @@
 //! against the local console.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
 use crate::mxc_common::logger::Logger;
@@ -18,10 +19,12 @@ use crate::isolation_session_bindings::bindings::{
     IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
     IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR};
 use windows::Win32::System::Com::{CoDecrementMTAUsage, CoIncrementMTAUsage, CO_MTA_USAGE_COOKIE};
 use windows::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    GetConsoleMode, GetStdHandle, CONSOLE_MODE, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+    STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::UI::WindowId;
@@ -35,12 +38,78 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, drain_output_relays_within,
+    duplicate_handle, OutputRelayDrain, PipeRelay, PipeRelayWithStopParams,
 };
-use super::process_options::{build_iso_process_options, ProcessOptions};
+use super::process_options::{
+    build_iso_process_options, with_service_timeout_grace, ProcessOptions,
+};
 
 // The OS account name is lifecycle addressing data, not diagnostic identity.
 const AGENT_IDENTITY_MARKER: &str = "isolation-session-agent";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdinHandleKind {
+    Console,
+    PipeOrFile,
+}
+
+fn classify_stdin_handle(handle: HANDLE) -> StdinHandleKind {
+    let file_type = unsafe { GetFileType(handle) };
+    if file_type == FILE_TYPE_CHAR {
+        let mut mode = CONSOLE_MODE(0);
+        if unsafe { GetConsoleMode(handle, &mut mode) }.is_ok() {
+            return StdinHandleKind::Console;
+        }
+    }
+    StdinHandleKind::PipeOrFile
+}
+
+/// # Safety
+/// Handles must be valid during setup. Console input is borrowed and must
+/// remain valid until the relay exits; the other handles are duplicated.
+unsafe fn create_stdin_relay(
+    stdin: HANDLE,
+    destination: HANDLE,
+    stop_event: HANDLE,
+    interactive: bool,
+    resize_callback: impl Fn(u16, u16) + Send + 'static,
+) -> Result<(OwnedHandle, Option<PipeReadCanceller>), IsolationSessionError> {
+    // Choose the relay from stdin itself; `interactive` describes stdout.
+    if classify_stdin_handle(stdin) == StdinHandleKind::PipeOrFile {
+        let (thread, canceller) = unsafe { create_relay_thread(stdin, destination) }
+            .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?
+            .into_thread_and_canceller();
+        return Ok((thread, Some(canceller)));
+    }
+
+    // process.Close() can release the original while the relay is still writing.
+    let h_write = duplicate_handle(destination)
+        .map_err(|e| lifecycle_err(format!("duplicate stdin handle: {e}")))?;
+    let h_stop_event = duplicate_handle(stop_event)
+        .map_err(|e| lifecycle_err(format!("duplicate stdin stop event: {e}")))?;
+    let thread = if interactive {
+        unsafe {
+            create_console_relay_thread(ConsoleRelayParams {
+                h_read: stdin,
+                h_write,
+                h_stop_event,
+                resize_callback: Box::new(resize_callback),
+            })
+        }
+        .map_err(|e| lifecycle_err(format!("create console-aware stdin relay: {e}")))?
+    } else {
+        unsafe {
+            create_relay_thread_with_stop(PipeRelayWithStopParams {
+                h_read: stdin,
+                h_write,
+                h_stop_event,
+            })
+        }
+        .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?
+    };
+    Ok((thread, None))
+}
 
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
 /// which outlive the call that created them.
@@ -398,16 +467,22 @@ impl IsolationSessionManager {
 
     /// Step 3: Create a process inside the started isolation session and run it
     /// to completion. Output is streamed live to the calling process's stdio via
-    /// internal relay threads; only the exit code is returned.
+    /// internal relay threads; only the exit code or timeout is returned.
+    ///
+    /// `options.timeout_ms` is enforced locally; the service-side timer is armed
+    /// with [`with_service_timeout_grace`] so a timeout is never reported as an
+    /// ordinary exit.
     ///
     /// This is the **relay** path, reached by `wxc-exec` and by an in-process
     /// caller that asked to attach. A caller that wants the streams handed back
     /// uses [`Self::piped_exec_handle`] instead.
+    ///
+    /// [`with_service_timeout_grace`]: super::process_options::with_service_timeout_grace
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
         logger: Option<&mut Logger>,
-    ) -> Result<i32, IsolationSessionError> {
+    ) -> Result<ExecOutcome, IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
             // Everything fallible that does not need the workload runs first, so no
             // failure can strand a running one.
@@ -418,10 +493,7 @@ impl IsolationSessionManager {
             let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
                 .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
 
-            // Manual-reset stop event for the stdin relay. Effective for a waitable
-            // `h_read` (console = TTY mode); for pipe handles it has no effect on a
-            // blocked `ReadFile`, so that relay misses its join and ends only when
-            // the calling process exits. Only `wxc-exec` reaches the non-TTY case.
+            // Manual-reset stop event for console-backed stdin relays.
             let stdin_stop_event = unsafe {
                 CreateEventW(None, true, false, PCWSTR::null())
                     .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
@@ -448,7 +520,8 @@ impl IsolationSessionManager {
             // Lifetime: each relay's param struct is moved to the heap and owned
             // by its thread, which frees it on exit, so joining is not required
             // for memory safety.
-            let started = self.start_process(options, logger.as_deref())?;
+            let service_options = with_service_timeout_grace(options.clone());
+            let started = self.start_process(&service_options, logger.as_deref())?;
             let process = &started.process;
             let stdout_handle_val = started.stdout;
             let stderr_handle_val = started.stderr;
@@ -491,102 +564,59 @@ impl IsolationSessionManager {
             }
 
             scope.stdout = if stdout_handle_val != 0 {
-                let (thread, canceller) = unsafe {
-                    create_relay_thread(
-                        HANDLE(stdout_handle_val as *mut core::ffi::c_void),
-                        wxc_stdout,
-                    )
-                }
-                .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?;
-                scope.output_cancellers.push(canceller);
-                Some(thread)
+                Some(
+                    unsafe {
+                        create_relay_thread(
+                            HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+                            wxc_stdout,
+                        )
+                    }
+                    .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
+                )
             } else {
                 None
             };
             scope.stderr = if stderr_handle_val != 0 {
-                let (thread, canceller) = unsafe {
-                    create_relay_thread(
-                        HANDLE(stderr_handle_val as *mut core::ffi::c_void),
-                        wxc_stderr,
-                    )
-                }
-                .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?;
-                scope.output_cancellers.push(canceller);
-                Some(thread)
+                Some(
+                    unsafe {
+                        create_relay_thread(
+                            HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+                            wxc_stderr,
+                        )
+                    }
+                    .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
+                )
             } else {
                 None
             };
-            // Stdin: in interactive mode use the console-aware relay so
-            // `WINDOW_BUFFER_SIZE_EVENT` records propagate as
-            // `ResizeConsole(cols, rows)` calls on the agent's inner ConPTY.
-            // In non-interactive mode the agent's stdin is plain byte-oriented
-            // and the simpler stop-aware pipe relay is appropriate.
-            enum StdinRelayKind {
-                None,
-                Pipe(PipeRelayWithStopParams),
-                Console(ConsoleRelayParams),
-            }
-
-            let stdin_relay_state = if stdin_handle_val == 0 {
-                StdinRelayKind::None
-            } else {
-                // Owned, like the output relays': `process.Close()` releases the
-                // original while this relay may still be writing.
-                let stdin_h_write =
-                    duplicate_handle(HANDLE(stdin_handle_val as *mut core::ffi::c_void))
-                        .map_err(|e| lifecycle_err(format!("duplicate stdin handle: {}", e)))?;
-                // Shares the event object, so `signal_stop` still reaches the relay.
-                let stdin_h_stop = duplicate_handle(stdin_stop_owned.get())
-                    .map_err(|e| lifecycle_err(format!("duplicate stdin stop event: {}", e)))?;
-                if options.interactive {
-                    // Clone the WinRT process handle so the relay thread holds
-                    // its own ref-counted reference (WinRT clone = AddRef),
-                    // released when the thread frees the params it owns.
-                    let process_for_resize = process.clone();
-                    let impersonation = self.impersonation.clone();
-                    StdinRelayKind::Console(ConsoleRelayParams {
-                        h_read: wxc_stdin,
-                        h_write: stdin_h_write,
-                        h_stop_event: stdin_h_stop,
-                        resize_callback: Box::new(move |cols, rows| {
+            if stdin_handle_val != 0 {
+                // The console relay needs its own process reference for resize calls.
+                let process_for_resize = process.clone();
+                let impersonation = self.impersonation.clone();
+                // SAFETY: process and standard handles outlive relay setup;
+                // the host's console input remains valid during execution.
+                let (thread, canceller) = unsafe {
+                    create_stdin_relay(
+                        wxc_stdin,
+                        HANDLE(stdin_handle_val as *mut core::ffi::c_void),
+                        stdin_stop_owned.get(),
+                        options.interactive,
+                        move |cols, rows| {
                             let _ = owned_thread::call(&impersonation, || {
                                 let _ = process_for_resize.ResizeConsole(cols, rows);
                                 Ok(())
                             });
-                        }),
-                    })
-                } else {
-                    StdinRelayKind::Pipe(PipeRelayWithStopParams {
-                        h_read: wxc_stdin,
-                        h_write: stdin_h_write,
-                        h_stop_event: stdin_h_stop,
-                    })
-                }
-            };
+                        },
+                    )
+                }?;
+                scope.stdin = Some(thread);
+                scope.stdin_canceller = canceller;
+            }
 
-            // Matched by value: the params move into the spawn call, which puts
-            // them on the heap under the relay thread's ownership.
-            scope.stdin = match stdin_relay_state {
-                StdinRelayKind::None => None,
-                StdinRelayKind::Pipe(params) => Some(
-                    unsafe { create_relay_thread_with_stop(params) }
-                        .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
-                ),
-                StdinRelayKind::Console(params) => {
-                    Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
-                        lifecycle_err(format!("create console-aware stdin relay: {}", e))
-                    })?)
-                }
-            };
+            let outcome = started.wait(options.timeout_ms, || scope.stop_stdin())?;
+            scope.finish()?;
 
-            let outcome = started.wait(options.timeout_ms)?;
-            scope.stop_stdin();
-            scope.finish();
-
-            Ok(match outcome {
-                ExecOutcome::Exited(exit_code) => exit_code,
-                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
-            })
+            Ok(outcome)
         })
     }
 
@@ -645,7 +675,7 @@ impl IsolationSessionManager {
             // before the shutdown ladder destroys the evidence.
             waiter: Box::new(move || {
                 owned_thread::call(&waiter_process.impersonation, || {
-                    waiter_process.wait(timeout_ms)
+                    waiter_process.wait(timeout_ms, || Ok(true))
                 })
                 .map_err(super::error::map_lifecycle_error)
             }),
@@ -885,7 +915,14 @@ impl StartedProcess {
     /// first `ExitCode()` reads 259 for a workload that exited with 259, so it
     /// walks all three tiers and cannot then tell that exit from a live
     /// process. An exited process therefore returns its code directly.
-    pub(super) fn wait(&self, timeout_ms: u32) -> Result<ExecOutcome, IsolationSessionError> {
+    ///
+    /// `before_shutdown` stops caller-owned input copying after a timeout.
+    /// Returning false skips the stdin-close step because a writer remains open.
+    pub(super) fn wait(
+        &self,
+        timeout_ms: u32,
+        before_shutdown: impl FnOnce() -> Result<bool, IsolationSessionError>,
+    ) -> Result<ExecOutcome, IsolationSessionError> {
         // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle —
         // no COM round-trip. On timeout it returns -1; the ladder below then
         // decides what to do about a process that is still running.
@@ -904,17 +941,15 @@ impl StartedProcess {
                 .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))
         })?;
 
-        // An exited process never reaches the ladder: the ladder cannot tell a
-        // 259 exit from a live process, which is the ambiguity `plan_wait`
-        // exists to resolve while the evidence is still intact.
         match plan {
+            // An exited process must skip shutdown: the ladder cannot
+            // distinguish a real exit code of 259 from STILL_ACTIVE.
             WaitPlan::Exited(exit_code) => {
                 self.record_exited(exit_code);
                 return Ok(ExecOutcome::Exited(exit_code));
             }
-            // The deadline was spent and the process is already gone, so there
-            // is nothing to kill and nothing to confirm — the sample that
-            // produced this plan is the confirmation.
+            // The deadline was spent, but the process is already gone.
+            // Nothing needs killing; retain the timeout result.
             WaitPlan::TimedOutAfterDeadline => {
                 self.record_timed_out(timeout_ms);
                 return Ok(ExecOutcome::TimedOut);
@@ -922,10 +957,9 @@ impl StartedProcess {
             WaitPlan::KillThenReportTimeout => {}
         }
 
-        // Timed out: the process was still running, so it must be dead before
-        // this reports `TimedOut`, which promises exactly that.
         self.record_timed_out(timeout_ms);
-        let (_, terminate_error) = wait_with_graceful_shutdown(&self.process)?;
+        let stdin_released = before_shutdown()?;
+        let (_, terminate_error) = wait_with_graceful_shutdown(&self.process, stdin_released)?;
         if let Some(error_code) = terminate_error {
             self.record_kill_failed(error_code);
         }
@@ -934,15 +968,11 @@ impl StartedProcess {
             .ExitCode()
             .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
         if after == STILL_ACTIVE {
-            // Unlike the general case, 259 is not ambiguous here: the sample
-            // above established the process was running, so this is the same
-            // process still running rather than a stale exit code. (The one
-            // exception is a workload that exits with 259 inside the ladder's
-            // own window, which yields a conservative "could not determine"
-            // rather than a false claim that it was killed.)
+            // A 259 exit during shutdown remains ambiguous: conservatively
+            // report failure rather than claiming the process was killed.
             return Err(lifecycle_err(
-                "the sandboxed process was still running after close-stdin, Ctrl-Close and \
-                 terminate; it timed out but could not be confirmed killed",
+                "the sandboxed process was still running after timeout shutdown; \
+                 it timed out but could not be confirmed killed",
             ));
         }
         Ok(ExecOutcome::TimedOut)
@@ -1022,26 +1052,27 @@ impl StartedProcess {
 /// Owns the relay threads and the workload for the span of `create_process`.
 ///
 /// [`finish`](Self::finish) tears down a workload that has already exited.
-/// Dropping without it abandons the run: the workload is terminated so the
-/// output relays reach EOF. Every join is bounded, so a relay whose read never
-/// returns cannot wedge the caller's thread.
+/// Dropping without it cancels output reads and terminates the workload.
+/// Every join is bounded; cancellation does not interrupt destination writes.
 struct RelayScope<'a> {
     process: &'a IsoSessionProcess,
     stop_event: HANDLE,
-    stdout: Option<OwnedHandle>,
-    stderr: Option<OwnedHandle>,
+    stdout: Option<PipeRelay>,
+    stderr: Option<PipeRelay>,
     stdin: Option<OwnedHandle>,
-    /// Ends the output relays' reads. A descendant that inherited the write
-    /// ends keeps them open past the workload's exit, so EOF alone is not a
-    /// bound.
-    output_cancellers: Vec<PipeReadCanceller>,
+    /// Ends a pipe/file-backed stdin relay. Console stdin relays use the stop
+    /// event instead because `CancelSynchronousIo` has console-handle edge
+    /// cases.
+    stdin_canceller: Option<PipeReadCanceller>,
     finished: bool,
 }
 
 impl<'a> RelayScope<'a> {
     const JOIN_MS: u32 = 1000;
-    /// Expiry cancels the read, dropping an in-flight chunk.
-    const DRAIN_MS: u32 = 5000;
+    /// Stop waiting only after all output relays are idle for this long.
+    const IDLE_MS: u64 = 5000;
+    /// Overall cap so a pathological one-byte-forever trickle still returns.
+    const ABSOLUTE_CAP_MS: u64 = 60_000;
 
     fn new(process: &'a IsoSessionProcess, stop_event: HANDLE) -> Self {
         Self {
@@ -1050,7 +1081,7 @@ impl<'a> RelayScope<'a> {
             stdout: None,
             stderr: None,
             stdin: None,
-            output_cancellers: Vec::new(),
+            stdin_canceller: None,
             finished: false,
         }
     }
@@ -1062,45 +1093,64 @@ impl<'a> RelayScope<'a> {
         }
     }
 
-    fn cancel_output_reads(&self) {
-        for canceller in &self.output_cancellers {
+    fn cancel_stdin_read(&self) {
+        if let Some(canceller) = &self.stdin_canceller {
             canceller.close();
         }
     }
 
     /// Whether the relay exited. An absent relay was never spawned.
-    fn join(relay: &Option<OwnedHandle>, timeout_ms: u32) -> bool {
-        match relay {
-            // SAFETY: an owned thread handle held by this scope.
-            Some(t) => (unsafe { WaitForSingleObject(t.get(), timeout_ms) }) == WAIT_OBJECT_0,
-            None => true,
-        }
+    fn join(relay: Option<&OwnedHandle>, timeout_ms: u32) -> bool {
+        wait_for_relay(relay, timeout_ms).unwrap_or(false)
     }
 
-    /// Each relay reads its own duplicate, so one still running does not keep
-    /// the pipe handles alive.
+    fn join_output(relay: &Option<PipeRelay>, timeout_ms: u32) -> bool {
+        Self::join(relay.as_ref().map(PipeRelay::thread), timeout_ms)
+    }
+
+    fn output_relays(&self) -> Vec<&PipeRelay> {
+        [&self.stdout, &self.stderr]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .collect()
+    }
+
+    /// Release the process's handles. A still-running relay owns its duplicates
+    /// until it exits.
     fn close_handles(&self) {
         let _ = self.process.Close();
     }
 
-    fn stop_stdin(&self) {
+    fn stop_stdin(&mut self) -> Result<bool, IsolationSessionError> {
         self.signal_stop();
-        Self::join(&self.stdin, Self::JOIN_MS);
+        self.cancel_stdin_read();
+        let exited = wait_for_relay(self.stdin.as_ref(), Self::JOIN_MS)?;
+        if exited {
+            self.stdin = None;
+            self.stdin_canceller = None;
+        }
+        Ok(exited)
     }
 
     /// Teardown for a workload that has already exited.
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), IsolationSessionError> {
         self.signal_stop();
-        let stdout_drained = Self::join(&self.stdout, Self::DRAIN_MS);
-        let stderr_drained = Self::join(&self.stderr, Self::DRAIN_MS);
-        if !(stdout_drained && stderr_drained) {
-            self.cancel_output_reads();
-            Self::join(&self.stdout, Self::JOIN_MS);
-            Self::join(&self.stderr, Self::JOIN_MS);
+        self.cancel_stdin_read();
+        let output_relays = self.output_relays();
+        let output_drain = drain_output_relays_within(
+            &output_relays,
+            Duration::from_millis(Self::IDLE_MS),
+            Duration::from_millis(Self::ABSOLUTE_CAP_MS),
+        )
+        .map_err(|error| lifecycle_err(format!("drain output relays: {error}")))?;
+        if output_drain == OutputRelayDrain::GaveUp {
+            Self::join_output(&self.stdout, Self::JOIN_MS);
+            Self::join_output(&self.stderr, Self::JOIN_MS);
         }
-        Self::join(&self.stdin, Self::JOIN_MS);
+        Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
         self.finished = true;
+        Ok(())
     }
 }
 
@@ -1110,11 +1160,14 @@ impl Drop for RelayScope<'_> {
             return;
         }
         self.signal_stop();
-        self.cancel_output_reads();
+        self.cancel_stdin_read();
+        for relay in self.output_relays() {
+            relay.cancel_read();
+        }
         let _ = self.process.Terminate();
-        Self::join(&self.stdout, Self::JOIN_MS);
-        Self::join(&self.stderr, Self::JOIN_MS);
-        Self::join(&self.stdin, Self::JOIN_MS);
+        Self::join_output(&self.stdout, Self::JOIN_MS);
+        Self::join_output(&self.stderr, Self::JOIN_MS);
+        Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
     }
 }
@@ -1176,7 +1229,7 @@ impl ClosingProcess {
         &self,
         timeout_ms: u32,
     ) -> Result<ExecOutcome, IsolationSessionError> {
-        owned_thread::call(&self.impersonation, || self.wait(timeout_ms))
+        owned_thread::call(&self.impersonation, || self.wait(timeout_ms, || Ok(true)))
     }
 
     pub(super) fn terminate_process(&self) -> Result<(), IsolationSessionError> {
@@ -1219,7 +1272,7 @@ const STILL_ACTIVE: i32 = windows::Win32::Foundation::STATUS_PENDING.0;
 /// What `WaitForExit` returns when the deadline elapses before the process
 /// exits. Like [`STILL_ACTIVE`] this is a legal exit code in its own right, so
 /// it is never used alone to conclude a timeout.
-const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
+pub(super) const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
 
 /// How long [`StartedProcess::terminate`] waits for a kill to land before
 /// reporting success anyway. Bounded so a failed `Terminate` cannot wedge that
@@ -1295,11 +1348,30 @@ fn plan_wait(
     }
 }
 
+fn wait_for_relay(
+    relay: Option<&OwnedHandle>,
+    timeout_ms: u32,
+) -> Result<bool, IsolationSessionError> {
+    let Some(relay) = relay else {
+        return Ok(true);
+    };
+    // SAFETY: the relay's owned thread handle remains valid throughout the wait.
+    match unsafe { WaitForSingleObject(relay.get(), timeout_ms) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        _ => Err(lifecycle_err(format!(
+            "waiting for relay failed: {}",
+            std::io::Error::last_os_error()
+        ))),
+    }
+}
+
 /// Three-tier graceful shutdown for an `IsoSessionProcess` that's still
-/// running after `WaitForExit(timeout_ms)` returns. Tier 1: close stdin —
-/// many REPLs exit on EOF alone. Tier 2: `SendCtrlClose` — ConPTY-only;
-/// `E_NOTIMPL` outside ConPTY, benign. Tier 3: force-terminate, wait
+/// running after `WaitForExit(timeout_ms)` returns. Tier 1 asks the platform
+/// to close stdin, tier 2 tries `SendCtrlClose` (ConPTY-only; `E_NOTIMPL`
+/// outside ConPTY is benign), and tier 3 force-terminates, then waits
 /// infinitely (`WaitForExit(0)` = INFINITE) for the kill to land.
+/// Tier 1 is skipped if the caller's stdin relay has not exited.
 ///
 /// The first `ExitCode()` query is `?`-propagated: a failure there means
 /// the kernel handle is broken, and the cleanup methods on the same
@@ -1317,6 +1389,7 @@ fn plan_wait(
 /// independently determined the process was still running.
 fn wait_with_graceful_shutdown(
     process: &IsoSessionProcess,
+    stdin_released: bool,
 ) -> Result<(i32, Option<i32>), IsolationSessionError> {
     let mut exit_code = process
         .ExitCode()
@@ -1325,11 +1398,15 @@ fn wait_with_graceful_shutdown(
         return Ok((exit_code, None));
     }
 
-    let _ = process.CloseStandardInput();
-    let _ = process.WaitForExit(5000);
-    exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
-    if exit_code != STILL_ACTIVE {
-        return Ok((exit_code, None));
+    // A live relay can still hold a writer, so closing platform stdin alone
+    // cannot deliver EOF. Skip that grace period if the relay did not stop.
+    if stdin_released {
+        let _ = process.CloseStandardInput();
+        let _ = process.WaitForExit(5000);
+        exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+        if exit_code != STILL_ACTIVE {
+            return Ok((exit_code, None));
+        }
     }
 
     let _ = process.SendCtrlClose();
@@ -1351,6 +1428,200 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_stdin_test_payload(handle: HANDLE, size: usize) -> Vec<u8> {
+        use std::time::{Duration, Instant};
+        use windows::Win32::Storage::FileSystem::ReadFile;
+        use windows::Win32::System::Pipes::PeekNamedPipe;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut available = 0;
+            unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }
+                .expect("destination pipe should remain readable");
+            if available as usize >= size {
+                let mut payload = vec![0; size];
+                let mut read = 0;
+                unsafe { ReadFile(handle, Some(&mut payload), Some(&mut read), None) }.unwrap();
+                payload.truncate(read as usize);
+                return payload;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "selected stdin relay did not deliver the payload"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn stdin_routing_delivers_pipe_input_and_releases_writer_for_both_output_modes() {
+        use crate::mxc_common::process_util::{create_local_pipe, PipeWriter};
+        use std::io::Write;
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
+        use windows::Win32::System::Pipes::PeekNamedPipe;
+
+        for interactive in [true, false] {
+            let (source_read, source_write) = create_local_pipe().unwrap();
+            let mut source_write = PipeWriter::new(source_write);
+            let (dest_read, dest_write) = create_local_pipe().unwrap();
+            let stop = OwnedHandle::new(unsafe {
+                CreateEventW(None, true, false, PCWSTR::null()).unwrap()
+            });
+            // SAFETY: all handles remain valid until the relay has exited.
+            let (relay, canceller) = unsafe {
+                create_stdin_relay(
+                    source_read.get(),
+                    dest_write.get(),
+                    stop.get(),
+                    interactive,
+                    |_, _| panic!("pipe input must not handle console resize"),
+                )
+            }
+            .unwrap();
+
+            let payload = b"stdin payload\r\n";
+            source_write.write_all(payload).unwrap();
+            let received = read_stdin_test_payload(dest_read.get(), payload.len());
+            assert!(!wait_for_relay(Some(&relay), 0).unwrap());
+            canceller
+                .expect("pipe input must have a read canceller")
+                .close();
+            assert!(wait_for_relay(Some(&relay), 5000).unwrap());
+            assert_eq!(received, payload);
+
+            // Keep the caller's source open; close only the platform's writer.
+            drop(dest_write);
+            let error = unsafe { PeekNamedPipe(dest_read.get(), None, 0, None, None, None) }
+                .expect_err("the selected relay must release its write duplicate");
+            assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
+        }
+    }
+
+    #[test]
+    fn stdin_routing_delivers_file_input_for_both_output_modes() {
+        use crate::mxc_common::process_util::create_local_pipe;
+        use std::io::{Seek, Write};
+        use std::os::windows::io::AsRawHandle;
+
+        for interactive in [true, false] {
+            let mut input = tempfile::tempfile().unwrap();
+            let payload = b"file input\r\n";
+            input.write_all(payload).unwrap();
+            input.rewind().unwrap();
+            let (dest_read, dest_write) = create_local_pipe().unwrap();
+            let stop = OwnedHandle::new(unsafe {
+                CreateEventW(None, true, false, PCWSTR::null()).unwrap()
+            });
+            // SAFETY: all handles remain valid until the relay has exited.
+            let (relay, canceller) = unsafe {
+                create_stdin_relay(
+                    HANDLE(input.as_raw_handle()),
+                    dest_write.get(),
+                    stop.get(),
+                    interactive,
+                    |_, _| panic!("file input must not handle console resize"),
+                )
+            }
+            .unwrap();
+            let received = read_stdin_test_payload(dest_read.get(), payload.len());
+            assert!(wait_for_relay(Some(&relay), 5000).unwrap());
+            assert!(
+                canceller.is_some(),
+                "file input must select the cancellable relay"
+            );
+            assert_eq!(received, payload);
+        }
+    }
+
+    #[test]
+    fn stdin_routing_console_uses_stop_event_for_both_output_modes() {
+        use crate::mxc_common::process_util::create_local_pipe;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+        const CHILD: &str = "MXC_STDIN_ROUTING_CONSOLE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Restart this test with a real console; the runner may have none.
+            let test_name = "backend_modules::isolation_session::common::manager::tests::\
+                stdin_routing_console_uses_stop_event_for_both_output_modes";
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name])
+                .env(CHILD, "1")
+                .creation_flags(CREATE_NEW_CONSOLE.0)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    panic!("console routing child timed out: {output:?}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "console routing child failed: {output:?}"
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let console = OwnedHandle::new(unsafe {
+            CreateFileW(
+                windows_core::w!("CONIN$"),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            classify_stdin_handle(console.get()),
+            StdinHandleKind::Console
+        );
+        for interactive in [true, false] {
+            let (_dest_read, dest_write) = create_local_pipe().unwrap();
+            let stop = OwnedHandle::new(unsafe {
+                CreateEventW(None, true, false, PCWSTR::null()).unwrap()
+            });
+            // SAFETY: the private console and pipes outlive the relay.
+            let (relay, canceller) = unsafe {
+                create_stdin_relay(
+                    console.get(),
+                    dest_write.get(),
+                    stop.get(),
+                    interactive,
+                    |_, _| {},
+                )
+            }
+            .unwrap();
+            assert!(canceller.is_none(), "console input must use the stop event");
+            unsafe { SetEvent(stop.get()).unwrap() };
+            assert!(wait_for_relay(Some(&relay), 5000).unwrap());
+        }
+    }
+
+    #[test]
+    fn stdin_shutdown_reports_wait_failure() {
+        let invalid = OwnedHandle::new(HANDLE::default());
+        let error = wait_for_relay(Some(&invalid), 0).unwrap_err();
+        assert!(error.to_string().contains("waiting for relay failed"));
+        assert!(wait_for_relay(None, 0).unwrap());
+    }
 
     #[test]
     fn bounded_termination_requires_confirmation_after_a_timeout_sentinel() {

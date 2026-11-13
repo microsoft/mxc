@@ -94,6 +94,7 @@ fn provisioned_and_started(client: &DaemonClient) -> String {
             volumes: Vec::new(),
             network: Default::default(),
             port_mappings: Vec::new(),
+            session_ref: None,
         })
         .expect("provision");
     client
@@ -115,6 +116,7 @@ fn stamped_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
         env: Vec::new(),
         env_scope: EnvScope::Merge,
         timeout_ms: 60_000,
+        stdin: false,
     }
 }
 
@@ -276,11 +278,12 @@ fn ping_round_trip_over_pipe() {
 
 /// Full state-aware lifecycle over the pipe: provision -> start -> exec -> stop
 /// -> deprovision. Provisions with the default isolated posture, which refuses
-/// a registry pull, so `alpine:latest` has to be in the daemon session cache
-/// already (`%TEMP%\mxc-wslc-sessions`). Run explicitly with
+/// a registry pull, so `alpine:latest` has to be cached in the store slot the
+/// daemon leases — slot 0 of the pool, since it holds one session. Warm it with
+/// `scripts\setup-wslc.ps1 -DaemonSlots 1`. Run explicitly with
 /// `cargo test -p mxc-sdk --features wslc --test wslc_daemon_ipc -- --ignored`.
 #[test]
-#[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
+#[ignore = "requires a WSL2 host with alpine:latest cached in daemon store slot 0"]
 fn full_lifecycle_over_pipe() {
     use mxc_internal::wslc_common::daemon_protocol::{
         DeprovisionConfig, ExecConfig, ProvisionConfig, StartConfig, StopConfig,
@@ -296,6 +299,7 @@ fn full_lifecycle_over_pipe() {
             volumes: Vec::new(),
             network: Default::default(),
             port_mappings: Vec::new(),
+            session_ref: None,
         })
         .expect("provision");
 
@@ -315,6 +319,7 @@ fn full_lifecycle_over_pipe() {
             env: Vec::new(),
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
+            stdin: false,
         })
         .expect("first exec");
     assert_eq!(result.exit_code, 0, "echo hi should exit 0");
@@ -331,6 +336,7 @@ fn full_lifecycle_over_pipe() {
             env: Vec::new(),
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
+            stdin: false,
         })
         .expect("second exec");
     assert_eq!(result.exit_code, 7, "exit 7 should propagate its exit code");

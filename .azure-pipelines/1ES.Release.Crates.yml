@@ -68,6 +68,6 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
-            OwnersEmail: $(Build.RequestedForEmail)
-            ApproversEmail: $(Build.RequestedForEmail)
+            OwnersEmail: $(ownersEmail)
+            ApproversEmail: $(approversEmail)
           dryRun: ${{ parameters.dryRun }}

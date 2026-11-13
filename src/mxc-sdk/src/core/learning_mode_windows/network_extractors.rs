@@ -16,10 +16,10 @@ use windows::core::GUID;
 use super::extractors::{sanitize_properties, DecodedEventParts, RawDenial};
 
 pub(crate) const NETWORK_DECISION_PROVIDER: GUID = GUID {
-    data1: 0x7123_7669,
-    data2: 0x21c3,
-    data3: 0x4101,
-    data4: [0xbd, 0x2f, 0xff, 0x38, 0x94, 0x5d, 0x72, 0x5a],
+    data1: 0x301e_c03d,
+    data2: 0x2951,
+    data3: 0x5efb,
+    data4: [0x6d, 0x99, 0x59, 0xc6, 0x46, 0x28, 0xbb, 0xfc],
 };
 pub(crate) const NETWORK_DECISION_EVENT_ID: u16 = 1;
 

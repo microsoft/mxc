@@ -73,7 +73,7 @@ pub struct Request {
     /// Optional filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<Filesystem>,
-    /// Optional fallback consent.
+    /// Legacy settings accepted for 1.x compatibility and ignored.
     #[serde(default)]
     pub fallback: OptionalField<Fallback>,
     /// Optional network policy.
@@ -109,4 +109,19 @@ pub struct Request {
     /// Optional one-shot Hyperlight backend settings.
     #[serde(default)]
     pub hyperlight: OptionalField<OneShotHyperlight>,
+    /// Required image selection when containment is MicroVM.
+    #[serde(default)]
+    pub microvm: OptionalField<OneShotMicroVm>,
+}
+
+/// Creation settings for the development MicroVM backend.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OneShotMicroVm {
+    /// Image reference including its registry, resolved by the signed NVX agent.
+    pub image: super::ImageReference,
+    /// Optional settings applied when creating the MicroVM.
+    #[serde(default)]
+    pub provision: super::OptionalField<super::MicroVmProvision>,
 }

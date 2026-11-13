@@ -11,18 +11,14 @@
 //! Two entry points:
 //!
 //! - [`resolve_runner`] performs backend selection only, returning a
-//!   [`ResolvedRunner`] (the boxed runner plus, on Windows, an optional
-//!   [`DaclManager`](crate::mxc_common::filesystem_dacl::DaclManager) guard for the
-//!   ProcessContainer fallback tiers, whose `Drop` restores host ACEs).
-//!   Callers that must manage the guard's lifetime across signal / audit
-//!   machinery (`wxc-exec`) use this and own the guard themselves.
+//!   [`ResolvedRunner`] containing the boxed runner.
 //! - [`run`] is the convenience wrapper: resolve, run to completion, and drop
 //!   the runner (then, on Windows, the guard) in the correct order. Callers
 //!   without such machinery (`lxc-exec`, `mxc-exec-mac`, and the FFI layer) use
 //!   this.
 //!
-//! Backend selection is per-host: the Windows body drives the ProcessContainer
-//! fallback tiers plus the Windows experimental backends; the Linux body
+//! Backend selection is per-host: the Windows body drives native
+//! ProcessContainer plus the Windows experimental backends; the Linux body
 //! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
 //! resolves to Seatbelt.
 
@@ -37,33 +33,13 @@ use crate::mxc_engine::error::Error;
 
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
-/// On Windows, `dacl_manager` — when present — is the guard for the
-/// ProcessContainer DACL-fallback tier: its `Drop` restores the host ACEs the
-/// tier applied. It must outlive the run — drop the `runner` first, then the
-/// manager (struct fields drop in declaration order, so `runner` is declared
-/// first). Callers that hand the manager off to external cleanup machinery
-/// (`wxc-exec` parks it for its Ctrl-C handler) take it out of the struct.
 pub struct ResolvedRunner {
     /// The boxed run-to-completion runner for the selected backend.
     pub runner: Box<dyn ScriptRunner>,
-    /// Guard restoring host ACEs applied by the ProcessContainer DACL-fallback
-    /// tier; `None` for every other tier and backend. Windows only.
-    #[cfg(target_os = "windows")]
-    pub dacl_manager: Option<crate::mxc_common::filesystem_dacl::DaclManager>,
 }
 
 impl ResolvedRunner {
-    /// Wrap a runner that needs no DACL guard.
-    #[cfg(target_os = "windows")]
-    fn without_guard(runner: Box<dyn ScriptRunner>) -> Self {
-        Self {
-            runner,
-            dacl_manager: None,
-        }
-    }
-
-    /// Wrap a runner (non-Windows hosts have no DACL guard).
-    #[cfg(not(target_os = "windows"))]
+    /// Wrap a resolved runner.
     fn without_guard(runner: Box<dyn ScriptRunner>) -> Self {
         Self { runner }
     }
@@ -72,10 +48,7 @@ impl ResolvedRunner {
 /// Select the containment backend for `request` and construct its
 /// run-to-completion [`ScriptRunner`].
 ///
-/// On Windows the ProcessContainer backend drives
-/// [`dispatch_with_fallback`](crate::process_container_common::dispatcher::dispatch_with_fallback),
-/// logging the selected isolation tier and any tier-selection warnings to
-/// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
+/// On Windows the ProcessContainer backend uses only the native PSEC contract.
 ///
 /// Experimental backends, classified by the engine's backend registry, require
 /// `request.experimental_enabled`; without it they return a
@@ -187,20 +160,26 @@ pub fn resolve_runner_for_audit(
 
 /// Resolve `request`'s backend and run it to completion.
 ///
-/// Convenience over [`resolve_runner`] for callers without external guard /
-/// signal machinery: it runs the resolved runner and drops it — then, on
-/// Windows, the DACL guard — in the correct order before returning the
-/// [`ScriptResponse`].
+/// Convenience over [`resolve_runner`] that runs the resolved backend to
+/// completion. Warnings the logger recorded are moved onto the response;
+/// nothing is written to the terminal.
 pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResponse, Error> {
-    let mut resolved = resolve_runner(request, logger)?;
-    let response = resolved.runner.run(request, logger);
-    // `resolved` drops here: `runner` first (releasing child handles), then —
-    // on Windows — `dacl_manager` (restoring host ACEs).
-    Ok(response)
+    let resolved = resolve_runner(request, logger)?;
+    Ok(run_resolved(resolved, request, logger))
+}
+
+fn run_resolved(
+    mut resolved: ResolvedRunner,
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> ScriptResponse {
+    let mut response = resolved.runner.run(request, logger);
+    response.extend_warnings(logger.take_warnings());
+    response
 }
 
 // ---------------------------------------------------------------------------
-// Windows: ProcessContainer fallback tiers + Windows experimental backends.
+// Windows: native ProcessContainer + Windows experimental backends.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
@@ -208,59 +187,20 @@ fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use std::fmt::Write;
-
     match request.containment {
         ContainmentBackend::ProcessContainer => {
-            // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback` prefers
-            // the native BaseContainer (OS sandbox API) when usable and
-            // otherwise falls back to AppContainer tiers (BFS / DACL). The
-            // schema version does not influence this choice. When the request
-            // sets `captureDenials`, `factory_for_request` hands the guarded
-            // WPR fallback factory to the dispatcher so an AppContainer
-            // fallback tier can still honor it instead of failing closed.
-            let capture_factory = crate::mxc_engine::guarded_capture::factory_for_request(request);
+            use crate::mxc_common::sandbox_process::Runner;
+            use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-            match crate::process_container_common::dispatcher::dispatch_with_fallback(
-                request,
-                capture_factory,
-            ) {
-                Ok(dispatched) => {
-                    for w in &dispatched.warnings {
-                        let _ = writeln!(logger, "warning: {w}");
-                    }
-                    let _ = writeln!(
-                        logger,
-                        "selected isolation tier: {}",
-                        dispatched.tier.as_str()
-                    );
-                    dispatched.log_enforcement_degraded(logger);
-                    let (runner, dacl_manager) = dispatched.into_runner_and_guard();
-                    Ok(ResolvedRunner {
-                        runner,
-                        dacl_manager,
-                    })
-                }
-                Err(e) => {
-                    // Surface any retained-entry DACL warnings through the
-                    // logger so the caller's buffer flush still reports them.
-                    if let crate::process_container_common::dispatcher::DispatchError::Dacl {
-                        warnings,
-                        ..
-                    } = &e
-                    {
-                        for w in warnings {
-                            let _ = writeln!(logger, "dacl warning: {w}");
-                        }
-                    }
-                    Err(MxcError::backend_unavailable(format!("{e}")))
-                }
-            }
+            BaseContainerRunner::for_request(request).map(|backend| ResolvedRunner {
+                runner: Box::new(Runner::new(backend)),
+            })
         }
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
             {
+                use std::fmt::Write;
+
                 let _ = writeln!(logger, "Using WSLContainer runner");
                 let wslc_config = request.wslc.as_ref().cloned().unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
@@ -270,6 +210,7 @@ fn resolve_runner_inner_windows(
             #[cfg(not(feature = "wslc"))]
             {
                 let _ = logger;
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
                 Err(MxcError::unsupported_containment(
                     "WSLC backend not compiled. Rebuild with --features wslc.",
                 ))
@@ -288,16 +229,16 @@ fn resolve_runner_inner_windows(
             "VM backend not yet implemented",
         )),
         ContainmentBackend::MicroVm => {
-            #[cfg(feature = "microvm")]
+            #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    crate::nanvix_runner::NanVixScriptRunner::new(),
+                    crate::nvx_runner::NvxRunner::new(),
                 )))
             }
-            #[cfg(not(feature = "microvm"))]
+            #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
             {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
+                Err(MxcError::backend_unavailable(
+                    "MicroVM requires Windows x64 and a build with --features microvm",
                 ))
             }
         }
@@ -308,11 +249,9 @@ fn resolve_runner_inner_windows(
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
                 {
-                    let _ = writeln!(
-                        logger,
-                        "warning: windowsSandbox.idleTimeoutMs and daemonPipeName \
-                         are ignored by the one-shot backend; each invocation launches and tears \
-                         down a fresh VM"
+                    logger.warning_line(
+                        "windowsSandbox.idleTimeoutMs and daemonPipeName are ignored by the \
+                         one-shot backend; each invocation launches and tears down a fresh VM",
                     );
                 }
             }
@@ -329,6 +268,7 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "isolation_session"))]
             {
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
                 Err(MxcError::unsupported_containment(
                     "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
                 ))
@@ -351,20 +291,9 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
-        ContainmentBackend::MicroVm => {
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    crate::nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
+        ContainmentBackend::MicroVm => Err(MxcError::unsupported_containment(
+            "the NVX MicroVM backend is available only on Windows x64",
+        )),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
@@ -502,8 +431,10 @@ fn resolve_hyperlight() -> Result<ResolvedRunner, MxcError> {
     }
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     {
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
         Err(MxcError::unsupported_containment(
-            "Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)",
+            "Hyperlight backend not compiled in; it requires x86_64 and --features hyperlight \
+             (Hyperlight needs KVM or WHP).",
         ))
     }
 }
@@ -526,10 +457,7 @@ mod tests {
     #[test]
     fn policy_hash_identity_matches_runner_identity_rules() {
         assert_eq!(policy_hash_identity(""), "CLI");
-        assert_eq!(
-            policy_hash_identity("sandbox-0123456789abcdef"),
-            "sandbox-0123456789abcdef"
-        );
+        assert_eq!(policy_hash_identity("sandbox-0123456789abcdef"), "redacted");
         assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
         assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
     }
@@ -570,6 +498,7 @@ mod tests {
             let mut logger = Logger::new(Mode::Buffer);
             resolve_runner_inner_windows(&request, &mut logger).unwrap();
             assert!(logger.get_buffer().is_empty());
+            assert!(logger.warnings().is_empty());
         }
     }
 
@@ -584,7 +513,7 @@ mod tests {
 
         resolve_runner_inner_windows(&request, &mut logger).unwrap();
 
-        let warning = logger.get_buffer();
+        let warning = logger.warnings().join("\n");
         assert!(warning.contains("idleTimeoutMs"));
         assert!(warning.contains("daemonPipeName"));
         assert!(warning.contains("fresh VM"));
@@ -603,5 +532,77 @@ mod tests {
             .expect("WSLC selection must not require runtime experimental authorization");
 
         assert!(!logger.get_buffer().contains("experimental"));
+    }
+
+    fn resolve_error(request: &ExecutionRequest) -> Error {
+        let mut logger = Logger::new(Mode::Buffer);
+        match resolve_runner(request, &mut logger) {
+            Ok(_) => panic!("{:?} must not resolve", request.containment),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn an_unenforceable_process_container_field_is_backend_unavailable() {
+        let _guard = crate::process_container_common::test_env::PolicyCapabilityGuard::set(
+            true, false, true,
+        );
+        let mut request = ExecutionRequest {
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+
+        let error = resolve_error(&request);
+
+        assert_eq!(error.code, crate::ErrorCode::BackendUnavailable, "{error}");
+    }
+
+    #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
+    #[test]
+    fn a_backend_not_compiled_in_is_unsupported() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Hyperlight,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+
+        let error = resolve_error(&request);
+
+        assert_eq!(
+            error.code,
+            crate::ErrorCode::UnsupportedContainment,
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use crate::mxc_common::logger::Mode;
+
+    struct WarningRunner;
+
+    impl ScriptRunner for WarningRunner {
+        fn execute(&mut self, _request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+            logger.warning_line("advisory");
+            ScriptResponse::default()
+        }
+    }
+
+    #[test]
+    fn run_moves_logger_warnings_onto_the_response() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let response = run_resolved(
+            ResolvedRunner::without_guard(Box::new(WarningRunner)),
+            &ExecutionRequest {
+                script_code: "echo hi".to_string(),
+                ..Default::default()
+            },
+            &mut logger,
+        );
+        assert_eq!(response.warnings(), ["advisory"]);
+        assert!(logger.warnings().is_empty());
     }
 }

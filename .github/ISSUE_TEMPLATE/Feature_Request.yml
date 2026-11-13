@@ -5,6 +5,18 @@ labels:
 - Issue-Feature
 - Needs-Triage
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your idea! A problem description or use case is
+        enough to start; you do not need a finished design or a commitment
+        to implement it.
+
+        Want to work on it? Let us know so we can plan together. Maintainers
+        will help discuss scope and any design review needed before implementation.
+        See the
+        [contribution guide](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#plan-features-together)
+        for the next steps.
   - type: textarea
     attributes:
       label: Description of the new feature / enhancement

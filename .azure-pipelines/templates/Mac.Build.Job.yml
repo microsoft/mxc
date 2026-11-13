@@ -92,7 +92,7 @@ jobs:
     - script: |
         set -euo pipefail
         cargo test --locked --release --target $(targetTriple) -p mxc-internal -p mxc_ffi --lib state_aware
-        cargo test --locked --release --target $(targetTriple) -p mxc-internal --test state_aware
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
       displayName: Test state-aware SDK boundaries
       workingDirectory: $(workingDirectory)
 
@@ -113,7 +113,7 @@ jobs:
       displayName: 'Zip binaries for ESRP signing'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
-    - task: EsrpCodeSigning@5
+    - task: EsrpCodeSigning@6
       displayName: 'Sign macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
@@ -140,7 +140,7 @@ jobs:
             }
           ]
 
-    - task: EsrpCodeSigning@5
+    - task: EsrpCodeSigning@6
       displayName: 'Notarize macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:

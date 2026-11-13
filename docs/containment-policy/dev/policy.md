@@ -42,7 +42,7 @@ sandbox.
 | `filesystem`, `network`, `ui` | Cross-cutting policy sections (below). An omitted section is not proof that every backend enforces a restriction. |
 | `runtimeConfig` | Runtime settings, including a caller-managed network proxy. |
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
-| `fallback` | Optional `allowDaclMutation` boolean (default `true`); `false` refuses the Windows host-DACL fallback. |
+| `fallback` | Optional `allowDaclMutation` boolean accepted for 1.x compatibility and ignored. Removing this accepted field requires a new major contract. |
 | `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
 | `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight` | Backend-specific settings; only the section matching the selected backend is accepted. |
 | `test` | Optional development-only placeholder with an optional string `message`; it has no policy enforcement effect. |
@@ -51,8 +51,8 @@ sandbox.
 
 | Field | Type and meaning |
 |---|---|
-| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight/MicroVM). |
-| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight and MicroVM reject an explicit working directory. |
+| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight, a guest shell command for NVX MicroVM). |
+| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight rejects an explicit working directory; MicroVM uses a guest path, as described in the [NVX guide](../../backends/nvx/nvx.md#working-directory-and-environment). |
 | `process.timeout` | Optional integer milliseconds, `0` to `4294967295`; `0` means no timeout. |
 | `process.env` | Optional array of `KEY=VALUE` strings. Omitted uses the backend default; supplied entries replace it unless `inheritDefaultEnv` is `true`. |
 | `process.inheritDefaultEnv` | Optional boolean (default `false`); layers supplied `env` entries over the backend default, with caller entries winning. |
@@ -64,8 +64,10 @@ With `env: []` and `inheritDefaultEnv: false`, the request asks for an empty
 environment. Windows ProcessContainer refuses a supplied environment missing
 `SYSTEMROOT` or `LOCALAPPDATA`; IsolationSession cannot replace its user's
 default environment and requires `inheritDefaultEnv: true` for supplied `env`.
-MicroVM rejects `deniedPaths`; Hyperlight checks denied paths against its
-mounted grants. Path strings use the selected host/backend's conventions.
+Hyperlight checks denied paths against its mounted grants. See the
+[NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM filesystem and environment support. Path strings use the selected
+host/backend's conventions.
 
 ### Network and UI
 
@@ -137,11 +139,12 @@ experimental authorization and suitable host/build support.
 |---|---|
 | `processContainer` | `leastPrivilege` (boolean), `capabilities` (array of single capability names, no commas), `learningMode` (boolean), `captureDenials` (`mode`: `block` or `allow`, default `block`; optional `outputPath` and `retainEtl`), `filesystem.enumeratePaths` (array of paths), `network.allowedProxyPeer` (proxy peer identity), and `ui` (below). `enumeratePaths` needs host support and cannot combine with `leastPrivilege`. `captureDenials.mode: "allow"` permits and records otherwise denied access. |
 | `processContainer.ui` | Optional `isolation` (`container`, `desktop`, `handles`, `atoms`), `desktopSystemControl` and `ime` booleans, and `systemSettings` (`none`, `parameters`, `display`, `all`). |
-| `lxc` | `distribution` and `release` strings, both required if this section is present. LXC rejects `runtimeConfig.networkProxy`. |
-| `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), and `extraMachLookups` (string array). |
-| `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. |
+| `lxc` | `distribution` and `release` strings, both required if this section is present. |
+| `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), `extraMachLookups` (string array), and `captureDenials` (`mode`: `block` or `allow`, default `block`; optional `outputPath` and `retainEtl`). `captureDenials` cannot combine with `profileOverride`. |
+| `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. The contract accepts any `targetOs` string, but the WSLc backend rejects values other than `"linux"`; omit it or use `"linux"`. |
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
 | `hyperlight` | Optional `runtime`: `agent` (default), `python`, `python-shell`, `node`, `bash`, or `dotnet-jit`. The command line supplies source for that guest runtime. |
+| `microvm` | Required explicit registry-qualified `image`. Optional positive integer `provision.memoryMib` selects guest memory when the verified runtime advertises `spec.memory`. See [NVX supported operations and policy](../../backends/nvx/nvx.md#supported-operations-and-policy). |
 
 For Seatbelt, `profileOverride` replaces the generated profile, so
 `filesystem`, `network`, and `ui` restrictions in the request are not
@@ -153,10 +156,10 @@ WSLc networking supports only all-deny isolated or all-allow bridged
 rejects mixed postures and per-destination rules. IsolationSession cannot
 restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
-section is rejected for IsolationSession. MicroVM permits all-deny isolated
-or explicitly all-allow unrestricted host networking; mixed postures and
-per-destination rules are rejected. Hyperlight rejects a supplied `network`
-section. Windows Sandbox create-and-run execution blocks networking when
+section is rejected for IsolationSession. MicroVM networking support is
+described in the [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy).
+Hyperlight rejects a supplied `network` section. Windows Sandbox
+create-and-run execution blocks networking when
 `network` is omitted; it rejects supplied `network.egress` or
 `network.ingress` sections (even empty or deny-only), host filters, and
 proxies. Backend support is not implied by a field appearing in this
@@ -165,20 +168,106 @@ development contract.
 ## Container lifecycle operations
 
 Set `phase` to `provision`, `start`, `exec`, `stop`, or `deprovision`. These
-operations exist for **IsolationSession, WSLc, and Windows Sandbox** in this
+operations exist for **IsolationSession, WSLc, Windows Sandbox, and MicroVM** in this
 contract. `provision` requires a concrete `containment` and must omit
 `sandboxId`; subsequent phases require the ID returned by provision
-(`iso:...`, `wslc:...`, or `wsb:...`) and infer the backend from its prefix.
-Every phase requires `version`; all admit optional `$schema`, `_comment`,
-and `telemetry.enabled`.
+(`iso:...`, `wslc:...`, `wsb:...`, or `microvm:...`) and infer the backend from its prefix.
+WSLc also supports `provision-session` and `deprovision-session`, which require
+`containment: "wslc"` and carry no `sandboxId`. Every phase requires `version`;
+all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 
 | Phase | Allowed request fields besides the common fields |
 |---|---|
 | `provision` / `isolation_session` | Required all-allow `network`; optional `isolationSession.provision.appId` (string). No filesystem, UI, or proxy. |
-| `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, or `portMappings`. Port mappings require all-allow bridged networking; per-container CPU/memory/GPU/storage are not available at provision. |
+| `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
+| `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
+| `provision` / `w365_agents` | Contract only; optional `w365Agents.provision` settings (below). No process or local policy sections. Runtime returns `backend_unavailable`. |
+| `provision` / `microvm` | Required registry-qualified `microvm.image`; optional positive `microvm.provision.memoryMib` when the runtime advertises memory support. Optional filesystem read-only, read-write, and denied paths, directional network defaults/rules, and `runtimeConfig.networkProxy`, subject to NVX capabilities and limits. These settings are fixed at provision. No filesystem enumeration, UI, or session phases. Requires experimental authorization. |
 | `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
-| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All three backends reject supplied network policy at exec and inherit their provision posture. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
+| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All four implemented backends reject supplied network policy at exec and inherit their provision posture. IsolationSession, Windows Sandbox, and MicroVM reject an exec proxy; WSLc accepts one. |
+| `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
+
+MicroVM lifecycle operations are supported through JSON entry points and the
+executor with experimental authorization. A MicroVM ID has the form
+`microvm:<32 lowercase hexadecimal characters>`; preserve the returned value
+as an opaque sensitive capability. Start, stop, and deprovision carry only the
+ID and common fields. Exec cannot change image, memory, filesystem, network,
+or proxy policy. It supports captured or live stdout/stderr, but not writable
+stdin or PTY. See the [NVX guide](../../backends/nvx/nvx.md) for precise policy
+limits, host requirements, capture limits, and cleanup/recovery behavior.
+
+### WSLc sessions
+
+A session is one WSL2 utility VM shared by the sandboxes placed in it.
+`provision-session` sets VM sizing; it does not create a sandbox:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision-session",
+  "containment": "wslc",
+  "wslc": {
+    "provisionSession": { "cpuCount": 2, "memoryMb": 4096, "gpu": false }
+  }
+}
+```
+
+| Sizing field | Meaning |
+|---|---|
+| `cpuCount` | Optional non-negative integer, up to `4294967295`; a positive value cannot exceed the host's logical processor count. Omitted or `0` uses the SDK default. |
+| `memoryMb` | Optional non-negative integer; the backend rejects values above `4294967295`. A ceiling, not a reservation, so it may exceed installed host RAM. Omitted or `0` uses the SDK default. |
+| `gpu` | Optional boolean, default `false`; enables GPU passthrough when supported by the host runtime. |
+
+Success returns `{"result":{"sessionId":"wslcsess:0123456789abcdef0123456789abcdef"}}`.
+The ID shown here is illustrative: use the returned value, which has exactly
+32 lowercase hexadecimal digits after `wslcsess:`, in later requests.
+Treat it as an opaque bearer capability and keep it out of logs.
+
+Place a sandbox in that session with `wslc.provision.sessionId`:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "wslc": {
+    "provision": {
+      "image": "alpine:latest",
+      "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+    }
+  }
+}
+```
+
+The VM's CPU, memory, and GPU settings apply to every sandbox in the session,
+not as per-sandbox quotas. Omitting `sessionId` joins the implicit shared
+session, preserving existing behavior. An isolated provision needs its image
+already cached in the selected session's store or supplied as `imageTarPath`.
+
+After deprovisioning every sandbox in the session, release it:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "deprovision-session",
+  "containment": "wslc",
+  "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+}
+```
+
+Release returns `{"result":{}}`. A session still holding sandboxes or work
+is refused rather than cascading deletion; the implicit session cannot be
+released explicitly. Unused sessions can expire before explicit release.
+Malformed IDs return `malformed_id`; a valid ID that no longer names a
+session returns `not_provisioned`.
+
+A dry run validates either session request without contacting the daemon,
+minting an ID, creating a VM or store, or reserving capacity, and returns
+`{"result":{}}`. Neither session phase is available through typed SDK V1,
+which still targets contract `1.0.0`.
+
+### Sandbox examples
 
 Example WSLc provision with a container-specific TCP port mapping:
 
@@ -228,7 +317,35 @@ with the returned one):
 }
 ```
 
-When calling the executor directly, pass routing fields via `--operation` and
-`--container-id` instead of putting `phase` and `sandboxId` in the JSON file;
-the executor inserts them before parsing. JSON library/FFI calls include
-those fields as shown above.
+When calling the executor directly, pass `phase` via `--operation`, `sandboxId`
+via `--container-id`, and a release's `sessionId` via `--session-id` instead
+of putting those fields in the JSON file; the executor inserts them before
+parsing. Placement's nested `wslc.provision.sessionId` stays in JSON.
+JSON library/FFI calls include routing fields as shown above.
+
+### W365 Agents (contract only)
+
+In `1.1.0-alpha`, provision accepts `containment: "w365_agents"` and
+`w365Agents.provision`:
+
+| Field | Requirement |
+|---|---|
+| `poolId` | Required when the provision settings object is supplied; hyphenated ASCII-hex GUID (`8-4-4-4-12`). |
+| `userType` | Optional; `"Local"`, `"HumanUser"`, or `"Agentic"`. |
+| `userObjectId` | Optional; the same GUID format as `poolId`. |
+
+`Local` runs Windows under a local account; `userObjectId` identifies the
+remote-control owner, not the Windows account. `HumanUser` uses a human user's
+Microsoft Entra identity. `Agentic` uses an Agent User identity identified by
+`userObjectId`. These values describe the session account, not whether a human
+or an agent invokes MXC.
+
+Service authentication differs by kind: `Local` disallows an auxiliary token;
+`HumanUser` allows one for assertion-based startup if it represents the same
+human user; `Agentic` requires one representing the selected Agent User.
+This contract slice does not provide auxiliary-token settings or implement
+session authentication.
+
+The backend is not implemented: provision returns `backend_unavailable`, even
+with experimental opt-in. Later phases using a `w365:` ID return
+`unsupported_containment`.

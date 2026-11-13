@@ -295,7 +295,6 @@ meaning for this backend.
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
-| `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
 | `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
@@ -316,11 +315,6 @@ Notes on the rows that are not a simple accept/reject:
   filesystem and network policy are rejected outright, leaving nothing to
   preserve. On the state-aware path the parser rejects the whole `lifecycle`
   section for every backend, so no per-value handling applies.
-- **`fallback`** is `n/a` rather than `rejected`. `allowDaclMutation` gates an
-  AppContainer-only DACL fallback this backend never performs, so either value
-  is vacuously satisfied and neither asserts anything untrue. Bringing it under
-  the single-backend-section check uniformly across backends is tracked
-  separately.
 - **Foreign or mis-slotted experimental payloads** are rejected by the exact
   request root, not silently ignored. Only provision defines the
   `isolationSession.provision` input. Exact adaptation carries
@@ -421,6 +415,23 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
+`Relayed` execution uses the same [timeout cleanup](oneshot.md#os-api-dependency)
+as create-and-run execution: stop input copying before closing stdin, or skip
+stdin-close if the thread has not exited within one second. SDK `Piped` and
+explicit PTY operations keep their existing shutdown behavior.
+
+### Output draining after relayed execution
+
+After the workload exits and stdin forwarding stops, create-and-run and
+lifecycle `Relayed` execution keep copying stdout and stderr until both finish,
+neither has a successful output write for five seconds, or 60 seconds pass,
+whichever comes first. Reaching a limit cancels reads and briefly waits for the
+copying threads to exit; it cannot interrupt blocked writes or flushes. Output
+can be lost without a warning or a change to the workload's exit code. A child
+process that keeps writing can use the full 60-second drain budget; this is not
+a limit on the total execution or cleanup time. These limits do not apply to
+SDK `Piped` execution.
+
 ### Deprovision and concurrent sandboxes
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).
@@ -502,13 +513,11 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
 - On the `wxc-exec` route, cancellation is process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
-  `process.timeout`) reaps the agent if the runner does not. On the
-  streaming path that timer is armed with a **margin** past the caller's
-  deadline, so it acts purely as a watchdog: the service kills with an
-  ordinary exit code (the host suite pins it as exit code 1), so if it
-  fired first a genuine timeout would be indistinguishable from a normal
-  exit and could not be reported as one. The run-to-completion path arms
-  it unchanged — it has no timeout channel to report through.
+  `process.timeout`) reaps the agent if the runner does not. That timer is
+  armed with a **margin** past the caller's deadline, so it acts purely as
+  a watchdog: the service kills with an ordinary exit code, so if it fired
+  first a genuine timeout would be indistinguishable from a normal exit
+  and could not be reported as one.
 - The runner's existing 3-tier shutdown (`CloseStandardInput` →
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.

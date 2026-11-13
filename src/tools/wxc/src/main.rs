@@ -6,23 +6,29 @@ mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
 use std::process;
-use std::sync::{Mutex, OnceLock};
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use mxc_internal::mxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
-use mxc_internal::mxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
+use mxc_internal::mxc_common::config_parser::{
+    CliTargetId, LoadOptions, ParseError, RequestInputError,
+};
 #[cfg(target_os = "windows")]
 use mxc_internal::mxc_common::diagnostic::DiagnosticConfig;
 use mxc_internal::mxc_common::error::WxcError;
 use mxc_internal::mxc_common::logger::{Logger, Mode};
 use mxc_internal::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use mxc_internal::mxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
-use mxc_internal::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use mxc_internal::mxc_common::mxc_error::{MxcError, MxcErrorCode};
+#[cfg(target_os = "windows")]
+use mxc_internal::mxc_common::script_runner::RunCancellation;
+use mxc_internal::mxc_common::script_runner::{
+    emit_mxc_error_exit, emit_warning_envelopes, handle_dry_run_exit, ScriptRunner,
+};
 use mxc_internal::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use mxc_internal::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use mxc_internal::mxc_common::telemetry;
-use mxc_internal::process_container_common::appcontainer_runner::delete_app_container_profile;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -43,14 +49,6 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
-    /// Delete container profile mode
-    #[arg(long)]
-    delete: bool,
-
-    /// Container name (required with --delete)
-    #[arg(long = "containername")]
-    containername: Option<String>,
-
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
@@ -65,13 +63,12 @@ struct Cli {
         long,
         value_enum,
         conflicts_with_all = [
-            "delete",
-            "containername",
             "setup_hyperlight",
             "force",
             "setup_wslc",
             "image",
             "storage_path",
+            "wslc_daemon_slots",
             "probe",
             "force_reclaim"
         ]
@@ -85,6 +82,14 @@ struct Cli {
     /// Opaque lifecycle ID (`sandboxId` in JSON) used by start, exec, stop, or deprovision.
     #[arg(long = "container-id", requires = "operation")]
     container_id: Option<String>,
+
+    /// Session ID returned by provision-session, used by deprovision-session.
+    #[arg(
+        long = "session-id",
+        requires = "operation",
+        conflicts_with = "container_id"
+    )]
+    session_id: Option<String>,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -124,9 +129,11 @@ struct Cli {
     setup_wslc: bool,
 
     /// Image reference to pre-pull (e.g. `alpine:latest`,
-    /// `ghcr.io/owner/image:tag`). Required with `--setup-wslc`.
+    /// `ghcr.io/owner/image:tag`). Repeat to pull several images, which fills
+    /// each store in one session rather than one per image. Required with
+    /// `--setup-wslc`.
     #[arg(long = "image", requires = "setup_wslc")]
-    image: Option<String>,
+    image: Vec<String>,
 
     /// Optional WSLC storage path. When omitted the runner default is used
     /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
@@ -135,7 +142,21 @@ struct Cli {
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
 
-    /// Run the fallback detector and emit JSON, without spawning a sandbox.
+    /// Also warm the first N container-lifecycle store slots, which the
+    /// lifecycle daemon leases from and `--storage-path` does not reach.
+    /// Defaults to 0 so warming a create-and-run cache stays one pull per
+    /// image; each slot warmed adds a pull and a multi-GiB store.
+    /// Requires `--setup-wslc`.
+    #[arg(
+        long = "wslc-daemon-slots",
+        value_name = "N",
+        value_parser = clap::value_parser!(u16).range(0..=64),
+        requires = "setup_wslc"
+    )]
+    wslc_daemon_slots: Option<u16>,
+
+    /// Probe native ProcessContainer support and emit JSON without spawning.
+    /// With a config, exit 1 if native ProcessContainer cannot enforce the request.
     #[arg(long)]
     probe: bool,
 
@@ -148,8 +169,6 @@ struct Cli {
             "config",
             "config_base64",
             "command",
-            "delete",
-            "containername",
             "experimental",
             "dry_run",
             "setup_hyperlight",
@@ -157,10 +176,12 @@ struct Cli {
             "setup_wslc",
             "image",
             "storage_path",
+            "wslc_daemon_slots",
             "probe",
             "force_reclaim",
             "operation",
-            "container_id"
+            "container_id",
+            "session_id"
         ]
     )]
     #[cfg_attr(
@@ -215,21 +236,25 @@ impl Cli {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliOperation {
+    ProvisionSession,
     Provision,
     Start,
     Exec,
     Stop,
     Deprovision,
+    DeprovisionSession,
 }
 
 impl From<CliOperation> for mxc_internal::mxc_common::state_aware_request::Phase {
     fn from(operation: CliOperation) -> Self {
         match operation {
+            CliOperation::ProvisionSession => Self::ProvisionSession,
             CliOperation::Provision => Self::Provision,
             CliOperation::Start => Self::Start,
             CliOperation::Exec => Self::Exec,
             CliOperation::Stop => Self::Stop,
             CliOperation::Deprovision => Self::Deprovision,
+            CliOperation::DeprovisionSession => Self::DeprovisionSession,
         }
     }
 }
@@ -266,7 +291,7 @@ fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
         logger,
         "Container name: {}",
         if request.container_id.is_empty() {
-            "CLI"
+            "(assigned by the backend)"
         } else {
             &request.container_id
         }
@@ -351,7 +376,7 @@ fn logger_for_cli(cli: &Cli) -> Logger {
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(error) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{log_path}': {error}");
+            emit_warning_envelopes(&[format!("could not open log file '{log_path}': {error}")]);
         }
     }
 
@@ -518,15 +543,16 @@ fn run_state_aware_main(
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
 
-    // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
-    // MXC — no caller supplies or relays one. `provision` seeds a fresh
-    // vector (persisted post-dispatch below, once its `sandbox_id` exists);
-    // every later phase recalls that persisted lifecycle root and spins a
-    // child off it. Empty when telemetry is inactive.
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
-        is_provision,
+        parsed.phase(),
         sandbox_id.as_deref(),
+    );
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
     );
 
     // Attribute out-of-band emit paths (the console-control handler installed in
@@ -547,6 +573,15 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend,
+            phase,
+            correlation_vector: &correlation,
+        },
+    );
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
     let diagnostics_active = logger.has_diagnostic_sink();
@@ -574,9 +609,7 @@ fn run_state_aware_main(
             diagnostic_logger.log_audit_event(&record);
         }
     }
-    for warning in logger.take_warnings() {
-        eprintln!("{warning}");
-    }
+    mxc_internal::mxc_common::script_runner::emit_warning_envelopes(&logger.take_warnings());
     let buffered = logger.get_buffer().to_string();
     if !buffered.is_empty() {
         eprint!("{}", buffered);
@@ -611,6 +644,16 @@ fn run_state_aware_main(
                 id,
                 dry_run,
                 &outcome,
+            );
+        }
+    } else if matches!(phase, "start" | "exec" | "stop") {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                dry_run,
+                outcome.is_ok(),
             );
         }
     }
@@ -658,15 +701,15 @@ fn run_state_aware_main(
             process::exit(0);
         }
         StateAwareExit::ExecCode(exit_code) => process::exit(exit_code),
-        StateAwareExit::Error(json) => {
+        StateAwareExit::Error(json, exit_code) => {
             println!("{}", json);
-            process::exit(1);
+            process::exit(exit_code);
         }
-        StateAwareExit::ExecError(json) => {
+        StateAwareExit::ExecError(json, exit_code) => {
             // The script's own stderr may not end in a newline, and gluing the
             // envelope onto those bytes would leave it unparseable.
             eprintln!("\n{}", json);
-            process::exit(1);
+            process::exit(exit_code);
         }
     }
 }
@@ -680,10 +723,10 @@ enum StateAwareExit {
     Envelope(String),
     /// Exit with this script exit code (its output was already streamed).
     ExecCode(i32),
-    /// Print this JSON error envelope to stdout, then exit 1.
-    Error(String),
-    /// Print this JSON error envelope to stderr, then exit 1.
-    ExecError(String),
+    /// Print this JSON error envelope to stdout, then exit with the code's status.
+    Error(String, i32),
+    /// Print this JSON error envelope to stderr, then exit with the code's status.
+    ExecError(String, i32),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
@@ -699,22 +742,28 @@ fn finalize_state_aware_outcome(
         Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
         Err(e) => {
             let json = error_envelope_string(&e);
+            let exit_code = e.code.exit_code();
 
             // A failed exec has already streamed the script's output to stdout,
             // so an envelope appended there would corrupt both. A dry run
             // streams nothing and keeps its envelope on stdout.
             if phase == "exec" && !dry_run {
-                StateAwareExit::ExecError(json)
+                StateAwareExit::ExecError(json, exit_code)
             } else {
-                StateAwareExit::Error(json)
+                StateAwareExit::Error(json, exit_code)
             }
         }
     }
 }
 
+/// Where a request failure is written, which differs by request shape.
 enum RequestErrorRoute<'a> {
-    Diagnostic,
-    Envelope(&'a MxcError),
+    /// One-shot: a typed envelope on stderr, beside the diagnostics, because
+    /// stdout belongs to the script's own output.
+    Stderr(MxcError),
+    /// State-aware: the envelope *is* the operation's response document, so it
+    /// goes to stdout where the caller parses the result.
+    Stdout(&'a MxcError),
 }
 
 fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
@@ -722,8 +771,8 @@ fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
         ParseError::Decode(_)
         | ParseError::Version(_)
         | ParseError::OneShot(_)
-        | ParseError::OneShotMalformed(_) => RequestErrorRoute::Diagnostic,
-        ParseError::StateAware(e) => RequestErrorRoute::Envelope(e),
+        | ParseError::OneShotMalformed(_) => RequestErrorRoute::Stderr(error.to_mxc_error()),
+        ParseError::StateAware(e) => RequestErrorRoute::Stdout(e),
     }
 }
 
@@ -732,10 +781,8 @@ fn reject_state_aware_without_operation(logger: &mut Logger) -> ! {
         remove 'phase' and 'sandboxId' from the config JSON";
     let error = ParseError::OneShot(WxcError::ConfigParse(message.to_string()));
     log_request_parse_rejection(logger, &error, None);
-    eprintln!("Request error");
-    eprintln!("{message}");
     eprint!("{}", logger.get_buffer());
-    process::exit(1);
+    emit_mxc_error_exit(&MxcError::malformed_request(message));
 }
 
 fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError, phase: Option<Phase>) {
@@ -788,18 +835,9 @@ fn print_error_envelope(error: &MxcError) {
 
 /// Serialise `error` to its JSON response-envelope string. Split out of
 /// [`print_error_envelope`] so [`finalize_state_aware_outcome`] can build the
-/// error-exit envelope without printing, and so both the print path and the
-/// state-aware exit path share one serialisation (including the last-resort
-/// fallback when the envelope itself fails to serialise).
+/// error-exit envelope without printing.
 fn error_envelope_string(error: &MxcError) -> String {
-    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
-    serde_json::to_string(&envelope).unwrap_or_else(|_| {
-        // Last-resort path: serialisation of the envelope itself failed — emit a
-        // minimal structurally-valid envelope so consumers that require
-        // `error.code` still parse something.
-        r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
-            .to_string()
-    })
+    error.to_envelope_string()
 }
 
 fn config_input(cli: &Cli) -> Option<(String, bool)> {
@@ -827,190 +865,85 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-// ---------------------------------------------------------------------------
-// Graceful-exit DACL cleanup
-// ---------------------------------------------------------------------------
-//
-// `DaclManager`'s `Drop` is the only thing that restores host ACEs we
-// applied during a Tier 2 / Tier 3 run. We need that `Drop` to fire on
-// every code path that can leave main, including the abnormal ones.
-// There are three:
-//
-// 1. **Normal exit / `process::exit`** — destructors of stack-owned
-//    values run on the former and are SKIPPED on the latter. We deal
-//    with this by explicitly `drop(take_parked_dacl())`-ing before any
-//    `process::exit` site below.
-// 2. **Panic unwind** — destructors of stack-owned values run; the
-//    release profile uses the default `unwind` strategy (see
-//    `src/Cargo.toml`). But the `DaclManager` we extract from
-//    `Dispatched` lives inside a process-global static (so the Ctrl-C
-//    handler can reach it), and statics are NOT touched by unwinding.
-//    To restore on panic we install a stack-owned `ParkedDaclGuard` in
-//    `main` whose `Drop` calls `take_parked_dacl()` and drops the
-//    manager. The guard sits at function scope so the unwind path
-//    threads through it.
-// 3. **Ctrl-C / Ctrl-Break / console close / logoff / shutdown** — the
-//    default Windows handler calls `ExitProcess` directly, skipping
-//    every Rust destructor. We install a `SetConsoleCtrlHandler` that
-//    takes-and-drops the parked manager before yielding to the
-//    default handler.
-//
-// The mutex in the slot serializes the Ctrl-C handler and the guard
-// against each other, so the manager is taken (and therefore
-// `Drop`'d) at most once.
-//
-// Parent-process kill (`TerminateProcess`) still bypasses every
-// handler; any leak there is reaped by `recover_orphaned_state` on
-// the next wxc-exec startup (which we already run at the top of
-// `main`).
+#[cfg(target_os = "windows")]
+static RUN_CANCELLATION_SLOT: Mutex<Option<RunCancellation>> = Mutex::new(None);
 
 #[cfg(target_os = "windows")]
-static DACL_CLEANUP_SLOT: OnceLock<
-    Mutex<Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager>>,
-> = OnceLock::new();
-
-#[cfg(target_os = "windows")]
-fn dacl_cleanup_slot(
-) -> &'static Mutex<Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager>> {
-    DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
+struct ConsoleRunGuard {
+    cancellation: Option<RunCancellation>,
 }
 
-/// Park the DACL manager in the global slot so the Ctrl-C handler can
-/// drop it if a signal arrives before the normal-exit path runs.
 #[cfg(target_os = "windows")]
-fn park_dacl_for_cleanup(mgr: mxc_internal::mxc_common::filesystem_dacl::DaclManager) {
-    let slot = dacl_cleanup_slot();
-    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
-    *guard = Some(mgr);
-}
+impl ConsoleRunGuard {
+    fn new(cancellation: Option<RunCancellation>) -> Self {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = cancellation.clone();
+        Self { cancellation }
+    }
 
-/// Take the parked DACL manager (if any) so the caller can drop it,
-/// triggering ACE restore. Returns `None` if either nothing was parked
-/// or another path (the Ctrl-C handler) already took it.
-///
-/// Recovers from `PoisonError` the same way [`park_dacl_for_cleanup`]
-/// does (`into_inner`): a poisoned mutex must NOT silently swallow a
-/// parked manager — that would leak ACEs until the next-startup
-/// recovery scan reaps them.
-#[cfg(target_os = "windows")]
-fn take_parked_dacl() -> Option<mxc_internal::mxc_common::filesystem_dacl::DaclManager> {
-    DACL_CLEANUP_SLOT.get().and_then(|slot| {
-        let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
-        guard.take()
-    })
-}
-
-/// Stack-owned witness that ensures `take_parked_dacl()` runs on every
-/// path out of `main`, including panic unwind. The parked
-/// `DaclManager` lives in a process-global static (so the Ctrl-C
-/// handler can reach it), and Rust's unwinder doesn't touch statics —
-/// without this guard, a panic between `park_dacl_for_cleanup` and
-/// the explicit `drop(take_parked_dacl())` near the end of `main`
-/// would leave host ACEs in place until the next startup's recovery
-/// scan.
-///
-/// `Drop` is a no-op if nothing was ever parked or if the Ctrl-C
-/// handler already drained the slot.
-#[cfg(target_os = "windows")]
-struct ParkedDaclGuard;
-
-#[cfg(target_os = "windows")]
-impl Drop for ParkedDaclGuard {
-    fn drop(&mut self) {
-        drop(take_parked_dacl());
+    fn finish(mut self) -> bool {
+        // Clear the handler's signal only after backend cleanup has finished.
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.cancellation
+            .take()
+            .is_some_and(|signal| signal.was_cancelled())
     }
 }
 
-/// Windows console-control handler. Called by the OS on Ctrl-C, Ctrl-Break,
-/// console close, logoff, and shutdown. Takes the parked DACL manager and
-/// drops it — `Drop` runs `restore()` which removes the ACEs we applied.
-/// Returns `FALSE` so the default handler still runs (which terminates
-/// the process).
-///
-/// Acquires the slot with a bounded wait
-/// (`plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`), not `try_lock`.
-/// If the main thread is mid-`Drop` on the same manager — which can be
-/// doing a `SetNamedSecurityInfoW` — returning FALSE immediately lets
-/// the default handler call `ExitProcess`, terminating that drop mid-
-/// Win32 and leaving the host DACL in an inconsistent state. The
-/// bounded wait blocks the default handler until either main finishes
-/// (lock released) or the shared timeout elapses — whichever comes
-/// first. On timeout we proceed anyway; the recovery scan on the next
-/// `wxc-exec` startup reaps anything left behind.
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
-    // Ordering guarantee: best-effort cancellation telemetry runs STRICTLY
-    // BEFORE the up-to-5s DACL cleanup loop, which can consume the OS
-    // shutdown-handler budget. Factored through `cancel_then_cleanup` so a
-    // future edit that reorders these two would fail a unit test rather than
-    // silently drop cancellation telemetry when the cleanup times out.
-    cancel_then_cleanup(
-        // Emit first. No-op unless telemetry is active; emits no message text
-        // and does not shut the provider down (the OS reclaims it at exit).
-        telemetry::emit_cancellation,
-        // Then the security-critical host DACL cleanup.
-        || {
-            if let Some(slot) = DACL_CLEANUP_SLOT.get() {
-                use std::time::{Duration, Instant};
-                // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
-                // ~5s OS-imposed kill budget. The persistent elevated PLM
-                // child handles trace cleanup after this owner terminates.
-                let deadline =
-                    Instant::now() + mxc_internal::plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
-                loop {
-                    if let Ok(mut guard) = slot.try_lock() {
-                        // Either main already took the manager (guard is None)
-                        // or it never parked one; dropping `Option::take` is
-                        // a no-op in both cases. Either way, the contract — no
-                        // restore thread running concurrently with the default
-                        // handler's ExitProcess — is satisfied.
-                        drop(guard.take());
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        },
-    );
-    // FALSE = "I did not fully handle this; run the next handler in the
-    // chain (i.e. the default handler that calls ExitProcess)".
+impl Drop for ConsoleRunGuard {
+    fn drop(&mut self) {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn request_console_cancellation(ctrl_type: u32, cancellation: Option<&RunCancellation>) -> bool {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        if let Some(cancellation) = cancellation {
+            return cancellation.request();
+        }
+    }
+    false
+}
+
+/// Claim cooperative interrupts; otherwise emit telemetry before default termination.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn executor_ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_console_control(ctrl_type)
+    }))
+    .unwrap_or(windows::core::BOOL(0))
+}
+
+#[cfg(target_os = "windows")]
+fn handle_console_control(ctrl_type: u32) -> windows::core::BOOL {
+    {
+        let cancellation = RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if request_console_cancellation(ctrl_type, cancellation.as_ref()) {
+            // The execution owner wakes its bounded native wait and runs teardown.
+            // Never call native lifecycle APIs on this handler thread.
+            return windows::core::BOOL(1);
+        }
+    }
+    telemetry::emit_cancellation();
     windows::core::BOOL(0)
 }
 
-/// Runs the cancellation `emit` strictly before the (possibly slow,
-/// security-critical) `cleanup`, and guarantees `cleanup` runs even if `emit`
-/// panics. Factored out of [`dacl_ctrl_handler`] so both invariants are lockable
-/// by a unit test:
-///
-/// 1. **Ordering** — `emit` runs before `cleanup`. The cleanup can burn the OS
-///    shutdown-handler budget and never return, so emitting first ensures the
-///    cancellation telemetry is not lost.
-/// 2. **Cleanup-always** — `emit` is wrapped in [`catch_unwind`] so a panic in
-///    telemetry can never skip the DACL restore (which would leave host ACEs in
-///    place) and can never unwind across the `extern "system"` `dacl_ctrl_handler`
-///    boundary (which is undefined behaviour).
-///
-/// A caught panic is intentionally swallowed: this runs on the OS
-/// shutdown-handler path where there is nothing left to propagate it to, and the
-/// security-critical `cleanup` is what must not be skipped.
 #[cfg(target_os = "windows")]
-fn cancel_then_cleanup(emit: impl FnOnce(), cleanup: impl FnOnce()) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(emit));
-    cleanup();
-}
-
-/// Install the console-control handler. Idempotent — calling twice
-/// registers the same handler twice, which is harmless because the
-/// take-and-drop is `Option::take`-based.
-#[cfg(target_os = "windows")]
-fn install_dacl_ctrl_handler() {
+fn install_executor_ctrl_handler() -> windows::core::Result<()> {
     use windows::Win32::System::Console::SetConsoleCtrlHandler;
-    // SAFETY: `dacl_ctrl_handler` has the correct ABI; the `Add=TRUE`
+    // SAFETY: `executor_ctrl_handler` has the correct ABI; the `Add=TRUE`
     // call merely appends to the OS handler chain.
-    let _ = unsafe { SetConsoleCtrlHandler(Some(dacl_ctrl_handler), true) };
+    unsafe { SetConsoleCtrlHandler(Some(executor_ctrl_handler), true) }
 }
 
 fn main() {
@@ -1033,38 +966,16 @@ fn main() {
         std::env::set_var("WXC_WSB_FORCE_RECLAIM", "1");
     }
 
-    // Best-effort: reap any orphaned DACL state files left behind by
-    // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
-    // `wxc-exec --probe` is the canonical recovery trigger consumers
-    // (run_processcontainer_crash_recovery_test.ps1, SDK warm-start) rely on. Errors
-    // here are non-fatal and only surface via stderr. On a healthy host
-    // with zero state files this is sub-millisecond.
-    match mxc_internal::mxc_common::filesystem_dacl::recover_orphaned_state() {
-        Ok(report) => {
-            if report.files_processed > 0 || !report.errors.is_empty() {
-                eprintln!(
-                    "DACL recovery: {} file(s), {} ACE(s) restored, {} pruned (missing), {} error(s)",
-                    report.files_processed,
-                    report.aces_restored,
-                    report.aces_pruned_missing,
-                    report.errors.len()
-                );
-                for e in &report.errors {
-                    eprintln!("  {e}");
-                }
-            }
-        }
-        Err(e) => eprintln!("DACL recovery failed: {e}"),
-    }
-
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
-    // sandbox and never parks a DaclManager.
+    // sandbox.
     //
-    // Run it AFTER recovery (so consumers that rely on `--probe`-as-
-    // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
-    // (which probe doesn't need; deferring them shaves cold-start cost
-    // off the SDK warm path).
+    // It does activate WinRT: `isolation_session_available()` resolves the
+    // IsolationSession activation factory. That probe owns and releases its
+    // own COM apartment, so it neither needs nor disturbs the process-wide
+    // init below — this ordering is not a claim that the probe is COM-free.
+    //
+    // Run before COM initialization and console-handler installation.
     if cli.probe {
         let request = if let Some(decoded) = decoded_config.as_ref() {
             // Parse using the existing pipeline but route logger output to
@@ -1079,16 +990,18 @@ fn main() {
                     ) {
                         Ok(MxcRequest::OneShot(request)) => request,
                         Ok(MxcRequest::StateAware(_)) | Err(_) => {
-                            eprintln!("Error: failed to load probe config");
                             eprint!("{}", probe_logger.get_buffer());
-                            process::exit(1);
+                            emit_mxc_error_exit(&MxcError::malformed_request(
+                                "failed to load probe config",
+                            ));
                         }
                     }
                 }
                 Err(_) => {
-                    eprintln!("Error: failed to load probe config");
                     eprint!("{}", probe_logger.get_buffer());
-                    process::exit(1);
+                    emit_mxc_error_exit(&MxcError::malformed_request(
+                        "failed to load probe config",
+                    ));
                 }
             }
         } else {
@@ -1096,17 +1009,16 @@ fn main() {
         };
         let output = match mxc_internal::mxc_engine::probe_execution_request(Some(&request)) {
             Ok(output) => output,
-            Err(error) => {
-                eprintln!("Error: {}", error.message);
-                process::exit(1);
-            }
+            Err(error) => emit_mxc_error_exit(&error.into_mxc_error()),
         };
         match mxc_internal::process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("Error: probe serialization failed: {e}");
-                process::exit(1);
-            }
+            Err(e) => emit_mxc_error_exit(&MxcError::backend_error(format!(
+                "probe serialization failed: {e}"
+            ))),
+        }
+        if decoded_config.is_some() && output.error.is_some() {
+            process::exit(1);
         }
         return;
     }
@@ -1125,19 +1037,12 @@ fn main() {
         )
     };
 
-    // Install the Ctrl-C / Ctrl-Break handler that drops any parked
-    // DaclManager on signal. Cheap and idempotent. Windows-only: the parked
-    // DACL manager it drains lives behind `#[cfg(target_os = "windows")]`.
     #[cfg(target_os = "windows")]
-    install_dacl_ctrl_handler();
-
-    // Stack-owned witness so a panic anywhere below — between
-    // `park_dacl_for_cleanup` and the explicit `drop(take_parked_dacl())`
-    // near the end of `main` — still drains the slot and runs
-    // `restore()` during unwind. Without it the manager is parked in
-    // a static and unwinding skips destructors of static-owned values.
-    #[cfg(target_os = "windows")]
-    let _dacl_guard = ParkedDaclGuard;
+    if let Err(error) = install_executor_ctrl_handler() {
+        emit_mxc_error_exit(&MxcError::backend_error(format!(
+            "cannot install executor console-control handler: {error}"
+        )));
+    }
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk
@@ -1146,50 +1051,43 @@ fn main() {
         // Setup exits before any config is read, so a positional here is
         // most likely a runtime name given with a space instead of `=`.
         if let Some(stray) = &cli.config_path {
-            eprintln!(
-                "Error: --setup-hyperlight takes no config path; name runtimes with \
+            emit_mxc_error_exit(&MxcError::malformed_request(format!(
+                "--setup-hyperlight takes no config path; name runtimes with \
                  --setup-hyperlight={stray}"
-            );
-            process::exit(1);
+            )));
         }
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
             // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
             if !mxc_internal::hyperlight_common::is_whp_available() {
-                eprintln!(
-                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
-                     Enable the HypervisorPlatform optional feature and reboot."
-                );
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::backend_unavailable(
+                    "--setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot.",
+                ));
             }
 
             // Setup is an interactive install: the pull and the warm-up
             // report progress as they go.
             let mut logger = Logger::new(Mode::Console);
-            let runtimes = match mxc_internal::hyperlight_common::parse_runtimes(runtime_names) {
-                Ok(runtimes) => runtimes,
-                Err(msg) => {
-                    eprintln!("Error: {msg}");
-                    process::exit(1);
-                }
-            };
+            let runtimes = mxc_internal::hyperlight_common::parse_runtimes(runtime_names)
+                .unwrap_or_else(|msg| emit_mxc_error_exit(&MxcError::malformed_request(msg)));
             match mxc_internal::hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
                 Ok(home) => {
                     eprintln!("hyperlight setup: image home ready at {:?}", home);
                     process::exit(0);
                 }
-                Err(msg) => {
-                    eprintln!("hyperlight setup failed: {msg}");
-                    process::exit(1);
-                }
+                Err(msg) => emit_mxc_error_exit(&MxcError::backend_error(format!(
+                    "hyperlight setup failed: {msg}"
+                ))),
             }
         }
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
             let _ = runtime_names;
-            eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::unsupported_containment(
+                "--setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)",
+            ));
         }
     }
 
@@ -1199,13 +1097,17 @@ fn main() {
     if cli.setup_wslc {
         #[cfg(feature = "wslc")]
         {
-            let image = match cli.image.as_deref() {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    eprintln!("Error: --setup-wslc requires --image <name>");
-                    process::exit(1);
-                }
-            };
+            let images: Vec<&str> = cli
+                .image
+                .iter()
+                .map(String::as_str)
+                .filter(|name| !name.is_empty())
+                .collect();
+            if images.is_empty() {
+                emit_mxc_error_exit(&MxcError::malformed_request(
+                    "--setup-wslc requires --image <name>",
+                ));
+            }
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {
@@ -1217,8 +1119,9 @@ fn main() {
             // `init_and_load_sdk`.
             let result = unsafe {
                 mxc_internal::wslc_common::image::setup_pull_image(
-                    image,
+                    &images,
                     cli.storage_path.as_deref(),
+                    cli.wslc_daemon_slots.unwrap_or(0) as usize,
                     &mut logger,
                 )
             };
@@ -1230,16 +1133,16 @@ fn main() {
             }
             match result {
                 Ok(()) => process::exit(0),
-                Err(msg) => {
-                    eprintln!("wslc setup failed: {msg}");
-                    process::exit(1);
-                }
+                Err(msg) => emit_mxc_error_exit(&MxcError::backend_error(format!(
+                    "wslc setup failed: {msg}"
+                ))),
             }
         }
         #[cfg(not(feature = "wslc"))]
         {
-            eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::unsupported_containment(
+                "WSLC backend not compiled. Rebuild with --features wslc.",
+            ));
         }
     }
 
@@ -1256,13 +1159,11 @@ fn main() {
         logger.enable_diagnostics(&diag_config);
     }
 
-    // Determine config input. In delete mode the config is optional; every
-    // other path requires it. `decoded_config` above already read the source
-    // once — if it's populated, unpack the decoded JSON (or surface the
-    // decode error). If it's absent, either accept the empty state for
-    // delete mode or report the missing-config error.
-    let config_json: Option<String> = match decoded_config {
-        Some(Ok(json)) => Some(json),
+    // Determine config input. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the decode
+    // error); if it's absent, report the missing-config error.
+    let config_json: String = match decoded_config {
+        Some(Ok(json)) => json,
         Some(Err(error)) => match cli.operation {
             Some(operation) => {
                 let error = lifecycle_input_error(operation, &mut logger, error);
@@ -1271,57 +1172,45 @@ fn main() {
                 process::exit(1);
             }
             None => {
-                eprintln!("Request error");
-                eprintln!("{}", error.into_error());
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::malformed_request(error.into_error().to_string()));
             }
         },
         None => {
-            if !cli.delete {
-                let message =
-                    "No config provided. Use a positional path, --config, or --config-base64";
-                if let Some(operation) = cli.operation {
-                    let error = lifecycle_input_error(
-                        operation,
-                        &mut logger,
-                        RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
-                    );
-                    print_error_envelope(&error);
-                    eprint!("{}", logger.get_buffer());
-                    process::exit(1);
-                }
-                eprintln!("Error: {message}");
+            let message = "No config provided. Use a positional path, --config, or --config-base64";
+            if let Some(operation) = cli.operation {
+                let error = lifecycle_input_error(
+                    operation,
+                    &mut logger,
+                    RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
+                );
+                print_error_envelope(&error);
+                eprint!("{}", logger.get_buffer());
                 process::exit(1);
             }
-            None
+            emit_mxc_error_exit(&MxcError::malformed_request(message));
         }
     };
-
-    // Delete mode
-    if cli.delete {
-        let name = match cli.containername {
-            Some(ref n) => n.as_str(),
-            None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
-            }
-        };
-        let success = delete_app_container_profile(name, &mut logger);
-        print!("{}", logger.get_buffer());
-        process::exit(if success { 0 } else { 1 });
-    }
-
-    // Non-delete paths always have a config JSON at this point (or exited
-    // above with the missing-config error).
-    let config_json = config_json.expect("config_json is Some on non-delete paths");
     if let Some(operation) = cli.operation {
         let phase = operation.into();
+        let target_id = cli
+            .container_id
+            .as_deref()
+            .map(|value| CliTargetId {
+                flag: "--container-id",
+                value,
+            })
+            .or_else(|| {
+                cli.session_id.as_deref().map(|value| CliTargetId {
+                    flag: "--session-id",
+                    value,
+                })
+            });
         let parsed =
             match mxc_internal::mxc_common::config_parser::load_state_aware_request_from_json_with_options(
                 &config_json,
                 &mut logger,
                 phase,
-                cli.container_id.as_deref(),
+                target_id,
                 &cli.command,
             ) {
                 Ok(parsed) => parsed,
@@ -1342,12 +1231,11 @@ fn main() {
                 }
             };
         let mut parsed = parsed;
-        let telemetry_active = parsed
-            .request()
-            .telemetry
-            .as_ref()
-            .map(|config| telemetry::init(config, &mut logger))
-            .unwrap_or(false);
+        let telemetry_active = telemetry::init_for_request(
+            parsed.request().telemetry.as_ref(),
+            parsed.request().source_contract,
+            &mut logger,
+        );
         parsed.set_experimental_enabled(cli.experimental);
         parsed.set_dry_run(cli.dry_run);
         run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
@@ -1373,15 +1261,16 @@ fn main() {
         Err(error) => {
             log_request_parse_rejection(&mut logger, &error, None);
             match request_error_route(&error) {
-                RequestErrorRoute::Diagnostic => {
-                    eprint!("Request error\n{}", logger.get_buffer());
+                RequestErrorRoute::Stderr(typed) => {
+                    eprint!("{}", logger.get_buffer());
+                    emit_mxc_error_exit(&typed);
                 }
-                RequestErrorRoute::Envelope(e) => {
+                RequestErrorRoute::Stdout(e) => {
                     print_error_envelope(e);
                     eprint!("{}", logger.get_buffer());
+                    process::exit(e.code.exit_code());
                 }
             }
-            process::exit(1);
         }
     };
 
@@ -1390,11 +1279,30 @@ fn main() {
     request.dry_run = cli.dry_run;
 
     // ── Telemetry init ──────────────────────────────────────────────
-    let telemetry_active = request
-        .telemetry
-        .as_ref()
-        .map(|c| telemetry::init(c, &mut logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        request.telemetry.as_ref(),
+        request.source_contract,
+        &mut logger,
+    );
+    let learning_mode_requested = {
+        #[cfg(target_os = "windows")]
+        {
+            DiagnosticConfig::force_learning_mode()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    };
+    let learning_mode = telemetry::LearningMode::for_request(&request)
+        .with_overrides(cli.audit, learning_mode_requested);
+    let _session = telemetry::session::start_with_learning_mode(
+        telemetry_active,
+        "",
+        request.source_contract,
+        learning_mode,
+        &mut logger,
+    );
     let requested_sandbox_kind = request
         .telemetry
         .as_ref()
@@ -1408,6 +1316,16 @@ fn main() {
         telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
+
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
@@ -1432,35 +1350,34 @@ fn main() {
                 "containment",
                 "",
             );
-            eprintln!("Error: {message}");
             telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
                 requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::policy_validation(message));
         }
         let injected = apply_permissive_learning_mode(&mut request.policy.capabilities);
         let context = match audit::prepare_request(&mut request, config_file_path(&cli)) {
             Ok(context) => context,
             Err(message) => {
-                eprintln!("Error: {message}");
                 telemetry::emit_early_exit_with_kind(
                     telemetry_active,
                     &request.containment,
                     requested_sandbox_kind,
                     telemetry::FailureReason::ConfigError,
                 );
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::backend_error(message));
             }
         };
         audit_context = Some(context);
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
         if injected && cli.audit_verbose {
-            eprintln!(
-                "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
-            );
+            emit_warning_envelopes(&[
+                "permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+                    .to_string(),
+            ]);
         }
     }
 
@@ -1474,9 +1391,6 @@ fn main() {
             "process.commandLine",
             "",
         );
-        eprintln!(
-            "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
-        );
         eprint!("{}", logger.get_buffer());
         telemetry::emit_early_exit_with_kind(
             telemetry_active,
@@ -1484,20 +1398,12 @@ fn main() {
             requested_sandbox_kind,
             telemetry::FailureReason::ConfigError,
         );
-        process::exit(1);
+        emit_mxc_error_exit(&MxcError::malformed_request(
+            "no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path.",
+        ));
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_requested = {
-        #[cfg(target_os = "windows")]
-        {
-            DiagnosticConfig::force_learning_mode()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            false
-        }
-    };
     let learning_mode_injected = if learning_mode_requested
         && !request.policy.capabilities.iter().any(|c| {
             c.eq_ignore_ascii_case("learningModeLogging")
@@ -1575,40 +1481,31 @@ fn main() {
     }
 
     // Run script in the selected containment backend. Backend selection and
-    // runner construction — including the ProcessContainer BaseContainer /
-    // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
+    // runner construction — including native ProcessContainer and every
+    // experimental backend —
     // live in `mxc_internal::mxc_engine::resolve_runner`, the single home for one-shot backend
-    // dispatch. The DACL guard it returns for the fallback tiers is parked into
-    // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
-    // it on signal as well as the normal-exit path below; it is `None` when no
-    // DACL augmentation was required. Tier-selection warnings and the selected
-    // tier are logged to `logger` by the engine.
+    // dispatch.
     let resolved_runner = mxc_internal::mxc_engine::resolve_runner(&request, &mut logger);
     let mut runner: Box<dyn ScriptRunner> = match resolved_runner {
-        Ok(resolved) => {
-            #[cfg(target_os = "windows")]
-            if let Some(mgr) = resolved.dacl_manager {
-                park_dacl_for_cleanup(mgr);
-            }
-            resolved.runner
-        }
+        Ok(resolved) => resolved.runner,
         Err(e) => {
+            let error = e.into_mxc_error();
             log_config_rejected(
                 &mut logger,
-                RejectionReason::RunnerUnavailable,
+                rejection_reason_for(&error),
                 request.containment.wire_name(),
                 "containment",
                 "",
             );
-            eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
+            emit_warning_envelopes(&logger.take_warnings());
             telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
                 requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&error);
         }
     };
 
@@ -1618,6 +1515,8 @@ fn main() {
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    #[cfg(target_os = "windows")]
+    let console_run = ConsoleRunGuard::new(runner.cancellation());
     let run_start = Instant::now();
     let mut response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -1628,51 +1527,48 @@ fn main() {
         if !cli.dry_run {
             match audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose) {
                 Ok(cleanup_warnings) => {
-                    for warning in cleanup_warnings {
-                        let message = format!("[audit] warning: {warning}");
-                        let _ = writeln!(logger, "{message}");
-                        eprintln!("{message}");
+                    for warning in &cleanup_warnings {
+                        let _ = writeln!(logger, "[audit] warning: {warning}");
                     }
+                    response.extend_warnings(
+                        cleanup_warnings
+                            .into_iter()
+                            .map(|warning| format!("[audit] {warning}")),
+                    );
                     eprintln!("[audit] artifacts written to {}", context.log_dir.display());
                 }
                 Err(error) => {
                     let message = format!("audit finalization failed: {error}");
                     let _ = writeln!(logger, "[audit] {message}");
-                    eprintln!("error: {message}");
-                    response.exit_code = -1;
                     response.error_message = match response.error_message.is_empty() {
                         true => message,
                         false => format!("{}; {message}", response.error_message),
                     };
+                    // Derived rather than hard-coded so the status keeps
+                    // agreeing with the code the envelope reports: an
+                    // otherwise-clean run carries `backend_error`, and a run
+                    // the backend already refused stays a rejection.
+                    response.exit_code = response.failure_phase.failure_exit_code();
                 }
             }
         }
     }
 
-    // Explicitly drop the runner before retrieving the parked DACL
-    // manager so any runner-internal resources holding child handles
-    // release first; then drop the manager so its `restore()` runs.
-    // (process::exit below skips destructors, so we must do this
-    // manually for prompt cleanup on the normal path. The Ctrl-C
-    // handler covers the abnormal path; recover_orphaned_state on the
-    // next startup covers everything else.)
-    //
-    // The parked-DACL machinery is Windows-only: `DaclManager` lives behind
-    // `#[cfg(target_os = "windows")]` in `mxc_internal::mxc_common::filesystem_dacl`, so the
-    // whole extract/park/take/cleanup lifecycle is gated to match.
     drop(runner);
     #[cfg(target_os = "windows")]
-    drop(take_parked_dacl());
+    let cancelled = console_run.finish();
+    #[cfg(not(target_os = "windows"))]
+    let cancelled = false;
 
     // Surface security warnings (e.g. permissiveLearningMode relaxing
     // deny-by-default under --audit). The logger only records these rather than
     // writing them itself, so that `mxc_engine` embedders don't get unannounced
     // writes to a terminal they own. wxc-exec *does* own its terminal, so it
-    // opts in here. Messages carry their own banner; print them verbatim.
+    // opts in here. Warnings travel on the response so a programmatic caller
+    // reads them from one structured place rather than scraping stderr.
     // Emitted before the dry-run branch below, which exits the process.
-    for warning in logger.warnings() {
-        eprintln!("{warning}");
-    }
+    response.extend_warnings(logger.take_warnings());
+    emit_warning_envelopes(response.warnings());
 
     #[cfg(target_os = "windows")]
     if let Err(error) = mxc_internal::mxc_engine::emit_verbose_telemetry(
@@ -1686,13 +1582,25 @@ fn main() {
         ));
     }
 
-    telemetry::emit_completion_with_kind(
-        telemetry_active,
-        &request.containment,
-        requested_sandbox_kind,
-        &response,
-        run_elapsed,
-    );
+    if cancelled {
+        telemetry::emit_early_exit_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            telemetry::FailureReason::Cancelled,
+        );
+        if response.exit_code != 0 {
+            response.exit_code = 130;
+        }
+    } else {
+        telemetry::emit_completion_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            &response,
+            run_elapsed,
+        );
+    }
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
@@ -1771,11 +1679,13 @@ mod tests {
     #[test]
     fn cli_accepts_lifecycle_operation_and_container_id() {
         for (name, expected) in [
+            ("provision-session", CliOperation::ProvisionSession),
             ("provision", CliOperation::Provision),
             ("start", CliOperation::Start),
             ("exec", CliOperation::Exec),
             ("stop", CliOperation::Stop),
             ("deprovision", CliOperation::Deprovision),
+            ("deprovision-session", CliOperation::DeprovisionSession),
         ] {
             let cli = parse_cli(&["wxc-exec", "policy.json", "--operation", name]);
             assert_eq!(cli.operation, Some(expected));
@@ -1838,13 +1748,59 @@ mod tests {
         let help = Cli::command().render_help().to_string();
 
         assert!(help.contains("--container-id"));
+        assert!(help.contains("--session-id"));
         assert!(!help.contains("--sandbox-id"));
+    }
+
+    #[test]
+    fn cli_keeps_the_two_lifecycle_identities_on_separate_flags() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "deprovision-session",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]);
+        assert_eq!(
+            cli.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(cli.container_id, None);
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--session-id must require --operation"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "deprovision-session",
+            "--container-id",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--container-id and --session-id must conflict"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn cli_rejects_lifecycle_operation_with_utility_modes() {
         for utility_mode in [
-            "--delete",
             "--setup-hyperlight",
             "--setup-wslc",
             "--probe",
@@ -1866,21 +1822,6 @@ mod tests {
                 "{utility_mode}"
             );
         }
-
-        let error = match Cli::try_parse_from([
-            "wxc-exec",
-            "policy.json",
-            "--operation",
-            "deprovision",
-            "--container-id",
-            "iso:abc",
-            "--containername",
-            "legacy-profile",
-        ]) {
-            Err(error) => error,
-            Ok(_) => panic!("--operation must conflict with --containername"),
-        };
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     fn test_logger() -> Logger {
@@ -1957,7 +1898,7 @@ mod tests {
 
     impl ResolveError {
         fn from_parse(e: ParseError) -> Self {
-            let envelope_routed = matches!(request_error_route(&e), RequestErrorRoute::Envelope(_));
+            let envelope_routed = matches!(request_error_route(&e), RequestErrorRoute::Stdout(_));
 
             let message = match e {
                 ParseError::Decode(err)
@@ -2047,28 +1988,33 @@ mod tests {
 
     #[test]
     fn request_error_route_matches_the_output_conventions() {
-        let decode = ParseError::Decode(WxcError::ConfigParse("decode".to_string()));
-        assert!(matches!(
-            request_error_route(&decode),
-            RequestErrorRoute::Diagnostic
-        ));
-
-        let version = ParseError::Version(WxcError::ConfigParse("version".to_string()));
-        assert!(matches!(
-            request_error_route(&version),
-            RequestErrorRoute::Diagnostic
-        ));
-
-        let oneshot = ParseError::OneShot(WxcError::ConfigParse("oneshot".to_string()));
-        assert!(matches!(
-            request_error_route(&oneshot),
-            RequestErrorRoute::Diagnostic
-        ));
+        // The stderr route still classifies: a one-shot parse failure blames
+        // the request, so it reports a code rather than an untyped exit.
+        for (case, error) in [
+            (
+                "decode",
+                ParseError::Decode(WxcError::ConfigParse("decode".to_string())),
+            ),
+            (
+                "version",
+                ParseError::Version(WxcError::ConfigParse("version".to_string())),
+            ),
+            (
+                "oneshot",
+                ParseError::OneShot(WxcError::ConfigParse("oneshot".to_string())),
+            ),
+        ] {
+            let RequestErrorRoute::Stderr(typed) = request_error_route(&error) else {
+                panic!("{case}: one-shot failures belong on stderr");
+            };
+            assert_eq!(typed.code, MxcErrorCode::MalformedRequest, "{case}");
+            assert_eq!(typed.code.exit_code(), 1, "{case}");
+        }
 
         let stateaware = ParseError::StateAware(MxcError::malformed_request("stateaware"));
         assert!(matches!(
             request_error_route(&stateaware),
-            RequestErrorRoute::Envelope(_)
+            RequestErrorRoute::Stdout(_)
         ));
     }
 
@@ -2080,11 +2026,13 @@ mod tests {
         logger.enable_file_sink(&log_path).unwrap();
 
         for operation in [
+            CliOperation::ProvisionSession,
             CliOperation::Provision,
             CliOperation::Start,
             CliOperation::Exec,
             CliOperation::Stop,
             CliOperation::Deprovision,
+            CliOperation::DeprovisionSession,
         ] {
             let error = lifecycle_input_error(
                 operation,
@@ -2110,17 +2058,24 @@ mod tests {
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
             log.matches(r#""reason":"malformed_json""#).count(),
-            5,
+            7,
             "each lifecycle input failure must emit one ConfigRejected record: {log}"
         );
-        for phase in ["provision", "start", "exec", "stop", "deprovision"] {
+        for phase in [
+            "provision-session",
+            "provision",
+            "start",
+            "exec",
+            "stop",
+            "deprovision",
+            "deprovision-session",
+        ] {
             assert_eq!(
                 log.matches(&format!(r#""phase":"{phase}""#)).count(),
                 1,
                 "missing lifecycle phase {phase}: {log}"
             );
         }
-
         let mut logger = test_logger();
         let source_path = directory.path().join("source-audit.log");
         logger.enable_file_sink(&source_path).unwrap();
@@ -2293,7 +2248,7 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                matches!(request_error_route(&error), RequestErrorRoute::Diagnostic),
+                matches!(request_error_route(&error), RequestErrorRoute::Stderr(_)),
                 "{case}: pre-discrimination failures must remain stderr diagnostics"
             );
 
@@ -2332,7 +2287,7 @@ mod tests {
             &mut logger,
         )
         .unwrap_err();
-        let RequestErrorRoute::Envelope(error) = request_error_route(&error) else {
+        let RequestErrorRoute::Stdout(error) = request_error_route(&error) else {
             panic!("identified lifecycle requests must retain their JSON error envelope");
         };
         let envelope: serde_json::Value =
@@ -2355,7 +2310,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             request_error_route(&error),
-            RequestErrorRoute::Diagnostic
+            RequestErrorRoute::Stderr(_)
         ));
         assert!(logger.get_buffer().contains("duplicate field `telemetry`"));
     }
@@ -3034,60 +2989,63 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn cancel_then_cleanup_emits_before_cleanup() {
-        // Locks in the dacl_ctrl_handler ordering guarantee: cancellation
-        // telemetry must be emitted BEFORE the (up-to-5s, security-critical)
-        // DACL cleanup, so a cleanup that burns the OS shutdown budget can't
-        // swallow the telemetry. Drive the extracted helper with two spies that
-        // record their call order into a shared vec.
-        use std::sync::Mutex;
-
-        let order: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-        cancel_then_cleanup(
-            || order.lock().unwrap().push("emit"),
-            || order.lock().unwrap().push("cleanup"),
-        );
-
-        assert_eq!(*order.lock().unwrap(), vec!["emit", "cleanup"]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn cancel_then_cleanup_runs_cleanup_even_if_emit_panics() {
-        // Locks in the cleanup-always guarantee: a panic in the cancellation
-        // emit (telemetry) must NEVER skip the security-critical DACL cleanup,
-        // and must not unwind across the extern "system" ctrl-handler boundary.
-        // Without the catch_unwind in cancel_then_cleanup, `cleanup` would never
-        // run and the panic would escape the handler (UB in production).
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        static CLEANED: AtomicBool = AtomicBool::new(false);
-        // Suppress the default panic hook's stderr backtrace for this
-        // intentional panic so the test output stays clean.
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        cancel_then_cleanup(
-            || panic!("telemetry emit blew up"),
-            || CLEANED.store(true, Ordering::SeqCst),
-        );
-        std::panic::set_hook(prev);
-
-        assert!(
-            CLEANED.load(Ordering::SeqCst),
-            "cleanup must run even when emit panics"
-        );
+    fn console_handler_claims_only_cooperatively_cancellable_interrupts() {
+        use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
+        for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
+            let cancellation = RunCancellation::default();
+            let guard = ConsoleRunGuard::new(Some(cancellation.clone()));
+            assert!(unsafe { executor_ctrl_handler(event) }.as_bool());
+            assert!(
+                !cancellation.was_cancelled(),
+                "requesting must not pretend cleanup completed"
+            );
+            assert!(
+                !guard.finish(),
+                "a completed run wins over an unobserved cancellation"
+            );
+        }
+        let cancellation = RunCancellation::default();
+        assert!(!request_console_cancellation(
+            CTRL_CLOSE_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(!request_console_cancellation(CTRL_C_EVENT, None));
+        assert!(!request_console_cancellation(CTRL_BREAK_EVENT, None));
+        cancellation.complete();
+        assert!(!request_console_cancellation(
+            CTRL_C_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(RUN_CANCELLATION_SLOT.lock().unwrap().is_none());
     }
 
     #[test]
     fn pre_dispatch_vector_is_empty_when_telemetry_inactive() {
-        // Inactive telemetry does no RNG/clock work regardless of phase.
-        assert!(telemetry::correlation_state::pre_dispatch_vector(false, true, None).is_empty());
-        assert!(telemetry::correlation_state::pre_dispatch_vector(
-            false,
-            false,
-            Some("wsb:12345678")
-        )
-        .is_empty());
+        for phase in [
+            Phase::ProvisionSession,
+            Phase::Provision,
+            Phase::Start,
+            Phase::Exec,
+            Phase::Stop,
+            Phase::Deprovision,
+            Phase::DeprovisionSession,
+        ] {
+            assert!(
+                telemetry::correlation_state::pre_dispatch_vector(false, phase, None).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn session_phase_correlation_never_creates_the_sandbox_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            let vector = telemetry::correlation_state::pre_dispatch_vector(true, phase, None);
+            assert!(telemetry::correlation_vector::is_relayable(&vector));
+        }
+        assert!(!store.exists());
     }
 
     #[test]
@@ -3096,19 +3054,18 @@ mod tests {
         let _guard = StoreDirGuard::set(tmp.path());
         let sandbox_id = "wsb:12345678";
 
-        // Active provision seeds a fresh valid vector.
-        let provisioned = telemetry::correlation_state::pre_dispatch_vector(true, true, None);
+        let provisioned =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Provision, None);
         assert!(telemetry::correlation_vector::is_relayable(&provisioned));
 
-        // Persisting it (as `run_state_aware_main` does post-dispatch) lets a
-        // later phase recall it and spin a distinct child off the same base.
         let outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
             serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
         ));
         telemetry::correlation_state::on_provision_outcome(true, &provisioned, &outcome);
 
         let base_prefix = provisioned.split('.').next().unwrap();
-        let spun = telemetry::correlation_state::pre_dispatch_vector(true, false, Some(sandbox_id));
+        let spun =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Start, Some(sandbox_id));
         assert!(spun.starts_with(&format!("{base_prefix}.")), "{spun:?}");
         assert_ne!(spun, provisioned);
     }
@@ -3140,11 +3097,12 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::malformed_request("boom".to_string()));
         match finalize_state_aware_outcome(outcome, "provision", false) {
-            StateAwareExit::Error(json) => {
+            StateAwareExit::Error(json, exit_code) => {
                 // Must be a parseable envelope carrying the error code so consumers
                 // that key off `error.code` still work.
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert!(parsed["error"]["code"].is_string(), "{json}");
+                assert_eq!(exit_code, 1);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -3155,10 +3113,11 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::backend_error("output was truncated".to_string()));
         match finalize_state_aware_outcome(outcome, "exec", false) {
-            StateAwareExit::ExecError(json) => {
+            StateAwareExit::ExecError(json, exit_code) => {
                 // Still a parseable envelope; only the stream it lands on changes.
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert!(parsed["error"]["code"].is_string(), "{json}");
+                assert_eq!(exit_code, -1);
             }
             other => panic!("expected ExecError, got {other:?}"),
         }
@@ -3170,7 +3129,7 @@ mod tests {
             Err(MxcError::malformed_request("boom".to_string()));
         assert!(matches!(
             finalize_state_aware_outcome(outcome, "exec", true),
-            StateAwareExit::Error(_)
+            StateAwareExit::Error(_, 1)
         ));
     }
 }

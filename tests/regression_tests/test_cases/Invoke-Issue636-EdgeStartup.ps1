@@ -33,9 +33,6 @@ $configJson = @"
         "readonlyPaths": $((ConvertTo-Json -InputObject @($edgeRoot) -Compress)),
         "readwritePaths": $((ConvertTo-Json -InputObject @($scratch) -Compress))
     },
-    "fallback": {
-        "allowDaclMutation": true
-    },
     "ui": {
         "disable": false
     }

@@ -142,6 +142,9 @@ pub fn validate_deprovision(
 }
 
 /// Spawn a workload in an existing container and return a live process.
+///
+/// A WSLC process started this way reads end-of-file on stdin; use
+/// [`spawn_in_container_with_stdin`] to give it input.
 pub fn spawn_in_container(
     container_id: &ContainerId,
     request: ExecutionRequest,
@@ -150,7 +153,20 @@ pub fn spawn_in_container(
     let input = request
         .into_sdk_input(container_id, options.telemetry)
         .map_err(Error::from)?;
-    crate::mxc_engine::exec_typed_state_aware_request(input, false).map(MxcProcess::new)
+    crate::mxc_engine::exec_typed_state_aware_request(input, false, false).map(MxcProcess::new)
+}
+
+/// Spawn a workload in an existing container with a writable stdin, which
+/// [`MxcProcess::take_stdin`] returns.
+pub fn spawn_in_container_with_stdin(
+    container_id: &ContainerId,
+    request: ExecutionRequest,
+    options: SpawnInContainerOptions,
+) -> Result<MxcProcess, Error> {
+    let input = request
+        .into_sdk_input(container_id, options.telemetry)
+        .map_err(Error::from)?;
+    crate::mxc_engine::exec_typed_state_aware_request(input, false, true).map(MxcProcess::new)
 }
 
 /// Spawn a workload in an existing container with a caller-controlled PTY.

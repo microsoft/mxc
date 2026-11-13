@@ -50,13 +50,8 @@ fn isolation_session_unavailable() -> MxcError {
     )
 }
 
-/// This phase's telemetry correlation vector, purely internal to MXC: no
-/// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
-/// exist yet) mints a fresh vector; every later phase recalls the same
-/// lifecycle root persisted by `provision` and spins a distinct child off it —
-/// see [`telemetry::correlation_state`].
 fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
-    telemetry::correlation_state::pre_dispatch_vector(active, phase == Phase::Provision, sandbox_id)
+    telemetry::correlation_state::pre_dispatch_vector(active, phase, sandbox_id)
 }
 
 fn surface_attached_warnings(logger: &mut Logger, mut surface: impl FnMut(&str)) {
@@ -143,6 +138,17 @@ pub fn run_state_aware(
                 dry_run,
             )
         }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            let mut runner = crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new();
+            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            );
+            runner.finish(outcome)
+        }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
@@ -169,6 +175,7 @@ pub enum EngineProvisionMetadata {
 #[non_exhaustive]
 pub struct EngineStateAwareResult {
     pub sandbox_id: Option<String>,
+    pub session_id: Option<String>,
     pub metadata: Option<EngineProvisionMetadata>,
     pub warnings: Vec<String>,
 }
@@ -178,6 +185,7 @@ impl EngineStateAwareResult {
     fn empty() -> Self {
         Self {
             sandbox_id: None,
+            session_id: None,
             metadata: None,
             warnings: Vec::new(),
         }
@@ -187,7 +195,18 @@ impl EngineStateAwareResult {
     fn provision(sandbox_id: String, metadata: Option<EngineProvisionMetadata>) -> Self {
         Self {
             sandbox_id: Some(sandbox_id),
+            session_id: None,
             metadata,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn provision_session(session_id: String) -> Self {
+        Self {
+            sandbox_id: None,
+            session_id: Some(session_id),
+            metadata: None,
             warnings: Vec::new(),
         }
     }
@@ -212,6 +231,9 @@ fn typed_dispatch_result<
 ) -> Result<EngineStateAwareResult, MxcError> {
     match outcome {
         TypedDispatchOutcome::DryRun => Ok(EngineStateAwareResult::empty()),
+        TypedDispatchOutcome::ProvisionSession(result) => {
+            Ok(EngineStateAwareResult::provision_session(result.session_id))
+        }
         TypedDispatchOutcome::Provision(result) => Ok(EngineStateAwareResult::provision(
             result.sandbox_id,
             result
@@ -243,6 +265,7 @@ fn typed_dispatch_result<
             }
             Ok(EngineStateAwareResult::empty())
         }
+        TypedDispatchOutcome::DeprovisionSession => Ok(EngineStateAwareResult::empty()),
         TypedDispatchOutcome::ExecCompleted { .. } => Err(MxcError::backend_error(
             "typed envelope dispatch returned an exec completion",
         )),
@@ -325,10 +348,28 @@ fn run_state_aware_typed(
 /// caller's stdio. The streaming counterpart of the exec arm of
 /// [`run_state_aware`].
 ///
+/// `stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// IsolationSession always provides one, and MicroVM rejects it before setup.
+///
 /// Backends without a state-aware impl return an [`MxcError`] with
 /// `unsupported_phase`.
 pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
+    stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    exec_state_aware_with_capture_mode(parsed, stdin, false)
+}
+
+fn exec_state_aware_capture(
+    parsed: ParsedStateAwareRequest,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    exec_state_aware_with_capture_mode(parsed, false, true)
+}
+
+fn exec_state_aware_with_capture_mode(
+    parsed: ParsedStateAwareRequest,
+    _stdin: bool,
+    _capture_output: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
     crate::mxc_engine::experimental::require_experimental_optin(
@@ -364,11 +405,37 @@ pub fn exec_state_aware(
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
-            let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
+            let mut runner = if _stdin {
+                crate::wslc_common::WslcStateAwareRunner::with_piped_stdin()
+            } else {
+                crate::wslc_common::WslcStateAwareRunner::new()
+            };
             let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,
             )?;
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            if _stdin {
+                return Err(MxcError::unsupported_containment(
+                    "MicroVM lifecycle exec does not support writable stdin",
+                ));
+            }
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            let mut runner = if _capture_output {
+                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::for_capture()
+            } else {
+                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new()
+            };
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut runner,
+                bound,
+            );
+            let handle = runner.finish(handle)?;
             Ok(Box::new(
                 crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
@@ -450,7 +517,7 @@ fn normalize_sdk_state_aware(
 ) -> Result<ParsedStateAwareRequest, Error> {
     let mut parsed =
         crate::mxc_common::config_parser::normalize_sdk_state_aware_request(input, logger)
-            .map_err(|error| Error::from(MxcError::malformed_request(error.to_string())))?;
+            .map_err(|error| Error::from(error.into_state_aware()))?;
     parsed.set_experimental_enabled(experimental);
     Ok(parsed)
 }
@@ -587,12 +654,11 @@ fn exec_state_aware_attached_parsed(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     surface_attached_warnings(logger, |warning| {
         let _ = writeln!(std::io::stderr().lock(), "{warning}");
     });
@@ -600,7 +666,22 @@ fn exec_state_aware_attached_parsed(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     let dispatched =
         with_attached_exec_claim(|| run_state_aware(parsed, false)).unwrap_or_else(|| {
             Err(MxcError::malformed_request(
@@ -609,6 +690,17 @@ fn exec_state_aware_attached_parsed(
                  a time. Nothing has been run.",
             ))
         });
+    if dispatched.is_ok() {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                false,
+                true,
+            );
+        }
+    }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
         requested_sandbox_kind,
@@ -650,18 +742,32 @@ fn run_state_aware_envelope(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase_name,
+            correlation_vector: &correlation,
+        },
+    );
     let mut outcome = run_state_aware(parsed, dry_run);
     inject_warnings(&mut outcome, &init_warnings);
     match phase {
@@ -682,7 +788,21 @@ fn run_state_aware_envelope(
                 );
             }
         }
-        _ => {}
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    dry_run,
+                    outcome.is_ok(),
+                );
+            }
+        }
+
+        // Lifecycle records are keyed by sandbox ID, so a session phase has
+        // nothing to persist against and nothing to recall.
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
@@ -707,8 +827,16 @@ fn run_state_aware_envelope(
 fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    exec_state_aware_process_parsed(parsed, logger, exec_state_aware)
+    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware(parsed, stdin))
+}
+
+fn exec_state_aware_capture_parsed(
+    parsed: ParsedStateAwareRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    exec_state_aware_process_parsed(parsed, logger, exec_state_aware_capture)
 }
 
 fn exec_state_aware_pty_parsed(
@@ -737,21 +865,44 @@ fn exec_state_aware_process_parsed(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     match start(parsed) {
         Ok(process) => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    false,
+                    true,
+                );
+            }
             let process = crate::mxc_engine::ProcessWithWarnings::wrap(process, init_warnings);
             Ok(wrap_state_aware_telemetry_process_with_kind(
                 process,
@@ -797,18 +948,32 @@ pub fn run_typed_state_aware_request(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, &mut logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     let mut outcome = run_state_aware_typed(parsed, dry_run);
     if let Ok(result) = &mut outcome {
         for warning in init_warnings {
@@ -839,7 +1004,21 @@ pub fn run_typed_state_aware_request(
                 );
             }
         }
-        _ => {}
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(sandbox_id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    sandbox_id,
+                    &correlation,
+                    dry_run,
+                    status.is_ok(),
+                );
+            }
+        }
+
+        // Lifecycle records are keyed by sandbox ID, so a session phase has
+        // nothing to persist against and nothing to recall.
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_typed(
         telemetry_active,
@@ -856,14 +1035,15 @@ pub fn run_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
-/// model as a live streaming process.
+/// model as a live streaming process, with a writable WSLc stdin if `stdin`.
 pub fn exec_typed_state_aware_request(
     input: SdkStateAwareInput,
     experimental: bool,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger)
+    exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
@@ -925,14 +1105,24 @@ pub fn run_state_aware_json(
 /// streaming process, returning a [`SandboxProcess`] handle.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`].
+/// [`run_state_aware_json`]; `stdin` is as for [`exec_state_aware`].
 pub fn exec_state_aware_json(
+    request_json: &str,
+    experimental: bool,
+    stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    exec_state_aware_parsed(parsed, &mut logger, stdin)
+}
+
+pub fn exec_state_aware_capture_json(
     request_json: &str,
     experimental: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger)
+    exec_state_aware_capture_parsed(parsed, &mut logger)
 }
 
 /// Run a raw state-aware exec request with a caller-controlled PTY.
@@ -949,6 +1139,8 @@ pub fn exec_state_aware_pty_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    use crate::mxc_common::models::ExecutionRequest;
     use crate::mxc_common::mxc_error::MxcErrorCode;
     use crate::mxc_common::sdk_input::{
         SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,
@@ -977,6 +1169,7 @@ mod tests {
             Some(crate::mxc_common::models::WslcProvisionConfig {
                 image,
                 image_tar_path,
+                session_id: None,
                 port_mappings: None,
             })
         };
@@ -1361,6 +1554,20 @@ mod tests {
     }
 
     #[test]
+    fn session_phase_correlation_does_not_open_the_sandbox_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            assert!(telemetry::correlation_vector::is_relayable(
+                &phase_correlation(true, phase, None,)
+            ));
+            assert!(phase_correlation(false, phase, None).is_empty());
+        }
+        assert!(!store.exists());
+    }
+
+    #[test]
     fn attached_warning_surface_drains_retained_warnings() {
         let mut logger = Logger::new(Mode::Buffer);
         logger.warning_line("first");
@@ -1374,22 +1581,22 @@ mod tests {
     }
 
     #[test]
-    fn later_phase_without_a_persisted_record_seeds_a_disconnected_vector() {
+    fn later_phase_without_a_persisted_record_establishes_a_stable_root() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
 
         let a = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
+        telemetry::correlation_state::on_lifecycle_outcome(true, "wsb:abcdef01", &a, false, true);
         let b = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
 
         assert!(telemetry::correlation_vector::is_relayable(&a));
         assert!(telemetry::correlation_vector::is_relayable(&b));
-        // No provision ever persisted a root for this sandbox_id, so each call
-        // seeds its own fresh, disconnected vector instead of sharing a base.
+        // The first authorized phase establishes a root for later processes.
         let base_of = |cv: &str| cv.split('.').next().unwrap().to_string();
-        assert_ne!(
+        assert_eq!(
             base_of(&a),
             base_of(&b),
-            "with no persisted record, repeated calls must not coincidentally share a base"
+            "late-enabled telemetry must retain its newly established root"
         );
     }
 
@@ -1593,6 +1800,238 @@ mod tests {
             .contains("compiled without the `wslc` feature"));
     }
 
+    fn session_operations() -> [StateAwareOperation; 2] {
+        [
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:00000000000000000000000000000000".to_string(),
+            },
+        ]
+    }
+
+    fn parsed_session(operation: StateAwareOperation) -> ParsedStateAwareRequest {
+        let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
+        normalize_sdk_state_aware(input, false, &mut Logger::new(Mode::Buffer)).unwrap()
+    }
+
+    fn session_refusal_on_each_route(
+        operation: &StateAwareOperation,
+        dry_run: bool,
+    ) -> [(&'static str, Error); 2] {
+        let input = || SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation.clone());
+        let parsed = parsed_session(operation.clone());
+        let envelope = run_state_aware(parsed, dry_run).unwrap_err();
+        let typed = run_typed_state_aware_request(input().unwrap(), false, dry_run).unwrap_err();
+        [
+            ("run_state_aware", envelope.into()),
+            ("run_typed_state_aware_request", typed),
+        ]
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "wslc")))]
+    #[test]
+    fn a_session_phase_without_wslc_reports_the_backend_not_the_request() {
+        for operation in session_operations() {
+            for dry_run in [false, true] {
+                for (route, error) in session_refusal_on_each_route(&operation, dry_run) {
+                    assert_eq!(
+                        error.code,
+                        crate::ErrorCode::BackendUnavailable,
+                        "{route} with dry_run={dry_run}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn a_dry_run_session_phase_validates_without_minting_or_booting_anything() {
+        for operation in session_operations() {
+            let envelope = run_state_aware(parsed_session(operation.clone()), true).unwrap();
+            let DispatchOutcome::Envelope(envelope) = envelope else {
+                panic!("a dry run must return a result envelope");
+            };
+            assert_eq!(envelope, serde_json::json!({"result": {}}));
+            let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
+            let result = run_typed_state_aware_request(input, false, true).unwrap();
+            assert_eq!(
+                result.session_id, None,
+                "a dry run must not mint a session id"
+            );
+            assert_eq!(result.sandbox_id, None);
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn invalid_session_sizing_is_refused_before_live_or_dry_run_dispatch() {
+        for config in [
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                memory_mb: Some(u64::from(u32::MAX) + 1),
+                ..Default::default()
+            },
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                cpu_count: Some(u32::MAX),
+                ..Default::default()
+            },
+        ] {
+            for dry_run in [false, true] {
+                let operation = StateAwareOperation::ProvisionSession(Some(config));
+                for (route, error) in session_refusal_on_each_route(&operation, dry_run) {
+                    assert_eq!(
+                        error.code,
+                        crate::ErrorCode::PolicyValidation,
+                        "{route}, {config:?}, dry_run={dry_run}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn zero_session_sizing_validates_as_the_sdk_default() {
+        let parsed = parsed_session(StateAwareOperation::ProvisionSession(Some(
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                cpu_count: Some(0),
+                memory_mb: Some(0),
+                gpu: Some(false),
+            },
+        )));
+        let result = run_state_aware_typed(parsed, true).unwrap();
+        assert!(result.session_id.is_none());
+        assert!(result.sandbox_id.is_none());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn a_malformed_session_id_is_refused_before_the_daemon_is_contacted() {
+        for session_id in [
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            for dry_run in [false, true] {
+                let parsed = ParsedStateAwareRequest::new(
+                    ExecutionRequest::default(),
+                    StateAwareOperation::DeprovisionSession {
+                        session_id: session_id.to_string(),
+                    },
+                );
+                let error = run_state_aware(parsed, dry_run).unwrap_err();
+                assert_eq!(error.code, MxcErrorCode::MalformedId, "dry_run={dry_run}");
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn malformed_session_ids_have_the_same_error_on_join_and_release() {
+        for session_id in [
+            "",
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            for request in [
+                serde_json::json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "provision",
+                    "containment": "wslc",
+                    "wslc": { "provision": { "sessionId": session_id } }
+                }),
+                serde_json::json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "deprovision-session",
+                    "containment": "wslc",
+                    "sessionId": session_id
+                }),
+            ] {
+                for dry_run in [false, true] {
+                    let error = run_state_aware_json(&request.to_string(), dry_run, false)
+                        .expect_err("a malformed session ID must be refused");
+                    assert_eq!(error.code, crate::ErrorCode::MalformedId);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_session_release_preserves_the_malformed_id_error() {
+        let error = SdkStateAwareInput::new(
+            ContractVersion::V1_1_0Alpha,
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:short".to_string(),
+            },
+        )
+        .unwrap_err()
+        .into_state_aware();
+        assert_eq!(error.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn session_operations_require_the_development_contract() {
+        for operation in session_operations() {
+            let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation).unwrap_err();
+            assert!(error.to_string().contains("1.1.0-alpha"), "{error}",);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_minted_session_id_reaches_the_typed_result_without_being_mistaken_for_a_sandbox() {
+        let minted = typed_dispatch_result(
+            TypedDispatchOutcome::<(), (), (), ()>::ProvisionSession(
+                crate::mxc_common::state_aware_backend::ProvisionSessionResult {
+                    session_id: "wslcsess:0123456789abcdef0123456789abcdef".to_string(),
+                },
+            ),
+            no_provision_metadata,
+        )
+        .unwrap();
+        assert_eq!(
+            minted.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(minted.sandbox_id, None);
+        assert_eq!(minted.metadata, None);
+
+        let released = typed_dispatch_result(
+            TypedDispatchOutcome::<(), (), (), ()>::DeprovisionSession,
+            no_provision_metadata,
+        )
+        .unwrap();
+        assert_eq!(released.session_id, None);
+        assert_eq!(released.sandbox_id, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_sdk_facade_cannot_silently_discard_a_minted_session_id() {
+        let result = crate::state_aware_sdk::StateAwareResult::from_engine(
+            EngineStateAwareResult::provision_session(
+                "wslcsess:0123456789abcdef0123456789abcdef".to_string(),
+            ),
+        );
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+
+        assert!(
+            result.clone().into_lifecycle().is_err(),
+            "a minted session id must not pass as an empty lifecycle result, leaving the \
+             caller no way to release the session"
+        );
+        assert!(
+            result.into_validation().is_err(),
+            "a minted session id must not pass as a dry-run result, leaving the caller no \
+             way to release the session"
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {
@@ -1604,7 +2043,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = match exec_state_aware(parsed) {
+        let error = match exec_state_aware(parsed, false) {
             Ok(_) => panic!("expected the backend to reject the synthetic sandbox id"),
             Err(error) => error,
         };
@@ -1661,6 +2100,152 @@ mod tests {
         value.to_string()
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lifecycle_raw_and_typed_dispatch_emit_matching_execution_pairs() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _correlation_store = StoreDirGuard::set(store.path());
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let id = "wslc:00000000000000000000000000000000";
+        for typed in [false, true] {
+            for phase in [
+                Phase::ProvisionSession,
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+                Phase::DeprovisionSession,
+            ] {
+                let mut development = false;
+                let succeeded = if typed {
+                    let mut input = match phase {
+                        Phase::ProvisionSession => SdkStateAwareInput::new(
+                            ContractVersion::V1_1_0Alpha,
+                            StateAwareOperation::ProvisionSession(None),
+                        )
+                        .unwrap(),
+                        Phase::Provision => wslc_provision(None, None, Some(true)),
+                        Phase::Start => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Start { sandbox_id }
+                        }),
+                        Phase::Exec => exec_input(id, "echo synthetic", Some(true)),
+                        Phase::Stop => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Stop { sandbox_id }
+                        }),
+                        Phase::Deprovision => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Deprovision { sandbox_id }
+                        }),
+                        Phase::DeprovisionSession => SdkStateAwareInput::new(
+                            ContractVersion::V1_1_0Alpha,
+                            StateAwareOperation::DeprovisionSession {
+                                session_id: "wslcsess:00000000000000000000000000000000".to_string(),
+                            },
+                        )
+                        .unwrap(),
+                    };
+                    input.telemetry_opt_in = Some(true);
+                    run_typed_state_aware_request(input, true, true).is_ok()
+                } else {
+                    let mut request: serde_json::Value = match phase {
+                        Phase::ProvisionSession => serde_json::json!({
+                            "version": "1.1.0-alpha",
+                            "containment": "wslc",
+                            "phase": phase.as_str()
+                        }),
+                        Phase::DeprovisionSession => serde_json::json!({
+                            "version": "1.1.0-alpha",
+                            "containment": "wslc",
+                            "phase": phase.as_str(),
+                            "sessionId": "wslcsess:00000000000000000000000000000000"
+                        }),
+                        _ => serde_json::from_str(&lifecycle_fixture("wslc", id, phase)).unwrap(),
+                    };
+                    request["telemetry"] = serde_json::json!({ "enabled": true });
+                    development = request["version"] == "1.1.0-alpha";
+                    run_state_aware_json(&request.to_string(), true, true).is_ok()
+                };
+                let starts = test_sink::take_starts();
+                let ends = test_sink::take_executions();
+                let expected =
+                    usize::from(!development || crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                assert_eq!(starts.len(), expected, "typed={typed}, phase={phase:?}");
+                assert_eq!(ends.len(), expected, "typed={typed}, phase={phase:?}");
+                if expected == 0 {
+                    test_sink::take_errors();
+                    continue;
+                }
+                assert_eq!(starts[0].outcome, "started");
+                assert_eq!(
+                    ends[0].outcome,
+                    if succeeded { "success" } else { "failure" }
+                );
+                assert_eq!(starts[0].phase, phase.as_str());
+                assert_eq!(starts[0].phase, ends[0].phase);
+                assert_eq!(starts[0].backend, ends[0].backend);
+                assert_eq!(starts[0].sandbox_kind, ends[0].sandbox_kind);
+                assert_eq!(starts[0].session_id, ends[0].session_id);
+                assert_eq!(starts[0].learning_mode, "not_applicable");
+                assert_eq!(starts[0].learning_mode, ends[0].learning_mode);
+                assert_eq!(starts[0].correlation_vector, ends[0].correlation_vector);
+                assert!(!starts[0].correlation_vector.is_empty());
+                test_sink::take_errors();
+            }
+        }
+        test_sink::clear();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lifecycle_streaming_start_is_emitted_before_a_failed_spawn() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _correlation_store = StoreDirGuard::set(store.path());
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let mut logger = Logger::new(Mode::Buffer);
+        let parsed = normalize_sdk_state_aware(
+            exec_input(
+                "wslc:00000000000000000000000000000000",
+                "echo synthetic",
+                Some(true),
+            ),
+            true,
+            &mut logger,
+        )
+        .unwrap();
+        let mut start = None;
+        let result = exec_state_aware_process_parsed(parsed, &mut logger, |_| {
+            let starts = test_sink::take_starts();
+            assert_eq!(starts.len(), 1);
+            assert!(test_sink::take_executions().is_empty());
+            start = starts.first().cloned();
+            Err(MxcError::backend_unavailable("synthetic"))
+        });
+        assert!(result.is_err());
+        let ends = test_sink::take_executions();
+        assert_eq!(ends.len(), 1);
+        let start = start.unwrap();
+        assert_eq!(start.session_id, ends[0].session_id);
+        assert_eq!(start.phase, ends[0].phase);
+        assert_eq!(start.correlation_vector, ends[0].correlation_vector);
+        assert_eq!(
+            ends[0].failure_reason,
+            Some(telemetry::FailureReason::InitError)
+        );
+        test_sink::clear();
+    }
+
     #[test]
     fn every_backend_and_phase_keeps_required_gates_before_binding() {
         for (backend, id, available) in backend_cases() {
@@ -1682,7 +2267,7 @@ mod tests {
                         "{backend} {phase}"
                     );
                     assert!(error.message.contains("experimental"));
-                    let error = exec_state_aware(parsed)
+                    let error = exec_state_aware(parsed, false)
                         .err()
                         .expect("opt-in must be required");
                     assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
@@ -1703,7 +2288,7 @@ mod tests {
                         "{backend} {phase}"
                     );
                     assert_eq!(
-                        exec_state_aware(parsed)
+                        exec_state_aware(parsed, false)
                             .err()
                             .expect("backend unavailable")
                             .code,
@@ -1738,7 +2323,9 @@ mod tests {
                 };
                 assert_eq!(envelope, serde_json::json!({"result": {}}));
                 if phase != Phase::Exec {
-                    let error = exec_state_aware(parsed).err().expect("requires exec");
+                    let error = exec_state_aware(parsed, false)
+                        .err()
+                        .expect("requires exec");
                     assert_eq!(error.code, MxcErrorCode::MalformedRequest);
                     assert_eq!(
                         error.message,
@@ -1768,7 +2355,10 @@ mod tests {
                 );
                 if phase == Phase::Exec {
                     assert_eq!(
-                        exec_state_aware(parsed).err().expect("malformed ID").code,
+                        exec_state_aware(parsed, false)
+                            .err()
+                            .expect("malformed ID")
+                            .code,
                         MxcErrorCode::MalformedId,
                         "{backend} {phase}"
                     );
@@ -1785,7 +2375,7 @@ mod tests {
             }
             let json = lifecycle_fixture(backend, id, Phase::Exec);
             let parsed = parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
-            let error = exec_state_aware(parsed)
+            let error = exec_state_aware(parsed, false)
                 .err()
                 .expect("cannot return streams");
             assert_eq!(error.code, MxcErrorCode::BackendError);

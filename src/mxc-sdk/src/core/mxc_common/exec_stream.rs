@@ -19,16 +19,15 @@
 //! [`ExecHandle`]'s contract is that pipe-handle ownership stays with the
 //! backend's underlying process object. So this adapter does **not** take the
 //! raw handles: it **duplicates** each non-null pipe handle
-//! ([`try_clone_to_owned`]) and wraps the *duplicate* as an owned reader/writer.
+//! (`try_clone_to_owned`) and wraps the *duplicate* as an owned reader/writer.
 //! The adapter closes only its duplicates on drop; the backend's originals (and
 //! its `waiter`/`terminator`, which may also reference them) are untouched — so
 //! there is no double-close even for a backend that keeps and closes its own
-//! pipe ends. IsolationSession is exactly that case under
-//! [`ExecStdio::Piped`]: it is the only state-aware backend that returns
-//! real pipe handles, and it closes its own ends when its process object drops.
-//! Under [`ExecStdio::Relayed`] it relays internally and returns null
-//! handles, as do Windows Sandbox and WSLc — which under [`ExecStdio::Piped`]
-//! return no handle at all, refusing it up front. A handle with *all three*
+//! pipe ends. IsolationSession and WSLc return real pipe handles under
+//! [`ExecStdio::Piped`]; IsolationSession closes its own ends when its process
+//! object drops. Under [`ExecStdio::Relayed`] both relay internally and return
+//! null handles, as does Windows Sandbox — which under [`ExecStdio::Piped`]
+//! returns no handle at all, refusing it up front. A handle with *all three*
 //! streams null is refused here rather than wrapped: it means the backend has
 //! not implemented the `Piped` contract, and a stream-less `SandboxProcess`
 //! would hide that.
@@ -40,7 +39,6 @@
 //! caller abandon a read on a stream it *did* take — see
 //! [`stdout_closer`](SandboxProcess::stdout_closer).
 //!
-//! [`try_clone_to_owned`]: std::os::windows::io::BorrowedHandle::try_clone_to_owned
 //! [`ExecStdio::Piped`]: crate::mxc_common::state_aware_backend::ExecStdio::Piped
 //! [`ExecStdio::Relayed`]: crate::mxc_common::state_aware_backend::ExecStdio::Relayed
 
@@ -146,9 +144,9 @@ pub struct ExecSandboxProcess {
     native_stdio: Option<NativeStdio>,
     /// Whether the caller selected the individual-stream access mode.
     individual_stdio_taken: bool,
-    /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
-    /// the outcome rather than a code because a timeout has no code.
-    exit: Option<ExecOutcome>,
+    /// The waiter's terminal result once joined, so repeat waits preserve both
+    /// successful outcomes and backend cleanup failures.
+    terminal: Option<Result<ExecOutcome, MxcError>>,
     /// Whether a termination request was **refused**. Recorded separately
     /// because `terminator` is consumed on both outcomes, so its absence alone
     /// cannot distinguish "killed" from "the kill was rejected" — and those
@@ -274,14 +272,16 @@ impl ExecSandboxProcess {
         // exec we are about to terminate. On failure the slot still holds it.
         let waiter_slot = Arc::new(Mutex::new(Some(waiter)));
         let thread_slot = Arc::clone(&waiter_slot);
+        let telemetry_context = super::telemetry::session::capture();
         let spawned = std::thread::Builder::new()
             .name("mxc-exec-waiter".to_string())
-            .spawn(
-                move || match thread_slot.lock().ok().and_then(|mut w| w.take()) {
+            .spawn(move || {
+                let _session = super::telemetry::session::resume(telemetry_context);
+                match thread_slot.lock().ok().and_then(|mut w| w.take()) {
                     Some(waiter) => waiter(),
                     None => Err(MxcError::backend_error("exec waiter was already consumed")),
-                },
-            );
+                }
+            });
 
         let waiter_thread = match spawned {
             Ok(thread) => thread,
@@ -313,7 +313,7 @@ impl ExecSandboxProcess {
             terminator: Some(terminator),
             native_stdio: Some(native_stdio),
             individual_stdio_taken: false,
-            exit: None,
+            terminal: None,
             kill_refused: false,
         })
     }
@@ -323,19 +323,18 @@ impl ExecSandboxProcess {
     /// The outcome is cached rather than the exit code, because a timeout has
     /// no code to cache and repeat calls must still be idempotent.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome);
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result);
         }
         let handle = self
             .waiter
             .take()
             .ok_or_else(|| std::io::Error::other("exec waiter already consumed"))?;
-        let outcome = handle
+        let result = handle
             .join()
-            .map_err(|_| std::io::Error::other("exec waiter thread panicked"))?
-            .map_err(|e: MxcError| std::io::Error::other(e.message))?;
-        self.exit = Some(outcome);
-        outcome_to_io(outcome)
+            .unwrap_or_else(|_| Err(MxcError::backend_error("exec waiter thread panicked")));
+        self.terminal = Some(result);
+        terminal_to_io(self.terminal.as_ref().expect("terminal result was stored"))
     }
 
     /// Drain whatever output the caller did not take, concurrently with the
@@ -369,8 +368,8 @@ impl ExecSandboxProcess {
         self.native_stdio.take();
         self.stdin.take();
 
-        // Deliberately **not** gated on `self.exit`. A cached exit code means a
-        // previous `try_wait` observed the child finish; it says nothing about
+        // Deliberately **not** gated on `self.terminal`. A cached success means
+        // a previous `try_wait` observed the child finish; it says nothing about
         // whether anything drained. Returning early here would let
         // `try_wait()` then `wait()` skip the drain the contract promises.
         let drain_stdout = match spawn_discard_checked(self.stdout.take()) {
@@ -566,8 +565,8 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome).map(Some);
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result).map(Some);
         }
         match &self.waiter {
             Some(handle) if handle.is_finished() => self.join_waiter().map(Some),
@@ -589,7 +588,7 @@ impl SandboxProcess for ExecSandboxProcess {
         // demonstrably dead. Running the terminator here would be equally
         // wrong: it would surface a failure to terminate something that has
         // already terminated.
-        if self.exit.is_some() {
+        if matches!(self.terminal, Some(Ok(_))) {
             self.terminator = None;
             self.kill_refused = false;
             return Ok(());
@@ -641,7 +640,7 @@ impl Drop for ExecSandboxProcess {
         let kill_accepted = match self.terminator.take() {
             // Nothing to terminate once the exit is known; running the
             // terminator over a dead process only invites a spurious failure.
-            _ if self.exit.is_some() => true,
+            _ if matches!(self.terminal, Some(Ok(_))) => true,
             Some(terminator) => terminator().is_ok(),
             // Already killed via `kill()`, whose result the caller has seen —
             // and whose refusal, if it was one, is precisely the case this
@@ -657,7 +656,7 @@ impl Drop for ExecSandboxProcess {
 }
 
 /// Map an [`ExecOutcome`] onto the [`SandboxProcess`] convention, where a
-/// timeout is an `Err` carrying [`io::ErrorKind::TimedOut`](std::io::ErrorKind)
+/// timeout is an `Err` carrying [`std::io::ErrorKind::TimedOut`]
 /// rather than an exit code.
 ///
 /// That convention is not invented here: five one-shot backends already report
@@ -672,6 +671,13 @@ fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
             std::io::ErrorKind::TimedOut,
             "the exec timed out and the sandbox terminated it",
         )),
+    }
+}
+
+fn terminal_to_io(result: &Result<ExecOutcome, MxcError>) -> std::io::Result<i32> {
+    match result {
+        Ok(outcome) => outcome_to_io(*outcome),
+        Err(error) => Err(std::io::Error::other(error.message.clone())),
     }
 }
 
@@ -959,6 +965,47 @@ mod tests {
     fn classify_stream_passes_through_a_successful_wrap() {
         let got = classify_stream(false, || Some(7u8), "stdout").unwrap();
         assert_eq!(got, Some(7));
+    }
+
+    #[test]
+    fn exec_waiter_preserves_telemetry_context_for_enabled_and_disabled_requests() {
+        use crate::mxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::telemetry::{session, LearningMode};
+
+        for (active, vector) in [(false, ""), (true, ""), (true, "invalid")] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let _scope = session::start_with_learning_mode(
+                active,
+                vector,
+                Some(crate::mxc_contract::ContractVersion::V1_1_0Alpha),
+                LearningMode::Learning,
+                &mut logger,
+            );
+            let expected_id = session::current();
+            let expected_mode = session::learning_mode();
+            let expected_critical = session::critical_events();
+            let (stdout_read, stdout_write) = std::io::pipe().unwrap();
+            let handle = ExecHandle {
+                stdin_closer: None,
+                stdout: reader_handle(&stdout_read),
+                stderr: null_pipe_handle(),
+                stdin: null_pipe_handle(),
+                waiter: Box::new(move || {
+                    assert_eq!(session::current(), expected_id);
+                    assert_eq!(session::learning_mode(), expected_mode);
+                    assert_eq!(session::critical_events(), expected_critical);
+                    assert_eq!(session::invocation_disabled(), !active);
+                    Ok(ExecOutcome::Exited(7))
+                }),
+                terminator: Box::new(|| Ok(())),
+            };
+            let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+            drop(stdout_write);
+            assert_eq!(process.wait().unwrap(), 7);
+            assert_eq!(session::current(), expected_id);
+            assert_eq!(session::learning_mode(), expected_mode);
+            assert_eq!(session::invocation_disabled(), !active);
+        }
     }
 
     /// A stream the backend named but that cannot be duplicated is a setup

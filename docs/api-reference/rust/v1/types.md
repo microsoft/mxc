@@ -179,12 +179,14 @@ pub struct DeprovisionOptions {
 An error returned by the SDK's fallible operations (spawn_execution_request).
 
 ```rust
+#[non_exhaustive]
 pub struct Error {
   pub code: ErrorCode,
   pub message: String,
   pub operation: Option<String>,
   pub native_code: Option<String>,
   pub remediation: Option<String>,
+  pub details: Option<Box<serde_json::Value>>,
 }
 
 impl Error {
@@ -199,6 +201,12 @@ impl From<MxcError> for Error {
   fn from(error: MxcError) -> Self;
 }
 ```
+
+`Error` is `#[non_exhaustive]`; use `Error::new` to construct it. The constructor
+sets `details` to `None`. Conversions to and from the internal error preserve
+structured details, including their JSON value type. Use
+`error.details.as_deref()` to borrow the value. `Display` omits details and
+`Debug` redacts them; do not log sensitive values.
 
 
 ## `mxc_sdk::v1::ErrorCode`
@@ -302,8 +310,9 @@ pub struct LifecycleResult {
 
 ## `mxc_sdk::v1::MxcProcess`
 
-A live container process, returned by `v1::spawn` and
-`v1::container::spawn_in_container`.
+A live container process, returned by `v1::spawn`, `v1::spawn_with_stdin`,
+`v1::container::spawn_in_container`, and
+`v1::container::spawn_in_container_with_stdin`.
 
 ```rust
 pub struct MxcProcess {
@@ -527,7 +536,7 @@ pub struct PlatformSupport {
 
 ## `mxc_sdk::v1::ProbeFacts`
 
-Raw machine facts gathered prior to running tier selection.
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```rust
 pub struct ProbeFacts {
@@ -552,7 +561,11 @@ pub struct ProbeFacts {
 
 ## `mxc_sdk::v1::ProbeOutput`
 
-JSON output emitted by wxc-execution --probe.
+Host capabilities and request compatibility for Windows ProcessContainer.
+
+When native ProcessContainer cannot serve the request, `tier` and
+`needs_dacl_augmentation` are `None` and `error` explains why. `probes` still
+contains host capability facts.
 
 ```rust
 pub struct ProbeOutput {

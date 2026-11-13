@@ -4,7 +4,7 @@
 //! Default `process.env` block for the Seatbelt backend, introduced by schema
 //! 0.9.
 //!
-//! Kept out of [`crate::seatbelt_common::seatbelt_runner`], which is `target_os = "macos"`, so
+//! Kept out of `crate::seatbelt_common::seatbelt_runner`, which is `target_os = "macos"`, so
 //! the resolution rules are compiled and tested on every host.
 
 use crate::mxc_common::models::ExecutionRequest;
@@ -39,7 +39,7 @@ fn default_env(working_directory: Option<&str>) -> Vec<(String, String)> {
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// `working_directory` is the directory the runner will start the child in, as
-/// described on [`default_env`]. The state dispatch and overlay merge are
+/// described on `default_env`. The state dispatch and overlay merge are
 /// shared; see [`crate::mxc_common::default_env::resolve_env`].
 pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>) -> Vec<String> {
     crate::mxc_common::default_env::resolve_env(request, || default_env(working_directory))

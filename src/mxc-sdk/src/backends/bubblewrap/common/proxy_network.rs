@@ -7,11 +7,11 @@ use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,17 +19,21 @@ use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
+use crate::mxc_common::sandbox_process::group_kill;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
-use nix::unistd::{access, dup2, pipe2, AccessFlags};
+use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+use nix::unistd::{access, dup2, pipe2, AccessFlags, Pid};
 use tempfile::TempDir;
 
-use crate::bwrap_common::bwrap_command::{COMMAND_TAIL, COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
+use crate::bwrap_common::bwrap_command::{path_is_denied, PolicyMount, COMMAND_TAIL};
+use crate::bwrap_common::host_tools::{self, LookupError};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
 use crate::bwrap_common::probe_exec;
+use crate::bwrap_common::resolver_file::{resolver_target_is_denied, sandbox_mount_path};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -46,9 +50,9 @@ const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
 ///
 /// The worst-case lock wait for every transaction plus explicit headroom,
 /// because the timer starts in [`ProxyNetworkNamespace::attach`] *before* slirp
-/// signals readiness and so also covers slirp startup. A single
-/// [`STARTUP_TIMEOUT`] cannot cover this: it would reject a viable sandbox the
-/// moment one call waited on a busy host.
+/// signals readiness and so also covers Bubblewrap loopback setup and slirp
+/// startup. A single [`STARTUP_TIMEOUT`] cannot cover this: it would reject a
+/// viable sandbox the moment one call waited on a busy host.
 ///
 /// A large policy needs more than one transaction per family, so this scales
 /// with the rendered payload count -- but only up to [`RULE_INSTALL_CEILING`].
@@ -91,7 +95,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Total budget for the advisory pre-flight probe surface.
 ///
-/// The launch path can afford [`PROBE_TIMEOUT`] on each of eight dependencies
+/// The launch path can afford [`PROBE_TIMEOUT`] on each of nine dependencies
 /// in turn; [`probe_proxy_enforcement`] cannot, because it runs behind a
 /// caller-owned timeout and is fail-closed, so being killed from outside would
 /// report the host as *unsupported*.
@@ -151,6 +155,16 @@ const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
 lock_wait="$2"
+
+# Every host tool arrives as the absolute path the parent checked, so nothing
+# below depends on this process's PATH.
+nsenter="$3"
+ip="$4"
+slirp4netns="$5"
+iptables_restore="$6"
+ip6tables_restore="$7"
+sleep="$8"
+
 # Inherited descriptors are remapped to fixed numbers by the parent (see
 # `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
 # They are hardcoded rather than passed in argv because /bin/sh is dash on
@@ -170,12 +184,27 @@ if [ -z "$child_pid" ]; then
     exit 1
 fi
 
+# The child PID is published before bwrap initializes loopback. Starting slirp
+# first brings lo up and creates 127.0.0.1/8, so bwrap's exclusive address
+# creation fails. The workload gate comes too late to order these two steps.
+ns="/proc/$child_pid/ns/net"
+while :; do
+    loopback=$("$nsenter" --net="$ns" -- "$ip" -4 -o address show dev lo up) || {
+        echo "mxc: failed to query Bubblewrap loopback readiness" >&2
+        exit 1
+    }
+    case "$loopback" in
+        *" inet 127.0.0.1/8 "*) break ;;
+    esac
+    "$sleep" 0.01
+done
+
 # slirp signals readiness internally so the supervisor, not slirp, decides when
 # the sandbox is ready -- the rules below must be in place first. Descriptor 9
 # is safe to hardcode: the parent hands this child exactly 0-4, so nothing else
 # can be sitting on it.
 exec 9> "$state_dir/slirp.internal"
-slirp4netns --configure --mtu=65520 \
+"$slirp4netns" --configure --mtu=65520 \
     --ready-fd 9 --exit-fd 4 \
     "$child_pid" tap0 &
 slirp_pid=$!
@@ -185,10 +214,9 @@ while [ ! -s "$state_dir/slirp.internal" ]; do
         echo "slirp4netns exited before signalling readiness" >&2
         exit 1
     fi
-    sleep 0.01
+    "$sleep" 0.01
 done
 
-ns="/proc/$child_pid/ns/net"
 # Network filtering in both directions, programmed here because it needs
 # CAP_NET_ADMIN in the owning user namespace, which this supervisor holds
 # (`--keep-caps`) and the caller does not.
@@ -217,7 +245,7 @@ conntrack_hint="mxc: could not install the sandbox network policy. If the error 
 'Invalid argument', this host is missing the nf_conntrack kernel module that the inbound \
 connection-state match requires, and an unprivileged sandbox cannot load it."
 for payload in "$state_dir"/rules.v4.*; do
-    nsenter --net="$ns" -- iptables-restore -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
+    "$nsenter" --net="$ns" -- "$iptables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 # No IPv6 payload is written when the kernel has no IPv6 stack (see
 # `rule_families`), and an unmatched glob expands to itself. IPv4 has no such
@@ -225,7 +253,7 @@ done
 # supervisor.
 for payload in "$state_dir"/rules.v6.*; do
     [ -e "$payload" ] || continue
-    nsenter --net="$ns" -- ip6tables-restore -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
+    "$nsenter" --net="$ns" -- "$ip6tables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 
 # Signalled by path, not through a descriptor: this is a plain file the parent
@@ -273,6 +301,35 @@ pub(crate) struct SandboxProxy {
     egress: ProxyEgress,
 }
 
+/// Why [`SandboxProxy::resolve`] failed.
+#[derive(Debug)]
+pub(crate) enum ProxyResolveError {
+    /// The endpoint, or the address it resolves to, cannot be enforced.
+    Rejected(String),
+    /// The host lookup itself did not produce an answer.
+    Lookup(String),
+}
+
+impl ProxyResolveError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Rejected(message) | Self::Lookup(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<String> for ProxyResolveError {
+    fn from(message: String) -> Self {
+        Self::Rejected(message)
+    }
+}
+
 impl SandboxProxy {
     /// Derive the sandbox-visible proxy from the configured one.
     ///
@@ -280,7 +337,7 @@ impl SandboxProxy {
     /// an address: the workload then presents the `Host` header and proxy-auth
     /// realm the operator configured. An IP literal has no name to pin, so a
     /// loopback literal is rewritten to slirp's gateway instead.
-    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, String> {
+    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, ProxyResolveError> {
         Self::resolve_with(configured, resolve_ipv4)
     }
 
@@ -295,7 +352,7 @@ impl SandboxProxy {
         if needs_lookup {
             return Ok(());
         }
-        checked
+        checked.map_err(|error| error.message().to_string())
     }
 
     /// Run the static checks, reporting whether a lookup would have followed.
@@ -304,11 +361,13 @@ impl SandboxProxy {
     /// also exactly when a hosts pin is created -- an IP literal resolves to
     /// `Ok(None)` from [`ProxyAddress::host_pin`]. Callers use the flag to
     /// reason about the pin without duplicating that classification.
-    fn inspect_without_resolving(configured: &ProxyAddress) -> (bool, Result<(), String>) {
+    fn inspect_without_resolving(
+        configured: &ProxyAddress,
+    ) -> (bool, Result<(), ProxyResolveError>) {
         let asked_to_resolve = Cell::new(false);
         let checked = Self::resolve_with(configured, |_, _| {
             asked_to_resolve.set(true);
-            Err(String::new())
+            Err(ProxyResolveError::Lookup(String::new()))
         });
 
         (asked_to_resolve.get(), checked.map(|_| ()))
@@ -321,10 +380,14 @@ impl SandboxProxy {
     /// a lookup whose answer the test does not control.
     fn resolve_with(
         configured: &ProxyAddress,
-        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, String>,
-    ) -> Result<Self, String> {
+        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError>,
+    ) -> Result<Self, ProxyResolveError> {
         if configured.port() == 0 {
-            return Err("Bubblewrap: proxy-only egress requires a non-zero proxy port".to_string());
+            return Err(
+                "Bubblewrap: proxy-only egress requires a non-zero proxy port"
+                    .to_string()
+                    .into(),
+            );
         }
         let host = configured.host().trim_matches(['[', ']']);
 
@@ -360,7 +423,7 @@ impl SandboxProxy {
             // an address nothing answers on -- failing at connect time rather
             // than at policy time.
             if ip.is_unspecified() {
-                return Self::rewritten(configured);
+                return Ok(Self::rewritten(configured)?);
             }
             if ip.is_loopback() {
                 return Err(format!(
@@ -368,13 +431,14 @@ impl SandboxProxy {
                      network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
                      wildcard address instead. The egress rule is emitted with IPv4 iptables.",
                     configured.host()
-                ));
+                )
+                .into());
             }
-            return Err(ipv6_unsupported(host));
+            return Err(ipv6_unsupported(host).into());
         }
 
         if is_reserved_loopback_name {
-            return Self::rewritten(configured);
+            return Ok(Self::rewritten(configured)?);
         }
 
         let resolved = resolve(host, configured.port())?;
@@ -499,27 +563,29 @@ fn with_deadline<T: Send + 'static>(
 /// `getaddrinfo` cannot be cancelled, so the lookup is moved to a thread and
 /// abandoned once the bound expires -- the wait is bounded even though the
 /// query itself keeps running until the resolver gives up.
-fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let query = host.to_string();
     let waited = with_deadline(RESOLVE_TIMEOUT_LABEL, RESOLVE_TIMEOUT, move || {
         lookup_ipv4(&query, port)
     })
     .map_err(|error| {
-        format!("Bubblewrap: could not start the lookup of proxy host '{host}': {error}")
+        ProxyResolveError::Lookup(format!(
+            "Bubblewrap: could not start the lookup of proxy host '{host}': {error}"
+        ))
     })?;
 
     match waited {
         Ok(resolved) => resolved,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: resolving proxy host '{host}' exceeded {}s. The proxy endpoint is \
              resolved on the host because DNS is closed inside the sandbox, so an unresponsive \
              host resolver blocks the sandbox from starting. Check the host's DNS configuration, \
              or give the proxy as an IPv4 address to skip resolution.",
             RESOLVE_TIMEOUT.as_secs()
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: the lookup of proxy host '{host}' ended without an answer."
-        )),
+        ))),
     }
 }
 
@@ -528,14 +594,14 @@ fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Only the first IPv4 answer is used, and it is the same one the sandbox is
 /// pinned to. Opening the rest would widen the chain to addresses the sandbox
 /// can no longer select: with DNS closed, the pin is its only resolution path.
-fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let resolved: Vec<IpAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|error| {
-            format!(
+            ProxyResolveError::Lookup(format!(
                 "Bubblewrap: could not resolve proxy host '{host}': {error}. The proxy endpoint \
                  is resolved on the host because DNS is closed inside the sandbox."
-            )
+            ))
         })?
         .map(|addr| addr.ip())
         .collect();
@@ -547,11 +613,11 @@ fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     // A name with AAAA records and no A records is the same unenforceable case
     // as an IPv6 literal, so say so rather than claiming it does not resolve.
     if resolved.is_empty() {
-        Err(format!(
+        Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: proxy host '{host}' did not resolve to any address."
-        ))
+        )))
     } else {
-        Err(ipv6_unsupported(host))
+        Err(ipv6_unsupported(host).into())
     }
 }
 
@@ -701,7 +767,7 @@ fn warn_skipped_ipv6_rules(kernel_ipv6: bool, logger: &mut Logger) {
 /// A same-UID user-namespace supervisor and its `slirp4netns` process.
 pub(crate) struct ProxyNetworkNamespace {
     state_dir: TempDir,
-    supervisor: Child,
+    supervisor: Supervisor,
     exit_writer: Option<OwnedFd>,
     /// Write end of the pipe carrying the sandbox PID to the supervisor.
     /// Dropping it without writing ends the supervisor's wait at EOF.
@@ -734,10 +800,8 @@ impl ProxyNetworkNamespace {
     /// the sandbox needs to agree with the plan, which only a hostname proxy
     /// endpoint produces. `resolver` redirects the sandbox's nameserver to
     /// slirp's forwarder, which only a loopback-resolver host produces.
-    ///
-    /// Callers reach this only after `BwrapRunner::validate` has already run
-    /// [`probe_dependencies`], so the probe is not repeated here.
     pub(crate) fn start(
+        tools: &NetworkTools,
         plan: &EgressPlan,
         ingress: &IngressPlan,
         pin: Option<&ProxyHostPin>,
@@ -783,23 +847,19 @@ impl ProxyNetworkNamespace {
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         set_nonblocking(liveness_reader.as_raw_fd())?;
 
-        let mut command = Command::new("unshare");
+        let mut command = Command::new(&tools.unshare);
         command
-            .args([
-                "--user",
-                "--map-current-user",
-                "--keep-caps",
-                "--",
-                "sh",
-                "-c",
-                SUPERVISOR_SCRIPT,
-                "mxc-bwrap-proxy-supervisor",
-            ])
+            .args(["--user", "--map-current-user", "--keep-caps", "--"])
+            .arg(&tools.sh)
+            .args(["-c", SUPERVISOR_SCRIPT, "mxc-bwrap-proxy-supervisor"])
             .arg(state_dir.path())
             .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
+            .args(tools.supervisor_arguments())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
+            .stderr(Stdio::from(stderr))
+            // Its own group, so a failed startup can kill every descendant.
+            .process_group(0);
         // Both pipes stay CLOEXEC in this process, so a concurrent spawn from
         // another thread cannot inherit them; only the supervisor gets them,
         // and only at the fixed numbers its script names.
@@ -812,7 +872,7 @@ impl ProxyNetworkNamespace {
             ],
         );
 
-        let mut supervisor = command.spawn().map_err(|error| {
+        let mut supervisor = command.spawn().map(Supervisor::new).map_err(|error| {
             format!("Bubblewrap: failed to start proxy-network supervisor: {error}")
         })?;
         drop(exit_reader);
@@ -829,15 +889,19 @@ impl ProxyNetworkNamespace {
             "user namespace startup",
             STARTUP_TIMEOUT,
         ) {
-            terminate_child(&mut supervisor);
-            return Err(error);
+            let _ = supervisor.terminate();
+            return Err(format!(
+                "{error}. If unshare was refused, check AppArmor's \
+                 kernel.apparmor_restrict_unprivileged_userns setting and the \
+                 kernel.unprivileged_userns_clone and user.max_user_namespaces limits"
+            ));
         }
 
         let userns_path = format!("/proc/{}/ns/user", supervisor.id());
         let userns = match File::open(&userns_path) {
             Ok(file) => file,
             Err(error) => {
-                terminate_child(&mut supervisor);
+                let _ = supervisor.terminate();
                 return Err(format!(
                     "Bubblewrap: failed to open proxy user namespace {userns_path}: {error}"
                 ));
@@ -849,7 +913,7 @@ impl ProxyNetworkNamespace {
             Some(pin) => {
                 let path = state_dir.path().join("hosts");
                 if let Err(error) = write_pinned_hosts(&path, pin) {
-                    terminate_child(&mut supervisor);
+                    let _ = supervisor.terminate();
                     return Err(error);
                 }
                 logger.log_line(&format!(
@@ -955,6 +1019,16 @@ impl ProxyNetworkNamespace {
 
     /// Give the supervisor the Bubblewrap child PID and wait for slirp readiness.
     pub(crate) fn attach(&mut self, child_pid: u32, logger: &mut Logger) -> Result<(), String> {
+        let timeout = rule_install_timeout(self.transactions, self.script_timeout_ms);
+        self.attach_within(child_pid, timeout, logger)
+    }
+
+    fn attach_within(
+        &mut self,
+        child_pid: u32,
+        timeout: Duration,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         let mut writer = self
             .pid_writer
             .take()
@@ -972,7 +1046,7 @@ impl ProxyNetworkNamespace {
             // Written after slirp is up *and* both rule sets are installed, so
             // naming slirp alone would send the reader to the wrong place.
             "slirp4netns startup and network rule installation",
-            rule_install_timeout(self.transactions, self.script_timeout_ms),
+            timeout,
         )?;
         logger.log_line(
             "Bubblewrap: slirp4netns configured the private network namespace and the network \
@@ -987,7 +1061,7 @@ impl ProxyNetworkNamespace {
     /// `slirp.ready` is a latch that stays on disk after slirp dies, so the
     /// readiness [`Self::attach`] waited for can already be stale here.
     pub(crate) fn check_alive(&mut self) -> Result<(), String> {
-        match self.supervisor.try_wait() {
+        match self.supervisor.poll() {
             Ok(None) => Ok(()),
 
             // The supervisor's last act is to wait on slirp, so it outlives
@@ -1013,7 +1087,7 @@ impl ProxyNetworkNamespace {
     /// Describe the provider loss a monitor observed, for the error the run
     /// fails with.
     pub(crate) fn lost_provider_detail(&mut self) -> String {
-        let status = match self.supervisor.try_wait() {
+        let status = match self.supervisor.poll() {
             Ok(Some(status)) => format!("exited with {status}"),
             Ok(None) => "is still running, so slirp4netns died on its own".to_string(),
             Err(error) => format!("could not be inspected: {error}"),
@@ -1033,7 +1107,7 @@ impl ProxyNetworkNamespace {
         self.exit_writer.take();
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         loop {
-            match self.supervisor.try_wait() {
+            match self.supervisor.poll() {
                 Ok(Some(status)) => {
                     // A clean teardown closes the exit pipe and slirp leaves
                     // with success. Anything else means it died on its own --
@@ -1058,14 +1132,14 @@ impl ProxyNetworkNamespace {
                          ({})",
                         stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
                     ));
-                    terminate_child(&mut self.supervisor);
+                    let _ = self.supervisor.terminate();
                     return;
                 }
                 Err(error) => {
                     logger.log_line(&format!(
                         "WARNING: Bubblewrap: failed to inspect slirp4netns shutdown: {error}"
                     ));
-                    terminate_child(&mut self.supervisor);
+                    let _ = self.supervisor.terminate();
                     return;
                 }
             }
@@ -1228,26 +1302,28 @@ fn run_probe(
     }
 }
 
-/// Arguments for the namespace grant check, and the single definition of what
+/// Flags for the namespace grant check, and the single definition of what
 /// the kernel is asked for — the walk builds the command through its injected
 /// factory.
 ///
 /// `unshare --help` only proves the flags are compiled in; the kernel can still
 /// refuse (unprivileged userns disabled, AppArmor restriction, or
-/// `user.max_net_namespaces` exhausted), which would otherwise surface deep
-/// inside supervisor startup. Both namespaces are requested together, mirroring
-/// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for, and via `sh -c :` because
-/// the supervisor itself runs as `sh -c`.
-const PRIVATE_NAMESPACE_PROBE_ARGS: [&str; 8] = [
-    "--user",
-    "--map-current-user",
-    "--keep-caps",
-    "--net",
-    "--",
-    "sh",
-    "-c",
-    ":",
-];
+/// `user.max_net_namespaces` exhausted). Both namespaces are requested together, mirroring
+/// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for.
+const PRIVATE_NAMESPACE_PROBE_FLAGS: [&str; 5] =
+    ["--user", "--map-current-user", "--keep-caps", "--net", "--"];
+
+fn private_namespace_probe<F>(tools: &NetworkTools, command: &F) -> Command
+where
+    F: Fn(&Path, &[&str]) -> Command,
+{
+    let mut probe = command(&tools.unshare, &PRIVATE_NAMESPACE_PROBE_FLAGS);
+
+    // The supervisor runs as `sh -c` inside these namespaces, so the check runs
+    // a no-op the same way.
+    probe.arg(&tools.sh).args(["-c", ":"]);
+    probe
+}
 
 /// Run the namespace grant check and turn a refusal into actionable guidance.
 ///
@@ -1258,6 +1334,7 @@ const PRIVATE_NAMESPACE_PROBE_ARGS: [&str; 8] = [
 /// the pure-formatter level.
 fn check_private_namespaces(
     command: Command,
+    shell: &Path,
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
 ) -> Result<(), String> {
@@ -1266,7 +1343,7 @@ fn check_private_namespaces(
         format!("Bubblewrap: {requirement} requires private user and network namespaces: {error}")
     })?;
     if !userns.status.success() {
-        return Err(namespace_probe_error(userns.status, use_case));
+        return Err(namespace_probe_error(userns.status, shell, use_case));
     }
     Ok(())
 }
@@ -1281,16 +1358,17 @@ fn shell_failed_to_start(code: i32) -> bool {
 ///
 /// Split out so the diagnostics are testable: a host where the namespaces work
 /// cannot be made to produce these statuses.
-fn namespace_probe_error(status: ExitStatus, use_case: PrivateNetworkUse) -> String {
+fn namespace_probe_error(status: ExitStatus, shell: &Path, use_case: PrivateNetworkUse) -> String {
     let requirement = use_case.requirement();
+
     // 126/127 are the exec-failure codes `unshare` propagates (EACCES and
-    // ENOENT). A PATH lookup can produce either, and both mean the namespaces
-    // worked and `sh` is what could not start.
+    // ENOENT). Both mean the namespaces worked and the shell is what could not
+    // start.
     if status.code().is_some_and(shell_failed_to_start) {
         return format!(
-            "Bubblewrap: {requirement} requires 'sh' on PATH inside the sandbox namespace \
-             (the proxy supervisor runs as 'sh -c'), which this host could not start. \
-             Install a POSIX shell or {}.",
+            "Bubblewrap: {requirement} runs its network supervisor with '{}', which could not \
+             start inside the new namespace. Install a working POSIX shell or {}.",
+            shell.display(),
             use_case.remedy()
         );
     }
@@ -1411,13 +1489,6 @@ fn strip_host_from_hosts(contents: &str, hostname: &str) -> String {
     out
 }
 
-/// A generated resolver file and the sandbox path it is mounted over.
-///
-/// The sandbox always runs in a private network namespace, so a host that
-/// resolves through a loopback stub -- `systemd-resolved` at `127.0.0.53`,
-/// `dnsmasq` at `127.0.0.1` -- hands it a nameserver address that belongs to
-/// its own empty loopback. Binding the host's resolver directories makes the
-/// file *readable*; it does not make the address *reachable*.
 #[derive(Debug)]
 pub(crate) struct ResolverPin {
     /// Canonical host path, which is what the filesystem policy is compared
@@ -1427,22 +1498,18 @@ pub(crate) struct ResolverPin {
 }
 
 impl ResolverPin {
-    /// The pin this host needs, or `None` when its resolvers already work
-    /// inside a private namespace.
-    pub(crate) fn for_host(policy: &ContainerPolicy, logger: &mut Logger) -> Option<Self> {
-        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, logger)
+    pub(crate) fn for_host(
+        policy: &ContainerPolicy,
+        mounts: &[PolicyMount],
+        logger: &mut Logger,
+    ) -> Option<Self> {
+        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, mounts, logger)
     }
 
-    /// The pin a sandbox reading `resolver_path` needs.
-    ///
-    /// Returning `None` leaves the sandbox exactly as it is today, so every
-    /// case this cannot read confidently declines rather than guessing.
-    ///
-    /// Takes the path rather than reading the host's so the decision can be
-    /// exercised against a fixture.
     pub(crate) fn from_resolver(
         resolver_path: &Path,
         policy: &ContainerPolicy,
+        mounts: &[PolicyMount],
         logger: &mut Logger,
     ) -> Option<Self> {
         let shown = resolver_path.display();
@@ -1487,7 +1554,13 @@ impl ResolverPin {
                 return None;
             }
         };
-        if path_is_denied(policy, &destination_text) {
+        let sandbox_destination = sandbox_mount_path(&destination_text);
+        let covering_mount = mounts
+            .iter()
+            .rfind(|mount| Path::new(&sandbox_destination).starts_with(&mount.destination));
+        if resolver_target_is_denied(policy, &destination)
+            || covering_mount.is_some_and(|mount| mount.intent == FsIntent::Denied)
+        {
             logger.warning_line(&format!(
                 "WARNING: Bubblewrap: the host resolves through a loopback nameserver, but the \
                  filesystem policy denies {destination_text}, so the sandbox keeps the host's \
@@ -1497,10 +1570,11 @@ impl ResolverPin {
             return None;
         }
 
-        // Naming the resolver itself is the caller supplying their own, which
-        // the pin would otherwise mount over.
         if policy_names_path(policy, &resolver_path.to_string_lossy())
             || policy_names_path(policy, &destination_text)
+            || covering_mount.is_some_and(|mount| {
+                Path::new(&mount.destination) == Path::new(&sandbox_destination)
+            })
         {
             logger.warning_line(&format!(
                 "WARNING: Bubblewrap: the filesystem policy mounts its own resolver, so the \
@@ -1563,17 +1637,6 @@ fn stage_resolver(
             None
         }
     }
-}
-
-/// The spelling bwrap has to mount over, which is not always the host's.
-fn sandbox_mount_path(host_path: &str) -> String {
-    // bwrap cannot create a mount point beneath a symlinked ancestor, and the
-    // sandbox always gets `/var/run` as a symlink.
-    host_path
-        .strip_prefix(COMPAT_RUN_LINK)
-        .filter(|rest| rest.starts_with('/'))
-        .map(|rest| format!("{COMPAT_RUN_TARGET}{rest}"))
-        .unwrap_or_else(|| host_path.to_string())
 }
 
 /// Whether every nameserver the host declares is a loopback address, with at
@@ -1647,10 +1710,14 @@ fn is_nameserver_line(line: &str) -> bool {
 fn resolver_target_of(start: &Path) -> Result<PathBuf, String> {
     let resolved = resolve_through_symlinks(start)
         .ok_or_else(|| format!("{} is not a resolvable path", start.display()))?;
+    if let Some(error) = resolved.error {
+        return Err(format!(
+            "{} could not be resolved ({error})",
+            start.display()
+        ));
+    }
+    let resolved = resolved.path;
 
-    // A chain that loops or dangles leaves canonicalization unfinished, so the
-    // walk hands back path text that is still a link. Binding there aborts the
-    // sandbox, which is worse than the broken DNS being fixed.
     let metadata = fs::symlink_metadata(&resolved)
         .map_err(|error| format!("{} could not be read ({error})", resolved.display()))?;
     if !metadata.file_type().is_file() {
@@ -1700,23 +1767,6 @@ pub(crate) fn check_hosts_pin_against_policy(
 /// an ancestor denial counts, and a more specific grant beneath it wins back.
 fn hosts_file_is_denied(policy: &ContainerPolicy) -> bool {
     path_is_denied(policy, SANDBOX_HOSTS_PATH)
-}
-
-/// Whether the filesystem policy masks `target`.
-fn path_is_denied(policy: &ContainerPolicy, target: &str) -> bool {
-    resolve_mount_order(policy)
-        .iter()
-        .rfind(|mount| covers_path(&mount.path, target))
-        .is_some_and(|mount| mount.intent == FsIntent::Denied)
-}
-
-/// Whether `path` is `target` or a directory holding it.
-fn covers_path(path: &str, target: &str) -> bool {
-    let path = path.trim_end_matches('/');
-    path == target
-        || target
-            .strip_prefix(path)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether the filesystem policy names `target` itself rather than an ancestor.
@@ -1809,14 +1859,15 @@ impl PrivateNetworkUse {
 /// Whether this host can enforce proxy-only egress, and why not when it cannot.
 ///
 /// Pre-flight counterpart to the launch-path check in
-/// [`crate::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
+/// [`crate::bwrap_common::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
-/// run fails. Advisory — the runner still probes before it launches.
+/// run fails. Advisory — the runner checks the tools and creates the
+/// namespaces at launch.
 ///
 /// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
 /// rules are installed, so it still surfaces at launch.
 ///
-/// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
+/// Bounded by `PRE_FLIGHT_BUDGET` in total, unlike the launch-path walk: a
 /// caller answering "can this host do it?" before spawning cannot afford the
 /// sum of every per-command timeout. The walk runs in a deadline-watched
 /// worker, so the ceiling holds even when a spawn itself blocks (a PATH lookup
@@ -1832,6 +1883,7 @@ pub fn probe_proxy_enforcement() -> Result<(), String> {
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::total(PRE_FLIGHT_BUDGET),
         )
+        .map(|_| ())
     })
 }
 
@@ -1962,90 +2014,156 @@ impl Drop for PreflightSlot {
     }
 }
 
-pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
-    static PROBED: OnceLock<()> = OnceLock::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetworkTools {
+    unshare: PathBuf,
+    sh: PathBuf,
+    slirp4netns: PathBuf,
+    nsenter: PathBuf,
+    ip: PathBuf,
+    iptables: PathBuf,
+    ip6tables: PathBuf,
+    iptables_restore: PathBuf,
+    ip6tables_restore: PathBuf,
+    sleep: PathBuf,
+}
+
+impl NetworkTools {
+    fn find<L>(use_case: PrivateNetworkUse, find: L) -> Result<Self, String>
+    where
+        L: Fn(&str) -> Result<PathBuf, LookupError>,
+    {
+        let tool = |name: &str| {
+            find(name).map_err(|error| {
+                format!(
+                    "Bubblewrap: {} requires '{name}', which {error}. Install it or {}.",
+                    use_case.requirement(),
+                    use_case.remedy()
+                )
+            })
+        };
+        Ok(Self {
+            unshare: tool("unshare")?,
+            sh: tool("sh")?,
+            slirp4netns: tool("slirp4netns")?,
+            nsenter: tool("nsenter")?,
+            ip: tool("ip")?,
+            iptables: tool("iptables")?,
+            ip6tables: tool("ip6tables")?,
+            iptables_restore: tool("iptables-restore")?,
+            ip6tables_restore: tool("ip6tables-restore")?,
+            sleep: tool("sleep")?,
+        })
+    }
+
+    /// `(name, path, argument, whether its iptables backend must be checked)`
+    /// for the tools without a dedicated check.
+    fn tool_probes(&self) -> [(&'static str, &Path, &'static str, bool); 7] {
+        [
+            ("nsenter", &self.nsenter, "--version", false),
+            ("ip", &self.ip, "-Version", false),
+            // The supervisor runs only the -restore variants, but these carry
+            // the version banner the backend decision reads.
+            ("iptables", &self.iptables, "--version", true),
+            ("ip6tables", &self.ip6tables, "--version", true),
+            (
+                "iptables-restore",
+                &self.iptables_restore,
+                "--version",
+                true,
+            ),
+            (
+                "ip6tables-restore",
+                &self.ip6tables_restore,
+                "--version",
+                true,
+            ),
+            ("sleep", &self.sleep, "0", false),
+        ]
+    }
+
+    /// The paths [`SUPERVISOR_SCRIPT`] reads from `$3` onward, in its order.
+    fn supervisor_arguments(&self) -> [&Path; 6] {
+        [
+            &self.nsenter,
+            &self.ip,
+            &self.slirp4netns,
+            &self.iptables_restore,
+            &self.ip6tables_restore,
+            &self.sleep,
+        ]
+    }
+}
+
+pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<NetworkTools, String> {
+    static APPROVED: Mutex<Option<NetworkTools>> = Mutex::new(None);
 
     probe_dependencies_caching(
-        &PROBED,
+        &APPROVED,
         use_case,
         ProbeBudget::unbounded(),
+        host_tools::find,
         real_probe_command,
     )
 }
 
-/// [`probe_dependencies`] against a caller-supplied cache, so the reuse rules
-/// are testable without a process-global `OnceLock`.
-///
-/// Only the tool and version checks are cached, and only on success: a failure
-/// usually means the operator has not installed slirp4netns yet. The
-/// namespace-allocation check stays outside, because unlike a package on PATH
-/// the kernel's answer changes under a running process.
-fn probe_dependencies_caching<F>(
-    cache: &OnceLock<()>,
+/// [`probe_dependencies`] against a caller-supplied approval, so the reuse
+/// rules are testable without process-global state.
+fn probe_dependencies_caching<L, F>(
+    approved: &Mutex<Option<NetworkTools>>,
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    find: L,
     command: F,
-) -> Result<(), String>
+) -> Result<NetworkTools, String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    L: Fn(&str) -> Result<PathBuf, LookupError>,
+    F: Fn(&Path, &[&str]) -> Command,
 {
-    if cache.get().is_none() {
-        probe_stable_dependencies(use_case, budget, &command)?;
-        let _ = cache.set(());
+    let tools = NetworkTools::find(use_case, find)?;
+
+    // A newly installed tool, or a PATH change that selects other files, takes
+    // effect without restarting the process.
+    let already_approved = approved
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        == Some(&tools);
+    if !already_approved {
+        probe_stable_dependencies(use_case, budget, &tools, &command)?;
+        *approved.lock().unwrap_or_else(PoisonError::into_inner) = Some(tools.clone());
     }
 
-    check_private_namespaces(
-        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
-        use_case,
-        budget,
-    )
+    Ok(tools)
 }
 
-/// Tools the in-namespace rules are programmed with: `(binary, probe flag,
-/// whether its backend must also be checked)`.
-///
-/// `iptables` / `ip6tables` are probed even though the supervisor only runs the
-/// `-restore` variants: they carry the version banner the backend decision
-/// reads, and ship in the same package. Over-strict is safe here; under-strict
-/// would let a launch fail on a host the pre-flight called supported.
-const RULE_TOOL_PROBES: [(&str, &str, bool); 5] = [
-    ("nsenter", "--version", false),
-    ("iptables", "--version", true),
-    ("ip6tables", "--version", true),
-    ("iptables-restore", "--version", true),
-    ("ip6tables-restore", "--version", true),
-];
-
-/// Whether a dependency probe covers a command [`SUPERVISOR_SCRIPT`] invokes.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SupervisorCommandCoverage {
-    /// `probe_dependencies_uncached` refuses the host when this is missing.
-    Probed,
-    /// Deliberately unprobed, with the reason.
-    Exempt(&'static str),
+pub(crate) fn probe_private_namespaces(
+    tools: &NetworkTools,
+    use_case: PrivateNetworkUse,
+) -> Result<(), String> {
+    check_private_namespaces(
+        private_namespace_probe(tools, &real_probe_command),
+        &tools.sh,
+        use_case,
+        ProbeBudget::unbounded(),
+    )
 }
 
 /// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
 /// Bumping it acknowledges that the command list below was re-checked.
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xaaf9_be3f_4367_b7d8;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xcbaa_8a75_caa4_2e8b;
 
-/// Every external command [`SUPERVISOR_SCRIPT`] runs, and how the pre-flight
-/// walk accounts for it.
+/// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
+/// pre-flight walk must check.
 #[cfg(test)]
-const SUPERVISOR_EXTERNAL_COMMANDS: &[(&str, SupervisorCommandCoverage)] = &[
-    ("slirp4netns", SupervisorCommandCoverage::Probed),
-    ("nsenter", SupervisorCommandCoverage::Probed),
-    ("iptables-restore", SupervisorCommandCoverage::Probed),
-    ("ip6tables-restore", SupervisorCommandCoverage::Probed),
-    (
-        "sleep",
-        SupervisorCommandCoverage::Exempt(
-            "coreutils; cannot realistically be absent on a host that already \
-             has util-linux and iptables",
-        ),
-    ),
+const SUPERVISOR_EXTERNAL_COMMANDS: &[&str] = &[
+    "slirp4netns",
+    "nsenter",
+    "ip",
+    "iptables-restore",
+    "ip6tables-restore",
+    "sleep",
 ];
 
 /// How each dependency check's command is built.
@@ -2053,7 +2171,7 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[(&str, SupervisorCommandCoverage)] = &[
 /// Injectable so a test can make one specific tool look missing or broken
 /// without depending on what the runner happens to have installed — and so the
 /// success path can be driven on a host that has none of the tooling.
-fn real_probe_command(program: &str, args: &[&str]) -> Command {
+fn real_probe_command(program: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command.args(args);
     command
@@ -2062,24 +2180,28 @@ fn real_probe_command(program: &str, args: &[&str]) -> Command {
 fn probe_dependencies_uncached(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
-) -> Result<(), String> {
-    probe_dependencies_with(use_case, budget, real_probe_command)
+) -> Result<NetworkTools, String> {
+    probe_dependencies_with(use_case, budget, host_tools::find, real_probe_command)
 }
 
-fn probe_dependencies_with<F>(
+fn probe_dependencies_with<L, F>(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    find: L,
     command: F,
-) -> Result<(), String>
+) -> Result<NetworkTools, String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    L: Fn(&str) -> Result<PathBuf, LookupError>,
+    F: Fn(&Path, &[&str]) -> Command,
 {
-    probe_stable_dependencies(use_case, budget, &command)?;
+    let tools = probe_dependencies_caching(&Mutex::new(None), use_case, budget, find, &command)?;
     check_private_namespaces(
-        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
+        private_namespace_probe(&tools, &command),
+        &tools.sh,
         use_case,
         budget,
-    )
+    )?;
+    Ok(tools)
 }
 
 /// The half of the walk whose answers are fixed by what is installed: tool
@@ -2087,20 +2209,22 @@ where
 fn probe_stable_dependencies<F>(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    tools: &NetworkTools,
     command: &F,
 ) -> Result<(), String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    F: Fn(&Path, &[&str]) -> Command,
 {
     let requirement = use_case.requirement();
+    let slirp4netns = tools.slirp4netns.display();
     let slirp = run_probe(
-        command("slirp4netns", &["--version"]),
+        command(&tools.slirp4netns, &["--version"]),
         "slirp4netns",
         budget,
     )
     .map_err(|error| {
         format!(
-            "Bubblewrap: {requirement} requires 'slirp4netns' on PATH: {error}. \
+            "Bubblewrap: {requirement} requires 'slirp4netns' ({slirp4netns}): {error}. \
              Install slirp4netns or {}.",
             use_case.remedy()
         )
@@ -2108,14 +2232,18 @@ where
     if !slirp.status.success() {
         return Err(format!(
             "Bubblewrap: {requirement} requires a working slirp4netns installation \
-             (slirp4netns --version exited with {})",
+             ({slirp4netns} --version exited with {})",
             slirp.status
         ));
     }
 
+    let unshare_path = tools.unshare.display();
     let unshare =
-        run_probe(command("unshare", &["--help"]), "unshare", budget).map_err(|error| {
-            format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
+        run_probe(command(&tools.unshare, &["--help"]), "unshare", budget).map_err(|error| {
+            format!(
+                "Bubblewrap: {requirement} requires util-linux 'unshare' ({unshare_path}): \
+                 {error}"
+            )
         })?;
     if !unshare.status.success()
         || !unshare.stdout.contains("--map-current-user")
@@ -2123,23 +2251,24 @@ where
     {
         return Err(format!(
             "Bubblewrap: {requirement} requires util-linux unshare with \
-             --map-current-user and --keep-caps support"
+             --map-current-user and --keep-caps support ({unshare_path})"
         ));
     }
 
-    // The in-namespace rules are programmed with these, so a host missing them
-    // must fail here rather than deep inside supervisor startup.
-    for (binary, probe, has_backend) in RULE_TOOL_PROBES {
-        let output = run_probe(command(binary, &[probe]), binary, budget).map_err(|error| {
+    // A broken tool must fail here rather than deep inside supervisor startup.
+    for (binary, path, probe, has_backend) in tools.tool_probes() {
+        let output = run_probe(command(path, &[probe]), binary, budget).map_err(|error| {
             format!(
-                "Bubblewrap: {requirement} requires '{binary}' on PATH to enforce {}: {error}",
+                "Bubblewrap: {requirement} requires '{binary}' ({}) to enforce {}: {error}",
+                path.display(),
                 use_case.mechanism()
             )
         })?;
         if !output.status.success() {
             return Err(format!(
                 "Bubblewrap: {requirement} requires a working '{binary}' installation \
-                 ({binary} {probe} exited with {})",
+                 ({} {probe} exited with {})",
+                path.display(),
                 output.status
             ));
         }
@@ -2148,6 +2277,7 @@ where
         if has_backend {
             iptables_backend_is_usable(
                 binary,
+                path,
                 &output.stdout,
                 Path::new(XTABLES_LOCK_PATH),
                 use_case,
@@ -2171,6 +2301,7 @@ where
 /// question, and for legacy the lock itself is tested.
 fn iptables_backend_is_usable(
     binary: &str,
+    path: &Path,
     banner: &str,
     lock: &Path,
     use_case: PrivateNetworkUse,
@@ -2185,13 +2316,14 @@ fn iptables_backend_is_usable(
     // A pre-1.8 banner carries no marker at all; those builds are legacy-only.
     Err(format!(
         "Bubblewrap: {} requires an iptables backend the sandbox supervisor can \
-         drive without privilege, but '{binary}' resolves to the legacy backend ({}) and \
+         drive without privilege, but '{binary}' ({}) resolves to the legacy backend ({}) and \
          '{}' is not writable by this user. The {} rules are installed by an \
          unprivileged supervisor in a user namespace, which keeps the caller's uid, so the \
          root-owned lock is unreachable and every rule would fail. Select the nf_tables \
          backend (for example: update-alternatives --set {binary} /usr/sbin/{binary}-nft), \
          or make '{}' writable.",
         use_case.requirement(),
+        path.display(),
         banner.trim(),
         lock.display(),
         use_case.mechanism(),
@@ -2254,7 +2386,7 @@ fn read_stderr_tail(path: &std::path::Path) -> String {
 
 fn wait_for_file(
     path: impl AsRef<std::path::Path>,
-    child: &mut Child,
+    child: &mut Supervisor,
     stderr_path: &std::path::Path,
     component: &str,
     timeout: Duration,
@@ -2265,7 +2397,7 @@ fn wait_for_file(
         if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
             return Ok(());
         }
-        if let Some(status) = child.try_wait().map_err(|error| {
+        if let Some(status) = child.poll().map_err(|error| {
             format!("Bubblewrap: failed to inspect {component} startup: {error}")
         })? {
             return Err(format!(
@@ -2297,7 +2429,7 @@ fn wait_for_file(
 /// receives it in argv (`--info-fd N`) and parses it as an integer. A child
 /// that must *redirect* to the descriptor from a shell needs
 /// [`remap_descriptors`] instead.
-fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
+pub(crate) fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `fcntl` is async-signal-safe and
     // this closure allocates nothing -- `fds` is captured by move and holds
@@ -2310,6 +2442,17 @@ fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
             Ok(())
         });
     }
+}
+
+// The child's stdio replaces descriptors 0-2 before pre_exec runs.
+pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
+    let fd = fcntl(
+        file.as_raw_fd(),
+        FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
+    )?;
+
+    // SAFETY: fcntl returned a new descriptor that nothing else owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Hand `mapping` to one specific child at fixed, known descriptor numbers.
@@ -2358,14 +2501,110 @@ fn set_nonblocking(fd: RawFd) -> Result<(), String> {
         .map_err(|error| format!("Bubblewrap: failed to make descriptor nonblocking: {error}"))
 }
 
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+pub(crate) fn startup_output(
+    child: &mut Child,
+    pty: Option<&crate::mxc_pty::LivePty>,
+) -> Result<String, String> {
+    if let Some(pty) = pty {
+        let output = pty
+            .read_available_output(64 * 1024)
+            .map_err(|error| format!("Bubblewrap: failed to read startup PTY output: {error}"))?;
+        return Ok(String::from_utf8_lossy(&output).trim().to_string());
+    }
+    let Some(stderr) = child.stderr.as_mut() else {
+        return Ok(String::new());
+    };
+    set_nonblocking(stderr.as_raw_fd())?;
+    let mut output = Vec::new();
+    let mut buffer = [0; 4096];
+    while output.len() < 64 * 1024 {
+        match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => {
+                return Err(format!(
+                    "Bubblewrap: failed to read startup stderr: {error}"
+                ))
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).trim().to_string())
+}
+
+/// The namespace supervisor and the process group it leads.
+///
+/// The leader stays unreaped until its group has been swept. [`group_kill`]
+/// signals the saved PID and group ID directly, so reaping first would let
+/// Linux reuse that ID for an unrelated process before the sweep runs.
+struct Supervisor {
+    child: Child,
+    exit: Option<ExitStatus>,
+}
+
+impl Supervisor {
+    fn new(child: Child) -> Self {
+        Self { child, exit: None }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// The exit status once the supervisor has exited.
+    ///
+    /// Observing the exit also sweeps the group: a blocked `nsenter`, `ip` or
+    /// restore child must not outlive a supervisor that died first.
+    fn poll(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if self.exit.is_none() && has_exited_unreaped(self.child.id())? {
+            self.terminate()?;
+        }
+        Ok(self.exit)
+    }
+
+    /// Kill the supervisor's whole process group, then reap the leader.
+    ///
+    /// The leader is signalled before the sweep (see [`group_kill`]), so a
+    /// woken shell cannot start a child the sweep misses.
+    fn terminate(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(status) = self.exit {
+            return Ok(status);
+        }
+        group_kill(&mut self.child)?;
+        let status = self.child.wait()?;
+        self.exit = Some(status);
+        Ok(status)
+    }
+}
+
+/// Whether `pid` has exited without reaping it.
+fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    waitid(
+        Id::Pid(Pid::from_raw(pid as i32)),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+    )
+    .map(|status| status != WaitStatus::StillAlive)
+    .map_err(std::io::Error::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bwrap_common::bwrap_command::{COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
+
+    #[test]
+    fn startup_stderr_returns_the_child_diagnostic() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf 'namespace refused\\n' >&2"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start diagnostic child");
+        assert!(child.wait().expect("wait for diagnostic child").success());
+        assert_eq!(
+            startup_output(&mut child, None).expect("read startup stderr"),
+            "namespace refused"
+        );
+    }
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an
@@ -2430,6 +2669,9 @@ mod tests {
         let error = SandboxProxy::resolve_with(&address, resolver([10, 0, 2, 2]))
             .expect_err("the slirp gateway must not be pinned as if it were a host address");
 
+        let ProxyResolveError::Rejected(error) = error else {
+            panic!("a reserved answer is a policy refusal: {error}");
+        };
         assert!(
             error.contains("10.0.2.0/24") && error.contains("127.0.0.1"),
             "error should name the reserved range and the supported alternative: {error}"
@@ -2503,7 +2745,7 @@ mod tests {
 
     /// A resolver that answers every name with `ip`, so pin decisions can be
     /// tested without a lookup the test does not control.
-    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, String> {
+    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError> {
         move |_, _| Ok(Ipv4Addr::from(ip))
     }
 
@@ -2645,7 +2887,7 @@ mod tests {
         let loopback = ProxyAddress::new("[::1]".into(), 8080);
         let error = SandboxProxy::resolve(&loopback).unwrap_err();
         assert!(
-            error.contains("IPv4"),
+            error.message().contains("IPv4"),
             "error should explain the IPv4 requirement: {error}"
         );
 
@@ -2665,10 +2907,37 @@ mod tests {
         );
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
+        // A lookup failure is a host fault, not a refusal of the policy.
+        let ProxyResolveError::Lookup(error) = error else {
+            panic!("an unresolvable name is a lookup failure: {error}");
+        };
         assert!(
             error.contains("proxy.corp.invalid"),
             "error should name the offending host: {error}"
         );
+    }
+
+    #[test]
+    fn a_failed_lookup_is_not_reported_as_a_refusal() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let error = SandboxProxy::resolve_with(&address, |_, _| {
+            Err(ProxyResolveError::Lookup("timed out".into()))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, ProxyResolveError::Lookup(_)), "{error}");
+    }
+
+    #[test]
+    fn static_rejections_are_refusals() {
+        for host in ["[::1]", "2001:db8::1", "10.0.2.2"] {
+            let address = ProxyAddress::new(host.into(), 8080);
+            let error = SandboxProxy::resolve(&address).unwrap_err();
+            assert!(
+                matches!(error, ProxyResolveError::Rejected(_)),
+                "{host}: {error}"
+            );
+        }
     }
 
     /// `::1` used to be rewritten to the IPv4 gateway, which handed the sandbox
@@ -2682,7 +2951,7 @@ mod tests {
             let error = SandboxProxy::resolve(&address).unwrap_err();
 
             assert!(
-                error.contains("IPv6 loopback"),
+                error.message().contains("IPv6 loopback"),
                 "error should name the unreachable address family: {error}"
             );
         }
@@ -2704,7 +2973,7 @@ mod tests {
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
         assert!(
-            error.contains("non-zero"),
+            error.message().contains("non-zero"),
             "error should explain the port requirement: {error}"
         );
     }
@@ -3026,8 +3295,9 @@ mod tests {
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
 
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         assert_eq!(pin.destination, resolver);
         assert!(pin.contents.contains("nameserver 10.0.2.3"));
@@ -3042,10 +3312,13 @@ mod tests {
         let resolver = host_with_resolver(&dir, "nameserver 8.8.8.8\n");
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            &mut logger
+        )
+        .is_none());
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
 
@@ -3058,7 +3331,8 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &mut logger).is_none()
+            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &[], &mut logger)
+                .is_none()
         );
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
@@ -3075,9 +3349,50 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
+    }
+
+    #[test]
+    fn resolver_pins_respect_translated_file_grants_and_masks() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let file = resolver.to_string_lossy().into_owned();
+        let parent = resolver.parent().unwrap().to_string_lossy().into_owned();
+        for (intent, destination, pinned, warning) in [
+            (
+                FsIntent::ReadWrite,
+                file.clone(),
+                false,
+                "mounts its own resolver",
+            ),
+            (FsIntent::ReadOnly, file, false, "mounts its own resolver"),
+            (
+                FsIntent::Denied,
+                parent.clone(),
+                false,
+                "filesystem policy denies",
+            ),
+            (FsIntent::ReadOnly, parent, true, ""),
+        ] {
+            let mounts = vec![PolicyMount {
+                source: "/run/resolvconf/resolv.conf".into(),
+                destination,
+                intent,
+            }];
+            let mut logger = buffer_logger();
+            let pin = ResolverPin::from_resolver(
+                &resolver,
+                &ContainerPolicy::default(),
+                &mounts,
+                &mut logger,
+            );
+            assert_eq!(pin.is_some(), pinned, "{mounts:?}");
+            if !pinned {
+                assert!(logger.warnings().join("\n").contains(warning));
+            }
+        }
     }
 
     #[test]
@@ -3090,7 +3405,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(
             out.contains("loopback"),
@@ -3126,7 +3441,7 @@ mod tests {
             ] {
                 let mut logger = buffer_logger();
                 assert!(
-                    ResolverPin::from_resolver(&link, &policy, &mut logger).is_none(),
+                    ResolverPin::from_resolver(&link, &policy, &[], &mut logger).is_none(),
                     "a grant on {} is the caller claiming the resolver",
                     grant.display()
                 );
@@ -3147,7 +3462,8 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &mut logger).is_none()
+            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &[], &mut logger)
+                .is_none()
         );
         let out = logger.warnings().join("\n");
         assert!(out.contains("could not be read"), "got: {out}");
@@ -3173,7 +3489,7 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &mut logger)
+            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &[], &mut logger)
                 .is_none(),
             "a denial of the canonical directory must stop the pin reached by an alias"
         );
@@ -3189,8 +3505,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         let staged = stage_resolver(
             Some(&pin),
@@ -3218,8 +3535,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         let staging = tempfile::tempdir().unwrap();
         let (source, destination) = stage_resolver(Some(&pin), staging.path(), &mut logger)
@@ -3403,8 +3721,7 @@ mod tests {
         assert!(resolver_target_of(&dangling).is_err());
     }
 
-    /// A link loop leaves canonicalization unfinished, so the walk hands back a
-    /// path that is still a link; binding there would abort the sandbox.
+    /// Reject a link loop before attempting to mount the resolver file.
     #[test]
     fn the_resolver_target_gives_up_on_a_link_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -3415,7 +3732,7 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
 
         let error = resolver_target_of(&first).expect_err("a loop has no target");
-        assert!(error.contains("regular file"), "got: {error}");
+        assert!(error.contains("could not be resolved"), "got: {error}");
     }
 
     /// A directory would be mounted over as if it were the resolver file.
@@ -3585,7 +3902,7 @@ mod tests {
     fn script_signals_readiness_only_after_rules_are_installed() {
         // The caller releases the workload on this signal, so emitting it early
         // would let the workload run with egress wide open.
-        let last_restore = script_offset("ip6tables-restore");
+        let last_restore = script_offset(r#""$ip6tables_restore""#);
         let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
 
         assert!(
@@ -3616,8 +3933,8 @@ mod tests {
     fn script_restores_both_families() {
         // A family left unrestored is a family with no chain and no terminal
         // verdict, so it would stay wide open.
-        script_offset("-- iptables-restore ");
-        script_offset("-- ip6tables-restore ");
+        script_offset(r#"-- "$iptables_restore" "#);
+        script_offset(r#"-- "$ip6tables_restore" "#);
     }
 
     #[test]
@@ -3625,7 +3942,7 @@ mod tests {
         // Offset-based ordering assertions only hold if the restores run
         // inline. Backgrounding one would satisfy those tests while destroying
         // the guarantee that rules precede readiness.
-        let rules_start = script_offset("-- iptables-restore ");
+        let rules_start = script_offset(r#"-- "$iptables_restore" "#);
         let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
         let script = normalised_script();
         let region = &script[rules_start..ready];
@@ -3854,7 +4171,7 @@ mod tests {
 
         let restores: Vec<&&str> = code
             .iter()
-            .filter(|line| line.contains("tables-restore"))
+            .filter(|line| line.contains(r#"tables_restore""#))
             .collect();
         assert_eq!(
             restores.len(),
@@ -3876,9 +4193,16 @@ mod tests {
         // The whole policy travels in the restore payloads now, so any
         // surviving per-rule invocation would be an unbatched leftover.
         assert!(
-            !code
+            !code.iter().any(|line| {
+                [
+                    "-- iptables ",
+                    "-- ip6tables ",
+                    r#""$iptables""#,
+                    r#""$ip6tables""#,
+                ]
                 .iter()
-                .any(|line| line.contains("-- iptables ") || line.contains("-- ip6tables ")),
+                .any(|call| line.contains(call))
+            }),
             "rule installation must go through iptables-restore, not per-rule calls"
         );
     }
@@ -4117,8 +4441,8 @@ mod tests {
         );
     }
 
-    /// `unshare` runs `sh` via a PATH lookup, so an exec failure surfaces as
-    /// either exec code; a refused namespace exits 1 and must stay distinct.
+    /// An exec failure of the shell surfaces as either exec code; a refused
+    /// namespace exits 1 and must stay distinct.
     #[test]
     fn an_exec_failure_is_told_apart_from_a_refused_namespace() {
         assert!(shell_failed_to_start(126));
@@ -4138,7 +4462,11 @@ mod tests {
     /// A host where they work cannot produce this status, so classify directly.
     #[test]
     fn a_refused_namespace_names_every_knob_that_could_be_responsible() {
-        let error = namespace_probe_error(exit_status(1), PrivateNetworkUse::ProxyOnlyEgress);
+        let error = namespace_probe_error(
+            exit_status(1),
+            Path::new("/usr/bin/sh"),
+            PrivateNetworkUse::ProxyOnlyEgress,
+        );
 
         assert!(error.contains("refused"), "got: {error}");
         for knob in [
@@ -4156,10 +4484,16 @@ mod tests {
     #[test]
     fn a_shell_that_cannot_start_is_not_reported_as_a_refused_namespace() {
         for code in [126, 127] {
-            let error =
-                namespace_probe_error(exit_status(code), PrivateNetworkUse::ProxyOnlyEgress);
+            let error = namespace_probe_error(
+                exit_status(code),
+                Path::new("/usr/bin/sh"),
+                PrivateNetworkUse::ProxyOnlyEgress,
+            );
 
-            assert!(error.contains("'sh'"), "must name the shell, got: {error}");
+            assert!(
+                error.contains("'/usr/bin/sh'"),
+                "must name the shell, got: {error}"
+            );
             assert!(
                 !error.contains("apparmor"),
                 "must not offer namespace remedies, got: {error}"
@@ -4167,25 +4501,18 @@ mod tests {
         }
     }
 
-    fn on_path(tool: &str) -> bool {
-        Command::new("sh")
-            .args(["-c", &format!("command -v {tool} >/dev/null 2>&1")])
-            .status()
-            .is_ok_and(|status| status.success())
+    fn is_installed(tool: &str) -> bool {
+        host_tools::find(tool).is_ok()
     }
 
     fn namespaces_are_available() -> bool {
-        Command::new("unshare")
-            .args([
-                "--user",
-                "--map-current-user",
-                "--keep-caps",
-                "--net",
-                "--",
-                "sh",
-                "-c",
-                ":",
-            ])
+        let (Ok(unshare), Ok(sh)) = (host_tools::find("unshare"), host_tools::find("sh")) else {
+            return false;
+        };
+        Command::new(unshare)
+            .args(PRIVATE_NAMESPACE_PROBE_FLAGS)
+            .arg(sh)
+            .args(["-c", ":"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -4193,20 +4520,26 @@ mod tests {
     }
 
     fn iptables_uses_nf_tables() -> bool {
-        Command::new("iptables")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nf_tables"))
+        host_tools::find("iptables").is_ok_and(|iptables| {
+            Command::new(iptables)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nf_tables"))
+        })
+    }
+
+    fn script_variable(tool: &str) -> String {
+        format!(r#""${}""#, tool.replace('-', "_"))
     }
 
     /// The supervisor is the only place proxy mode shells out at launch, so the
     /// pre-flight walk is only honest if it covers what that script runs.
     ///
     /// Shell is not worth parsing here — the binaries appear in argument
-    /// position (`nsenter --net=… -- iptables-restore …`) as well as command
-    /// position, so a tokenizer would miss exactly the cases that matter.
-    /// Pinning the constant is exact instead: any edit fails here and forces a
-    /// re-check of [`SUPERVISOR_EXTERNAL_COMMANDS`].
+    /// position (`"$nsenter" --net=… -- "$iptables_restore" …`) as well as
+    /// command position, so a tokenizer would miss exactly the cases that
+    /// matter. Pinning the constant is exact instead: any edit fails here and
+    /// forces a re-check of [`SUPERVISOR_EXTERNAL_COMMANDS`].
     #[test]
     fn supervisor_script_changes_force_a_dependency_re_review() {
         // FNV-1a rather than `DefaultHasher`, whose output is not stable across
@@ -4220,8 +4553,9 @@ mod tests {
 
         assert_eq!(
             digest, EXPECTED_SUPERVISOR_SCRIPT_DIGEST,
-            "SUPERVISOR_SCRIPT changed. Re-check that probe_dependencies_uncached probes every \
-             binary the script runs (including those passed to `nsenter --`), update \
+            "SUPERVISOR_SCRIPT changed. Re-check that every binary the script runs \
+             (including those passed to `nsenter --`) arrives as a checked path from \
+             NetworkTools::supervisor_arguments and is probed by the dependency walk, update \
              SUPERVISOR_EXTERNAL_COMMANDS, then set EXPECTED_SUPERVISOR_SCRIPT_DIGEST to {digest:#x}."
         );
     }
@@ -4230,30 +4564,27 @@ mod tests {
     /// removed would claim coverage nothing needs.
     #[test]
     fn every_listed_supervisor_command_is_actually_invoked() {
-        for (name, _) in SUPERVISOR_EXTERNAL_COMMANDS {
+        for name in SUPERVISOR_EXTERNAL_COMMANDS {
             assert!(
-                SUPERVISOR_SCRIPT.contains(name),
+                SUPERVISOR_SCRIPT.contains(&script_variable(name)),
                 "SUPERVISOR_EXTERNAL_COMMANDS lists '{name}', but SUPERVISOR_SCRIPT no longer \
                  runs it; drop the entry"
             );
         }
     }
 
-    /// Every command marked `Probed` must really be one the walk refuses a host
-    /// over, otherwise the annotation is decorative.
     #[test]
-    fn commands_marked_probed_are_in_the_dependency_walk() {
-        // The walk's full set: the two checked directly, plus the rule tooling.
+    fn every_supervisor_command_is_in_the_dependency_walk() {
+        // The walk's full set: the two checked directly, plus the probe list.
+        let tools = tools_in(Path::new("/mxc-test-tools"));
         let mut probed: Vec<&str> = vec!["slirp4netns", "unshare"];
-        probed.extend(RULE_TOOL_PROBES.iter().map(|(binary, _, _)| *binary));
+        probed.extend(tools.tool_probes().iter().map(|(name, ..)| *name));
 
-        for (name, coverage) in SUPERVISOR_EXTERNAL_COMMANDS {
-            if *coverage == SupervisorCommandCoverage::Probed {
-                assert!(
-                    probed.contains(name),
-                    "'{name}' is marked Probed but probe_dependencies_uncached never checks it"
-                );
-            }
+        for name in SUPERVISOR_EXTERNAL_COMMANDS {
+            assert!(
+                probed.contains(name),
+                "the supervisor runs '{name}' but probe_dependencies_uncached never checks it"
+            );
         }
     }
 
@@ -4262,15 +4593,17 @@ mod tests {
     /// surfaces as a dead supervisor mid-startup.
     #[test]
     fn the_rule_tools_the_supervisor_runs_are_probed() {
-        for binary in ["nsenter", "iptables-restore", "ip6tables-restore"] {
+        let tools = tools_in(Path::new("/mxc-test-tools"));
+        for binary in ["nsenter", "ip", "iptables-restore", "ip6tables-restore"] {
             assert!(
-                SUPERVISOR_SCRIPT.contains(binary),
+                SUPERVISOR_SCRIPT.contains(&script_variable(binary)),
                 "expected the supervisor to run '{binary}'"
             );
             assert!(
-                RULE_TOOL_PROBES
+                tools
+                    .tool_probes()
                     .iter()
-                    .any(|(probed, _, _)| *probed == binary),
+                    .any(|(probed, ..)| *probed == binary),
                 "the supervisor runs '{binary}' but the pre-flight walk never probes it"
             );
         }
@@ -4290,13 +4623,13 @@ mod tests {
     /// Cache reuse, in the three shapes that matter: a remembered success, a
     /// failure that is retried, and reuse across use cases.
     #[test]
-    fn the_cache_remembers_tools_but_re_checks_namespaces() {
+    fn the_cache_remembers_tools_without_allocating_namespaces() {
         use std::cell::RefCell;
 
         let log = RefCell::new(Vec::new());
-        let counting = |program: &str, args: &[&str]| {
+        let counting = |program: &Path, args: &[&str]| {
             log.borrow_mut()
-                .push(format!("{program} {}", args.join(" ")));
+                .push(format!("{} {}", tool_name(program), args.join(" ")));
             walk_stub_for(program, None)
         };
 
@@ -4315,10 +4648,16 @@ mod tests {
                 .count()
         };
 
-        let cache = OnceLock::new();
+        let approved = Mutex::new(None);
         let run = |use_case| {
-            let _ =
-                probe_dependencies_caching(&cache, use_case, ProbeBudget::unbounded(), counting);
+            probe_dependencies_caching(
+                &approved,
+                use_case,
+                ProbeBudget::unbounded(),
+                lookup_where_only(None),
+                counting,
+            )
+            .expect("tool checks should succeed");
             (stable_runs(), namespace_runs())
         };
 
@@ -4327,6 +4666,7 @@ mod tests {
         // The cache is shared across use cases, which ask the same questions.
         let after_other_use_case = run(PrivateNetworkUse::FirewallEnforcement);
 
+        assert_eq!(after_first.0, 1, "the tool check must run on a cold cache");
         assert_eq!(
             after_second.0, after_first.0,
             "a warm cache must not re-run the tool checks"
@@ -4335,11 +4675,45 @@ mod tests {
             after_other_use_case.0, after_first.0,
             "the cache is shared across use cases, which ask the same questions"
         );
-        assert!(
-            after_second.1 > after_first.1 && after_other_use_case.1 > after_second.1,
-            "the namespace check must run on every call, warm cache or not: {after_first:?} \
-             then {after_second:?} then {after_other_use_case:?}"
+        assert_eq!(
+            (after_first.1, after_second.1, after_other_use_case.1),
+            (0, 0, 0),
+            "launch dependency checks must not allocate namespaces"
         );
+    }
+
+    #[test]
+    fn a_different_tool_selection_is_checked_before_it_is_used() {
+        use std::cell::Cell;
+
+        let stable_runs = Cell::new(0_u32);
+        let counting = |program: &Path, _args: &[&str]| {
+            if tool_name(program) == "slirp4netns" {
+                stable_runs.set(stable_runs.get() + 1);
+            }
+            walk_stub_for(program, None)
+        };
+        let approved = Mutex::new(None);
+        let run = |directory: &'static str| {
+            let tools = probe_dependencies_caching(
+                &approved,
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                |name: &str| Ok(Path::new(directory).join(name)),
+                counting,
+            )
+            .expect("every tool answers");
+            assert_eq!(tools, tools_in(Path::new(directory)));
+            stable_runs.get()
+        };
+
+        assert_eq!(run("/first"), 1);
+        assert_eq!(
+            run("/first"),
+            1,
+            "the approved files must not be re-checked"
+        );
+        assert_eq!(run("/second"), 2, "different files must be checked first");
     }
 
     /// A failure must not be remembered: it usually means the operator has not
@@ -4349,8 +4723,8 @@ mod tests {
         use std::cell::Cell;
 
         let attempts = Cell::new(0_u32);
-        let cache = OnceLock::new();
-        let failing = |_: &str, _: &[&str]| {
+        let approved = Mutex::new(None);
+        let failing = |_: &Path, _: &[&str]| {
             attempts.set(attempts.get() + 1);
             let mut command = Command::new("sh");
             command.args(["-c", "exit 1"]);
@@ -4358,18 +4732,20 @@ mod tests {
         };
 
         probe_dependencies_caching(
-            &cache,
+            &approved,
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
+            lookup_where_only(None),
             failing,
         )
         .expect_err("a host whose tooling fails must not be reported usable");
         let after_first = attempts.get();
 
         probe_dependencies_caching(
-            &cache,
+            &approved,
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
+            lookup_where_only(None),
             failing,
         )
         .expect_err("the failure must not have been cached");
@@ -4391,6 +4767,7 @@ mod tests {
 
         let error = check_private_namespaces(
             command,
+            Path::new("/usr/bin/sh"),
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
         )
@@ -4411,12 +4788,16 @@ mod tests {
 
             let error = check_private_namespaces(
                 command,
+                Path::new("/usr/bin/sh"),
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
             )
             .expect_err("an exec failure must fail the walk");
 
-            assert!(error.contains("'sh'"), "must name the shell, got: {error}");
+            assert!(
+                error.contains("'/usr/bin/sh'"),
+                "must name the shell, got: {error}"
+            );
             assert!(
                 !error.contains("apparmor"),
                 "must not offer namespace remedies, got: {error}"
@@ -4431,6 +4812,7 @@ mod tests {
 
         assert!(check_private_namespaces(
             command,
+            Path::new("/usr/bin/sh"),
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
         )
@@ -4441,8 +4823,9 @@ mod tests {
     /// passing everywhere while proving nothing, so pin what it requests.
     #[test]
     fn the_namespace_probe_asks_for_both_namespaces_as_the_supervisor_does() {
-        let command = real_probe_command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS);
-        assert_eq!(command.get_program(), "unshare");
+        let tools = tools_in(Path::new("/mxc-test-tools"));
+        let command = private_namespace_probe(&tools, &real_probe_command);
+        assert_eq!(command.get_program(), tools.unshare.as_os_str());
 
         let args: Vec<String> = command
             .get_args()
@@ -4454,34 +4837,53 @@ mod tests {
                 "the probe must request {flag}, got: {args:?}"
             );
         }
-        // The supervisor runs as `sh -c`, so the probe must exercise that.
+
+        // The supervisor runs its shell with `-c`, so the probe must exercise that.
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "sh" && pair[1] == "-c"),
+                .any(|pair| Path::new(&pair[0]) == tools.sh && pair[1] == "-c"),
             "the probe must run the supervisor's shell, got: {args:?}"
         );
     }
 
+    fn tool_name(program: &Path) -> &str {
+        program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    }
+
+    fn tools_in(directory: &Path) -> NetworkTools {
+        NetworkTools::find(PrivateNetworkUse::ProxyOnlyEgress, |name| {
+            Ok(directory.join(name))
+        })
+        .expect("every tool is found")
+    }
+
+    fn lookup_where_only(
+        missing: Option<&'static str>,
+    ) -> impl Fn(&str) -> Result<PathBuf, LookupError> {
+        move |name| {
+            if Some(name) == missing {
+                return Err(LookupError::NotFound);
+            }
+            Ok(Path::new("/mxc-test-tools").join(name))
+        }
+    }
+
     /// A stand-in for the whole dependency walk: every tool succeeds with the
-    /// banner the walk demands, except `missing`, which is not on PATH.
+    /// banner the walk demands.
     ///
     /// Makes each refusal reproducible on any host, including one with none of
     /// the real tooling — where the host-conditional walk test proves nothing.
-    fn walk_where_only(missing: Option<&'static str>) -> impl Fn(&str, &[&str]) -> Command {
-        move |program, _args| {
-            if Some(program) == missing {
-                // A name that cannot exist on PATH, so the spawn fails with
-                // ENOENT exactly as a genuinely absent tool would.
-                return Command::new("mxc-probe-absent-tool-for-tests");
-            }
-            walk_stub_for(program, None)
-        }
+    fn walk_stub(program: &Path, _args: &[&str]) -> Command {
+        walk_stub_for(program, None)
     }
 
     /// A stand-in that succeeds, emitting the banner the walk parses for
     /// `program`. `override_script` replaces that behaviour for one tool.
-    fn walk_stub_for(program: &str, override_script: Option<&str>) -> Command {
-        let script = override_script.unwrap_or(match program {
+    fn walk_stub_for(program: &Path, override_script: Option<&str>) -> Command {
+        let script = override_script.unwrap_or(match tool_name(program) {
             // The walk requires both flags to be advertised.
             "unshare" => "printf '%s\\n' '--map-current-user --keep-caps'",
             // The backend gate refuses anything that is not nf_tables.
@@ -4504,9 +4906,10 @@ mod tests {
             probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
-                walk_where_only(None),
+                lookup_where_only(None),
+                walk_stub,
             ),
-            Ok(())
+            Ok(tools_in(Path::new("/mxc-test-tools")))
         );
     }
 
@@ -4517,28 +4920,56 @@ mod tests {
         for tool in [
             "slirp4netns",
             "unshare",
+            "sh",
             "nsenter",
+            "ip",
             "iptables",
             "ip6tables",
             "iptables-restore",
             "ip6tables-restore",
+            "sleep",
         ] {
             let error = probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
-                walk_where_only(Some(tool)),
+                lookup_where_only(Some(tool)),
+                walk_stub,
             )
             .expect_err("a missing tool must fail the walk");
 
             assert!(
-                error.contains(tool),
+                error.contains(&format!("'{tool}'")),
                 "a missing '{tool}' must be named, got: {error}"
+            );
+            assert!(
+                error.contains("/usr/sbin"),
+                "the refusal must say where the tool was looked for, got: {error}"
             );
             assert!(
                 error.contains("runtimeConfig.networkProxy"),
                 "the refusal must name the config that required it, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_found_tool_that_cannot_start_is_reported_at_its_path() {
+        let factory = |program: &Path, args: &[&str]| {
+            if tool_name(program) == "nsenter" {
+                return Command::new("/mxc-probe-absent-directory/nsenter");
+            }
+            walk_stub(program, args)
+        };
+
+        let error = probe_dependencies_with(
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::unbounded(),
+            lookup_where_only(None),
+            factory,
+        )
+        .expect_err("a tool that cannot start must fail the walk");
+
+        assert!(error.contains("/mxc-test-tools/nsenter"), "got: {error}");
     }
 
     /// The wording differs by use case, so direct egress must not be told to
@@ -4548,7 +4979,8 @@ mod tests {
         let error = probe_dependencies_with(
             PrivateNetworkUse::FirewallEnforcement,
             ProbeBudget::unbounded(),
-            walk_where_only(Some("slirp4netns")),
+            lookup_where_only(Some("slirp4netns")),
+            walk_stub,
         )
         .expect_err("a missing tool must fail the walk");
 
@@ -4563,25 +4995,29 @@ mod tests {
     /// must not collapse the two.
     #[test]
     fn a_tool_that_exits_non_zero_is_reported_as_a_broken_installation() {
-        let factory = |program: &str, _args: &[&str]| {
-            if program == "nsenter" {
-                return walk_stub_for(program, Some("exit 3"));
-            }
-            walk_stub_for(program, None)
-        };
+        let tools = tools_in(Path::new("/mxc-test-tools"));
+        for (broken, path, ..) in tools.tool_probes() {
+            let factory = |program: &Path, _args: &[&str]| {
+                if tool_name(program) == broken {
+                    return walk_stub_for(program, Some("exit 3"));
+                }
+                walk_stub_for(program, None)
+            };
 
-        let error = probe_dependencies_with(
-            PrivateNetworkUse::ProxyOnlyEgress,
-            ProbeBudget::unbounded(),
-            factory,
-        )
-        .expect_err("a broken tool must fail the walk");
+            let error = probe_dependencies_with(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                lookup_where_only(None),
+                factory,
+            )
+            .expect_err("a broken tool must fail the walk");
 
-        assert!(error.contains("nsenter"), "got: {error}");
-        assert!(
-            error.contains("working"),
-            "a broken install must not be reported as missing, got: {error}"
-        );
+            assert!(error.contains(&path.display().to_string()), "got: {error}");
+            assert!(
+                error.contains("working"),
+                "a broken install must not be reported as missing, got: {error}"
+            );
+        }
     }
 
     /// `unshare` on PATH is not enough — an implementation without the flags
@@ -4593,8 +5029,8 @@ mod tests {
             "printf '%s\\n' '--map-current-user'",
             "printf '%s\\n' '--keep-caps'",
         ] {
-            let factory = move |program: &str, _args: &[&str]| {
-                if program == "unshare" {
+            let factory = move |program: &Path, _args: &[&str]| {
+                if tool_name(program) == "unshare" {
                     return walk_stub_for(program, Some(banner));
                 }
                 walk_stub_for(program, None)
@@ -4603,6 +5039,7 @@ mod tests {
             let error = probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
+                lookup_where_only(None),
                 factory,
             )
             .expect_err("an unshare without both flags must fail the walk");
@@ -4755,19 +5192,21 @@ mod tests {
     /// failing hosts that do meet every requirement.
     #[test]
     fn the_whole_dependency_walk_passes_on_a_host_that_meets_every_requirement() {
-        const CHECKED_TOOLS: [&str; 8] = [
+        const CHECKED_TOOLS: [&str; 10] = [
             "slirp4netns",
             "unshare",
             "sh",
             "nsenter",
+            "ip",
             "iptables",
             "ip6tables",
             "iptables-restore",
             "ip6tables-restore",
+            "sleep",
         ];
         let missing: Vec<&str> = CHECKED_TOOLS
             .into_iter()
-            .filter(|tool| !on_path(tool))
+            .filter(|tool| !is_installed(tool))
             .collect();
         let equipped =
             missing.is_empty() && namespaces_are_available() && iptables_uses_nf_tables();
@@ -4965,6 +5404,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.8.10 (nf_tables)\n",
                 &unreachable_lock(&dir),
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -4982,6 +5422,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::ProxyOnlyEgress,
@@ -4991,6 +5432,10 @@ mod tests {
         assert!(
             error.contains("iptables") && error.contains("nf_tables"),
             "the error must name the binary and the backend to switch to: {error}"
+        );
+        assert!(
+            error.contains("/usr/sbin/iptables"),
+            "the error must name the file that was checked: {error}"
         );
     }
 
@@ -5002,6 +5447,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::FirewallEnforcement,
@@ -5025,6 +5471,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::ProxyOnlyEgress,
@@ -5065,6 +5512,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.8.10 (legacy)\n",
                 &lock,
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -5095,6 +5543,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.6.1\n",
                 &unreachable_lock(&dir),
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -5156,6 +5605,20 @@ mod tests {
     /// argument fails, as the real one does when a glob matched nothing and
     /// reached it unexpanded.
     const FAKE_NSENTER: &str = r#"#!/bin/sh
+PATH=$MXC_TEST_STUB_PATH
+case "$*" in
+    *" -- "*/ip" "*)
+        if [ ! -e "$MXC_TEST_LOOPBACK_QUERY" ]; then
+            printf '%s\n' "$*" > "$MXC_TEST_LOOPBACK_QUERY"
+        fi
+        if [ "$(cat "$MXC_TEST_LOOPBACK_STATE")" = "error" ]; then
+            echo "fake nsenter: sandbox network namespace disappeared" >&2
+            exit 1
+        fi
+        cat "$MXC_TEST_LOOPBACK_STATE"
+        exit 0
+        ;;
+esac
 count=$(cat "$MXC_TEST_COUNT" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s' "$count" > "$MXC_TEST_COUNT"
@@ -5168,7 +5631,10 @@ tool=""
 payload=""
 for arg in "$@"; do
     case "$arg" in
-        iptables-restore|ip6tables-restore) tool="${arg%-restore}" ;;
+        */iptables-restore|*/ip6tables-restore)
+            tool="${arg##*/}"
+            tool="${tool%-restore}"
+            ;;
         -*) ;;
         *) [ -f "$arg" ] && payload="$arg" ;;
     esac
@@ -5188,7 +5654,15 @@ exit 0
     /// Signals readiness on the descriptor the supervisor opened for it (9),
     /// then idles so the supervisor's `wait` has something to wait on.
     const FAKE_SLIRP: &str = r#"#!/bin/sh
+PATH=$MXC_TEST_STUB_PATH
 echo $$ > "$MXC_TEST_SLIRP_PID"
+case "$(cat "$MXC_TEST_LOOPBACK_STATE")" in
+    *" inet 127.0.0.1/8 "*) ;;
+    *)
+        echo "fake slirp4netns: started before Bubblewrap initialized loopback" >&2
+        exit 1
+        ;;
+esac
 if [ "${MXC_TEST_SLIRP_DIES:-0}" = "1" ]; then
     echo "fake slirp4netns: exiting before readiness" >&2
     exit 1
@@ -5205,7 +5679,8 @@ exec sleep 30
     /// on demand, so the fail-closed ordering can be observed rather than read.
     struct FakeSupervisor {
         dir: TempDir,
-        child: Child,
+        tools: NetworkTools,
+        child: Supervisor,
         pid_writer: Option<File>,
         _exit_writer: OwnedFd,
     }
@@ -5286,7 +5761,7 @@ exec sleep 30
         fn wait_for_exit(&mut self) -> ExitStatus {
             let deadline = Instant::now() + Duration::from_secs(20);
             while Instant::now() < deadline {
-                if let Some(status) = self.child.try_wait().expect("try_wait") {
+                if let Some(status) = self.child.poll().expect("poll") {
                     return status;
                 }
                 thread::sleep(Duration::from_millis(10));
@@ -5304,7 +5779,7 @@ exec sleep 30
                 if self.signalled_ready() {
                     return;
                 }
-                if let Some(status) = self.child.try_wait().expect("try_wait") {
+                if let Some(status) = self.child.poll().expect("poll") {
                     panic!(
                         "supervisor exited ({status}) without signalling readiness; \
                          stderr: {}, rules run: {}",
@@ -5323,8 +5798,7 @@ exec sleep 30
 
     impl Drop for FakeSupervisor {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            let _ = self.child.terminate();
             // `set -e` bypasses the script's TERM trap, so a stub left running
             // by an aborted supervisor has to be reaped here.
             if let Ok(pid) = fs::read_to_string(self.dir.path().join("slirp.pid")) {
@@ -5344,6 +5818,16 @@ exec sleep 30
         let mut perms = fs::metadata(path).expect("stat stub").permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         fs::set_permissions(path, perms).expect("chmod stub");
+    }
+
+    fn stub_tools(bin: &Path) -> NetworkTools {
+        NetworkTools::find(PrivateNetworkUse::ProxyOnlyEgress, |name| match name {
+            // The supervisor script runs these for real; its other tools are
+            // stubs or are only handed to the fake `nsenter`.
+            "sh" | "sleep" => host_tools::find(name),
+            _ => Ok(bin.join(name)),
+        })
+        .expect("the host has sh and sleep")
     }
 
     fn spawn_fake_supervisor(fail_at: Option<u32>, slirp_dies: bool) -> FakeSupervisor {
@@ -5382,6 +5866,11 @@ exec sleep 30
         let state = dir.path().join("state");
         fs::create_dir_all(&bin).expect("bin dir");
         fs::create_dir_all(&state).expect("state dir");
+        fs::write(
+            dir.path().join("loopback.state"),
+            "1: lo    inet 127.0.0.1/8 scope host lo\n",
+        )
+        .expect("loopback state");
         for &family in families {
             let payloads =
                 render_filter_payloads(plan, ingress, family, TEST_CHAIN, TEST_INGRESS_CHAIN);
@@ -5395,28 +5884,31 @@ exec sleep 30
         }
         install_stub(&bin.join("nsenter"), FAKE_NSENTER);
         install_stub(&bin.join("slirp4netns"), FAKE_SLIRP);
+        let tools = stub_tools(&bin);
 
         let stderr = File::create(dir.path().join("supervisor.stderr")).expect("stderr");
         let (exit_reader, exit_writer) = pipe2(OFlag::O_CLOEXEC).expect("exit pipe");
         let (pid_reader, pid_writer) = pipe2(OFlag::O_CLOEXEC).expect("pid pipe");
 
-        // The stubs shadow the real tools; the rest of PATH still supplies the
-        // coreutils the script uses (`sleep`, `cat`).
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let mut command = Command::new("sh");
+        // A PATH naming no real directory proves the script runs only the tools
+        // it is handed. The stubs restore the test's own PATH for coreutils.
+        let mut command = Command::new(&tools.sh);
         command
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
             .arg(&state)
             .arg("1")
-            .env("PATH", path)
+            .args(tools.supervisor_arguments())
+            .env("PATH", dir.path().join("no-tools"))
+            .env(
+                "MXC_TEST_STUB_PATH",
+                std::env::var_os("PATH").unwrap_or_default(),
+            )
             .env("MXC_TEST_COUNT", dir.path().join("rules.count"))
             .env("MXC_TEST_ARGS", dir.path().join("rules.args"))
             .env("MXC_TEST_PAYLOAD", dir.path().join("rules.payload"))
             .env("MXC_TEST_SLIRP_PID", dir.path().join("slirp.pid"))
+            .env("MXC_TEST_LOOPBACK_QUERY", dir.path().join("loopback.query"))
+            .env("MXC_TEST_LOOPBACK_STATE", dir.path().join("loopback.state"))
             .env(
                 "MXC_TEST_FAIL_AT",
                 fail_at.map(|n| n.to_string()).unwrap_or_default(),
@@ -5432,16 +5924,117 @@ exec sleep 30
                 (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
             ],
         );
-        let child = command.spawn().expect("spawn supervisor");
+        let child = Supervisor::new(command.spawn().expect("spawn supervisor"));
         drop(exit_reader);
         drop(pid_reader);
 
         FakeSupervisor {
             dir,
+            tools,
             child,
             pid_writer: Some(File::from(pid_writer)),
             _exit_writer: exit_writer,
         }
+    }
+
+    #[test]
+    fn slirp_waits_for_bubblewrap_to_initialize_loopback() {
+        for pending in ["", "1: lo    inet 127.0.0.2/8 scope host lo\n"] {
+            let mut supervisor = spawn_fake_supervisor(None, false);
+            let state = supervisor.dir.path().join("loopback.state");
+            fs::write(&state, pending).expect("pending loopback state");
+            supervisor.publish_sandbox_pid();
+
+            wait_for_file(
+                supervisor.dir.path().join("loopback.query"),
+                &mut supervisor.child,
+                &supervisor.dir.path().join("supervisor.stderr"),
+                "loopback readiness query",
+                Duration::from_secs(20),
+            )
+            .expect("loopback must be queried before slirp starts");
+            assert!(
+                !supervisor.dir.path().join("slirp.pid").exists(),
+                "slirp started while loopback was not ready: {}",
+                supervisor.stderr()
+            );
+            assert_eq!(supervisor.rule_invocations(), 0);
+            assert!(!supervisor.signalled_ready());
+            let query = fs::read_to_string(supervisor.dir.path().join("loopback.query"))
+                .expect("query arguments");
+            assert_eq!(
+                query.trim(),
+                format!(
+                    "--net=/proc/4242/ns/net -- {} -4 -o address show dev lo up",
+                    supervisor.tools.ip.display()
+                )
+            );
+
+            fs::write(&state, "1: lo    inet 127.0.0.1/8 scope host lo\n")
+                .expect("initialized loopback state");
+            supervisor.wait_until_ready();
+            assert_eq!(supervisor.rule_invocations(), 2);
+        }
+    }
+
+    #[test]
+    fn a_failed_loopback_query_stops_startup_before_slirp() {
+        let mut supervisor = spawn_fake_supervisor(None, false);
+        fs::write(supervisor.dir.path().join("loopback.state"), "error")
+            .expect("failed loopback state");
+        supervisor.publish_sandbox_pid();
+
+        let status = supervisor.wait_for_exit();
+        assert!(!status.success(), "{status}");
+        assert!(
+            supervisor
+                .stderr()
+                .contains("network namespace disappeared"),
+            "{}",
+            supervisor.stderr()
+        );
+        assert!(
+            supervisor
+                .stderr()
+                .contains("failed to query Bubblewrap loopback readiness"),
+            "{}",
+            supervisor.stderr()
+        );
+        assert!(
+            !supervisor.dir.path().join("slirp.pid").exists(),
+            "slirp must not start after a failed loopback query"
+        );
+        assert_eq!(supervisor.rule_invocations(), 0);
+        assert!(!supervisor.signalled_ready());
+    }
+
+    #[test]
+    fn pending_loopback_uses_the_existing_network_startup_deadline() {
+        let mut supervisor = spawn_fake_supervisor(None, false);
+        fs::write(supervisor.dir.path().join("loopback.state"), "")
+            .expect("pending loopback state");
+        supervisor.publish_sandbox_pid();
+        wait_for_file(
+            supervisor.dir.path().join("loopback.query"),
+            &mut supervisor.child,
+            &supervisor.dir.path().join("supervisor.stderr"),
+            "loopback readiness query",
+            Duration::from_secs(20),
+        )
+        .expect("loopback query must start before the deadline is tested");
+
+        let error = wait_for_file(
+            supervisor.state_dir().join("slirp.ready"),
+            &mut supervisor.child,
+            &supervisor.dir.path().join("supervisor.stderr"),
+            "slirp4netns startup and network rule installation",
+            Duration::ZERO,
+        )
+        .expect_err("pending loopback must not bypass the network startup deadline");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(!supervisor.dir.path().join("slirp.pid").exists());
+        assert_eq!(supervisor.rule_invocations(), 0);
+        assert!(!supervisor.signalled_ready());
     }
 
     /// An ordinary policy still fits one transaction per family, and both hooks
@@ -5864,8 +6457,13 @@ exec sleep 30
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
             .spawn()
+            .map(Supervisor::new)
             .expect("spawn supervisor");
 
+        namespace_with(state_dir, supervisor)
+    }
+
+    fn namespace_with(state_dir: TempDir, supervisor: Supervisor) -> ProxyNetworkNamespace {
         ProxyNetworkNamespace {
             state_dir,
             supervisor,
@@ -5880,10 +6478,191 @@ exec sleep 30
         }
     }
 
+    /// `nsenter` stand-in that never returns, like a query stuck in a wedged
+    /// namespace. It `exec`s, so the recorded PID is the blocked process itself.
+    const BLOCKING_NSENTER: &str =
+        "#!/bin/sh\necho $$ > \"$MXC_TEST_BLOCKED_PID\"\nexec sleep 300\n";
+
+    fn process_is_gone(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z')),
+        }
+    }
+
+    /// Drives the real supervisor script and the production `attach` and
+    /// `stop` through a loopback query that never returns: the deadline must
+    /// apply, the workload gate must stay closed, and the blocked child -- not
+    /// just the supervisor shell -- must be gone afterwards.
+    #[test]
+    fn a_blocked_loopback_query_fails_attach_without_opening_the_gate_or_leaking_children() {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let bin = state_dir.path().join("bin");
+        fs::create_dir_all(&bin).expect("bin dir");
+        install_stub(&bin.join("nsenter"), BLOCKING_NSENTER);
+        let tools = stub_tools(&bin);
+        let blocked_pid_path = state_dir.path().join("blocked.pid");
+        let stderr = File::create(state_dir.path().join("supervisor.stderr")).expect("stderr");
+        let (exit_reader, exit_writer) = pipe2(OFlag::O_CLOEXEC).expect("exit pipe");
+        let (pid_reader, pid_writer) = pipe2(OFlag::O_CLOEXEC).expect("pid pipe");
+
+        let mut command = Command::new(&tools.sh);
+        command
+            .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
+            .arg(state_dir.path())
+            .arg("1")
+            .args(tools.supervisor_arguments())
+            .env("MXC_TEST_BLOCKED_PID", &blocked_pid_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .process_group(0);
+        remap_descriptors(
+            &mut command,
+            [
+                (pid_reader.as_raw_fd(), SUPERVISOR_PID_FD),
+                (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
+            ],
+        );
+        let supervisor = Supervisor::new(command.spawn().expect("spawn supervisor"));
+        drop(exit_reader);
+        drop(pid_reader);
+
+        let mut network = ProxyNetworkNamespace {
+            state_dir,
+            supervisor,
+            exit_writer: Some(exit_writer),
+            pid_writer: Some(pid_writer),
+            userns: Some(File::open("/dev/null").expect("stand-in namespace handle")),
+            hosts: None,
+            resolver: None,
+            liveness_reader: None,
+            transactions: 0,
+            script_timeout_ms: 0,
+        };
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut startup = network
+            .configure_bwrap(&mut Vec::new(), &mut logger)
+            .expect("startup descriptors");
+        let gate = startup.gate_reader.take().expect("gate reader");
+        set_nonblocking(gate.as_raw_fd()).expect("nonblocking gate");
+        let mut gate = File::from(gate);
+
+        // The runner only calls `release` after `attach` succeeds.
+        let error = network
+            .attach_within(4242, Duration::from_secs(3), &mut logger)
+            .expect_err("a blocked loopback query must fail the startup");
+        assert!(
+            error.contains(
+                "timed out waiting for slirp4netns startup and network rule installation"
+            ),
+            "{error}"
+        );
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            gate.read(&mut byte)
+                .expect_err("the gate is still held")
+                .kind(),
+            ErrorKind::WouldBlock,
+            "nothing may open the workload gate after a failed attach"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !blocked_pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let blocked_pid: u32 = fs::read_to_string(&blocked_pid_path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the loopback query must have started: {error}; supervisor stderr: {}",
+                    stderr_detail(&network.state_dir.path().join("supervisor.stderr"))
+                )
+            })
+            .trim()
+            .parse()
+            .expect("blocked pid");
+        network.stop(&mut logger);
+        assert!(
+            network.supervisor.poll().expect("poll").is_some(),
+            "the supervisor must be reaped"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_is_gone(blocked_pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            process_is_gone(blocked_pid),
+            "the blocked nsenter child {blocked_pid} outlived the supervisor"
+        );
+
+        drop(startup);
+        assert_eq!(
+            gate.read(&mut byte).expect("the gate writer is closed"),
+            0,
+            "the gate must close without ever having been released"
+        );
+    }
+
+    /// A supervisor that exits while a child of its group is still blocked
+    /// must not leave that child behind, whichever path observes the exit.
+    #[test]
+    fn a_supervisor_that_exits_early_does_not_leave_its_group_running() {
+        for observe in ["poll", "stop"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pid_path = dir.path().join("blocked.pid");
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "sleep 300 & echo $! > \"$1\"", "mxc-test-supervisor"])
+                .arg(&pid_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0);
+            let mut supervisor = Supervisor::new(command.spawn().expect("spawn supervisor"));
+
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let blocked_pid: u32 = loop {
+                if let Ok(pid) = fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = pid.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(Instant::now() < deadline, "the blocked child never started");
+                thread::sleep(Duration::from_millis(10));
+            };
+
+            if observe == "poll" {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while supervisor.poll().expect("poll").is_none() {
+                    assert!(Instant::now() < deadline, "supervisor did not exit");
+                    thread::sleep(Duration::from_millis(10));
+                }
+            } else {
+                let mut network =
+                    namespace_with(tempfile::tempdir().expect("state dir"), supervisor);
+                let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+                network.stop(&mut logger);
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !process_is_gone(blocked_pid) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                process_is_gone(blocked_pid),
+                "{observe}: the blocked child {blocked_pid} outlived the supervisor"
+            );
+        }
+    }
+
     fn await_exit(namespace: &mut ProxyNetworkNamespace) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if namespace.supervisor.try_wait().expect("try_wait").is_some() {
+            if namespace.supervisor.poll().expect("poll").is_some() {
                 return;
             }
             thread::sleep(Duration::from_millis(10));

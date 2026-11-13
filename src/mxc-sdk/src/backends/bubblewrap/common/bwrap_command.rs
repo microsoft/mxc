@@ -10,7 +10,6 @@
 use std::collections::HashSet;
 
 use crate::mxc_common::filesystem_resolve::FsIntent;
-#[cfg(any(target_os = "linux", test))]
 use crate::mxc_common::models::ContainerPolicy;
 use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ProxyAddress};
 use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
@@ -22,90 +21,466 @@ use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 /// environment value can also be. Shared so the two cannot drift apart.
 pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 
-/// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
-/// deny-by-default baseline. Mirrors the seatbelt backend's
-/// `SYSTEM_READ_ALLOW` (`src/backends/seatbelt/common/src/profile_builder.rs`):
-/// just enough of the host for a shell, the dynamic linker, libc, and
-/// system tools to work. Everything else — including the caller's `$HOME`,
-/// `/root`, `/opt`, `/var`, `/sys`, `/mnt`, `/media`, and the rest of
-/// `/run` — is invisible until the caller opts in via `readonlyPaths` /
-/// `readwritePaths`.
-///
-/// Notes:
-/// - Missing paths are silently skipped because the runner emits these
-///   via `--ro-bind-try` (e.g. `/lib32` does not exist on x86_64-only
-///   systems; `/run/systemd/resolve` does not exist on hosts without
-///   systemd-resolved).
-/// - On merged-usr distros (modern Debian, Ubuntu, Fedora, Arch) the
-///   top-level `/bin`, `/sbin`, `/lib*` entries are symlinks pointing
-///   under `/usr`. `bwrap` follows the source-side symlink, so the
-///   bind-mount still succeeds and the sandbox sees `/bin/sh` etc.
-/// - We deliberately do NOT bind `/usr` wholesale: that would expose
-///   `/usr/local`, which contains locally-installed (and sometimes
-///   user-managed) software. Callers who need `/usr/local` must list it
-///   explicitly in `readonlyPaths`.
-/// - We deliberately do NOT bind `/run` wholesale: `/run/user/<uid>`
-///   holds the caller's D-Bus session socket, keyring sockets, and
-///   ssh-agent socket. We only bind the well-known DNS stub-resolver
-///   directories so the resolver file is *readable* when `/etc/resolv.conf`
-///   is a symlink (the default on systemd-resolved hosts).
-/// - To keep that file readable when `/etc/resolv.conf` points *outside*
-///   those dirs, we also synthesise a `/var/run -> /run` compat symlink (for
-///   `/var/run/...`-routed targets — older RHEL/CentOS-era and some
-///   container images) and `--ro-bind-try` `/mnt/wsl/resolv.conf` (for
-///   WSL). Neither exposes host `/var` or `/mnt` contents — only the
-///   resolver path itself.
-/// - Readable is not reachable. A nameserver on the host's loopback — the
-///   systemd-resolved stub at `127.0.0.53`, a local `dnsmasq` — belongs to
-///   the sandbox's own empty loopback once it is in a private network
-///   namespace, so these binds alone leave names unresolvable. Reaching such
-///   a resolver is what `proxy_network::ResolverPin` does, by pointing the
-///   sandbox at slirp's forwarder.
-/// - `/etc` is bound whole because cherry-picking files (`passwd`,
-///   `nsswitch.conf`, `ssl/`, `ld.so.conf*`, …) is fragile and breaks
-///   tools that read other config files. Files with sensitive contents
-///   (`/etc/shadow`, `/etc/sudoers`, `/etc/ssh/ssh_host_*_key`) are mode
-///   `0400` / `0640` root and remain unreadable to a non-root caller —
-///   user-namespace UID mapping does not bypass kernel DAC.
-const BASELINE_RO_BIND_PATHS: &[&str] = &[
-    // Top-level executable / library dirs (symlinks under /usr on
-    // merged-usr distros, real directories on Alpine and older Debian).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyMount {
+    pub source: String,
+    pub destination: String,
+    pub intent: FsIntent,
+}
+
+pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
+    crate::mxc_common::filesystem_resolve::resolve_mount_order(policy)
+        .into_iter()
+        .map(|mount| PolicyMount {
+            destination: mount.path.clone(),
+            source: mount.path,
+            intent: mount.intent,
+        })
+        .collect()
+}
+
+pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/bin",
     "/sbin",
     "/lib",
     "/lib32",
     "/lib64",
     "/libx32",
-    // /usr subpaths — aligned with seatbelt's baseline, intentionally
-    // excluding /usr/local.
     "/usr/bin",
     "/usr/sbin",
     "/usr/lib",
     "/usr/lib32",
     "/usr/lib64",
+    "/usr/libx32",
     "/usr/libexec",
     "/usr/share",
-    // System configuration (ld.so config, certs, resolv.conf, hosts,
-    // passwd, group, machine-id, …). See module-level note on DAC.
     "/etc",
-    // DNS stub-resolver directories. /etc/resolv.conf is usually a
-    // symlink into one of these on modern Linux distros (systemd-resolved
-    // / NetworkManager / resolvconf). We bind the narrow subdirectories
-    // rather than all of /run to avoid exposing /run/user/<uid>.
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BaselineLink {
+    pub path: &'static str,
+    pub relative_target: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn baseline_links(
+    host_link_target: impl Fn(&str) -> std::io::Result<Option<std::path::PathBuf>>,
+) -> Result<Vec<BaselineLink>, String> {
+    let refuse = |reason: String| {
+        format!(
+            "{reason}. Refusing to start: mounting it apart from its target would let it \
+             bypass filesystem.deniedPaths."
+        )
+    };
+    let targets = BASELINE_RO_BIND_PATHS
+        .iter()
+        .map(|path| {
+            host_link_target(path)
+                .map_err(|error| refuse(format!("could not resolve the host's {path} ({error})")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let entries = || BASELINE_RO_BIND_PATHS.iter().zip(&targets);
+    let inside_bound_entry = |target: &std::path::Path| {
+        entries().any(|(entry, link)| link.is_none() && target.starts_with(entry))
+    };
+    let mut links = Vec::new();
+    for (&path, target) in entries() {
+        let Some(target) = target
+            .as_deref()
+            .filter(|target| inside_bound_entry(target))
+        else {
+            continue;
+        };
+
+        // bwrap cannot create later mounts through a sandbox symlink with
+        // an absolute target.
+        let relative_target = std::path::Path::new(path)
+            .parent()
+            .and_then(|parent| relative_path(parent, target))
+            .ok_or_else(|| {
+                refuse(format!(
+                    "the host's {path} points to {}, which cannot be written as a relative link",
+                    target.display()
+                ))
+            })?;
+        links.push(BaselineLink {
+            path,
+            relative_target,
+        });
+    }
+    Ok(links)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn relative_path(from: &std::path::Path, to: &std::path::Path) -> Option<String> {
+    if !from.has_root() || !to.has_root() {
+        return None;
+    }
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - shared];
+    for part in &to[shared..] {
+        parts.push(part.as_os_str().to_str()?);
+    }
+    Some(parts.join("/")).filter(|path| !path.is_empty())
+}
+
+/// A symlink the sandbox needs so that a grant's written path reaches its real path.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GrantLink {
+    pub path: String,
+
+    /// The real path the link leads to.
+    pub target: String,
+
+    pub passes_through: Vec<GrantLink>,
+    pub climbs_out_of: Vec<String>,
+}
+
+/// A `readwritePaths` or `readonlyPaths` entry whose spelling differs from its real path.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AliasedGrant {
+    pub real_path: String,
+
+    /// Each host symlink on the entry's path, at a location below real directories.
+    pub links: Vec<GrantLink>,
+
+    /// The link one level below the first of `links`, for when the sandbox has its own directory or symlink there.
+    pub inner: Option<GrantLink>,
+
+    pub climbs_out_of: Vec<String>,
+}
+
+/// What a mount argument leaves at its destination.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxEntry<'a> {
+    /// A bind of the same host path, which shows the host's own links.
+    HostBind,
+
+    Symlink {
+        target: &'a str,
+    },
+
+    /// Content that links must not be added to: `/dev`, `/proc`, a file, a
+    /// read-only directory, or a bind of a different host path.
+    Closed,
+
+    Tmpfs,
+
+    /// A directory bwrap creates inside whatever already holds its parent.
+    Directory,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct GrantLinkPlan {
+    pub args: Vec<String>,
+    pub unavailable: Vec<GrantLink>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkPlacement<'a> {
+    Create,
+    Present,
+    HostLink,
+
+    /// The sandbox creates a directory at the location, so only links inside it can be added.
+    CreateInside,
+
+    SandboxLink {
+        target: &'a str,
+    },
+
+    Blocked,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn plan_grant_links(mount_args: &[String], grants: &[AliasedGrant]) -> GrantLinkPlan {
+    let mut plan = GrantLinkPlan::default();
+    if grants.is_empty() {
+        return plan;
+    }
+    let layout = sandbox_layout(mount_args);
+    let place = |path: &str| match &layout {
+        Some(layout) => link_placement(std::path::Path::new(path), layout),
+        None => LinkPlacement::Blocked,
+    };
+    let mut reachable = std::collections::HashMap::new();
+    for grant in grants {
+        for directory in &grant.climbs_out_of {
+            if !ensure_directory(directory, &place, &mut reachable, &mut plan.args) {
+                plan.unavailable.push(GrantLink {
+                    path: directory.clone(),
+                    target: grant.real_path.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        for link in &grant.links {
+            let next_level;
+            let (link, placement) = match place(&link.path) {
+                LinkPlacement::CreateInside => {
+                    next_level = inner_link_under(grant, link, &link.path);
+                    match next_level.as_ref().map(|next| (next, place(&next.path))) {
+                        Some((
+                            next,
+                            placement @ (LinkPlacement::Create
+                            | LinkPlacement::Present
+                            | LinkPlacement::HostLink),
+                        )) => (next, placement),
+                        _ => (link, LinkPlacement::Blocked),
+                    }
+                }
+                LinkPlacement::SandboxLink { target } => {
+                    let leads_to = sandbox_link_target(&link.path, target);
+                    if leads_to == link.target {
+                        (link, LinkPlacement::Present)
+                    } else {
+                        next_level = inner_link_under(grant, link, &leads_to);
+
+                        // Whatever the host has under the sandbox link's target is not the grant.
+                        match next_level.as_ref().map(|next| (next, place(&next.path))) {
+                            Some((next, LinkPlacement::Create)) => (next, LinkPlacement::Create),
+                            _ => (link, LinkPlacement::Blocked),
+                        }
+                    }
+                }
+                placement => (link, placement),
+            };
+            if reachable.contains_key(link.path.as_str()) {
+                continue;
+            }
+            if !make_reachable(link, placement, &place, &mut reachable, &mut plan.args) {
+                plan.unavailable.push(link.clone());
+            }
+        }
+    }
+    plan
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn make_reachable<'a>(
+    link: &GrantLink,
+    placement: LinkPlacement<'a>,
+    place: &dyn Fn(&str) -> LinkPlacement<'a>,
+    reachable: &mut std::collections::HashMap<String, bool>,
+    args: &mut Vec<String>,
+) -> bool {
+    let reaches = match placement {
+        LinkPlacement::Present => true,
+        LinkPlacement::Create => match link_text(link) {
+            Some(text) => {
+                args.extend(["--symlink".into(), text, link.path.clone()]);
+                true
+            }
+            None => false,
+        },
+        LinkPlacement::HostLink => {
+            link.climbs_out_of
+                .iter()
+                .all(|directory| ensure_directory(directory, place, reachable, args))
+                && link.passes_through.iter().all(|hop| {
+                    // Only the link's target and its parents exist in the sandbox for a hop to lead to.
+                    std::path::Path::new(&link.target).starts_with(&hop.target)
+                        && match reachable.get(hop.path.as_str()).copied() {
+                            Some(reaches) => reaches,
+                            None => make_reachable(hop, place(&hop.path), place, reachable, args),
+                        }
+                })
+        }
+        LinkPlacement::SandboxLink { target } => {
+            sandbox_link_target(&link.path, target) == link.target
+        }
+        LinkPlacement::CreateInside | LinkPlacement::Blocked => false,
+    };
+    reachable.insert(link.path.clone(), reaches);
+    reaches
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn ensure_directory<'a>(
+    directory: &str,
+    place: &dyn Fn(&str) -> LinkPlacement<'a>,
+    reachable: &mut std::collections::HashMap<String, bool>,
+    args: &mut Vec<String>,
+) -> bool {
+    if let Some(&exists) = reachable.get(directory) {
+        return exists;
+    }
+    let exists = match place(directory) {
+        LinkPlacement::Present | LinkPlacement::HostLink | LinkPlacement::CreateInside => true,
+        LinkPlacement::Create => {
+            args.extend(["--dir".into(), directory.into()]);
+            true
+        }
+        LinkPlacement::SandboxLink { .. } | LinkPlacement::Blocked => false,
+    };
+    reachable.insert(directory.into(), exists);
+    exists
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn inner_link_under(grant: &AliasedGrant, link: &GrantLink, directory: &str) -> Option<GrantLink> {
+    let inner = grant.inner.as_ref()?;
+    let name = inner.path.strip_prefix(&link.path)?.strip_prefix('/')?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(GrantLink {
+        path: format!("{}/{name}", directory.trim_end_matches('/')),
+        target: inner.target.clone(),
+        ..Default::default()
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sandbox_link_target(location: &str, target: &str) -> String {
+    let parent = if target.starts_with('/') {
+        ""
+    } else {
+        location.rsplit_once('/').map_or("", |(parent, _)| parent)
+    };
+    let mut parts = Vec::new();
+    for part in parent.split('/').chain(target.split('/')) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// The entry each of `mount_args` leaves at its destination, or `None` for an
+/// option this does not know.
+#[cfg(any(target_os = "linux", test))]
+fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>> {
+    let mut layout = Vec::new();
+    let mut args = mount_args.iter().map(String::as_str);
+    while let Some(option) = args.next() {
+        let entry = match option {
+            "--unshare-user" | "--unshare-pid" | "--unshare-ipc" | "--unshare-uts"
+            | "--unshare-net" | "--die-with-parent" => continue,
+            "--dev" | "--proc" | "--remount-ro" => SandboxEntry::Closed,
+            "--tmpfs" => SandboxEntry::Tmpfs,
+            "--dir" => SandboxEntry::Directory,
+            "--symlink" => SandboxEntry::Symlink {
+                target: args.next()?,
+            },
+            "--file" => {
+                args.next()?;
+                SandboxEntry::Closed
+            }
+            "--bind" | "--ro-bind" | "--ro-bind-try" => {
+                let source = args.next()?;
+                let destination = args.next()?;
+                let entry = if source == destination {
+                    SandboxEntry::HostBind
+                } else {
+                    SandboxEntry::Closed
+                };
+                layout.push((destination, entry));
+                continue;
+            }
+            _ => return None,
+        };
+        layout.push((args.next()?, entry));
+    }
+    Some(layout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn link_placement<'a>(
+    link: &std::path::Path,
+    layout: &[(&str, SandboxEntry<'a>)],
+) -> LinkPlacement<'a> {
+    // The sandbox root is a tmpfs.
+    let mut placement = LinkPlacement::Create;
+    for &(path, entry) in layout {
+        let path = std::path::Path::new(path);
+        placement = if link == path {
+            match entry {
+                SandboxEntry::HostBind => LinkPlacement::Present,
+                SandboxEntry::Symlink { target } => LinkPlacement::SandboxLink { target },
+                SandboxEntry::Tmpfs => LinkPlacement::CreateInside,
+                SandboxEntry::Directory if placement == LinkPlacement::Create => {
+                    LinkPlacement::CreateInside
+                }
+                SandboxEntry::Directory => placement,
+                SandboxEntry::Closed => LinkPlacement::Blocked,
+            }
+        } else if link.starts_with(path) {
+            // A mount above the link hides whatever was placed under it before.
+            match entry {
+                SandboxEntry::HostBind => LinkPlacement::HostLink,
+                SandboxEntry::Tmpfs => LinkPlacement::Create,
+                SandboxEntry::Directory => placement,
+                SandboxEntry::Symlink { .. } | SandboxEntry::Closed => LinkPlacement::Blocked,
+            }
+        } else if path.starts_with(link) && placement == LinkPlacement::Create {
+            // bwrap creates the link's location as a directory to hold this entry.
+            LinkPlacement::CreateInside
+        } else {
+            continue;
+        };
+    }
+    placement
+}
+
+/// The link's target relative to its directory, since bwrap cannot create later
+/// mounts through a sandbox symlink with an absolute target.
+#[cfg(any(target_os = "linux", test))]
+fn link_text(link: &GrantLink) -> Option<String> {
+    let directory = std::path::Path::new(&link.path).parent()?;
+    let target = std::path::Path::new(&link.target);
+    if directory == target {
+        return Some(".".into());
+    }
+    relative_path(directory, target)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const RESOLVER_DIRS: &[&str] = &[
     "/run/systemd/resolve",
     "/run/NetworkManager",
     "/run/resolvconf",
-    // WSL generates its resolv.conf here and points /etc/resolv.conf at
-    // it. Bind just this single file (not /mnt) so DNS works under WSL
-    // without exposing the Windows drive mounts. Skipped on non-WSL hosts
-    // because the baseline is emitted via `--ro-bind-try`.
-    "/mnt/wsl/resolv.conf",
 ];
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const WSL_RESOLV_CONF: &str = "/mnt/wsl/resolv.conf";
 
 /// The compatibility symlink the sandbox gets in place of a real `/var/run`,
 /// and the directory it points at.
 pub(crate) const COMPAT_RUN_LINK: &str = "/var/run";
 pub(crate) const COMPAT_RUN_TARGET: &str = "/run";
+
+#[cfg(target_os = "linux")]
+pub(crate) fn path_intent(
+    policy: &ContainerPolicy,
+    target: impl AsRef<std::path::Path>,
+) -> Option<FsIntent> {
+    let target = target.as_ref();
+    crate::mxc_common::filesystem_resolve::resolve_mount_order(policy)
+        .iter()
+        .rfind(|mount| target.starts_with(&mount.path))
+        .map(|mount| mount.intent)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn path_is_denied(
+    policy: &ContainerPolicy,
+    target: impl AsRef<std::path::Path>,
+) -> bool {
+    path_intent(policy, target) == Some(FsIntent::Denied)
+}
 
 /// An absolute resolver target with no overlapping known mount destination.
 /// This lexical check does not resolve host or sandbox symlinks.
@@ -130,6 +505,8 @@ pub(crate) fn resolver_target_without_matching_mount(
     for mount in BASELINE_RO_BIND_PATHS
         .iter()
         .copied()
+        .chain(RESOLVER_DIRS.iter().copied())
+        .chain([WSL_RESOLV_CONF])
         .chain(["/dev", "/proc", "/tmp", "/var/run"])
         .chain(policy_mounts.clone())
     {
@@ -195,7 +572,8 @@ impl ResolvedNetworkMode {
 /// Refuse an inbound posture Bubblewrap cannot honor.
 ///
 /// The backend declares `INGRESS_DEFAULT` and `HOST_LOOPBACK` in
-/// [`network_policy_support`], which tells shared validation it understands
+/// [`crate::mxc_common::sandbox_process::SandboxBackend::network_policy_support`],
+/// which tells shared validation it understands
 /// those fields — not that it can satisfy both of their values. Shared
 /// validation therefore stops checking them and these rejections become the
 /// only thing standing between an unsupported value and a silent drop, so they
@@ -368,7 +746,7 @@ fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
 }
 
 /// Build the complete `bwrap` argument list, masking **every** denied path as a
-/// directory (`--tmpfs`).
+/// directory with a read-only tmpfs.
 ///
 /// This is the pure, classification-free entry point: it performs no filesystem
 /// I/O and so stays unit-testable on every host. Unit tests and any caller that
@@ -403,15 +781,34 @@ pub fn build_args_classified(
     denied_files: &HashSet<String>,
 ) -> Vec<String> {
     let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
-    build_args_classified_with_mode(request, proxy_address, denied_files, network_mode)
+    build_args_classified_with_mode(
+        request,
+        proxy_address,
+        denied_files,
+        network_mode,
+        None,
+        &[],
+        &[],
+        &policy_mounts(&request.policy),
+        true,
+        |_| Vec::new(),
+    )
 }
 
-/// Build Bubblewrap arguments using a previously resolved network mode.
+/// `grant_links` receives the mount arguments emitted before the grant links
+/// and returns the arguments that recreate those links.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_args_classified_with_mode(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     denied_files: &HashSet<String>,
     network_mode: ResolvedNetworkMode,
+    seccomp_fd: Option<i32>,
+    baseline_links: &[BaselineLink],
+    resolver_args: &[String],
+    mounts: &[PolicyMount],
+    private_tmp: bool,
+    grant_links: impl FnOnce(&[String]) -> Vec<String>,
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = Vec::new();
@@ -447,7 +844,16 @@ pub(crate) fn build_args_classified_with_mode(
     // so they always win when paths overlap (e.g. `readwritePaths:
     // ["/tmp/workspace"]` must beat the standard `--tmpfs /tmp`).
     for path in BASELINE_RO_BIND_PATHS {
-        args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
+        // Binding a host symlink would mount its target a second time, where
+        // a mask on the target's real path does not reach.
+        match baseline_links.iter().find(|link| link.path == *path) {
+            Some(link) => args.extend([
+                "--symlink".into(),
+                link.relative_target.clone(),
+                (*path).into(),
+            ]),
+            None => args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]),
+        }
     }
 
     // Recreate the standard `/var/run -> /run` compatibility symlink. Some
@@ -467,7 +873,10 @@ pub(crate) fn build_args_classified_with_mode(
     // paths under /dev, /proc, or /tmp survive).
     args.extend(["--dev".into(), "/dev".into()]);
     args.extend(["--proc".into(), "/proc".into()]);
-    args.extend(["--tmpfs".into(), "/tmp".into()]);
+    if private_tmp {
+        args.extend(["--tmpfs".into(), "/tmp".into()]);
+    }
+    args.extend_from_slice(resolver_args);
 
     // Policy mounts, emitted in most-specific-path-wins order so a deeper path
     // always overrides a shallower ancestor with a different intent regardless
@@ -478,25 +887,49 @@ pub(crate) fn build_args_classified_with_mode(
     // precedence. `resolve_mount_order` assumes object normalization already ran
     // (it does, in the runner before `build_args`), so exact same-path conflicts
     // are already collapsed to the strictest intent.
-    for mount in crate::mxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+    let mut denied_directories = Vec::new();
+    for mount in mounts {
         match mount.intent {
             // Read-write: override the base ro-bind and any standard mount.
             FsIntent::ReadWrite => {
-                args.extend(["--bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend([
+                    "--bind".into(),
+                    mount.source.clone(),
+                    mount.destination.clone(),
+                ]);
             }
             // Read-only: already covered by the base ro-bind, but listed
             // explicitly so the intent is clear and it overrides any rw parent.
             FsIntent::ReadOnly => {
-                args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend([
+                    "--ro-bind".into(),
+                    mount.source.clone(),
+                    mount.destination.clone(),
+                ]);
             }
             FsIntent::Denied => {
-                if denied_files.contains(&mount.path) {
-                    args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path.clone()]);
+                if denied_files.contains(&mount.source) {
+                    args.extend([
+                        "--ro-bind".into(),
+                        "/dev/null".into(),
+                        mount.destination.clone(),
+                    ]);
                 } else {
-                    args.extend(["--tmpfs".into(), mount.path.clone()]);
+                    args.extend(["--tmpfs".into(), mount.destination.clone()]);
+                    denied_directories.push(&mount.destination);
                 }
             }
         }
+    }
+
+    // Links are recreated after the policy mounts, which could otherwise hide
+    // them, and before the masks they may sit in become read-only.
+    let grant_link_args = grant_links(&args);
+    args.extend(grant_link_args);
+
+    // Child mounts need their mountpoints created before the masks become read-only.
+    for destination in denied_directories {
+        args.extend(["--remount-ro".into(), destination.clone()]);
     }
 
     // -- Working directory -------------------------------------------------
@@ -533,6 +966,10 @@ pub(crate) fn build_args_classified_with_mode(
         }
     }
 
+    if let Some(fd) = seccomp_fd {
+        args.extend(["--seccomp".into(), fd.to_string()]);
+    }
+
     // -- Command -----------------------------------------------------------
     args.extend(COMMAND_TAIL.iter().map(|arg| arg.to_string()));
     args.push(request.script_code.clone());
@@ -550,6 +987,122 @@ mod tests {
             working_directory: "/home/user".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn seccomp_descriptor_precedes_the_command_in_every_network_mode() {
+        let request = base_request();
+        let proxy = ProxyAddress::new("127.0.0.1".into(), 3128);
+        for (mode, proxy_address) in [
+            (ResolvedNetworkMode::Isolated, None),
+            (ResolvedNetworkMode::FirewallEnforced, None),
+            (ResolvedNetworkMode::ProxyOnly, Some(&proxy)),
+        ] {
+            let args = build_args_classified_with_mode(
+                &request,
+                proxy_address,
+                &HashSet::new(),
+                mode,
+                Some(17),
+                &[],
+                &[],
+                &policy_mounts(&request.policy),
+                true,
+                |_| Vec::new(),
+            );
+            assert_eq!(
+                &args[args.len() - 6..],
+                ["--seccomp", "17", "--", "sh", "-c", "echo hello"],
+                "{mode:?}"
+            );
+            assert_eq!(args.iter().filter(|arg| *arg == "--seccomp").count(), 1);
+            assert!(!args.iter().any(|arg| arg == "--add-seccomp-fd"));
+        }
+    }
+
+    #[test]
+    fn resolver_mounts_follow_virtual_filesystems_and_precede_policy() {
+        let mut request = base_request();
+        request.policy.denied_paths = vec!["/run".into()];
+        let resolver = vec![
+            "--tmpfs".into(),
+            "/run/resolver".into(),
+            "--file".into(),
+            "19".into(),
+            "/run/resolver/resolv.conf".into(),
+            "--remount-ro".into(),
+            "/run/resolver".into(),
+        ];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[],
+            &resolver,
+            &policy_mounts(&request.policy),
+            true,
+            |_| Vec::new(),
+        );
+        let temporary = args
+            .windows(2)
+            .position(|args| args == ["--tmpfs", "/tmp"])
+            .unwrap();
+        let file = args
+            .windows(2)
+            .position(|args| args == ["--file", "19"])
+            .unwrap();
+        let denial = args
+            .windows(2)
+            .position(|args| args == ["--tmpfs", "/run"])
+            .unwrap();
+        assert!(temporary < file, "private /tmp must not hide the resolver");
+        assert!(
+            file < denial,
+            "the resolver must not override filesystem policy"
+        );
+    }
+
+    #[test]
+    fn seccomp_preserves_option_like_operands_in_generated_arguments() {
+        let mut request = base_request();
+        request.env = Some(vec![
+            "FIRST=--seccomp".into(),
+            "SECOND=--add-seccomp-fd".into(),
+            "THIRD=--".into(),
+        ]);
+        request.script_code = "--seccomp".into();
+        let mut expected = build_args(&request, None);
+        let command_index = expected.len() - 4;
+        expected.splice(
+            command_index..command_index,
+            ["--seccomp".into(), "17".into()],
+        );
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            Some(17),
+            &[],
+            &[],
+            &policy_mounts(&request.policy),
+            true,
+            |_| Vec::new(),
+        );
+        assert_eq!(args, expected);
+        for (key, value) in [
+            ("FIRST", "--seccomp"),
+            ("SECOND", "--add-seccomp-fd"),
+            ("THIRD", "--"),
+        ] {
+            assert!(args.windows(3).any(|args| args == ["--setenv", key, value]));
+        }
+        assert_eq!(
+            &args[args.len() - 6..],
+            ["--seccomp", "17", "--", "sh", "-c", "--seccomp"]
+        );
     }
 
     #[test]
@@ -1209,6 +1762,11 @@ mod tests {
         // tmpfs at /secrets, and no ro-bind of /dev/null onto it.
         policy_mount_pos(&args, "--tmpfs", "/secrets");
         assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--remount-ro" && w[1] == "/secrets"),
+            "a denied directory mask must be read-only: {args:?}"
+        );
+        assert!(
             args.windows(3)
                 .all(|w| !(w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/secrets")),
             "a directory denied path must not be masked with /dev/null: {args:?}"
@@ -1291,6 +1849,24 @@ mod tests {
             "child file mask (pos {child}) must come after parent tmpfs (pos {parent}) \
              so it lands inside the masked subtree: {args:?}"
         );
+    }
+
+    #[test]
+    fn denied_tmpfs_masks_are_sealed_after_child_mounts() {
+        let mut r = base_request();
+        r.policy.denied_paths = vec!["/data".into(), "/data/nested".into()];
+        r.policy.readwrite_paths = vec!["/data/allowed/deep".into()];
+        let args = build_args(&r, None);
+
+        let child = policy_mount_pos(&args, "--bind", "/data/allowed/deep");
+        for path in ["/data", "/data/nested"] {
+            let mask = policy_mount_pos(&args, "--tmpfs", path);
+            let remount = args
+                .windows(2)
+                .position(|w| w[0] == "--remount-ro" && w[1] == path)
+                .unwrap_or_else(|| panic!("missing read-only remount for {path}: {args:?}"));
+            assert!(mask < remount && child < remount, "{args:?}");
+        }
     }
 
     #[test]
@@ -1599,12 +2175,8 @@ mod tests {
         }
     }
 
-    /// DNS stub-resolver dirs must be in the baseline so an `/etc/resolv.conf`
-    /// symlink has a target to resolve to. Emitted via `--ro-bind-try` so hosts
-    /// without systemd-resolved / NetworkManager / resolvconf still build a
-    /// valid argument vector.
     #[test]
-    fn baseline_includes_dns_stub_resolver_dirs() {
+    fn baseline_excludes_resolver_runtime_directories() {
         let args = build_args(&base_request(), None);
         for path in [
             "/run/systemd/resolve",
@@ -1614,21 +2186,10 @@ mod tests {
             let found = args
                 .windows(3)
                 .any(|w| w[0] == "--ro-bind-try" && w[1] == path && w[2] == path);
-            assert!(
-                found,
-                "baseline must emit `--ro-bind-try {} {}` so the sandbox can read \
-                 /etc/resolv.conf when it is a symlink",
-                path, path
-            );
+            assert!(!found, "baseline must not expose host IPC from {path}");
         }
     }
 
-    /// Regression test for the `/etc/resolv.conf -> /var/run/.../resolv.conf`
-    /// symlink case (older RHEL/CentOS-era, some container images). We never
-    /// mount `/var`, so without a `/var/run -> /run` compat symlink the
-    /// target dangles and DNS silently breaks. Assert the symlink is emitted
-    /// so `/var/run/NetworkManager/resolv.conf` resolves into the bound
-    /// `/run/NetworkManager`.
     #[test]
     fn baseline_recreates_var_run_compat_symlink() {
         let args = build_args(&base_request(), None);
@@ -1641,19 +2202,14 @@ mod tests {
              symlinks routed through /var/run/... resolve; got: {:?}",
             args
         );
-        // The compat symlink must not drag a host /var bind in with it.
         let var_bound = args.windows(2).any(|w| {
             matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try") && w[1] == "/var"
         });
         assert!(!var_bound, "compat symlink must not bind host /var");
     }
 
-    /// Regression test for WSL, where `/etc/resolv.conf` points at
-    /// `/mnt/wsl/resolv.conf`. We bind that single file (via `--ro-bind-try`,
-    /// so it is skipped on non-WSL hosts) without exposing the rest of
-    /// `/mnt`.
     #[test]
-    fn baseline_includes_wsl_resolv_conf() {
+    fn baseline_does_not_bind_unchecked_wsl_resolver_paths() {
         let args = build_args(&base_request(), None);
         let found = args.windows(3).any(|w| {
             w[0] == "--ro-bind-try"
@@ -1661,12 +2217,9 @@ mod tests {
                 && w[2] == "/mnt/wsl/resolv.conf"
         });
         assert!(
-            found,
-            "baseline must emit `--ro-bind-try /mnt/wsl/resolv.conf ...` so DNS \
-             works under WSL; got: {:?}",
-            args
+            !found,
+            "the runner must verify the WSL resolver is a regular file"
         );
-        // Only the single resolv.conf file — never /mnt or /mnt/wsl wholesale.
         let mnt_whole = args.windows(2).any(|w| {
             matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try")
                 && (w[1] == "/mnt" || w[1] == "/mnt/wsl")
@@ -1703,5 +2256,646 @@ mod tests {
             policy_bind,
             baseline_etc
         );
+    }
+
+    fn host(
+        links: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> std::io::Result<Option<std::path::PathBuf>> {
+        move |path| {
+            Ok(links
+                .iter()
+                .find(|(link, _)| *link == path)
+                .map(|(_, target)| target.into()))
+        }
+    }
+
+    fn link(path: &'static str, relative_target: &str) -> BaselineLink {
+        BaselineLink {
+            path,
+            relative_target: relative_target.into(),
+        }
+    }
+
+    #[test]
+    fn merged_usr_entries_link_to_their_usr_mounts() {
+        let debian = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/usr/sbin"),
+            ("/lib", "/usr/lib"),
+            ("/lib32", "/usr/lib32"),
+            ("/lib64", "/usr/lib64"),
+            ("/libx32", "/usr/libx32"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            debian,
+            [
+                link("/bin", "usr/bin"),
+                link("/sbin", "usr/sbin"),
+                link("/lib", "usr/lib"),
+                link("/lib32", "usr/lib32"),
+                link("/lib64", "usr/lib64"),
+                link("/libx32", "usr/libx32"),
+            ]
+        );
+
+        let arch = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/usr/bin"),
+            ("/lib", "/usr/lib"),
+            ("/lib64", "/usr/lib"),
+            ("/usr/sbin", "/usr/bin"),
+            ("/usr/lib64", "/usr/lib"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            arch,
+            [
+                link("/bin", "usr/bin"),
+                link("/sbin", "usr/bin"),
+                link("/lib", "usr/lib"),
+                link("/lib64", "usr/lib"),
+                link("/usr/sbin", "bin"),
+                link("/usr/lib64", "lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_links_into_a_bound_entry_become_sandbox_links() {
+        assert!(baseline_links(|_| Ok(None)).unwrap().is_empty());
+        let links = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/bin/sbin"),
+            ("/lib32", "/opt/lib32"),
+            ("/lib64", "/usr/lib/x86_64-linux-gnu"),
+            ("/usr/lib64", "/lib"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            links,
+            [
+                link("/bin", "usr/bin"),
+                link("/lib64", "usr/lib/x86_64-linux-gnu"),
+                link("/usr/lib64", "../lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_baseline_entry_refuses_to_start() {
+        let error = baseline_links(|path| match path {
+            "/lib" => Err(std::io::ErrorKind::PermissionDenied.into()),
+            _ => Ok(None),
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("the host's /lib") && error.contains("Refusing to start"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_target_that_cannot_be_written_as_a_link_refuses_to_start() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let error = baseline_links(|path| {
+            Ok((path == "/bin")
+                .then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/usr/bin/\xff"))))
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("the host's /bin") && error.contains("Refusing to start"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn baseline_links_replace_their_binds_before_policy_mounts() {
+        let mut request = base_request();
+        request.policy.readonly_paths = vec!["/bin/ls".into()];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[link("/bin", "usr/bin")],
+            &[],
+            &policy_mounts(&request.policy),
+            true,
+            |_| Vec::new(),
+        );
+
+        let symlink = args
+            .windows(3)
+            .position(|w| w == ["--symlink", "usr/bin", "/bin"])
+            .expect("the linked entry must become a symlink");
+        let grant = args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/bin/ls", "/bin/ls"])
+            .expect("policy mount missing");
+        assert!(
+            symlink < grant,
+            "a policy mount through the link must follow it"
+        );
+        assert!(!args
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind-try" && w[2] == "/bin"));
+        for path in BASELINE_RO_BIND_PATHS
+            .iter()
+            .filter(|path| **path != "/bin")
+        {
+            assert!(
+                args.windows(3)
+                    .any(|w| w == ["--ro-bind-try", *path, *path]),
+                "{path} must keep its bind"
+            );
+        }
+    }
+
+    fn grant_link(path: &str, target: &str) -> GrantLink {
+        GrantLink {
+            path: path.into(),
+            target: target.into(),
+            ..Default::default()
+        }
+    }
+
+    fn aliased(path: &str, target: &str) -> AliasedGrant {
+        AliasedGrant {
+            links: vec![grant_link(path, target)],
+            ..Default::default()
+        }
+    }
+
+    fn mount(path: &str, intent: FsIntent) -> PolicyMount {
+        PolicyMount {
+            source: path.into(),
+            destination: path.into(),
+            intent,
+        }
+    }
+
+    /// The links `grants` get in a merged-/usr sandbox with these mounts.
+    fn plan_for(
+        mounts: &[PolicyMount],
+        resolver_args: &[String],
+        grants: &[AliasedGrant],
+    ) -> GrantLinkPlan {
+        let mut plan = None;
+        build_args_classified_with_mode(
+            &base_request(),
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[link("/bin", "usr/bin")],
+            resolver_args,
+            mounts,
+            true,
+            |layout| {
+                let planned = plan_grant_links(layout, grants);
+                let args = planned.args.clone();
+                plan = Some(planned);
+                args
+            },
+        );
+        plan.expect("the arguments include the grant links")
+    }
+
+    #[test]
+    fn grant_links_are_recreated_only_where_nothing_else_is() {
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/data/repos/app".into(), "/srv/share".into()],
+            readonly_paths: vec!["/home/bob".into()],
+            denied_paths: vec!["/srv".into()],
+            ..Default::default()
+        });
+        let created = [
+            aliased("/home/alice/app", "/data/repos/app"),
+            aliased("/tmp/work/app", "/data/repos/app"),
+            aliased("/srv/app", "/srv/share"),
+            aliased("/data/repos/current", "/data/repos"),
+        ];
+        let present = [
+            aliased("/home/bob/app", "/data/repos/app"),
+            aliased("/bin", "/usr/bin"),
+            aliased("/etc/alternatives/app", "/data/repos/app"),
+        ];
+        let unavailable = [
+            grant_link("/dev/shm", "/run/shm"),
+            grant_link("/proc/app", "/data/repos/app"),
+            grant_link("/var/run/app", "/run/app"),
+            grant_link("/tmp", "/var/tmp"),
+            grant_link("/usr", "/opt/usr"),
+        ];
+        let grants: Vec<_> = created
+            .iter()
+            .chain(&present)
+            .cloned()
+            .chain(unavailable.iter().map(|link| AliasedGrant {
+                links: vec![link.clone()],
+                ..Default::default()
+            }))
+            .chain(created.iter().cloned())
+            .collect();
+
+        let plan = plan_for(&mounts, &[], &grants);
+        assert_eq!(
+            plan.args,
+            [
+                "--symlink",
+                "../../data/repos/app",
+                "/home/alice/app",
+                "--symlink",
+                "../../data/repos/app",
+                "/tmp/work/app",
+                "--symlink",
+                "share",
+                "/srv/app",
+                "--symlink",
+                ".",
+                "/data/repos/current",
+            ]
+        );
+        assert_eq!(plan.unavailable, unavailable);
+    }
+
+    #[test]
+    fn a_link_at_the_sandbox_tmp_is_recreated_one_level_down() {
+        let project = AliasedGrant {
+            links: vec![grant_link("/tmp", "/var/tmp")],
+            inner: Some(grant_link("/tmp/project", "/var/tmp/project")),
+            ..Default::default()
+        };
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/var/tmp/project".into()],
+            ..Default::default()
+        });
+
+        let plan = plan_for(&mounts, &[], &[project.clone(), project]);
+        assert_eq!(
+            plan.args,
+            ["--symlink", "../var/tmp/project", "/tmp/project"]
+        );
+        assert_eq!(plan.unavailable, Vec::<GrantLink>::new());
+    }
+
+    #[test]
+    fn a_grant_of_a_whole_symlinked_tmp_replaces_the_private_tmp() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/var/tmp".into()];
+        let grants = [aliased("/tmp", "/var/tmp")];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[],
+            &[],
+            &policy_mounts(&request.policy),
+            false,
+            |layout| plan_grant_links(layout, &grants).args,
+        );
+
+        assert!(!args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        let position = |expected: &[&str]| {
+            args.windows(expected.len())
+                .position(|window| window == expected)
+                .unwrap_or_else(|| panic!("{expected:?} missing from {args:?}"))
+        };
+        assert!(
+            position(&["--bind", "/var/tmp", "/var/tmp"])
+                < position(&["--symlink", "var/tmp", "/tmp"])
+        );
+    }
+
+    #[test]
+    fn host_links_seen_through_a_grant_get_the_links_they_pass_through() {
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/home/alice".into(), "/data/app".into()],
+            ..Default::default()
+        });
+        let host_link = |path: &str, passes_through: Vec<GrantLink>| GrantLink {
+            passes_through,
+            ..grant_link(path, "/data/app")
+        };
+        let current = host_link("/links/current", Vec::new());
+        let reachable = [
+            host_link("/home/alice/app", vec![current.clone()]),
+            host_link("/home/alice/again", vec![current]),
+            host_link(
+                "/home/alice/release",
+                vec![host_link("/home/alice/current", Vec::new())],
+            ),
+        ];
+        let unavailable = [
+            host_link("/home/alice/proc", vec![host_link("/proc/app", Vec::new())]),
+            host_link(
+                "/home/alice/sideways",
+                vec![grant_link("/links/other", "/data/other")],
+            ),
+        ];
+        let grants: Vec<_> = reachable
+            .iter()
+            .chain(&unavailable)
+            .map(|link| AliasedGrant {
+                links: vec![link.clone()],
+                ..Default::default()
+            })
+            .collect();
+
+        let plan = plan_for(&mounts, &[], &grants);
+        assert_eq!(plan.args, ["--symlink", "../data/app", "/links/current"]);
+        assert_eq!(plan.unavailable, unavailable);
+    }
+
+    #[test]
+    fn directories_that_a_path_climbs_out_of_are_created_where_the_sandbox_has_none() {
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec![
+                "/home/alice".into(),
+                "/data/app".into(),
+                "/srv/shared".into(),
+            ],
+            ..Default::default()
+        });
+        let through_staging = AliasedGrant {
+            real_path: "/data/app".into(),
+            links: vec![GrantLink {
+                climbs_out_of: vec!["/data/staging".into(), "/home/alice".into()],
+                ..grant_link("/home/alice/app", "/data/app")
+            }],
+            ..Default::default()
+        };
+        let spelled_with_dots = AliasedGrant {
+            real_path: "/srv/shared".into(),
+            links: vec![grant_link("/opt/app", "/srv/app")],
+            climbs_out_of: vec!["/srv/app".into(), "/data/staging".into(), "/proc/1".into()],
+            ..Default::default()
+        };
+        let through_dev = GrantLink {
+            climbs_out_of: vec!["/dev/shm/staging".into()],
+            ..grant_link("/home/alice/shm", "/data/app")
+        };
+        let grants = [
+            through_staging,
+            spelled_with_dots,
+            AliasedGrant {
+                links: vec![through_dev.clone()],
+                ..Default::default()
+            },
+        ];
+
+        let plan = plan_for(&mounts, &[], &grants);
+        assert_eq!(
+            plan.args,
+            [
+                "--dir",
+                "/data/staging",
+                "--dir",
+                "/srv/app",
+                "--symlink",
+                "../srv/app",
+                "/opt/app",
+            ]
+        );
+        assert_eq!(
+            plan.unavailable,
+            [
+                GrantLink {
+                    target: "/srv/shared".into(),
+                    ..grant_link("/proc/1", "")
+                },
+                through_dev,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sandbox_link_that_leads_elsewhere_gets_the_next_level_where_it_leads() {
+        let through_var_run = |real_path: &str| AliasedGrant {
+            real_path: real_path.into(),
+            links: vec![grant_link("/var/run", "/data/run")],
+            inner: Some(grant_link("/var/run/project", "/data/run/project")),
+            ..Default::default()
+        };
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/data/run".into(), "/run/app".into()],
+            ..Default::default()
+        });
+
+        let plan = plan_for(
+            &mounts,
+            &[],
+            &[
+                through_var_run("/data/run/project"),
+                aliased("/var/run", "/run"),
+            ],
+        );
+        assert_eq!(
+            plan.args,
+            ["--symlink", "../data/run/project", "/run/project"]
+        );
+        assert_eq!(plan.unavailable, Vec::<GrantLink>::new());
+
+        let whole = AliasedGrant {
+            inner: None,
+            ..through_var_run("/data/run")
+        };
+        let plan = plan_for(&mounts, &[], &[whole]);
+        assert_eq!(plan.args, Vec::<String>::new());
+        assert_eq!(plan.unavailable, [grant_link("/var/run", "/data/run")]);
+    }
+
+    #[test]
+    fn a_link_above_a_sandbox_entry_is_recreated_one_level_down() {
+        let lib = AliasedGrant {
+            links: vec![grant_link("/var", "/data/var")],
+            inner: Some(grant_link("/var/lib", "/data/var/lib")),
+            ..Default::default()
+        };
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/data/var/lib/x".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            plan_for(&mounts, &[], &[lib]).args,
+            ["--symlink", "../data/var/lib", "/var/lib"]
+        );
+    }
+
+    #[test]
+    fn links_inside_a_bind_of_another_host_path_are_unavailable() {
+        let mounts = [
+            PolicyMount {
+                source: "/var/run/app".into(),
+                destination: "/run/app".into(),
+                intent: FsIntent::ReadWrite,
+            },
+            mount("/data/project", FsIntent::ReadWrite),
+        ];
+        let alias = aliased("/run/app/alias", "/data/project");
+        let plan = plan_for(&mounts, &[], std::slice::from_ref(&alias));
+        assert_eq!(plan.args, Vec::<String>::new());
+        assert_eq!(plan.unavailable, alias.links);
+    }
+
+    #[test]
+    fn a_policy_mount_decides_for_the_baseline_directory_it_covers() {
+        let grants = [aliased("/etc/hosts", "/etc/static/hosts")];
+        let denied_etc = [
+            mount("/etc", FsIntent::Denied),
+            mount("/etc/static/hosts", FsIntent::ReadOnly),
+        ];
+        assert_eq!(
+            plan_for(&denied_etc, &[], &grants).args,
+            ["--symlink", "static/hosts", "/etc/hosts"]
+        );
+
+        let writable_etc = [mount("/etc", FsIntent::ReadWrite)];
+        assert_eq!(
+            plan_for(&writable_etc, &[], &grants),
+            GrantLinkPlan::default()
+        );
+    }
+
+    #[test]
+    fn grant_links_respect_the_resolver_layout() {
+        let resolver: Vec<String> = [
+            "--tmpfs",
+            "/run/systemd/resolve",
+            "--symlink",
+            "../srv/dns",
+            "/opt/dns",
+            "--file",
+            "19",
+            "/run/systemd/resolve/resolv.conf",
+            "--dir",
+            "/run/systemd/resolve/masked",
+            "--remount-ro",
+            "/run/systemd/resolve",
+        ]
+        .map(String::from)
+        .into();
+        let mounts = [mount("/run/systemd/resolve/masked", FsIntent::Denied)];
+        let grants = [
+            aliased("/opt/dns", "/srv/dns"),
+            aliased("/run/systemd/resolve/link", "/srv/dns"),
+            aliased("/run/systemd/resolve/masked/link", "/srv/dns"),
+        ];
+        let plan = plan_for(&mounts, &resolver, &grants);
+        assert_eq!(
+            plan.args,
+            [
+                "--symlink",
+                "../../../../srv/dns",
+                "/run/systemd/resolve/masked/link"
+            ]
+        );
+        assert_eq!(plan.unavailable, grants[1].links);
+    }
+
+    #[test]
+    fn an_unknown_mount_option_makes_every_grant_link_unavailable() {
+        let layout: Vec<String> = ["--overlay-src", "/data", "--tmpfs", "/tmp"]
+            .map(String::from)
+            .into();
+        let grant = aliased("/home/alice/app", "/data/repos/app");
+        let plan = plan_grant_links(&layout, std::slice::from_ref(&grant));
+        assert_eq!(plan.args, Vec::<String>::new());
+        assert_eq!(plan.unavailable, grant.links);
+    }
+
+    #[test]
+    fn the_planner_understands_every_mount_argument_emitted_before_the_links() {
+        let mut request = base_request();
+        request.policy = ContainerPolicy {
+            readwrite_paths: vec!["/data/repos/app".into()],
+            readonly_paths: vec!["/home/alice".into()],
+            denied_paths: vec!["/home/alice/.ssh".into(), "/home/alice/.env".into()],
+            ..Default::default()
+        };
+        let resolver: Vec<String> = [
+            "--tmpfs",
+            "/run/resolver",
+            "--dir",
+            "/run/resolver/sub",
+            "--symlink",
+            "sub",
+            "/run/resolver/link",
+            "--file",
+            "19",
+            "/run/resolver/resolv.conf",
+            "--ro-bind",
+            "/dev/null",
+            "/run/resolver/masked",
+            "--remount-ro",
+            "/run/resolver",
+        ]
+        .map(String::from)
+        .into();
+        for mode in [
+            ResolvedNetworkMode::Isolated,
+            ResolvedNetworkMode::FirewallEnforced,
+        ] {
+            build_args_classified_with_mode(
+                &request,
+                None,
+                &HashSet::from(["/home/alice/.env".to_string()]),
+                mode,
+                Some(17),
+                &[link("/bin", "usr/bin")],
+                &resolver,
+                &policy_mounts(&request.policy),
+                true,
+                |layout| {
+                    assert!(sandbox_layout(layout).is_some(), "{mode:?}: {layout:?}");
+                    Vec::new()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn grant_links_follow_policy_mounts_and_precede_read_only_masks() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/data/repos/app".into()];
+        request.policy.denied_paths = vec!["/home/alice".into()];
+        let link_args = [
+            "--symlink".to_string(),
+            "../../data/repos/app".into(),
+            "/home/alice/app".into(),
+        ];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[],
+            &[],
+            &policy_mounts(&request.policy),
+            true,
+            |layout| {
+                assert!(layout
+                    .windows(3)
+                    .any(|w| w == ["--bind", "/data/repos/app", "/data/repos/app"]));
+                link_args.to_vec()
+            },
+        );
+
+        let position = |expected: &[&str]| {
+            args.windows(expected.len())
+                .position(|window| window == expected)
+                .unwrap_or_else(|| panic!("{expected:?} missing from {args:?}"))
+        };
+        let link = position(&["--symlink", "../../data/repos/app", "/home/alice/app"]);
+        assert!(position(&["--bind", "/data/repos/app", "/data/repos/app"]) < link);
+        assert!(position(&["--tmpfs", "/home/alice"]) < link);
+        assert!(link < position(&["--remount-ro", "/home/alice"]));
     }
 }

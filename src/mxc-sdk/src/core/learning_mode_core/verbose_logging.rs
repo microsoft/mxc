@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_VERBOSE_LOGGING_GROUPS: usize = 4_096;
 /// Maximum compact-JSON bytes retained across distinct serialized signatures.
 ///
-/// This leaves substantial headroom under the guarded WPR analysis protocol's
-/// 64 MiB frame limit for actionable denials and envelope overhead.
+/// This leaves substantial headroom under the 64 MiB serialized-analysis limit
+/// for actionable denials and envelope overhead.
 pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stable category for a known Learning Mode ETW provider.
@@ -367,6 +367,16 @@ impl VerboseLoggingDocument {
 ///
 /// Returns an error when `output_path` has no usable file name.
 pub fn verbose_logging_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
+    capture_sibling_path(output_path, "verbose.json")
+}
+
+/// Derives a sibling of a denials output path that shares its stem, e.g.
+/// `denials.<id>.json` with `suffix` `seatbelt.log` → `denials.<id>.seatbelt.log`.
+///
+/// # Errors
+///
+/// Returns an error when `output_path` has no usable file name.
+pub fn capture_sibling_path(output_path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let file_name = output_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -380,7 +390,7 @@ pub fn verbose_logging_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(file_name);
-    let sibling = format!("{stem}.verbose.json");
+    let sibling = format!("{stem}.{suffix}");
     Ok(match output_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(sibling),
         _ => PathBuf::from(sibling),
@@ -575,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_leaves_guarded_analysis_protocol_headroom() {
+    fn byte_budget_leaves_serialized_analysis_headroom() {
         let mut summary = VerboseLoggingSummary::default();
         let mut retained_bytes = 0;
         let properties = (0..24)

@@ -46,6 +46,56 @@ impl std::fmt::Display for FailureReason {
     }
 }
 
+/// Selected ProcessContainer learning mode, not proof that setup succeeded.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LearningMode {
+    Enforcement,
+    Learning,
+    PermissiveLearning,
+    #[default]
+    NotApplicable,
+}
+
+impl LearningMode {
+    /// Bounded value emitted as `mxc.capture_denials`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforcement => "enforce",
+            Self::Learning => "deny-and-record",
+            Self::PermissiveLearning => "allow-and-record",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    pub fn for_request(request: &crate::mxc_common::models::ExecutionRequest) -> Self {
+        use crate::mxc_common::models::{ContainmentBackend, LearningModeCapability};
+
+        if request.containment != ContainmentBackend::ProcessContainer {
+            return Self::NotApplicable;
+        }
+        let mut mode = Self::Enforcement;
+        for capability in &request.policy.capabilities {
+            match LearningModeCapability::from_capability_name(capability) {
+                Some(LearningModeCapability::Permissive) => return Self::PermissiveLearning,
+                Some(LearningModeCapability::Learning) => mode = Self::Learning,
+                None => {}
+            }
+        }
+        mode
+    }
+
+    /// Account for executor overrides before their setup can fail.
+    pub fn with_overrides(self, permissive: bool, learning: bool) -> Self {
+        match self {
+            Self::NotApplicable => self,
+            _ if permissive => Self::PermissiveLearning,
+            Self::Enforcement if learning => Self::Learning,
+            _ => self,
+        }
+    }
+}
+
 /// Attribution shared by every telemetry event emitted for one dispatch: the
 /// containment `backend`, the state-aware lifecycle `phase` (empty for one-shot),
 /// and the `correlation_vector` MS-CV span (empty for one-shot). Grouped into one
@@ -63,7 +113,7 @@ pub struct TelemetryContext<'a> {
     pub correlation_vector: &'a str,
 }
 
-/// Data for an Execution ETW event.
+/// Shared payload for ExecutionStart and ExecutionEnd ETW events.
 pub struct ExecutionEvent<'a> {
     pub backend: &'a str,
     /// Containment kind requested by the caller before host-specific resolution.
@@ -103,14 +153,34 @@ pub struct VerboseEvent<'a> {
     pub summary: &'a str,
 }
 
-/// Log an Execution ETW event.
+/// Log an ExecutionStart ETW event with the same schema as ExecutionEnd.
+pub fn log_execution_start(event: &ExecutionEvent<'_>) {
+    crate::mxc_telemetry::log_execution_start(
+        event.backend,
+        event.sandbox_kind,
+        event.exit_code,
+        event.outcome,
+        event.duration_ms,
+        event
+            .failure_reason
+            .map(|reason| reason.as_str())
+            .unwrap_or(""),
+        event.phase,
+        event.correlation_vector,
+    );
+
+    #[cfg(test)]
+    test_sink::record_execution(event, true);
+}
+
+/// Log an ExecutionEnd ETW event.
 ///
 /// Delegates to the `mxc_telemetry` provider which adds common fields
 /// (Version, Channel, IsDebugging, UTCReplace_AppSessionGuid).
-pub fn log_execution(event: &ExecutionEvent<'_>) {
+pub fn log_execution_end(event: &ExecutionEvent<'_>) {
     let failure_str = event.failure_reason.map(|r| r.as_str()).unwrap_or("");
 
-    crate::mxc_telemetry::log_execution(
+    crate::mxc_telemetry::log_execution_end(
         event.backend,
         event.sandbox_kind,
         event.exit_code,
@@ -122,7 +192,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
     );
 
     #[cfg(test)]
-    test_sink::record_execution(event);
+    test_sink::record_execution(event, false);
 }
 
 /// Log an Error ETW event.
@@ -154,6 +224,9 @@ pub fn log_error(
 
 /// Log one `MXC.VerboseDenials` ETW event.
 pub fn log_verbose(event: &VerboseEvent<'_>) -> u32 {
+    if !super::session::legacy_events_enabled() {
+        return 0;
+    }
     let status = crate::mxc_telemetry::log_verbose(
         event.backend,
         event.sandbox_kind,
@@ -189,11 +262,13 @@ pub enum ProcessEvent<'a> {
 }
 
 fn requirement_emission_allowed() -> bool {
-    super::process_can_emit()
+    super::session::legacy_events_enabled() && super::process_can_emit()
 }
 
 pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
-    if !requirement_emission_allowed() {
+    if !super::process_can_emit()
+        || (!matches!(event, ProcessEvent::Exited(_)) && !super::session::legacy_events_enabled())
+    {
         return;
     }
 
@@ -213,46 +288,6 @@ pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_
 
     #[cfg(test)]
     test_sink::record_process(identity, process_id, event);
-}
-
-pub fn log_enforcement_degraded(
-    identity: &str,
-    tier: &str,
-    needs_dacl_augmentation: bool,
-    degradation_reasons: &str,
-    effective_enforcement_level: &str,
-) {
-    if !requirement_emission_allowed() {
-        return;
-    }
-
-    crate::mxc_telemetry::log_enforcement_degraded(
-        identity,
-        tier,
-        needs_dacl_augmentation,
-        degradation_reasons,
-        effective_enforcement_level,
-    );
-    #[cfg(test)]
-    test_sink::record_requirement(
-        "MXC.EnforcementDegraded",
-        vec![
-            ("identity".to_owned(), identity.to_owned()),
-            ("tier".to_owned(), tier.to_owned()),
-            (
-                "needs_dacl_augmentation".to_owned(),
-                needs_dacl_augmentation.to_string(),
-            ),
-            (
-                "degradation_reasons".to_owned(),
-                degradation_reasons.to_owned(),
-            ),
-            (
-                "effective_enforcement_level".to_owned(),
-                effective_enforcement_level.to_owned(),
-            ),
-        ],
-    );
 }
 
 pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
@@ -360,7 +395,7 @@ pub fn log_config_rejected(
 /// explicitly installs it; the production path above always makes the direct
 /// `mxc_telemetry` call regardless.
 #[cfg(test)]
-pub(super) mod test_sink {
+pub(crate) mod test_sink {
     use super::{ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext, VerboseEvent};
     use std::cell::Cell;
     use std::sync::Mutex;
@@ -377,6 +412,8 @@ pub(super) mod test_sink {
     /// Owned copy of an `Execution` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedExecution {
+        pub session_id: String,
+        pub learning_mode: String,
         pub backend: String,
         pub sandbox_kind: String,
         pub exit_code: i32,
@@ -390,6 +427,7 @@ pub(super) mod test_sink {
     /// Owned copy of an `Error` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
+        pub session_id: String,
         pub backend: String,
         pub sandbox_kind: String,
         pub error_type: FailureReason,
@@ -401,6 +439,7 @@ pub(super) mod test_sink {
     /// Owned copy of an `MXC.VerboseDenials` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedVerbose {
+        pub session_id: String,
         pub backend: String,
         pub sandbox_kind: String,
         pub phase: String,
@@ -417,6 +456,7 @@ pub(super) mod test_sink {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedRequirement {
+        pub session_id: String,
         pub name: String,
         pub fields: Vec<(String, String)>,
     }
@@ -431,6 +471,7 @@ pub(super) mod test_sink {
     }
 
     static EXECUTIONS: Mutex<Vec<CapturedExecution>> = Mutex::new(Vec::new());
+    static STARTS: Mutex<Vec<CapturedExecution>> = Mutex::new(Vec::new());
     static ERRORS: Mutex<Vec<CapturedError>> = Mutex::new(Vec::new());
     static VERBOSE: Mutex<Vec<CapturedVerbose>> = Mutex::new(Vec::new());
     static REQUIREMENTS: Mutex<Vec<CapturedRequirement>> = Mutex::new(Vec::new());
@@ -446,6 +487,7 @@ pub(super) mod test_sink {
     pub fn clear() {
         INSTALLED.with(|f| f.set(false));
         EXECUTIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        STARTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         VERBOSE.lock().unwrap_or_else(|e| e.into_inner()).clear();
         REQUIREMENTS
@@ -457,6 +499,10 @@ pub(super) mod test_sink {
     /// Drain and return the captured `Execution` records.
     pub fn take_executions() -> Vec<CapturedExecution> {
         std::mem::take(&mut *EXECUTIONS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub fn take_starts() -> Vec<CapturedExecution> {
+        std::mem::take(&mut *STARTS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Drain and return the captured `Error` records.
@@ -473,12 +519,18 @@ pub(super) mod test_sink {
         std::mem::take(&mut *REQUIREMENTS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
+    fn session_id() -> String {
+        let mut buffer = [0; 36];
+        super::super::session::wire_id(&mut buffer).to_owned()
+    }
+
     pub(super) fn record_requirement(name: &str, fields: Vec<(String, String)>) {
         if INSTALLED.with(|f| f.get()) {
             REQUIREMENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(CapturedRequirement {
+                    session_id: session_id(),
                     name: name.to_owned(),
                     fields,
                 });
@@ -519,20 +571,24 @@ pub(super) mod test_sink {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(CapturedRequirement {
+                    session_id: session_id(),
                     name: name.to_owned(),
                     fields,
                 });
         }
     }
 
-    pub(super) fn record_execution(event: &ExecutionEvent<'_>) {
+    pub(super) fn record_execution(event: &ExecutionEvent<'_>, start: bool) {
         if !INSTALLED.with(|f| f.get()) {
             return;
         }
-        EXECUTIONS
+        let records = if start { &STARTS } else { &EXECUTIONS };
+        records
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedExecution {
+                session_id: session_id(),
+                learning_mode: super::super::session::learning_mode().as_str().to_owned(),
                 backend: event.backend.to_owned(),
                 sandbox_kind: event.sandbox_kind.to_owned(),
                 exit_code: event.exit_code,
@@ -557,6 +613,7 @@ pub(super) mod test_sink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedError {
+                session_id: session_id(),
                 backend: ctx.backend.to_owned(),
                 sandbox_kind: sandbox_kind.to_owned(),
                 error_type,
@@ -574,6 +631,7 @@ pub(super) mod test_sink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedVerbose {
+                session_id: session_id(),
                 backend: event.backend.to_owned(),
                 sandbox_kind: event.sandbox_kind.to_owned(),
                 phase: event.phase.to_owned(),
@@ -593,6 +651,101 @@ pub(super) mod test_sink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn learning_mode_tracks_normalized_configuration_and_executor_overrides() {
+        use crate::mxc_common::{
+            config_parser::load_mxc_request_from_json,
+            logger::{Logger, Mode},
+            models::{ContainmentBackend, ExecutionRequest},
+            state_aware_request::MxcRequest,
+        };
+
+        for (settings, expected) in [
+            (serde_json::json!({}), LearningMode::Enforcement),
+            (
+                serde_json::json!({"learningMode": false}),
+                LearningMode::Enforcement,
+            ),
+            (
+                serde_json::json!({"learningMode": true}),
+                LearningMode::Learning,
+            ),
+            (
+                serde_json::json!({"captureDenials": {}}),
+                LearningMode::Learning,
+            ),
+            (
+                serde_json::json!({"captureDenials": {"mode": "block"}}),
+                LearningMode::Learning,
+            ),
+            (
+                serde_json::json!({"captureDenials": {"mode": "allow"}}),
+                LearningMode::PermissiveLearning,
+            ),
+            (
+                serde_json::json!({"learningMode": true, "captureDenials": {"mode": "allow"}}),
+                LearningMode::PermissiveLearning,
+            ),
+        ] {
+            let json = serde_json::json!({
+                "version": "1.0.0",
+                "containment": "processcontainer",
+                "process": {"commandLine": "echo synthetic"},
+                "processContainer": settings,
+            });
+            let MxcRequest::OneShot(request) =
+                load_mxc_request_from_json(&json.to_string(), &mut Logger::new(Mode::Buffer))
+                    .unwrap()
+            else {
+                panic!("expected create-and-run request");
+            };
+            let mode = LearningMode::for_request(&request);
+            assert_eq!(mode, expected);
+            assert_eq!(mode.with_overrides(false, false), expected);
+            assert_eq!(
+                mode.with_overrides(true, false),
+                LearningMode::PermissiveLearning
+            );
+            assert_eq!(
+                mode.with_overrides(true, true),
+                LearningMode::PermissiveLearning
+            );
+            assert_eq!(
+                mode.with_overrides(false, true),
+                if expected == LearningMode::PermissiveLearning {
+                    expected
+                } else {
+                    LearningMode::Learning
+                }
+            );
+        }
+        let mut request = ExecutionRequest::default();
+        for (capabilities, expected) in [
+            (vec!["LEARNINGMODELOGGING"], LearningMode::Learning),
+            (
+                vec!["PermissiveLearningMode"],
+                LearningMode::PermissiveLearning,
+            ),
+            (
+                vec!["PERMISSIVELEARNINGMODE", "learningModeLogging"],
+                LearningMode::PermissiveLearning,
+            ),
+            (vec!["customLearningModeLogging"], LearningMode::Enforcement),
+        ] {
+            request.policy.capabilities = capabilities.into_iter().map(str::to_owned).collect();
+            assert_eq!(LearningMode::for_request(&request), expected);
+        }
+        request.containment = ContainmentBackend::IsolationSession;
+        assert_eq!(
+            LearningMode::for_request(&request),
+            LearningMode::NotApplicable
+        );
+        assert_eq!(
+            LearningMode::NotApplicable.with_overrides(true, true),
+            LearningMode::NotApplicable
+        );
+    }
 
     #[test]
     fn failure_reason_as_str() {
@@ -638,213 +791,272 @@ mod tests {
     }
 
     #[test]
-    fn requirement_events_use_bounded_event_names() {
+    fn contracts_select_event_inventory_and_preserve_bounded_payloads() {
         let _lock = test_sink::TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        use crate::mxc_contract::ContractVersion;
+        for source_contract in [
+            None,
+            Some(ContractVersion::V0_9_0Alpha),
+            Some(ContractVersion::V1_0_0),
+            Some(ContractVersion::V1_1_0Alpha),
+        ] {
+            super::super::reset_for_test();
+            super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
+            super::super::TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+            let mut logger =
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            let _session = super::super::session::start(true, "", source_contract, &mut logger);
+            let session_id = super::super::session::current().unwrap().to_string();
+            test_sink::install();
+            super::super::emit_execution_start(
+                true,
+                Some("process"),
+                TelemetryContext {
+                    backend: "process_container",
+                    phase: "",
+                    correlation_vector: "",
+                },
+            );
+            log_execution_end(&ExecutionEvent {
+                backend: "process_container",
+                sandbox_kind: "process",
+                exit_code: 0,
+                outcome: "success",
+                duration_ms: 1,
+                failure_reason: None,
+                phase: "",
+                correlation_vector: "",
+            });
+            log_error(
+                TelemetryContext {
+                    backend: "process_container",
+                    phase: "",
+                    correlation_vector: "",
+                },
+                "process",
+                FailureReason::ConfigError,
+                1,
+            );
+            log_verbose(&VerboseEvent {
+                backend: "process_container",
+                sandbox_kind: "process",
+                phase: "",
+                correlation_vector: "",
+                document_id: "synthetic",
+                document_version: 2,
+                chunk_index: 0,
+                chunk_count: 1,
+                document_bytes: 2,
+                document_sha256: "synthetic",
+                content: "[]",
+                summary: "{}",
+            });
+            log_process_event("opaque", 42, ProcessEvent::Exited(0));
+            log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
+            log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate", 5));
+            log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
+            log_network_policy_applied("opaque", "proxy", "deny", 8080);
+            log_sandbox_torn_down("opaque", "success", "released");
+            log_config_rejected(
+                "corr",
+                "process_container",
+                "invalid",
+                "process.commandLine",
+                "validate",
+            );
+            let events = test_sink::take_requirements();
+            let development = source_contract == Some(ContractVersion::V1_1_0Alpha);
+            assert_eq!(events.len(), if development { 1 } else { 7 });
+            assert!(events.iter().all(|event| event.session_id == session_id));
+            assert_eq!(test_sink::take_starts()[0].session_id, session_id);
+            assert_eq!(test_sink::take_executions()[0].session_id, session_id);
+            assert_eq!(test_sink::take_errors()[0].session_id, session_id);
+            let verbose = test_sink::take_verbose();
+            if development {
+                assert_eq!(events[0].name, "MXC.ProcessExited");
+                assert!(verbose.is_empty());
+                super::super::reset_for_test();
+                continue;
+            }
+            assert_eq!(verbose[0].session_id, session_id);
+            super::super::reset_for_test();
+
+            // Validate ProcessExited payload
+            let process_exited = events
+                .iter()
+                .find(|e| {
+                    e.name == "MXC.ProcessExited"
+                        && e.fields
+                            .iter()
+                            .any(|(n, v)| n == "identity" && v == "opaque")
+                })
+                .expect("MXC.ProcessExited with opaque identity");
+            assert!(process_exited
+                .fields
+                .iter()
+                .any(|(n, v)| n == "process_id" && v == "42"));
+            assert!(
+                process_exited
+                    .fields
+                    .iter()
+                    .any(|(n, v)| n == "ExitCode" && v == "0"),
+                "ProcessExited must include ExitCode field with value 0"
+            );
+
+            // Validate ProcessTimedOut payload
+            let process_timedout = events
+                .iter()
+                .find(|e| e.name == "MXC.ProcessTimedOut")
+                .expect("MXC.ProcessTimedOut");
+            assert!(process_timedout
+                .fields
+                .iter()
+                .any(|(n, v)| n == "identity" && v == "opaque"));
+            assert!(process_timedout
+                .fields
+                .iter()
+                .any(|(n, v)| n == "process_id" && v == "42"));
+            assert!(
+                process_timedout
+                    .fields
+                    .iter()
+                    .any(|(n, v)| n == "TimeoutMs" && v == "1000"),
+                "ProcessTimedOut must include TimeoutMs field with value 1000"
+            );
+
+            // Validate ProcessKillFailed payload
+            let process_killfailed = events
+                .iter()
+                .find(|e| e.name == "MXC.ProcessKillFailed")
+                .expect("MXC.ProcessKillFailed");
+            assert!(process_killfailed
+                .fields
+                .iter()
+                .any(|(n, v)| n == "identity" && v == "opaque"));
+            assert!(process_killfailed
+                .fields
+                .iter()
+                .any(|(n, v)| n == "process_id" && v == "42"));
+            assert!(
+                process_killfailed
+                    .fields
+                    .iter()
+                    .any(|(n, v)| n == "mxc.error_type" && v == "terminate"),
+                "ProcessKillFailed must include mxc.error_type field"
+            );
+            assert!(
+                process_killfailed
+                    .fields
+                    .iter()
+                    .any(|(n, v)| n == "mxc.error_code" && v == "5"),
+                "ProcessKillFailed must include mxc.error_code field"
+            );
+
+            // Validate PolicyHash payload
+            let policy_hash = events
+                .iter()
+                .find(|e| e.name == "MXC.PolicyHash")
+                .expect("policy hash event");
+            assert!(policy_hash
+                .fields
+                .contains(&("identity".to_owned(), "opaque".to_owned())));
+            assert!(policy_hash
+                .fields
+                .contains(&("policy_hash".to_owned(), "sha256:abc".to_owned())));
+            assert!(policy_hash
+                .fields
+                .contains(&("config_schema_version".to_owned(), "0.9.0-alpha".to_owned())));
+
+            // Validate SandboxNetworkPolicyApplied payload
+            let network = events
+                .iter()
+                .find(|e| e.name == "MXC.SandboxNetworkPolicyApplied")
+                .expect("network event");
+            assert!(network
+                .fields
+                .iter()
+                .any(|(n, v)| n == "identity" && v == "opaque"));
+            assert!(network
+                .fields
+                .iter()
+                .any(|(n, v)| n == "enforcement_mode" && v == "proxy"));
+            assert!(network
+                .fields
+                .iter()
+                .any(|(n, v)| n == "default_policy" && v == "deny"));
+            assert!(network
+                .fields
+                .contains(&("proxy_port".to_owned(), "8080".to_owned())));
+
+            // Validate SandboxTornDown payload
+            let teardown = events
+                .iter()
+                .find(|e| e.name == "MXC.SandboxTornDown")
+                .expect("teardown event");
+            assert!(teardown
+                .fields
+                .iter()
+                .any(|(n, v)| n == "identity" && v == "opaque"));
+            assert!(teardown
+                .fields
+                .iter()
+                .any(|(n, v)| n == "status" && v == "success"));
+            assert!(teardown
+                .fields
+                .contains(&("released_resources".to_owned(), "released".to_owned())));
+
+            // Validate ConfigRejected payload
+            let rejected = events
+                .iter()
+                .find(|e| e.name == "MXC.ConfigRejected")
+                .expect("config rejection event");
+            assert!(rejected
+                .fields
+                .iter()
+                .any(|(n, v)| n == "correlation_id" && v == "corr"));
+            assert!(rejected
+                .fields
+                .iter()
+                .any(|(n, v)| n == "backend" && v == "process_container"));
+            assert!(rejected
+                .fields
+                .iter()
+                .any(|(n, v)| n == "reason" && v == "invalid"));
+            assert!(rejected.fields.contains(&(
+                "offending_field".to_owned(),
+                "process.commandLine".to_owned()
+            )));
+            assert!(rejected
+                .fields
+                .contains(&("phase".to_owned(), "validate".to_owned())));
+        }
+    }
+
+    #[test]
+    fn disabled_invocation_cannot_inherit_an_enabled_session_or_emit_backend_events() {
+        let _lock = test_sink::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         super::super::reset_for_test();
         super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
         super::super::TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
         test_sink::install();
-        log_process_event("opaque", 42, ProcessEvent::Exited(0));
-        log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
-        log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate", 5));
-        log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
-        log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
-        log_network_policy_applied("opaque", "proxy", "deny", 8080);
-        log_sandbox_torn_down("opaque", "success", "released");
-        log_config_rejected(
-            "corr",
-            "process_container",
-            "invalid",
-            "process.commandLine",
-            "validate",
-        );
+        let mut logger =
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let _enabled = super::super::session::start(true, "", None, &mut logger);
+        let expected = super::super::session::current().unwrap().to_string();
+        {
+            let _disabled = super::super::session::start(false, "", None, &mut logger);
+            log_policy_hash("synthetic", "synthetic-hash", "1.0.1");
+            assert!(test_sink::take_requirements().is_empty());
+        }
+        log_policy_hash("synthetic", "synthetic-hash", "1.0.1");
         let events = test_sink::take_requirements();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, expected);
         super::super::reset_for_test();
-
-        // Validate ProcessExited payload
-        let process_exited = events
-            .iter()
-            .find(|e| {
-                e.name == "MXC.ProcessExited"
-                    && e.fields
-                        .iter()
-                        .any(|(n, v)| n == "identity" && v == "opaque")
-            })
-            .expect("MXC.ProcessExited with opaque identity");
-        assert!(process_exited
-            .fields
-            .iter()
-            .any(|(n, v)| n == "process_id" && v == "42"));
-        assert!(
-            process_exited
-                .fields
-                .iter()
-                .any(|(n, v)| n == "ExitCode" && v == "0"),
-            "ProcessExited must include ExitCode field with value 0"
-        );
-
-        // Validate ProcessTimedOut payload
-        let process_timedout = events
-            .iter()
-            .find(|e| e.name == "MXC.ProcessTimedOut")
-            .expect("MXC.ProcessTimedOut");
-        assert!(process_timedout
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(process_timedout
-            .fields
-            .iter()
-            .any(|(n, v)| n == "process_id" && v == "42"));
-        assert!(
-            process_timedout
-                .fields
-                .iter()
-                .any(|(n, v)| n == "TimeoutMs" && v == "1000"),
-            "ProcessTimedOut must include TimeoutMs field with value 1000"
-        );
-
-        // Validate ProcessKillFailed payload
-        let process_killfailed = events
-            .iter()
-            .find(|e| e.name == "MXC.ProcessKillFailed")
-            .expect("MXC.ProcessKillFailed");
-        assert!(process_killfailed
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(process_killfailed
-            .fields
-            .iter()
-            .any(|(n, v)| n == "process_id" && v == "42"));
-        assert!(
-            process_killfailed
-                .fields
-                .iter()
-                .any(|(n, v)| n == "mxc.error_type" && v == "terminate"),
-            "ProcessKillFailed must include mxc.error_type field"
-        );
-        assert!(
-            process_killfailed
-                .fields
-                .iter()
-                .any(|(n, v)| n == "mxc.error_code" && v == "5"),
-            "ProcessKillFailed must include mxc.error_code field"
-        );
-
-        // Validate EnforcementDegraded payload
-        let enforcement = events
-            .iter()
-            .find(|e| e.name == "MXC.EnforcementDegraded")
-            .expect("enforcement event");
-        assert!(enforcement
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| n == "tier" && v == "base_container"),
-            "EnforcementDegraded must include tier field with correct value"
-        );
-        assert!(enforcement
-            .fields
-            .contains(&("needs_dacl_augmentation".to_owned(), "true".to_owned())));
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| !n.starts_with("degradation_reasons") || !v.is_empty()),
-            "EnforcementDegraded must include non-empty degradation_reasons"
-        );
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| !n.starts_with("effective_enforcement_level") || !v.is_empty()),
-            "EnforcementDegraded must include non-empty effective_enforcement_level"
-        );
-
-        // Validate PolicyHash payload
-        let policy_hash = events
-            .iter()
-            .find(|e| e.name == "MXC.PolicyHash")
-            .expect("policy hash event");
-        assert!(policy_hash
-            .fields
-            .contains(&("identity".to_owned(), "opaque".to_owned())));
-        assert!(policy_hash
-            .fields
-            .contains(&("policy_hash".to_owned(), "sha256:abc".to_owned())));
-        assert!(policy_hash
-            .fields
-            .contains(&("config_schema_version".to_owned(), "0.9.0-alpha".to_owned())));
-
-        // Validate SandboxNetworkPolicyApplied payload
-        let network = events
-            .iter()
-            .find(|e| e.name == "MXC.SandboxNetworkPolicyApplied")
-            .expect("network event");
-        assert!(network
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(network
-            .fields
-            .iter()
-            .any(|(n, v)| n == "enforcement_mode" && v == "proxy"));
-        assert!(network
-            .fields
-            .iter()
-            .any(|(n, v)| n == "default_policy" && v == "deny"));
-        assert!(network
-            .fields
-            .contains(&("proxy_port".to_owned(), "8080".to_owned())));
-
-        // Validate SandboxTornDown payload
-        let teardown = events
-            .iter()
-            .find(|e| e.name == "MXC.SandboxTornDown")
-            .expect("teardown event");
-        assert!(teardown
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(teardown
-            .fields
-            .iter()
-            .any(|(n, v)| n == "status" && v == "success"));
-        assert!(teardown
-            .fields
-            .contains(&("released_resources".to_owned(), "released".to_owned())));
-
-        // Validate ConfigRejected payload
-        let rejected = events
-            .iter()
-            .find(|e| e.name == "MXC.ConfigRejected")
-            .expect("config rejection event");
-        assert!(rejected
-            .fields
-            .iter()
-            .any(|(n, v)| n == "correlation_id" && v == "corr"));
-        assert!(rejected
-            .fields
-            .iter()
-            .any(|(n, v)| n == "backend" && v == "process_container"));
-        assert!(rejected
-            .fields
-            .iter()
-            .any(|(n, v)| n == "reason" && v == "invalid"));
-        assert!(rejected.fields.contains(&(
-            "offending_field".to_owned(),
-            "process.commandLine".to_owned()
-        )));
-        assert!(rejected
-            .fields
-            .contains(&("phase".to_owned(), "validate".to_owned())));
     }
 
     #[test]
@@ -858,7 +1070,6 @@ mod tests {
         test_sink::install();
 
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
-        log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
         log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
         log_sandbox_torn_down("opaque", "success", "released");

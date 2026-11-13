@@ -154,6 +154,22 @@ assert_blocked() {
     fi
 }
 
+# Diagnostics only: shows which host mechanism refused io_uring.
+log_io_uring_host_state() {
+    local value
+    if value="$(cat /proc/sys/kernel/io_uring_disabled 2>&1)"; then
+        echo "kernel.io_uring_disabled=$value"
+    else
+        echo "kernel.io_uring_disabled unreadable: $value"
+    fi
+    if command -v getenforce >/dev/null 2>&1; then
+        echo "SELinux: $(getenforce 2>&1)"
+    fi
+    if [ -d /sys/fs/selinux/class/io_uring/perms ]; then
+        echo "SELinux io_uring perms: $(ls /sys/fs/selinux/class/io_uring/perms | tr '\n' ' ')"
+    fi
+}
+
 assert_allowed() {
     if echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
         fail "$1"
@@ -191,6 +207,7 @@ PEER_UDP_LISTENER_PID=""
 PEER_LISTENER_LOG="$(mktemp)"
 PEER_UDP_LISTENER_LOG="$(mktemp)"
 PEER_DNS_LISTENER_LOG="$(mktemp)"
+IO_URING_CONFIG="$(mktemp --suffix=.json)"
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -208,7 +225,7 @@ teardown_peer() {
 }
 teardown_run() {
     teardown_peer
-    rm -f "$PEER_LISTENER_LOG" "$PEER_UDP_LISTENER_LOG" "$PEER_DNS_LISTENER_LOG"
+    rm -f "$PEER_LISTENER_LOG" "$PEER_UDP_LISTENER_LOG" "$PEER_DNS_LISTENER_LOG" "$IO_URING_CONFIG"
 }
 trap teardown_run EXIT
 
@@ -385,6 +402,33 @@ assert_blocked "tcp/443 succeeded while the policy allowed only icmp. The protoc
 run_case "icmp case: egress.default deny, peer allowed on tcp/443 only" "$ICMP_DENIED_CONFIG"
 assert_blocked "an ICMP echo succeeded while the policy allowed only tcp/443. ICMP is not carrying the port selectors, so a policy written for one transport leaks another."
 
+# The policy lets ICMP reach the peer, leaving the socket refusal as the only block.
+# Ubuntu is used because Alpine ships no python3.
+python3 - "$SCRIPT_DIR/lib/io_uring_egress_probe.py" "$PEER_IP" "$PEER_CIDR" >"$IO_URING_CONFIG" <<'PY'
+import json, sys
+probe, peer, cidr = sys.argv[1:]
+print(json.dumps({
+    "version": "1.0.0",
+    "containerId": "CLI-LXC-GA-Egress-Io-Uring",
+    "containment": "lxc",
+    "process": {"commandLine": "python3 -c '" + open(probe).read() + "' " + peer},
+    "lifecycle": {"destroyOnExit": True},
+    "lxc": {"distribution": "ubuntu", "release": "noble"},
+    "network": {"egress": {"default": "deny", "allow": [{"to": [{"cidr": cidr}], "ports": [{"protocol": "icmp"}]}]}},
+}))
+PY
+
+run_case "io_uring case: peer allowed on protocol icmp, echo sent from raw and packet sockets opened through io_uring" "$IO_URING_CONFIG"
+# Hosts such as RHEL refuse io_uring_setup with EPERM, which leaves the workload
+# no io_uring sockets to escape with. Any other setup error is a broken probe.
+# The workload runs on a pty, so its lines end in \r\n.
+if grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1" <<<"${CASE_OUTPUT//$'\r'/}"; then
+    log_io_uring_host_state
+    echo "io_uring case: the workload cannot open io_uring (EPERM), so there are no io_uring sockets to test."
+else
+    assert_blocked "an echo from a raw or packet socket opened through io_uring reached the peer. io_uring hands the workload the sockets the capability drop takes away."
+fi
+
 run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG"
 assert_allowed "a port inside the allowed range 440-445 was unreachable. endPort is not reaching the chain, so a range selector blocks the traffic it was written to permit."
 
@@ -415,5 +459,5 @@ assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed th
 run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
 assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
-echo "PASS: egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
+echo "PASS: egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, no exclusion answered for a destination a later rule denied, and no socket opened through io_uring reached the peer."
 echo "LXC egress enforcement test complete."

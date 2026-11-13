@@ -14,7 +14,7 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | Requirement | Details |
 |---|---|
 | **Windows 10 1903 (build 18362.1049)+ on x64, or Windows 10 2004 (build 19041)+ on ARM64** | WSL 2's own [system requirements](https://learn.microsoft.com/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2). MXC does not check the OS version itself — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) below. The WSL runtime package installs only on build 19041 and later, so in practice a 1903/1909 host still needs an upgrade to reach the WSL version below. |
-| **WSL 2.9.9+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
+| **WSL 3.0.5+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
 | **Container images** | Reachable from a registry, already cached, or supplied as a local tar |
 
@@ -54,14 +54,13 @@ optional component is absent as well. Any SDK call that reaches the WSL service
 can return it, so an unexpected `0x80040327` from a WSLC operation means the host
 OS is below WSL 2's floor, not that WSL is merely uninstalled.
 
-## Step 1 — Install WSL 2.9.9+
+## Step 1 — Install WSL 3.0.5+
 
-The WSLC SDK requires WSL version 2.9.9 or later. Update WSL to the latest
-version. Note that 2.9.9 may only be available on the pre-release channel
-until it reaches the default Store channel, so include `--pre-release`:
+The WSLC SDK requires WSL version 3.0.5 or later. Update WSL to the latest
+version:
 
 ```powershell
-wsl --update --pre-release
+wsl --update
 ```
 
 Verify your WSL version after updating:
@@ -70,7 +69,7 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.9.9.0 or later**. If `wsl --update --pre-release`
+The WSL version should be **3.0.5.0 or later**. If `wsl --update`
 does not bring you to the required version, build WSL from the `master`
 branch:
 
@@ -131,6 +130,14 @@ Or pull a single image directly:
     --setup-wslc --image alpine:latest
 ```
 
+Repeat `--image` to pull several in one go, which opens each store once instead
+of once per image:
+
+```powershell
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
+    --setup-wslc --image alpine:latest --image python:3.12-alpine
+```
+
 Pulled images persist in the cache until you remove them — pay the
 cost once per image, not once per run.
 
@@ -140,6 +147,15 @@ cost once per image, not once per run.
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
 > pulled and will pull it again under its own path.
+
+> **Container lifecycle operations use a different store.** The lifecycle
+> daemon leases its store from a pool under
+> `%LOCALAPPDATA%\mxc\wslc-store-slots` (or `%TEMP%\mxc\wslc-store-slots` when
+> `%LOCALAPPDATA%` is unresolvable), which `-StoragePath` does not reach.
+> Warm it with `setup-wslc.ps1 -DaemonSlots 1`, or `--wslc-daemon-slots 1` on
+> `wxc-exec.exe`; both default to 0, and each slot warmed costs another pull
+> and another multi-GiB store. See
+> [the lifecycle guide](wslc-state-aware.md#image-store).
 
 > **Bring-up reaches the network.** A cache miss makes the host fetch
 > from the image's registry before the container starts. That fetch is
@@ -213,6 +229,25 @@ prepare a machine that will run offline — warm the cache first:
 .\scripts\setup-wslc.ps1 -Image <image>
 ```
 
+### How warming works
+
+A store is a directory holding a `storage.vhdx`, and the SDK offers no way to
+write into one directly — a pull needs a live session. So warming opens a
+short-lived WSLc session against each target store, pulls every requested image
+into it, and releases it. The session is only a way to reach the file; what
+persists is the VHDX, which a later run or a lifecycle daemon reads.
+
+One session is opened per *store*, not per image, so warming three images into
+two stores costs two sessions rather than six. Passing every image to one
+invocation is therefore cheaper than invoking the tool once per image:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine -DaemonSlots 1
+```
+
+That warms two stores — the create-and-run store and lifecycle slot 0 — with
+both images, booting two utility VMs in total.
+
 ## Usage
 
 ### TypeScript SDK
@@ -246,8 +281,10 @@ try {
 }
 ```
 
-WSLC SDK execution uses standard output/error streams and does not expose a
-caller-controlled PTY or stdin.
+Create-and-run WSLC execution uses separate stdout and stderr pipes, and a stdin
+pipe only when started with stdin, and does not expose a caller-controlled PTY.
+See [Sending input (stdin)](#sending-input-stdin) for how to give a command
+input.
 
 ### Rust SDK
 
@@ -292,13 +329,53 @@ Notes and limits:
 
 - **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
   `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
-- **No stdin.** The WSLC SDK exposes no process-input API, so
-  `Sandbox::take_stdin()` returns `None` for a WSL container.
+- **Stdin.** `v1::spawn_with_stdin` returns a writable stdin through
+  `MxcProcess::take_stdin()`; drop it to give the command end-of-file.
+  `v1::spawn` and `v1::run` give the command end-of-file at once. See
+  [Sending input (stdin)](#sending-input-stdin).
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
   use `kill()` (which stops the container and everything in it) to terminate it.
 - **Discovery.** `platform_support()` lists `"wslc"` in `available_methods` only
   when this host can actually run it (`wslcsdk.dll` loads and the WSLC runtime
   reports no missing components).
+
+### Sending input (stdin)
+
+Stdin is forwarded to create-and-run commands and to commands run in a
+provisioned container (container lifecycle operations).
+
+| Flow | Stdin |
+|---|---|
+| CLI: `wxc-exec` with a `wslc` config, or `wxc-exec --operation exec` | The executor's own stdin is forwarded when it is a pipe, a file, or `NUL`, for example `type input.txt \| wxc-exec.exe config.json` or `wxc-exec.exe config.json < input.txt`. A terminal is not forwarded: the command sees end-of-file at once, and the executor prints a warning to stderr. |
+| Create-and-run from an SDK: `spawn_with_stdin` (Rust), `MxcContainer.SpawnWithStdin` (.NET), `spawnWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. Waiting on the process closes a stdin the caller did not take. Once the command exits, or is killed, its stdin is closed, so a pending write fails rather than hangs. If forwarding written input fails for any other reason, `wait` reports the failure. |
+| Create-and-run from an SDK: `spawn` (Rust), `MxcContainer.Spawn` (.NET), `spawn` (Node) | Not forwarded. |
+| Lifecycle exec from an SDK: `spawn_in_container_with_stdin` (Rust), `MxcLifecycle.SpawnInContainerWithStdin` (.NET), `spawnInContainerWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
+| Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | Not forwarded. |
+
+The run-to-completion helpers (`run`, `run_in_container`, `Run`,
+`RunInContainer`, `runInContainer`) take no input, so a command that reads
+stdin sees end-of-file at once.
+
+The executor reads its own stdin on a background thread as the command runs,
+so a stdin that never closes does not delay a command that does not read it.
+A command that exits before reading all its input is not an error. If reading
+the executor's stdin fails while the command runs, the executor stops the
+container before the command's stdin is closed, and reports the run as failed,
+even when the run also timed out. If the stop cannot be confirmed, the command's
+stdin stays open until the container is torn down, so the command never reads
+the cut-short input as complete.
+
+A command that exits while a large amount of its input is still unread (more
+than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
+its exit 30 seconds or more after the command ends, and may drop output the
+command wrote after its input backed up. When that happens the executor, or
+the SDK process's warnings, report that output may be incomplete. Even a
+command such as `head -n 1` that stops reading early is delayed this way, so
+keep input to a command that may not read all of it small.
+
+A `timeout` still ends a command that waits on a stdin that never closes.
+
+See [exec stdin](wslc-state-aware.md#exec-stdin) for lifecycle-exec details.
 
 ## Configuration Reference
 
@@ -309,12 +386,22 @@ WSLC-specific settings go under `wslc` in the JSON config:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `image` | string | `"alpine:latest"` | Container image (DockerHub, GHCR, MCR, etc.) |
+| `targetOs` | string | `"linux"` | Container OS for create-and-run execution. Omit it or use `"linux"`; other values are rejected |
 | `cpuCount` | number | Host default | Number of CPU cores for the container |
 | `memoryMb` | number | Host default | Memory limit in MB |
 | `gpu` | boolean | `false` | Enable GPU passthrough |
-| `storagePath` | string | System default | Host path for container storage (VHD) |
+| `storagePath` | string | System default | Host path for container storage (VHD). Create-and-run execution only |
 | `imageTarPath` | string | — | Path to a local tar file to import as the image |
 | `portMappings` | array | `[]` | Host→container TCP forwards; each entry takes `windowsPort` and `containerPort` |
+
+### `containerId` names the WSL session
+
+A create-and-run request names its WSL session after the top-level
+`containerId`. The field is optional: omit it and the run gets a generated
+name of the form `mxc-wslc-<uuid>`, fresh on every run.
+
+Supply your own only when you need a name you can recognise — two runs sharing
+one `containerId` are not isolated from each other by the id alone.
 
 ### Port mappings
 
@@ -350,8 +437,46 @@ The separate `provision` operation takes the same list under
 
 The lifecycle daemon creates one container per sandbox, so a forward belongs
 to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
-`gpu` / `storagePath` settings remain available only for create-and-run execution, because that daemon shares a
-single WSL session across every sandbox.
+`gpu` settings size the session rather than the sandbox, so a lifecycle caller
+asks for them on a separate `provision-session` operation and then names the
+returned session on each `provision`:
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision-session",
+    "containment": "wslc",
+    "wslc": {
+        "provisionSession": { "cpuCount": 4, "memoryMb": 8192 }
+    }
+}
+```
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+        }
+    }
+}
+```
+
+Every sandbox in the session shares that VM, so `cpuCount: 4` means the VM has
+four virtual CPUs rather than four per sandbox. Omitting `sessionId` joins an
+implicit session shared by every request that names none, which is what a WSLC
+`provision` has always done. Release the session with `deprovision-session`
+once its sandboxes are gone; it is refused while any remain. See
+[the lifecycle guide](wslc-state-aware.md#sessions).
+
+`storagePath` is create-and-run-only
+for a different reason: the daemon leases its store from a slot pool rather
+than taking a caller-named path, so warming its cache is a separate step. See
+[the lifecycle guide](wslc-state-aware.md#image-store).
 
 ### Image sources
 
@@ -502,6 +627,11 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+Create-and-run execution and container lifecycle provisioning use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts) for
+object identity, delegation, and denied-path overlap checks. A stalled probe
+rejects the request before volumes are created.
+
 ### Working directory (`process.cwd`)
 
 Create-and-run execution takes `process.cwd` as a local Windows drive path and maps it the
@@ -593,7 +723,9 @@ policy-persistence primitive, so there is nothing for the flag to select.
 
 Container lifecycle JSON requests differ: they reject the whole `lifecycle` section
 at parse time, because a multi-invocation sandbox's lifetime is driven by the
-explicit `provision` / `deprovision` phases rather than by per-run flags.
+explicit `provision` / `deprovision` phases rather than by per-run flags. The
+session those sandboxes live in has its own pair, `provision-session` /
+`deprovision-session`.
 
 ## Supported workloads
 
@@ -608,7 +740,7 @@ Four workload shapes are not:
 
 | Workload type | Why |
 |---|---|
-| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| Interactive processes (REPLs, shells) | Interactive terminal input is not forwarded; only piped or redirected input reaches the command (see [Sending input (stdin)](#sending-input-stdin)) |
 | GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
 | Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
 | Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |
@@ -631,9 +763,10 @@ images — cannot be used.
 | `WSLC runtime unavailable` **on a host below WSL 2's minimum Windows version** | The WSL runtime package cannot install on this OS, so it reports as missing — MXC does not distinguish the two cases | Run `wsl --update`; WSL reports the version verdict ("Windows version {} does not support the packaged version of Windows Subsystem for Linux"). Upgrade Windows — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) |
 | HRESULT `0x80040327` (`WSL_E_OS_NOT_SUPPORTED`) from any WSLC call | The SDK reached WSL's service-connect guard on a host that is neither Windows 11 nor has the WSL support interface | Upgrade Windows. `0x80040321` (`WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`) is the sibling code when the legacy `lxss` component is absent too |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
+| `WSLC runtime unavailable` | WSL runtime package is missing, older than 3.0.5, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (specified by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build that includes a newer SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
+| `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress. For a lifecycle operation the store is a daemon slot, so warm it with `setup-wslc.ps1 -DaemonSlots 1` |
+| `WSLc store unavailable: the image store at <path> is already held by another live session` | Two processes reached the same store, which admits one live session | Wait for the holder to release it. A running `wxc-wslc-daemon.exe` releases its slot after `MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS` (default 300s); a create-and-run execution releases its store when the run ends |
 | `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
 | `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |
 | `WSLC image '<name>' did not finish pulling within <n>s. The transfer was abandoned` | The registry stopped responding, so the pull was given up on rather than ended | Retry, or warm the cache from a faster network. For a separate `provision` operation, raise `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` alongside `MXC_WSLC_PULL_TIMEOUT_SECS`, since the pull must finish before the daemon-call deadline |

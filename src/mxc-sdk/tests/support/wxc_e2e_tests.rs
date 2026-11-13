@@ -24,7 +24,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 /// Locate the repository root.
 /// `CARGO_MANIFEST_DIR` points to `src/mxc-sdk/` during `cargo test`.
 pub fn repo_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("MXC_SDK_SOURCE_DIR"));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent() // src
         .and_then(|p| p.parent()) // repo root
@@ -43,7 +43,7 @@ pub fn examples_dir() -> PathBuf {
 }
 
 fn src_dir() -> PathBuf {
-    PathBuf::from(env!("MXC_SDK_SOURCE_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent() // src
         .expect("could not find src/")
         .to_path_buf()
@@ -678,7 +678,7 @@ pub fn has_platform_exec() -> bool {
 /// Whether `bwrap` (Bubblewrap) is installed, runnable, and new enough on this
 /// Linux host. Bubblewrap characterization tests skip cleanly otherwise (e.g. a
 /// CI runner without `bubblewrap` installed, or one shipping a release older
-/// than [`mxc_internal::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`]) — the backend
+/// than `mxc_internal::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`) — the backend
 /// rejects such hosts up front, so the tests would have nothing to exercise.
 pub fn has_bwrap() -> bool {
     #[cfg(target_os = "linux")]
@@ -686,7 +686,7 @@ pub fn has_bwrap() -> bool {
         match mxc_internal::bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => true,
             Err(err) => {
-                println!("SKIPPED: {err}");
+                skip_bwrap_test(&err.to_string());
                 false
             }
         }
@@ -699,19 +699,26 @@ pub fn has_bwrap() -> bool {
     }
 }
 
+/// Report a missing Bubblewrap test prerequisite, failing instead when
+/// `MXC_BWRAP_TESTS_REQUIRE_EXECUTION` is set.
+pub fn skip_bwrap_test(reason: &str) {
+    if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+        panic!("strict mode: {reason}");
+    }
+    println!("SKIPPED: {reason}");
+}
+
 /// Opt-in switch for the Windows ProcessContainer characterization tests.
 ///
-/// AppContainer/BaseContainer execution requires an elevated, host-prepped
-/// Windows host (see `docs/backends/process-container/host-prep.md`). Standard CI runners are NOT capable,
-/// so these tests are skipped unless a host-prepped lane explicitly sets
-/// `MXC_E2E_HOST_PREPPED=1`. This keeps them from ever red-failing on incapable
-/// CI while still being runnable on a prepared box.
-pub fn host_prepped_optin() -> bool {
-    let enabled = std::env::var("MXC_E2E_HOST_PREPPED").as_deref() == Ok("1");
+/// ProcessContainer execution requires a PSEC-capable Windows host. Standard
+/// CI runners are not necessarily capable, so these tests are skipped unless a
+/// capable lane sets `MXC_E2E_PSEC_CAPABLE_HOST=1`.
+pub fn processcontainer_optin() -> bool {
+    let enabled = std::env::var("MXC_E2E_PSEC_CAPABLE_HOST").as_deref() == Ok("1");
     if !enabled {
         println!(
-            "SKIPPED: ProcessContainer characterization requires a host-prepped Windows host; \
-             set MXC_E2E_HOST_PREPPED=1 on a prepared lane to enable"
+            "SKIPPED: ProcessContainer characterization requires a PSEC-capable Windows host; \
+             set MXC_E2E_PSEC_CAPABLE_HOST=1 on a capable lane to enable"
         );
     }
     enabled

@@ -27,9 +27,6 @@ $configJson = @"
     },
     "filesystem": {
         "readwritePaths": $((ConvertTo-Json -InputObject @($WorkDirectory) -Compress))
-    },
-    "fallback": {
-        "allowDaclMutation": true
     }
 }
 "@

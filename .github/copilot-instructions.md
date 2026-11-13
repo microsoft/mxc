@@ -18,6 +18,7 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 - `mxc_internal::mxc_engine` is the single execution engine. Executor binaries and the public SDK facade delegate backend routing to it. Keep each workspace consumer on `mxc-internal` consistently: its Rust types and static state are distinct from the published SDK's.
 - Keep `wxc`, `lxc`, and `mxc_darwin` thin. Do not add backend-selection matches to the binaries.
 - Keep build-time staging in the `mxc-sdk/build/` build modules, not runtime modules.
+- Keep the Windows Sandbox and WSLC sidecars published as `mxc-sdk` binary targets; their unit tests belong to `mxc-internal`.
 - Use `#[cfg(target_os = "...")]` and existing Cargo feature gates for platform-specific code.
 - Preserve the distinction between run-to-completion, streaming, and state-aware lifecycle APIs.
 - Unsupported policy must fail closed. Do not accept a field that the selected backend cannot enforce.
@@ -44,16 +45,22 @@ build.bat
 ./build-mac.sh
 ```
 
-The sidecars declared as `[[bin]]` targets in `src/mxc-internal/Cargo.toml` are
+The sidecars declared as `[[bin]]` targets in `src/mxc-sdk/Cargo.toml` are
 ordinary Cargo binary targets. Workspace builds compile the targets whose
 `required-features` are enabled; do not invoke Cargo recursively from
 `mxc-sdk/build.rs`. Build a sidecar directly with
-`cargo build -p mxc-internal --bin <target>`. The `wxc-wslc-daemon` target requires
+`cargo build -p mxc-sdk --bin <target>`. The `wxc-wslc-daemon` target requires
 `--features wslc`. Keep version-resource generation and dependency staging in
 the package build script, and keep artifact copying/signing in the repository
 build and CI entry points.
 
 ### Targeted validation
+
+The .NET SDK, behavioral tests, and Native AOT smoke test target `net8.0` and
+`net10.0`; samples and the console driver target `net10.0`. The root
+`global.json` selects a stable .NET 10 SDK and the Microsoft.Testing.Platform
+test runner. Windows test bundles explicitly publish `net10.0`; the Azure
+two-branch template falls back to `net8.0` for older checkouts.
 
 ```text
 # From src/
@@ -68,7 +75,7 @@ cargo test -p mxc-internal --lib -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 
@@ -79,14 +86,17 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 - Production parsing dispatches through exact closed contracts and their
   version-specific adapters into private `CommonRequestIR` normalization input.
 - Preserve optional-field presence through parsing and binding. Apply defaults and semantic validation in the backend.
+
 - New features use their intended permanent JSON location in the exact
   development contract. JSON placement, publication eligibility, and runtime
   experimental authorization are separate. Update the matching closed request
   types, adapt them into `CommonRequestIR` or a phase-specific runtime config,
   and regenerate the registered exact schema and TypeScript artifacts.
+
 - Never edit `schemas/stable/`; released schemas are immutable.
 - Never hand-edit generated development schemas or generated TypeScript wire types.
 - `schemas/schema-version.json` is the canonical source for compatibility constants.
+
 - In the .NET SDK (`sdk/dotnet/`), every serialized or deserialized wire type
   must be registered as a `[JsonSerializable]` root in `MxcJsonContext`
   (`MxcJsonSerialization.cs`) and routed through the `MxcJson` helpers, so the
@@ -153,3 +163,10 @@ When creating issues through an API, explicitly set the issue type and these exa
 | Task | `Task` | `Issue-Task`, `Needs-Triage` |
 
 Do not fabricate missing required issue fields. For security issues or BSODs, do not attach dumps, logs, or traces to a public GitHub issue; direct sensitive material to `secure@microsoft.com` and reference the issue.
+
+## Engineering and review guidance
+
+Follow the additional [design, staged delivery, communication, and validation standards](../AGENTS.md#design-for-the-codebase-not-just-the-feature)
+in `AGENTS.md`. Use the [MXC review skill](skills/mxc-code-review/SKILL.md)
+when reviewing changes, including its requirements for functional CI validation
+and bug regression coverage.

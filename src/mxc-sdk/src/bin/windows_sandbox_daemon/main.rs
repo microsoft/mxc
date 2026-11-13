@@ -11,14 +11,14 @@ mod control_server;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mxc_internal::windows_sandbox_lifecycle::control_plane::{
+use crate::windows_sandbox_lifecycle::control_plane::{
     self, process_creation_time, DaemonRecord, MappedFolderRecord, VmOwnership, VmProcId,
     IPC_PROTOCOL_VERSION, RECORD_SCHEMA_VERSION,
 };
-use mxc_internal::windows_sandbox_lifecycle::rendezvous::{
+use crate::windows_sandbox_lifecycle::rendezvous::{
     GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZVOUS_TIMEOUT,
 };
-use mxc_internal::windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
+use crate::windows_sandbox_lifecycle::{bridge as tcp_bridge, rendezvous, vm as sandbox_vm};
 use tokio::sync::{Mutex, Notify};
 
 use control_server::GuestSlot;
@@ -347,7 +347,7 @@ async fn serve(
     // (and immediately delete), and re-used on every post-StreamsReady data
     // stream reconnect.
     let guest_nonce = Arc::new(
-        mxc_internal::windows_sandbox_common::auth::generate_nonce()
+        crate::windows_sandbox_common::auth::generate_nonce()
             .map_err(|e| anyhow::anyhow!("failed to generate guest authentication nonce: {e}"))?,
     );
 
@@ -533,7 +533,7 @@ async fn launch_and_connect(
     mapped: &[sandbox_vm::MappedFolder],
     ownership: &Arc<std::sync::Mutex<VmOwnership>>,
     record: &mut DaemonRecord,
-    guest_nonce: &mxc_internal::windows_sandbox_common::auth::Nonce,
+    guest_nonce: &crate::windows_sandbox_common::auth::Nonce,
 ) -> Result<(tcp_bridge::GuestConnection, std::net::SocketAddr)> {
     let exe_dir = std::env::current_exe()
         .context("current_exe")?

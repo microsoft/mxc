@@ -16,16 +16,21 @@
 #![allow(clippy::all)]
 
 pub const WSLC_E_BASE: u32 = 1536;
-pub const WSLC_SESSION_OPTIONS_SIZE: u32 = 72;
+pub const WSLC_SESSION_OPTIONS_SIZE: u32 = 80;
 pub const WSLC_SESSION_OPTIONS_ALIGNMENT: u32 = 8;
-pub const WSLC_CONTAINER_OPTIONS_SIZE: u32 = 104;
+pub const WSLC_CONTAINER_OPTIONS_SIZE: u32 = 152;
 pub const WSLC_CONTAINER_OPTIONS_ALIGNMENT: u32 = 8;
 pub const WSLC_CONTAINER_PROCESS_OPTIONS_SIZE: u32 = 72;
 pub const WSLC_CONTAINER_PROCESS_OPTIONS_ALIGNMENT: u32 = 8;
 pub const WSLC_CONTAINER_ID_BUFFER_SIZE: u32 = 65;
 pub const WSLC_IMAGE_NAME_LENGTH: u32 = 256;
+pub const WSLC_NETWORK_ID_LENGTH: u32 = 65;
+pub const WSLC_NETWORK_NAME_LENGTH: u32 = 256;
+pub const WSLC_NETWORK_DRIVER_LENGTH: u32 = 256;
 pub type wchar_t = ::std::os::raw::c_ushort;
+pub type ULONG = ::std::os::raw::c_ulong;
 pub type USHORT = ::std::os::raw::c_ushort;
+pub type UCHAR = ::std::os::raw::c_uchar;
 pub type BOOL = ::std::os::raw::c_int;
 pub type BYTE = ::std::os::raw::c_uchar;
 pub type INT32 = ::std::os::raw::c_int;
@@ -39,6 +44,77 @@ pub type PSTR = *mut CHAR;
 pub type PCSTR = *const CHAR;
 pub type HANDLE = *mut ::std::os::raw::c_void;
 pub type HRESULT = ::std::os::raw::c_long;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct in_addr {
+    pub S_un: in_addr__bindgen_ty_1,
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union in_addr__bindgen_ty_1 {
+    pub S_un_b: in_addr__bindgen_ty_1__bindgen_ty_1,
+    pub S_un_w: in_addr__bindgen_ty_1__bindgen_ty_2,
+    pub S_addr: ULONG,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct in_addr__bindgen_ty_1__bindgen_ty_1 {
+    pub s_b1: UCHAR,
+    pub s_b2: UCHAR,
+    pub s_b3: UCHAR,
+    pub s_b4: UCHAR,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of in_addr__bindgen_ty_1__bindgen_ty_1"]
+        [::std::mem::size_of::<in_addr__bindgen_ty_1__bindgen_ty_1>() - 4usize];
+    ["Alignment of in_addr__bindgen_ty_1__bindgen_ty_1"]
+        [::std::mem::align_of::<in_addr__bindgen_ty_1__bindgen_ty_1>() - 1usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_1::s_b1"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_1, s_b1) - 0usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_1::s_b2"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_1, s_b2) - 1usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_1::s_b3"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_1, s_b3) - 2usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_1::s_b4"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_1, s_b4) - 3usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct in_addr__bindgen_ty_1__bindgen_ty_2 {
+    pub s_w1: USHORT,
+    pub s_w2: USHORT,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of in_addr__bindgen_ty_1__bindgen_ty_2"]
+        [::std::mem::size_of::<in_addr__bindgen_ty_1__bindgen_ty_2>() - 4usize];
+    ["Alignment of in_addr__bindgen_ty_1__bindgen_ty_2"]
+        [::std::mem::align_of::<in_addr__bindgen_ty_1__bindgen_ty_2>() - 2usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_2::s_w1"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_2, s_w1) - 0usize];
+    ["Offset of field: in_addr__bindgen_ty_1__bindgen_ty_2::s_w2"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1__bindgen_ty_2, s_w2) - 2usize];
+};
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of in_addr__bindgen_ty_1"][::std::mem::size_of::<in_addr__bindgen_ty_1>() - 4usize];
+    ["Alignment of in_addr__bindgen_ty_1"]
+        [::std::mem::align_of::<in_addr__bindgen_ty_1>() - 4usize];
+    ["Offset of field: in_addr__bindgen_ty_1::S_un_b"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1, S_un_b) - 0usize];
+    ["Offset of field: in_addr__bindgen_ty_1::S_un_w"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1, S_un_w) - 0usize];
+    ["Offset of field: in_addr__bindgen_ty_1::S_addr"]
+        [::std::mem::offset_of!(in_addr__bindgen_ty_1, S_addr) - 0usize];
+};
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of in_addr"][::std::mem::size_of::<in_addr>() - 4usize];
+    ["Alignment of in_addr"][::std::mem::align_of::<in_addr>() - 4usize];
+    ["Offset of field: in_addr::S_un"][::std::mem::offset_of!(in_addr, S_un) - 0usize];
+};
+pub type IN_ADDR = in_addr;
 pub type ADDRESS_FAMILY = USHORT;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -62,14 +138,42 @@ const _: () = {
         [::std::mem::offset_of!(sockaddr_storage, __ss_pad2) - 16usize];
 };
 #[repr(C)]
-#[repr(align(8))]
-#[derive(Debug, Copy, Clone)]
-pub struct WslcSessionSettings {
-    pub _opaque: [BYTE; 72usize],
+#[derive(Copy, Clone)]
+pub struct in6_addr {
+    pub u: in6_addr__bindgen_ty_1,
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union in6_addr__bindgen_ty_1 {
+    pub Byte: [UCHAR; 16usize],
+    pub Word: [USHORT; 8usize],
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of WslcSessionSettings"][::std::mem::size_of::<WslcSessionSettings>() - 72usize];
+    ["Size of in6_addr__bindgen_ty_1"][::std::mem::size_of::<in6_addr__bindgen_ty_1>() - 16usize];
+    ["Alignment of in6_addr__bindgen_ty_1"]
+        [::std::mem::align_of::<in6_addr__bindgen_ty_1>() - 2usize];
+    ["Offset of field: in6_addr__bindgen_ty_1::Byte"]
+        [::std::mem::offset_of!(in6_addr__bindgen_ty_1, Byte) - 0usize];
+    ["Offset of field: in6_addr__bindgen_ty_1::Word"]
+        [::std::mem::offset_of!(in6_addr__bindgen_ty_1, Word) - 0usize];
+};
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of in6_addr"][::std::mem::size_of::<in6_addr>() - 16usize];
+    ["Alignment of in6_addr"][::std::mem::align_of::<in6_addr>() - 2usize];
+    ["Offset of field: in6_addr::u"][::std::mem::offset_of!(in6_addr, u) - 0usize];
+};
+pub type IN6_ADDR = in6_addr;
+#[repr(C)]
+#[repr(align(8))]
+#[derive(Debug, Copy, Clone)]
+pub struct WslcSessionSettings {
+    pub _opaque: [BYTE; 80usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of WslcSessionSettings"][::std::mem::size_of::<WslcSessionSettings>() - 80usize];
     ["Alignment of WslcSessionSettings"][::std::mem::align_of::<WslcSessionSettings>() - 8usize];
     ["Offset of field: WslcSessionSettings::_opaque"]
         [::std::mem::offset_of!(WslcSessionSettings, _opaque) - 0usize];
@@ -91,11 +195,11 @@ pub type WslcSession = *mut WslcSession__;
 #[repr(align(8))]
 #[derive(Debug, Copy, Clone)]
 pub struct WslcContainerSettings {
-    pub _opaque: [BYTE; 104usize],
+    pub _opaque: [BYTE; 152usize],
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of WslcContainerSettings"][::std::mem::size_of::<WslcContainerSettings>() - 104usize];
+    ["Size of WslcContainerSettings"][::std::mem::size_of::<WslcContainerSettings>() - 152usize];
     ["Alignment of WslcContainerSettings"]
         [::std::mem::align_of::<WslcContainerSettings>() - 8usize];
     ["Offset of field: WslcContainerSettings::_opaque"]
@@ -373,6 +477,30 @@ const _: () = {
     ["Offset of field: WslcContainerNamedVolume::readOnly"]
         [::std::mem::offset_of!(WslcContainerNamedVolume, readOnly) - 16usize];
 };
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct WslcContainerNetwork {
+    pub name: PCSTR,
+    pub aliases: *const PCSTR,
+    pub aliasCount: u32,
+    pub ipv4Address: *const IN_ADDR,
+    pub ipv6Address: *const IN6_ADDR,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of WslcContainerNetwork"][::std::mem::size_of::<WslcContainerNetwork>() - 40usize];
+    ["Alignment of WslcContainerNetwork"][::std::mem::align_of::<WslcContainerNetwork>() - 8usize];
+    ["Offset of field: WslcContainerNetwork::name"]
+        [::std::mem::offset_of!(WslcContainerNetwork, name) - 0usize];
+    ["Offset of field: WslcContainerNetwork::aliases"]
+        [::std::mem::offset_of!(WslcContainerNetwork, aliases) - 8usize];
+    ["Offset of field: WslcContainerNetwork::aliasCount"]
+        [::std::mem::offset_of!(WslcContainerNetwork, aliasCount) - 16usize];
+    ["Offset of field: WslcContainerNetwork::ipv4Address"]
+        [::std::mem::offset_of!(WslcContainerNetwork, ipv4Address) - 24usize];
+    ["Offset of field: WslcContainerNetwork::ipv6Address"]
+        [::std::mem::offset_of!(WslcContainerNetwork, ipv6Address) - 32usize];
+};
 impl WslcContainerFlags {
     pub const WSLC_CONTAINER_FLAG_NONE: WslcContainerFlags = WslcContainerFlags(0);
     pub const WSLC_CONTAINER_FLAG_AUTO_REMOVE: WslcContainerFlags = WslcContainerFlags(1);
@@ -498,6 +626,39 @@ impl ::std::ops::BitAndAssign for WslcDeleteContainerFlags {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct WslcDeleteContainerFlags(pub ::std::os::raw::c_int);
+impl WslcProcessFlags {
+    pub const WSLC_PROCESS_FLAG_NONE: WslcProcessFlags = WslcProcessFlags(0);
+    pub const WSLC_PROCESS_FLAG_STDIN: WslcProcessFlags = WslcProcessFlags(1);
+}
+impl ::std::ops::BitOr<WslcProcessFlags> for WslcProcessFlags {
+    type Output = Self;
+    #[inline]
+    fn bitor(self, other: Self) -> Self {
+        WslcProcessFlags(self.0 | other.0)
+    }
+}
+impl ::std::ops::BitOrAssign for WslcProcessFlags {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: WslcProcessFlags) {
+        self.0 |= rhs.0;
+    }
+}
+impl ::std::ops::BitAnd<WslcProcessFlags> for WslcProcessFlags {
+    type Output = Self;
+    #[inline]
+    fn bitand(self, other: Self) -> Self {
+        WslcProcessFlags(self.0 & other.0)
+    }
+}
+impl ::std::ops::BitAndAssign for WslcProcessFlags {
+    #[inline]
+    fn bitand_assign(&mut self, rhs: WslcProcessFlags) {
+        self.0 &= rhs.0;
+    }
+}
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct WslcProcessFlags(pub ::std::os::raw::c_int);
 impl WslcProcessIOHandle {
     pub const WSLC_PROCESS_IO_HANDLE_STDIN: WslcProcessIOHandle = WslcProcessIOHandle(0);
     pub const WSLC_PROCESS_IO_HANDLE_STDOUT: WslcProcessIOHandle = WslcProcessIOHandle(1);
@@ -716,6 +877,115 @@ pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_UNKNOWN: WslcIdentityTo
 pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_TOKEN: WslcIdentityTokenType = 1;
 pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_CREDENTIALS: WslcIdentityTokenType = 2;
 pub type WslcIdentityTokenType = ::std::os::raw::c_int;
+impl WslcNetworkFlags {
+    pub const WSLC_NETWORK_FLAG_NONE: WslcNetworkFlags = WslcNetworkFlags(0);
+    pub const WSLC_NETWORK_FLAG_ENABLE_IPV4: WslcNetworkFlags = WslcNetworkFlags(1);
+    pub const WSLC_NETWORK_FLAG_ENABLE_IPV6: WslcNetworkFlags = WslcNetworkFlags(2);
+    pub const WSLC_NETWORK_FLAG_INTERNAL: WslcNetworkFlags = WslcNetworkFlags(4);
+}
+impl ::std::ops::BitOr<WslcNetworkFlags> for WslcNetworkFlags {
+    type Output = Self;
+    #[inline]
+    fn bitor(self, other: Self) -> Self {
+        WslcNetworkFlags(self.0 | other.0)
+    }
+}
+impl ::std::ops::BitOrAssign for WslcNetworkFlags {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: WslcNetworkFlags) {
+        self.0 |= rhs.0;
+    }
+}
+impl ::std::ops::BitAnd<WslcNetworkFlags> for WslcNetworkFlags {
+    type Output = Self;
+    #[inline]
+    fn bitand(self, other: Self) -> Self {
+        WslcNetworkFlags(self.0 & other.0)
+    }
+}
+impl ::std::ops::BitAndAssign for WslcNetworkFlags {
+    #[inline]
+    fn bitand_assign(&mut self, rhs: WslcNetworkFlags) {
+        self.0 &= rhs.0;
+    }
+}
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct WslcNetworkFlags(pub ::std::os::raw::c_int);
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WslcNetworkInfo {
+    pub id: [CHAR; 65usize],
+    pub name: [CHAR; 256usize],
+    pub driver: [CHAR; 256usize],
+    pub createdUnixTime: i64,
+    pub flags: WslcNetworkFlags,
+    pub ipv4PrefixLength: u8,
+    pub ipv6PrefixLength: u8,
+    pub ipv4Subnet: IN_ADDR,
+    pub ipv4Gateway: IN_ADDR,
+    pub ipv6Subnet: IN6_ADDR,
+    pub ipv6Gateway: IN6_ADDR,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of WslcNetworkInfo"][::std::mem::size_of::<WslcNetworkInfo>() - 640usize];
+    ["Alignment of WslcNetworkInfo"][::std::mem::align_of::<WslcNetworkInfo>() - 8usize];
+    ["Offset of field: WslcNetworkInfo::id"][::std::mem::offset_of!(WslcNetworkInfo, id) - 0usize];
+    ["Offset of field: WslcNetworkInfo::name"]
+        [::std::mem::offset_of!(WslcNetworkInfo, name) - 65usize];
+    ["Offset of field: WslcNetworkInfo::driver"]
+        [::std::mem::offset_of!(WslcNetworkInfo, driver) - 321usize];
+    ["Offset of field: WslcNetworkInfo::createdUnixTime"]
+        [::std::mem::offset_of!(WslcNetworkInfo, createdUnixTime) - 584usize];
+    ["Offset of field: WslcNetworkInfo::flags"]
+        [::std::mem::offset_of!(WslcNetworkInfo, flags) - 592usize];
+    ["Offset of field: WslcNetworkInfo::ipv4PrefixLength"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv4PrefixLength) - 596usize];
+    ["Offset of field: WslcNetworkInfo::ipv6PrefixLength"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv6PrefixLength) - 597usize];
+    ["Offset of field: WslcNetworkInfo::ipv4Subnet"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv4Subnet) - 600usize];
+    ["Offset of field: WslcNetworkInfo::ipv4Gateway"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv4Gateway) - 604usize];
+    ["Offset of field: WslcNetworkInfo::ipv6Subnet"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv6Subnet) - 608usize];
+    ["Offset of field: WslcNetworkInfo::ipv6Gateway"]
+        [::std::mem::offset_of!(WslcNetworkInfo, ipv6Gateway) - 624usize];
+};
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WslcNetworkSettings {
+    pub name: PCSTR,
+    pub flags: WslcNetworkFlags,
+    pub ipv4PrefixLength: u8,
+    pub ipv6PrefixLength: u8,
+    pub ipv4Subnet: IN_ADDR,
+    pub ipv4Gateway: IN_ADDR,
+    pub ipv6Subnet: IN6_ADDR,
+    pub ipv6Gateway: IN6_ADDR,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of WslcNetworkSettings"][::std::mem::size_of::<WslcNetworkSettings>() - 56usize];
+    ["Alignment of WslcNetworkSettings"][::std::mem::align_of::<WslcNetworkSettings>() - 8usize];
+    ["Offset of field: WslcNetworkSettings::name"]
+        [::std::mem::offset_of!(WslcNetworkSettings, name) - 0usize];
+    ["Offset of field: WslcNetworkSettings::flags"]
+        [::std::mem::offset_of!(WslcNetworkSettings, flags) - 8usize];
+    ["Offset of field: WslcNetworkSettings::ipv4PrefixLength"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv4PrefixLength) - 12usize];
+    ["Offset of field: WslcNetworkSettings::ipv6PrefixLength"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv6PrefixLength) - 13usize];
+    ["Offset of field: WslcNetworkSettings::ipv4Subnet"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv4Subnet) - 16usize];
+    ["Offset of field: WslcNetworkSettings::ipv4Gateway"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv4Gateway) - 20usize];
+    ["Offset of field: WslcNetworkSettings::ipv6Subnet"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv6Subnet) - 24usize];
+    ["Offset of field: WslcNetworkSettings::ipv6Gateway"]
+        [::std::mem::offset_of!(WslcNetworkSettings, ipv6Gateway) - 40usize];
+};
 impl WslcComponentFlags {
     pub const WSLC_COMPONENT_FLAG_NONE: WslcComponentFlags = WslcComponentFlags(0);
     pub const WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM: WslcComponentFlags =
@@ -821,6 +1091,10 @@ pub struct WslcSdk {
             sessionSettings: *mut WslcSessionSettings,
             flags: WslcSessionFeatureFlags,
         ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcSetSessionSettingsHostLoopback: Result<
+        unsafe extern "C" fn(sessionSettings: *mut WslcSessionSettings, hostName: PCSTR) -> HRESULT,
         ::libloading::Error,
     >,
     pub WslcGetSessionTerminationEvent: Result<
@@ -948,6 +1222,30 @@ pub struct WslcSdk {
         ) -> HRESULT,
         ::libloading::Error,
     >,
+    pub WslcSetContainerSettingsNetworks: Result<
+        unsafe extern "C" fn(
+            containerSettings: *mut WslcContainerSettings,
+            networks: *const WslcContainerNetwork,
+            networkCount: u32,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcSetContainerSettingsCapabilityAdditions: Result<
+        unsafe extern "C" fn(
+            containerSettings: *mut WslcContainerSettings,
+            capabilities: *const PCSTR,
+            capabilityCount: u32,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcSetContainerSettingsCapabilityDrops: Result<
+        unsafe extern "C" fn(
+            containerSettings: *mut WslcContainerSettings,
+            capabilities: *const PCSTR,
+            capabilityCount: u32,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
     pub WslcCreateContainerProcess: Result<
         unsafe extern "C" fn(
             container: WslcContainer,
@@ -1016,6 +1314,13 @@ pub struct WslcSdk {
             processSettings: *mut WslcProcessSettings,
             key_value: *const PCSTR,
             argc: usize,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcSetProcessSettingsFlags: Result<
+        unsafe extern "C" fn(
+            processSettings: *mut WslcProcessSettings,
+            flags: WslcProcessFlags,
         ) -> HRESULT,
         ::libloading::Error,
     >,
@@ -1157,6 +1462,32 @@ pub struct WslcSdk {
         ) -> HRESULT,
         ::libloading::Error,
     >,
+    pub WslcListSessionNetworks: Result<
+        unsafe extern "C" fn(
+            session: WslcSession,
+            networks: *mut *mut WslcNetworkInfo,
+            count: *mut u32,
+            errorMessage: *mut PWSTR,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcCreateSessionNetwork: Result<
+        unsafe extern "C" fn(
+            session: WslcSession,
+            settings: *const WslcNetworkSettings,
+            networkInfo: *mut WslcNetworkInfo,
+            errorMessage: *mut PWSTR,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcDeleteSessionNetwork: Result<
+        unsafe extern "C" fn(
+            session: WslcSession,
+            nameOrId: PCSTR,
+            errorMessage: *mut PWSTR,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
     pub WslcCreateSessionVhdVolume: Result<
         unsafe extern "C" fn(
             session: WslcSession,
@@ -1219,6 +1550,9 @@ impl WslcSdk {
         let WslcSetSessionSettingsFeatureFlags = __library
             .get(b"WslcSetSessionSettingsFeatureFlags\0")
             .map(|sym| *sym);
+        let WslcSetSessionSettingsHostLoopback = __library
+            .get(b"WslcSetSessionSettingsHostLoopback\0")
+            .map(|sym| *sym);
         let WslcGetSessionTerminationEvent = __library
             .get(b"WslcGetSessionTerminationEvent\0")
             .map(|sym| *sym);
@@ -1266,6 +1600,15 @@ impl WslcSdk {
         let WslcSetContainerSettingsNamedVolumes = __library
             .get(b"WslcSetContainerSettingsNamedVolumes\0")
             .map(|sym| *sym);
+        let WslcSetContainerSettingsNetworks = __library
+            .get(b"WslcSetContainerSettingsNetworks\0")
+            .map(|sym| *sym);
+        let WslcSetContainerSettingsCapabilityAdditions = __library
+            .get(b"WslcSetContainerSettingsCapabilityAdditions\0")
+            .map(|sym| *sym);
+        let WslcSetContainerSettingsCapabilityDrops = __library
+            .get(b"WslcSetContainerSettingsCapabilityDrops\0")
+            .map(|sym| *sym);
         let WslcCreateContainerProcess = __library
             .get(b"WslcCreateContainerProcess\0")
             .map(|sym| *sym);
@@ -1287,6 +1630,9 @@ impl WslcSdk {
             .map(|sym| *sym);
         let WslcSetProcessSettingsEnvVariables = __library
             .get(b"WslcSetProcessSettingsEnvVariables\0")
+            .map(|sym| *sym);
+        let WslcSetProcessSettingsFlags = __library
+            .get(b"WslcSetProcessSettingsFlags\0")
             .map(|sym| *sym);
         let WslcSetProcessSettingsCallbacks = __library
             .get(b"WslcSetProcessSettingsCallbacks\0")
@@ -1315,6 +1661,9 @@ impl WslcSdk {
         let WslcPushSessionImage = __library.get(b"WslcPushSessionImage\0").map(|sym| *sym);
         let WslcSessionAuthenticate = __library.get(b"WslcSessionAuthenticate\0").map(|sym| *sym);
         let WslcListSessionImages = __library.get(b"WslcListSessionImages\0").map(|sym| *sym);
+        let WslcListSessionNetworks = __library.get(b"WslcListSessionNetworks\0").map(|sym| *sym);
+        let WslcCreateSessionNetwork = __library.get(b"WslcCreateSessionNetwork\0").map(|sym| *sym);
+        let WslcDeleteSessionNetwork = __library.get(b"WslcDeleteSessionNetwork\0").map(|sym| *sym);
         let WslcCreateSessionVhdVolume = __library
             .get(b"WslcCreateSessionVhdVolume\0")
             .map(|sym| *sym);
@@ -1335,6 +1684,7 @@ impl WslcSdk {
             WslcSetSessionSettingsTimeout,
             WslcSetSessionSettingsVhd,
             WslcSetSessionSettingsFeatureFlags,
+            WslcSetSessionSettingsHostLoopback,
             WslcGetSessionTerminationEvent,
             WslcGetSessionTerminationReason,
             WslcTerminateSession,
@@ -1354,6 +1704,9 @@ impl WslcSdk {
             WslcSetContainerSettingsPortMappings,
             WslcSetContainerSettingsVolumes,
             WslcSetContainerSettingsNamedVolumes,
+            WslcSetContainerSettingsNetworks,
+            WslcSetContainerSettingsCapabilityAdditions,
+            WslcSetContainerSettingsCapabilityDrops,
             WslcCreateContainerProcess,
             WslcReleaseContainer,
             WslcGetContainerID,
@@ -1366,6 +1719,7 @@ impl WslcSdk {
             WslcSetProcessSettingsWorkingDirectory,
             WslcSetProcessSettingsCmdLine,
             WslcSetProcessSettingsEnvVariables,
+            WslcSetProcessSettingsFlags,
             WslcSetProcessSettingsCallbacks,
             WslcSetContainerInitProcessIOCallbacks,
             WslcGetProcessPid,
@@ -1385,6 +1739,9 @@ impl WslcSdk {
             WslcPushSessionImage,
             WslcSessionAuthenticate,
             WslcListSessionImages,
+            WslcListSessionNetworks,
+            WslcCreateSessionNetwork,
+            WslcDeleteSessionNetwork,
             WslcCreateSessionVhdVolume,
             WslcDeleteSessionVhdVolume,
             WslcGetMissingComponents,
@@ -1463,6 +1820,16 @@ impl WslcSdk {
             .WslcSetSessionSettingsFeatureFlags
             .as_ref()
             .expect("Expected function, got error."))(sessionSettings, flags)
+    }
+    pub unsafe fn WslcSetSessionSettingsHostLoopback(
+        &self,
+        sessionSettings: *mut WslcSessionSettings,
+        hostName: PCSTR,
+    ) -> HRESULT {
+        (self
+            .WslcSetSessionSettingsHostLoopback
+            .as_ref()
+            .expect("Expected function, got error."))(sessionSettings, hostName)
     }
     pub unsafe fn WslcGetSessionTerminationEvent(
         &self,
@@ -1679,6 +2046,49 @@ impl WslcSdk {
             namedVolumeCount,
         )
     }
+    pub unsafe fn WslcSetContainerSettingsNetworks(
+        &self,
+        containerSettings: *mut WslcContainerSettings,
+        networks: *const WslcContainerNetwork,
+        networkCount: u32,
+    ) -> HRESULT {
+        (self
+            .WslcSetContainerSettingsNetworks
+            .as_ref()
+            .expect("Expected function, got error."))(
+            containerSettings, networks, networkCount
+        )
+    }
+    pub unsafe fn WslcSetContainerSettingsCapabilityAdditions(
+        &self,
+        containerSettings: *mut WslcContainerSettings,
+        capabilities: *const PCSTR,
+        capabilityCount: u32,
+    ) -> HRESULT {
+        (self
+            .WslcSetContainerSettingsCapabilityAdditions
+            .as_ref()
+            .expect("Expected function, got error."))(
+            containerSettings,
+            capabilities,
+            capabilityCount,
+        )
+    }
+    pub unsafe fn WslcSetContainerSettingsCapabilityDrops(
+        &self,
+        containerSettings: *mut WslcContainerSettings,
+        capabilities: *const PCSTR,
+        capabilityCount: u32,
+    ) -> HRESULT {
+        (self
+            .WslcSetContainerSettingsCapabilityDrops
+            .as_ref()
+            .expect("Expected function, got error."))(
+            containerSettings,
+            capabilities,
+            capabilityCount,
+        )
+    }
     pub unsafe fn WslcCreateContainerProcess(
         &self,
         container: WslcContainer,
@@ -1810,6 +2220,16 @@ impl WslcSdk {
             .WslcSetProcessSettingsEnvVariables
             .as_ref()
             .expect("Expected function, got error."))(processSettings, key_value, argc)
+    }
+    pub unsafe fn WslcSetProcessSettingsFlags(
+        &self,
+        processSettings: *mut WslcProcessSettings,
+        flags: WslcProcessFlags,
+    ) -> HRESULT {
+        (self
+            .WslcSetProcessSettingsFlags
+            .as_ref()
+            .expect("Expected function, got error."))(processSettings, flags)
     }
     pub unsafe fn WslcSetProcessSettingsCallbacks(
         &self,
@@ -2036,6 +2456,43 @@ impl WslcSdk {
             .WslcListSessionImages
             .as_ref()
             .expect("Expected function, got error."))(session, images, count)
+    }
+    pub unsafe fn WslcListSessionNetworks(
+        &self,
+        session: WslcSession,
+        networks: *mut *mut WslcNetworkInfo,
+        count: *mut u32,
+        errorMessage: *mut PWSTR,
+    ) -> HRESULT {
+        (self
+            .WslcListSessionNetworks
+            .as_ref()
+            .expect("Expected function, got error."))(session, networks, count, errorMessage)
+    }
+    pub unsafe fn WslcCreateSessionNetwork(
+        &self,
+        session: WslcSession,
+        settings: *const WslcNetworkSettings,
+        networkInfo: *mut WslcNetworkInfo,
+        errorMessage: *mut PWSTR,
+    ) -> HRESULT {
+        (self
+            .WslcCreateSessionNetwork
+            .as_ref()
+            .expect("Expected function, got error."))(
+            session, settings, networkInfo, errorMessage
+        )
+    }
+    pub unsafe fn WslcDeleteSessionNetwork(
+        &self,
+        session: WslcSession,
+        nameOrId: PCSTR,
+        errorMessage: *mut PWSTR,
+    ) -> HRESULT {
+        (self
+            .WslcDeleteSessionNetwork
+            .as_ref()
+            .expect("Expected function, got error."))(session, nameOrId, errorMessage)
     }
     pub unsafe fn WslcCreateSessionVhdVolume(
         &self,

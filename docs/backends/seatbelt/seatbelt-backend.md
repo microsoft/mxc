@@ -11,7 +11,7 @@ framework behind the App Sandbox that every Mac App Store app uses.
 |---|---|
 | **Binary** | `mxc-exec-mac` |
 | **Config value** | `"containment": "seatbelt"` |
-| **Schema** | `0.9.0-alpha` or later. |
+| **Schema** | `1.0.0` or later. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
 | **Enforced by** | The macOS kernel, via a generated profile |
@@ -26,8 +26,8 @@ The sandbox lives exactly as long as the process tree it wraps.
 
 ```json
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
-    "version": "0.9.0-alpha",
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
     "containment": "seatbelt",
     "process": { "commandLine": "echo hi", "timeout": 30000 },
     "filesystem": {
@@ -78,7 +78,7 @@ remains deny rather than inheriting ingress allow.
 | Firewall / packet-filter enforcement mode | ❌ | Rejected — no packet-filter layer |
 | Proxy peer identity pinning | ❌ | Rejected — not supported |
 | Named containers, attach, lifecycle | ❌ | Not applicable — process-scoped |
-| Caller-controlled PTY | ✅ | Direct `exec` only; incompatible with `guiAccess` and legacy `launchMethod: "open"` |
+| Caller-controlled PTY | ✅ | Incompatible with `guiAccess` |
 
 The short version: **Seatbelt gives you an on/off switch for outbound network
 plus a loopback exception. It has no concept of "this host but not that one."**
@@ -115,18 +115,23 @@ given path. `deniedPaths` sits outside that ordering and always outranks.
 
 Before a path reaches the profile, MXC:
 
-1. **Expands `~`** against `$HOME`.
-2. **Collapses** `//`, `/./`, and trailing `/`. Rejects `..` (see above).
-3. **Resolves symlinked roots** — `/etc`, `/tmp`, `/var` → `/private/…`;
-   `/home` → `/System/Volumes/Data/home`.
+1. **Expands `~`** against `$HOME` and resolves relative paths from MXC's
+   working directory.
+2. **Resolves symlinks**, including files, directory ancestors, chains, and
+   macOS roots such as `/tmp` → `/private/tmp`.
+3. **Applies `..` after following symlinks** and collapses redundant separators
+   and `.` segments. Missing trailing components are supported.
 4. **Re-applies precedence** (`denied` > `readonly` > `readwrite`) to the
    *resolved* paths.
 
-Steps 3 and 4 aren't cosmetic. Those roots are symlinks, and the kernel fully
-resolves a path before matching it — a rule written against the unresolved path
-is silently dead. Step 4 catches two spellings of the same path
-(`readonlyPaths: ["/private/tmp/x"]` vs `readwritePaths: ["/tmp/x"]`) that the
-shared parser can't see are identical.
+For example, if `/work/link` points to `/data/nested`,
+`/work/link/../secret.txt` applies to `/data/secret.txt`, not
+`/work/secret.txt`. A deny on a symlink protects its real target and other
+symlink aliases, even under a broader read-write grant.
+
+Paths are resolved before launch. Dangling symlinks, symlink loops, inaccessible
+ancestors, and targets whose resolved names cannot be represented as UTF-8 are
+rejected rather than producing rules that might not protect the intended path.
 
 `/Users` needs no rewriting — it's a firmlink, not a symlink.
 
@@ -170,6 +175,9 @@ kernel reads metadata on each ancestor directory while resolving a path.
 The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
+
+MXC grants exact device paths for inherited terminals or the caller-owned PTY
+assigned to the workload. Explicit filesystem grants or `profileOverride` can widen access.
 
 The developer grant resolves from the `xcode-select` symlink, and only when root
 owns both the link and every directory above it, so an unprivileged process
@@ -349,19 +357,21 @@ Set under a top-level `"seatbelt"` key.
 
 | Option | Type | Default | What it does |
 |---|---|---|---|
-| `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
+| `nestedPty` | bool | `true` | Lets the inner process allocate and use its own ptys, without granting access to unrelated host terminals. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
-| `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
-| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
+| `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules, and rejects an override that contains their `com.microsoft.mxc.run.` names. Last resort. |
+| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. Names starting with `com.microsoft.mxc.run.` are rejected. |
+| `captureDenials` | object | unset | **Requires config version `1.1.0-alpha`.** Records what the sandbox blocked into a JSON report. See [Learning mode](#learning-mode-capturedenials). |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
 
 All `mach-lookup` (an allowlist would be fragile — the services GUI frameworks
 need vary by macOS release), plus `mach-register`, `iokit-open` for GPU/Metal,
-`pseudo-tty` with the `/dev/ttys*` and `/dev/ptmx` devices, and POSIX shared
-memory.
+`pseudo-tty` with `/dev/ptmx` and sandbox-authorized `/dev/ttys*` devices, and
+POSIX shared memory. PTY allocation remains enabled even when `nestedPty` is
+`false`.
 
 It also grants read **and** write across all of `/private/tmp` and
 `/private/var/folders`, regardless of your `filesystem` policy. Deny rules are
@@ -382,13 +392,92 @@ in `global-name`). Read access to `/private/var/db/mds` and
 baseline `/Library` and `/System` allows.
 </details>
 
+## Learning mode (`captureDenials`)
 
-> **`launchMethod` is retired with the pre-0.9 contracts.** A
-> `0.9.0-alpha` config that sets it is rejected; drop the field and the process
-> is launched with `exec`, like every other backend. On the older schemas,
-> `"exec"` (the default) applies `sandbox_init()` then execs directly, while
-> `"open"` runs the command as the first shell of a Terminal.app instance — and
-> sandboxes that shell. Terminal itself runs unsandboxed.
+Learning mode shows what a workload tried to do that the policy did not
+allow, so you can decide what to grant. The config must use version
+`1.1.0-alpha`. The typed v1 SDK settings send `1.0.0` requests, so they can't
+turn this on yet. Use `mxc-exec-mac`, or send a `1.1.0-alpha` request through
+the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
+[.NET](../../api-reference/dotnet/v1/dev.md), or
+[Node](../../api-reference/node/v1/dev.md).
+
+```json
+"seatbelt": {
+    "captureDenials": {
+        "mode": "block",
+        "outputPath": "~/mxc/denials.json"
+    }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
+| `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
+| `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
+
+MXC adds a per-run ID to the file name (`denials.json` becomes
+`denials.<pid>_<id>.json`). Names without an extension get `.json` first.
+MXC writes a `.verbose.json` file next to it and
+prints the actual path on stderr as a JSON line:
+
+```json
+{"type":"captureDenials","outputPath":"/Users/me/mxc/denials.53120_9f2c….json","exitCode":0,"totalDenials":4,"deniedResourcesTruncated":false}
+```
+
+The report uses the [same format as Windows](../../learning-mode.md#output-file-the-caller-consumes),
+with these macOS differences:
+
+- `resource` is an absolute path for `file`. Other types use
+  `<operation>:<target>`, for example `network-outbound:remote:*:443` or
+  `mach-lookup:com.apple.CARenderServer`.
+
+- Verbose signatures use `providerGuid` `com.apple.security.sandbox`, event
+  ID `0`, and the Seatbelt operation (for example `file-read-data`) as
+  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, other
+  values are kept, and values over 256 characters are cut short. There is no
+  account-name replacement or digest.
+
+`deniedResourcesTruncated: true` means some denials may be missing. Delete the
+report, its `.verbose.json` file, and any `.seatbelt.log` when you're done.
+
+Requests that `guiAccess` grants, such as Mach lookups and IOKit opens, aren't
+denials. They appear only in the verbose file, with `"decision": "allowGrant"`.
+
+`mxc-exec-mac --audit config.json` is a shortcut that runs the
+config with `captureDenials` in `"allow"` mode and writes the report to a temp
+file.
+
+**Limits**
+
+MXC counts repeated denials as they arrive instead of storing each one, so a
+workload that hits the same denial many times doesn't push other denials out
+of the report. The report lists at most 10,000 different denials, and the
+verbose file at most 4,096 groups; extra groups are only counted. MXC skips
+any log line over 64 KiB and sets `processedEventsTruncated` in the verbose
+file. Reaching the 10,000-denial limit or skipping a line marks the report as
+truncated. MXC stops writing `.seatbelt.log` at 1 GiB, keeps the file, and
+adds a warning; the report and verbose file are not affected.
+
+**Limitations**
+
+- It can't be combined with `profileOverride`. MXC finds this run's entries
+  by tagging the rules in its generated profile, and it doesn't rewrite a
+  custom profile.
+
+- macOS hides the remote address in network reports (`remote:*:443`), so only
+  the port is known.
+
+- Reads of paths that don't exist aren't reported.
+
+- Paths longer than about 900 bytes aren't reported, and the report isn't
+  marked truncated. macOS limits each report to about 1 KB. The access is
+  still blocked in `block` mode and allowed in `allow` mode.
+
+- MXC reads the reports with `log stream`. If it can't collect every report
+  before the workload exits, the verbose file sets `processedEventsTruncated`
+  to `true`. Accounts that can't run `log stream` haven't been tested.
 
 ## Process environment
 
@@ -397,8 +486,6 @@ cleared environment, so host secrets (cloud credentials, API tokens) can't leak
 into untrusted code. This is unconditional.
 
 `process.env` is an array of `"KEY=VALUE"` strings, not an object.
-
-### Schema 0.9 and later
 
 The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
 `HOME` (the directory the child is started in), and `TERM`
@@ -423,49 +510,88 @@ empty from inside the workload.
 
 > ⚠️ **`HOME` is only set when a working directory resolves.** It names the
 > directory the child is started in, so when `process.cwd` is omitted *and* no
-> policy path supplies one, `HOME` is left unset — the pre-0.9 behavior.
+> policy path supplies one, `HOME` is left unset.
 > Because `HOME` is the working directory, dotfiles inside it — `.gitconfig`,
 > `.npmrc`, `.curlrc`, `.config/*` — are read as *user-level* tool
 > configuration, not just project input. Pass `"HOME=…"` to point elsewhere
 > when the workspace is untrusted.
 
-> ⚠️ **Behavior change.** Before 0.9 a supplied `process.env` was layered onto
-> the baseline `PATH`. At 0.9 it is used verbatim. Set
-> `"inheritDefaultEnv": true` to get the old behavior, or supply `PATH`
-> yourself.
-
 Tools installed outside the default `PATH` need both an env entry **and** a
 `readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
 `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
-
-### Before schema 0.9
-
-`PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin` and each `process.env` entry
-adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
-
-> ⚠️ **`$HOME` and `TERM` are unset inside the sandbox unless you set them.**
-> Policy paths still accept `~` (expanded against the *host's* `$HOME` when the
-> config is parsed), but a script running inside the sandbox cannot use `~` —
-> the shell expands it against an unset `HOME`. `getpwuid()` doesn't help
-> either, since directory services aren't reachable. Pass `"HOME=…"` in
-> `process.env` if your command needs it.
 
 ## Working directory
 
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
-paths are. `PWD` is exported to the resolved directory.
+paths are. The directory must already exist; a missing path (including one
+hidden by `..`) fails before launch, even with `--dry-run`. It is then resolved
+through symlinks and `..`, and `PWD`
+and the default `HOME` use that physical path (for example, `/tmp` becomes
+`/private/tmp`).
 
-Both launch methods apply it: `exec` sets it on the child process, while `open`
-performs the `cd` and the `PWD` export inside the generated helper script,
-since Terminal would otherwise start the workload in its own directory. A
-relative `cwd` is resolved against the MXC process's directory on both paths.
+A relative `cwd` is resolved against the MXC process's directory.
 
 **Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
 out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's
 `os.getcwd`/`os.path.abspath`, and even `import` when `sys.path` contains `''`)
 fail with `Operation not permitted`. Grant the working directory in
 `readwritePaths` or `readonlyPaths`.
+
+## Process cleanup
+
+A run ends when its main process (the `/bin/sh` that runs your command) exits,
+times out, or is killed. MXC then kills every process the run started that is
+still running, so nothing the run started outlives it. This includes:
+
+- background jobs (`command &`)
+- processes that left the run's session or process group, such as a Node
+  `spawn(..., { detached: true })` child, which calls `setsid()`
+- processes whose parent has already exited
+
+A status check (`try_wait`, `TryGetExitCode`) only reports the exit. Cleanup
+runs when you wait, kill, or release the process handle.
+
+### How MXC finds the run's processes
+
+Each run gets eight random IDs. MXC adds two rules to the end of the run's
+profile:
+
+```scheme
+(deny mach-lookup (global-name-prefix "com.microsoft.mxc.run."))
+(allow mach-lookup (global-name-regex #"^com\.microsoft\.mxc\.run\.(<id1>|...|<id8>)$"))
+```
+
+Every process in the run inherits the profile and cannot remove it. To clean
+up, MXC scans the system's process list and asks macOS which processes allow
+all eight names and deny other random names under the same prefix. It skips
+processes that existed before the run started. No service under the prefix
+exists, so the rules grant nothing. They are added after a `profileOverride`
+profile too.
+
+`--debug` prints these rules after the end of the generated profile, not inside
+it, so the profile can be copied into `profileOverride` without them. MXC
+rejects a `profileOverride` or `extraMachLookups` entry that uses the
+`com.microsoft.mxc.run.` prefix, because the rules MXC adds would override it.
+
+MXC freezes every matching process before killing any, so a process cannot
+restart one that was just killed. It scans again until two scans in a row find
+nothing new.
+
+### Limits
+
+Cleanup is best effort. Windows job objects and Linux PID namespaces let the
+operating system track every process; macOS offers no equivalent to a program
+running without special privileges.
+
+- A scan cannot prove that nothing is left. A run that keeps starting very
+  short-lived processes can occasionally slip one past a scan.
+- If new processes are still appearing after 5 seconds, MXC stops. After a
+  normal exit, wait still returns the exit code and the failure is listed in
+  the process warnings. After a timeout or kill, the call reports an error.
+- Programs that macOS starts on the workload's behalf, such as an app opened
+  with `open` when `guiAccess` is enabled, run outside the sandbox and are not
+  part of the run.
 
 ## Usage
 
@@ -475,6 +601,7 @@ fail with `Operation not permitted`. Grant the working directory in
 ./mxc-exec-mac config.json                        # config file
 ./mxc-exec-mac --config-base64 <base64-string>    # inline config
 ./mxc-exec-mac --dry-run config.json              # validate, don't run
+./mxc-exec-mac --audit config.json                # record what gets blocked (learning mode)
 ./mxc-exec-mac --debug --log-file mxc.log config.json
 ```
 
@@ -595,7 +722,6 @@ once you can see the rules that were emitted.
 | Command not found, or a tool can't find its libraries | The environment is always cleared and `PATH` resets to `/usr/bin:/bin:/usr/sbin:/sbin` | Add `process.env`, and `readonlyPaths` for the install prefix (e.g. `/opt/homebrew`) |
 | A client is configured with `HTTP_PROXY` but reaches nothing | It's ignoring the proxy vars. Outbound is kernel-scoped to the proxy port, so it can't connect anywhere else | Use a proxy-aware client — see [Proxy support](#proxy-support-what-is-and-isnt-enforced) |
 | A test runner or build tool fails spawning workers | `nestedPty: false`, or its IPC socket sits under a `readonlyPaths`/`deniedPaths` entry | Leave `nestedPty` at `true`; put socket directories in `readwritePaths` |
-| The same config runs on Linux but is rejected on macOS | A `..` segment in a path — Seatbelt-only rejection | Pass the fully resolved path |
 
 ### What gets rejected
 
@@ -625,12 +751,8 @@ rejected before Seatbelt validation.
 
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
-| Any path containing a `..` segment | macOS resolves `..` *after* following symlinks, so a lexically-resolved rule can silently point elsewhere (`/tmp/..` is `/private`, not `/`) | Pass the fully resolved path |
-
-This one is **Seatbelt-only** — the shared parser accepts `..`, so a
-cross-backend policy using it will run on Linux and fail on macOS. That's
-deliberate: the alternative is a rule that matches nothing, which for
-`deniedPaths` would fail *open*.
+| A dangling symlink, symlink loop, or inaccessible path | The target cannot be resolved reliably for a Seatbelt path filter | Repair the link or make the path accessible to MXC |
+| A path resolving to a non-UTF-8 name | The profile cannot represent the target faithfully | Use a target with a UTF-8 name |
 
 #### Streaming / GUI
 
@@ -668,6 +790,9 @@ shell (e.g. iTerm2's *Custom Command*) avoids the setuid exec.
 
 **No container abstraction.** No persistent container to attach to or destroy —
 every invocation is a fresh process tree.
+
+**Process cleanup is best effort.** MXC cannot prove that every process a run
+started has ended. See [Process cleanup](#process-cleanup).
 
 **SIP overrides the profile.** You cannot grant write access to `/System` or
 `/usr`, even with an explicit `readwritePaths` entry.

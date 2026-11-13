@@ -3,10 +3,11 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnJson } from '@microsoft/mxc-sdk/v1/dev';
 import {
   sdk,
   NETWORK_TEST_URL,
@@ -48,6 +49,28 @@ describe('macOS Seatbelt Container', {
       fs.rmSync(tempDir, { recursive: true, force: true });
       tempDir = '';
     }
+  });
+
+  // A fresh process makes koffi's local-visibility load the first to map
+  // mxc_ffi, so the native sandbox_init lookup runs unmocked and uncached.
+  it('reports seatbelt from native discovery in a fresh process', () => {
+    const script =
+      "const { getPlatformSupport, getAvailableBackends } = await import('@microsoft/mxc-sdk/v1');" +
+      'console.log(JSON.stringify({ support: getPlatformSupport(), backends: getAvailableBackends() }));';
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: new URL('.', import.meta.url),
+      encoding: 'utf-8',
+      timeout: 30000,
+    });
+    const { support, backends } = JSON.parse(output) as {
+      support: { isSupported: boolean; availableMethods: string[]; reason?: string };
+      backends: { backend: string; capabilities?: string[] }[];
+    };
+    assert.ok(support.isSupported, `seatbelt must be supported: ${output}`);
+    assert.deepStrictEqual(support.availableMethods, ['seatbelt']);
+    const seatbelt = backends.find((entry) => entry.backend === 'seatbelt');
+    assert.ok(seatbelt, output);
+    assert.ok(seatbelt.capabilities?.includes('captureDenials'), output);
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {
@@ -227,5 +250,26 @@ describe('macOS Seatbelt Container', {
     await outputEnded;
     assert.strictEqual(outcome.exitCode, 0, `Expected exit 0: ${stdout}`);
     assert.ok(stdout.includes('profile override works'));
+  });
+
+  it('should not write a denial report after dispose', { timeout: 30_000 }, async () => {
+    tempDir = createTempDir('mxc-dispose', '/private/tmp');
+    const proc = await spawnJson(JSON.stringify({
+      version: '1.1.0-alpha',
+      containment: 'seatbelt',
+      process: { commandLine: 'exec /bin/sleep 30' },
+      seatbelt: {
+        captureDenials: { outputPath: path.join(tempDir, 'denials.json'), retainEtl: true },
+      },
+    }));
+    assert.ok(fs.readdirSync(tempDir).some((name) => name.endsWith('.seatbelt.log')));
+
+    proc.dispose();
+
+    const deadline = Date.now() + 15_000;
+    while (fs.readdirSync(tempDir).length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepStrictEqual(fs.readdirSync(tempDir), []);
   });
 });

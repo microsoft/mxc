@@ -13,8 +13,12 @@ use super::{
     MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 
-/// Verbose document version owned by the WFP diagnostic extension.
-pub(crate) const CAPTURE_VERBOSE_LOGGING_VERSION: u32 = 5;
+/// `providerGuid` for Seatbelt signatures. macOS has no ETW provider GUID, so
+/// this is the Sandbox kernel extension's bundle identifier.
+pub(crate) const SEATBELT_PROVIDER_ID: &str = "com.apple.security.sandbox";
+
+/// Current verbose document version written by every MXC capture path.
+pub(crate) const CAPTURE_VERBOSE_LOGGING_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +26,8 @@ pub(crate) enum CaptureVerboseLoggingProvider {
     KernelGeneral,
     PrivacyAuditingPermissiveLearningMode,
     LearningModeNetworkDecision,
+    /// macOS Seatbelt reports from the unified log (added in version 6).
+    Seatbelt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -182,6 +188,36 @@ impl CaptureVerboseLoggingSummary {
         *retained_bytes = retained_bytes.saturating_add(serialized_len);
     }
 
+    /// Records one occurrence. Once every retained group is actionable and the
+    /// summary is full, `actionable_only_saturated` is set and later
+    /// actionable signatures skip the eviction search.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn record_with_saturation(
+        &mut self,
+        signature: CaptureVerboseLoggingSignature,
+        retained_bytes: &mut usize,
+        max_bytes: usize,
+        actionable_only_saturated: &mut bool,
+    ) {
+        let actionable = signature.reason.is_actionable();
+        if *actionable_only_saturated && actionable {
+            self.record_actionable_after_saturation(signature);
+            return;
+        }
+        let overflow_before = self.overflow_occurrences;
+        self.record_with_byte_budget(signature, retained_bytes, max_bytes);
+        if actionable
+            && self.overflow_occurrences > overflow_before
+            && (self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS || *retained_bytes >= max_bytes)
+            && self
+                .signatures
+                .iter()
+                .all(|group| group.signature.reason.is_actionable())
+        {
+            *actionable_only_saturated = true;
+        }
+    }
+
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_actionable_after_saturation(
         &mut self,
@@ -316,6 +352,8 @@ pub(crate) struct CaptureAnalysis {
     pub(crate) denials: Vec<super::DeniedResource>,
     pub(crate) denied_resources_truncated: bool,
     pub(crate) verbose_logging: VerboseLoggingSummary,
+    /// Signatures only the capture document can represent: WFP network
+    /// decisions on Windows and Seatbelt reports on macOS.
     pub(crate) network_verbose_logging: CaptureVerboseLoggingSummary,
 }
 
@@ -377,7 +415,8 @@ impl CaptureAnalysis {
             CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
                 VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
             }
-            CaptureVerboseLoggingProvider::LearningModeNetworkDecision => return None,
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
+            | CaptureVerboseLoggingProvider::Seatbelt => return None,
         };
         let reason = match signature.reason {
             CaptureVerboseLoggingOutcomeReason::Actionable => {
@@ -492,6 +531,8 @@ pub(crate) fn parse_supported_verbose_document(
             .map(normalize_version3_document),
         4 => serde_json::from_slice::<VersionedVerboseDocument<Version4Signature>>(bytes)
             .map(normalize_version4_document),
+        5 => serde_json::from_slice::<VersionedVerboseDocument<Version5Signature>>(bytes)
+            .map(normalize_version5_document),
         CAPTURE_VERBOSE_LOGGING_VERSION => serde_json::from_slice(bytes),
         _ => Err(<serde_json::Error as serde::de::Error>::custom(
             "unsupported verbose logging document version",
@@ -603,6 +644,53 @@ struct Version4Signature {
     properties: Vec<(String, String)>,
 }
 
+/// Version 5 used the version 4 providers plus the WFP outcome reasons.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Version5Reason {
+    Actionable,
+    UnsupportedEventSchema,
+    SchemaUnavailable,
+    EventPayloadMalformed,
+    DecoderLimitReached,
+    UnsupportedPropertyEncoding,
+    MissingObjectType,
+    MissingObjectName,
+    UnsupportedObjectType,
+    UnusableResourcePath,
+    UnresolvedCapability,
+    ComActivation,
+    ComInterfaceCall,
+    NotActionable,
+    IntentionalNetworkPolicyDeny,
+    ProxyContainment,
+    UnknownNetworkReason,
+    IncompleteNetworkEndpoint,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Version5Signature {
+    provider: Version4Provider,
+    provider_guid: String,
+    event_id: u16,
+    #[serde(default)]
+    event_name: Option<String>,
+    reason: Version5Reason,
+    pid: u32,
+    #[serde(default)]
+    access_type: Option<AccessType>,
+    #[serde(default)]
+    resource_type: Option<ResourceType>,
+    #[serde(default)]
+    network_decision_reason: Option<NetworkDecisionReason>,
+    #[serde(default)]
+    configuration_recommendation: Option<ConfigurationRecommendation>,
+    #[serde(default)]
+    network_endpoint: Option<NetworkEndpoint>,
+    properties: Vec<(String, String)>,
+}
+
 fn normalize_version3_document(
     document: VersionedVerboseDocument<Version3Signature>,
 ) -> CaptureVerboseLoggingDocument {
@@ -650,17 +738,7 @@ fn normalize_version4_document(
             .into_iter()
             .map(|aggregate| CaptureVerboseLoggingAggregate {
                 signature: CaptureVerboseLoggingSignature {
-                    provider: match aggregate.signature.provider {
-                        Version4Provider::KernelGeneral => {
-                            CaptureVerboseLoggingProvider::KernelGeneral
-                        }
-                        Version4Provider::PrivacyAuditingPermissiveLearningMode => {
-                            CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
-                        }
-                        Version4Provider::LearningModeNetworkDecision => {
-                            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
-                        }
-                    },
+                    provider: normalize_version4_provider(aggregate.signature.provider),
                     provider_guid: aggregate.signature.provider_guid,
                     event_id: aggregate.signature.event_id,
                     event_name: aggregate.signature.event_name,
@@ -677,6 +755,48 @@ fn normalize_version4_document(
             })
             .collect(),
         summary: document.summary,
+    }
+}
+
+fn normalize_version5_document(
+    document: VersionedVerboseDocument<Version5Signature>,
+) -> CaptureVerboseLoggingDocument {
+    CaptureVerboseLoggingDocument {
+        version: document.version,
+        signatures: document
+            .signatures
+            .into_iter()
+            .map(|aggregate| CaptureVerboseLoggingAggregate {
+                signature: CaptureVerboseLoggingSignature {
+                    provider: normalize_version4_provider(aggregate.signature.provider),
+                    provider_guid: aggregate.signature.provider_guid,
+                    event_id: aggregate.signature.event_id,
+                    event_name: aggregate.signature.event_name,
+                    reason: normalize_version5_reason(aggregate.signature.reason),
+                    pid: aggregate.signature.pid,
+                    access_type: aggregate.signature.access_type,
+                    resource_type: aggregate.signature.resource_type,
+                    network_decision_reason: aggregate.signature.network_decision_reason,
+                    configuration_recommendation: aggregate.signature.configuration_recommendation,
+                    network_endpoint: aggregate.signature.network_endpoint,
+                    properties: aggregate.signature.properties,
+                },
+                count: aggregate.count,
+            })
+            .collect(),
+        summary: document.summary,
+    }
+}
+
+fn normalize_version4_provider(provider: Version4Provider) -> CaptureVerboseLoggingProvider {
+    match provider {
+        Version4Provider::KernelGeneral => CaptureVerboseLoggingProvider::KernelGeneral,
+        Version4Provider::PrivacyAuditingPermissiveLearningMode => {
+            CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
+        }
+        Version4Provider::LearningModeNetworkDecision => {
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
+        }
     }
 }
 
@@ -745,7 +865,31 @@ fn normalize_version4_reason(reason: Version4Reason) -> CaptureVerboseLoggingOut
     }
 }
 
-#[allow(dead_code)] // Used when the product-output integration builds v5.
+fn normalize_version5_reason(reason: Version5Reason) -> CaptureVerboseLoggingOutcomeReason {
+    use CaptureVerboseLoggingOutcomeReason as Reason;
+    match reason {
+        Version5Reason::Actionable => Reason::Actionable,
+        Version5Reason::UnsupportedEventSchema => Reason::UnsupportedEventSchema,
+        Version5Reason::SchemaUnavailable => Reason::SchemaUnavailable,
+        Version5Reason::EventPayloadMalformed => Reason::EventPayloadMalformed,
+        Version5Reason::DecoderLimitReached => Reason::DecoderLimitReached,
+        Version5Reason::UnsupportedPropertyEncoding => Reason::UnsupportedPropertyEncoding,
+        Version5Reason::MissingObjectType => Reason::MissingObjectType,
+        Version5Reason::MissingObjectName => Reason::MissingObjectName,
+        Version5Reason::UnsupportedObjectType => Reason::UnsupportedObjectType,
+        Version5Reason::UnusableResourcePath => Reason::UnusableResourcePath,
+        Version5Reason::UnresolvedCapability => Reason::UnresolvedCapability,
+        Version5Reason::ComActivation => Reason::ComActivation,
+        Version5Reason::ComInterfaceCall => Reason::ComInterfaceCall,
+        Version5Reason::NotActionable => Reason::NotActionable,
+        Version5Reason::IntentionalNetworkPolicyDeny => Reason::IntentionalNetworkPolicyDeny,
+        Version5Reason::ProxyContainment => Reason::ProxyContainment,
+        Version5Reason::UnknownNetworkReason => Reason::UnknownNetworkReason,
+        Version5Reason::IncompleteNetworkEndpoint => Reason::IncompleteNetworkEndpoint,
+    }
+}
+
+#[allow(dead_code)] // Used when the product-output integration builds the capture document.
 fn convert_legacy_aggregate(aggregate: &VerboseLoggingAggregate) -> CaptureVerboseLoggingAggregate {
     CaptureVerboseLoggingAggregate {
         signature: CaptureVerboseLoggingSignature {
@@ -773,7 +917,7 @@ fn convert_legacy_aggregate(aggregate: &VerboseLoggingAggregate) -> CaptureVerbo
     }
 }
 
-#[allow(dead_code)] // Used when the product-output integration builds v5.
+#[allow(dead_code)] // Used when the product-output integration builds the capture document.
 fn convert_legacy_reason(
     reason: VerboseLoggingOutcomeReason,
 ) -> CaptureVerboseLoggingOutcomeReason {
@@ -838,7 +982,7 @@ mod tests {
     ) -> CaptureVerboseLoggingSignature {
         CaptureVerboseLoggingSignature {
             provider: CaptureVerboseLoggingProvider::LearningModeNetworkDecision,
-            provider_guid: "{71237669-21C3-4101-BD2F-FF38945D725A}".to_string(),
+            provider_guid: "{301EC03D-2951-5EFB-6D99-59C64628BBFC}".to_string(),
             event_id: 1,
             event_name: Some("NetworkDecisionV1".to_string()),
             reason,
@@ -854,6 +998,32 @@ mod tests {
             }),
             properties: Vec::new(),
         }
+    }
+
+    #[test]
+    fn full_actionable_summary_switches_to_the_fast_path() {
+        let signature = |pid| CaptureVerboseLoggingSignature {
+            pid,
+            ..network_signature(CaptureVerboseLoggingOutcomeReason::Actionable)
+        };
+        let max_bytes = 2 * serialized_signature_len(&signature(1));
+        let mut summary = CaptureVerboseLoggingSummary::default();
+        let mut bytes = 0;
+        let mut saturated = false;
+        for pid in [1, 2] {
+            summary.record_with_saturation(signature(pid), &mut bytes, max_bytes, &mut saturated);
+        }
+        assert!(!saturated);
+
+        summary.record_with_saturation(signature(3), &mut bytes, max_bytes, &mut saturated);
+        assert!(saturated);
+        summary.record_with_saturation(signature(1), &mut bytes, max_bytes, &mut saturated);
+        summary.record_with_saturation(signature(4), &mut bytes, max_bytes, &mut saturated);
+
+        assert_eq!(summary.signatures.len(), 2);
+        assert_eq!(summary.signatures[0].count, 2);
+        assert_eq!(summary.total_occurrences, 5);
+        assert_eq!(summary.actionable_overflow_occurrences, 2);
     }
 
     #[test]
@@ -907,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn version_five_document_merges_legacy_and_network_groups() {
+    fn capture_document_merges_legacy_and_network_groups() {
         let legacy = VerboseLoggingSummary {
             signatures: vec![VerboseLoggingAggregate {
                 signature: VerboseLoggingSignature {
@@ -982,7 +1152,7 @@ mod tests {
             "signatures": [{
                 "signature": {
                     "provider": "learningModeNetworkDecision",
-                    "providerGuid": "{71237669-21C3-4101-BD2F-FF38945D725A}",
+                    "providerGuid": "{301EC03D-2951-5EFB-6D99-59C64628BBFC}",
                     "eventId": 1,
                     "eventName": "NetworkDecisionV1",
                     "reason": "schemaUnavailable",
@@ -1016,6 +1186,44 @@ mod tests {
         assert_eq!(
             parsed.signatures[0].signature.event_name.as_deref(),
             Some("NetworkDecisionV1")
+        );
+    }
+
+    #[test]
+    fn parser_accepts_version_five_and_limits_seatbelt_to_version_six() {
+        let mut document = serde_json::to_value(CaptureVerboseLoggingDocument {
+            version: 5,
+            signatures: vec![CaptureVerboseLoggingAggregate {
+                signature: network_signature(CaptureVerboseLoggingOutcomeReason::ProxyContainment),
+                count: 1,
+            }],
+            summary: CaptureVerboseLoggingDocumentSummary {
+                total_occurrences: 1,
+                overflow_occurrences: 0,
+                actionable_overflow_occurrences: 0,
+                aggregate_groups_truncated: false,
+                processed_events_truncated: false,
+                actionable_limit_reached: false,
+            },
+        })
+        .unwrap();
+        let parsed =
+            parse_supported_verbose_document(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(parsed.version, 5);
+        assert_eq!(
+            parsed.signatures[0].signature.network_endpoint,
+            network_signature(CaptureVerboseLoggingOutcomeReason::ProxyContainment)
+                .network_endpoint
+        );
+
+        document["signatures"][0]["signature"]["provider"] = serde_json::json!("seatbelt");
+        assert!(parse_supported_verbose_document(&serde_json::to_vec(&document).unwrap()).is_err());
+        document["version"] = serde_json::json!(6);
+        let parsed =
+            parse_supported_verbose_document(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(
+            parsed.signatures[0].signature.provider,
+            CaptureVerboseLoggingProvider::Seatbelt
         );
     }
 

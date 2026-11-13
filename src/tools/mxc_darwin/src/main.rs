@@ -10,12 +10,15 @@
 //! use still requires macOS.
 
 use std::fmt::Write;
-use std::process;
 
 use clap::Parser;
 use mxc_internal::mxc_common::config_parser::load_one_shot_request;
 use mxc_internal::mxc_common::logger::{Logger, Mode};
-use mxc_internal::mxc_common::models::ExecutionRequest;
+use mxc_internal::mxc_common::models::{
+    CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest,
+};
+use mxc_internal::mxc_common::mxc_error::MxcError;
+use mxc_internal::mxc_common::script_runner::{emit_mxc_error_exit, emit_warning_envelopes};
 
 #[cfg(target_os = "macos")]
 use mxc_internal::mxc_common::models::ScriptResponse;
@@ -55,6 +58,26 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
+
+    /// Run with seatbelt.captureDenials in allow mode: default-denied
+    /// operations are allowed and recorded.
+    #[arg(long)]
+    audit: bool,
+}
+
+const AUDIT_CAPTURE_DENIALS_CONFLICT_MSG: &str =
+    "--audit cannot be combined with seatbelt.captureDenials; use captureDenials.mode: \"allow\" for permissive capture";
+
+fn apply_audit(request: &mut ExecutionRequest) -> Result<(), String> {
+    let seatbelt = request.seatbelt.get_or_insert_with(Default::default);
+    if seatbelt.capture_denials.is_some() {
+        return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
+    }
+    seatbelt.capture_denials = Some(CaptureDenialsConfig {
+        mode: CaptureDenialsMode::Allow,
+        ..Default::default()
+    });
+    Ok(())
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -84,8 +107,9 @@ fn main() {
     } else if let Some(ref path) = cli.config_path {
         (path.clone(), false)
     } else {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
+        emit_mxc_error_exit(&MxcError::malformed_request(
+            "No config provided. Use a positional path, --config, or --config-base64",
+        ));
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -96,20 +120,25 @@ fn main() {
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+            emit_warning_envelopes(&[format!("could not open log file '{log_path}': {e}")]);
         }
     }
 
     let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
-        Err(_) => {
-            eprint!("Request error\n{}", logger.get_buffer());
-            process::exit(1);
+        Err(error) => {
+            eprint!("{}", logger.get_buffer());
+            emit_mxc_error_exit(&error.to_mxc_error());
         }
     };
 
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
+    if cli.audit {
+        if let Err(message) = apply_audit(&mut request) {
+            emit_mxc_error_exit(&MxcError::malformed_request(message));
+        }
+    }
 
     log_request(&request, &mut logger);
 
@@ -143,6 +172,16 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
         telemetry::install_panic_hook();
     }
 
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
+
     // Backend selection lives in `mxc_internal::mxc_engine::run`, the single home for one-shot
     // dispatch. On macOS it always resolves to Seatbelt (logging a note if the
     // request asked for a different backend) and runs it to completion.
@@ -150,13 +189,16 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     let response = match mxc_internal::mxc_engine::run(request, logger) {
         Ok(response) => response,
         Err(e) => {
-            eprintln!("error: {}", e.message);
+            emit_warning_envelopes(logger.warnings());
             eprint!("{}", logger.get_buffer());
-            process::exit(1);
+            emit_mxc_error_exit(&e.into_mxc_error());
         }
     };
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Emitted before the dry-run branch below, which exits the process.
+    emit_warning_envelopes(response.warnings());
 
     if request.dry_run {
         handle_dry_run_exit(&response, logger);
@@ -175,6 +217,17 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
+    if let Some(pointer) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials.as_ref())
+    {
+        // Workloads inherit stderr and may leave the last line unterminated.
+        match serde_json::to_string(pointer) {
+            Ok(line) => eprintln!("\n{line}"),
+            Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
+        }
+    }
 
     // Never exit non-zero on an infrastructure failure without a diagnostic:
     // `display_script_results` only writes the error into the (buffered,
@@ -182,15 +235,14 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // with lxc-exec / wxc-exec (issue #564).
     mxc_internal::mxc_common::script_runner::emit_backend_error_envelope(&response);
 
-    process::exit(response.exit_code);
+    std::process::exit(response.exit_code);
 }
 
 #[cfg(not(target_os = "macos"))]
 fn run_seatbelt(_request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    eprintln!(
-        "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
-         This binary was built for a non-Darwin target and cannot execute scripts."
-    );
     print!("{}", logger.get_buffer());
-    process::exit(1);
+    emit_mxc_error_exit(&MxcError::backend_unavailable(
+        "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
+         This binary was built for a non-Darwin target and cannot execute scripts.",
+    ));
 }

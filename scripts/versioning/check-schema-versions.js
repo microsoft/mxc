@@ -83,14 +83,18 @@ if (publishedVersions.at(-1) !== stableLatest) {
     `Exact Rust contract registry latest published version is "${publishedVersions.at(-1)}" but canonical stableLatest is "${stableLatest}"`
   );
 }
-for (const [label, version, requiredRoot] of [
-  ["stateAware", stateAware, "isolation_session_provision"],
+for (const [label, version, requiredRoots] of [
+  ["stateAware", stateAware, ["isolation_session_provision"]],
   [
     "stateAwareWindowsSandbox",
     stateAwareWindowsSandbox,
-    "windows_sandbox_provision",
+    ["windows_sandbox_provision"],
   ],
-  ["stateAwareWslc", stateAwareWslc, "wslc_provision"],
+  [
+    "stateAwareWslc",
+    stateAwareWslc,
+    ["wslc_provision", "wslc_provision_session", "wslc_deprovision_session"],
+  ],
 ]) {
   if (!registryByVersion.has(version)) {
     errors.push(`Canonical ${label} version "${version}" is absent from the exact Rust registry`);
@@ -98,10 +102,12 @@ for (const [label, version, requiredRoot] of [
   }
   try {
     const roots = requestRootsForContract(registryByVersion.get(version));
-    if (!roots.has(requiredRoot)) {
-      errors.push(
-        `Canonical ${label} version "${version}" does not support ${requiredRoot}`
-      );
+    for (const requiredRoot of requiredRoots) {
+      if (!roots.has(requiredRoot)) {
+        errors.push(
+          `Canonical ${label} version "${version}" does not support ${requiredRoot}`
+        );
+      }
     }
   } catch (error) {
     errors.push(

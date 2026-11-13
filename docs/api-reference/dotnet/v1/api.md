@@ -13,16 +13,26 @@ Callers do not supply JSON or a schema version.
 |---|---|---|---|
 | Capture stdout and stderr | `Run` / `RunAsync` | `RunInContainer` / `RunInContainerAsync` | `ExecutionResult` |
 | Live standard pipes | `Spawn` / `SpawnAsync` | `SpawnInContainer` / `SpawnInContainerAsync` | `MxcProcess` |
+| Live standard pipes with a writable WSLC stdin | `SpawnWithStdin` / `SpawnWithStdinAsync` | `SpawnInContainerWithStdin` / `SpawnInContainerWithStdinAsync` | `MxcProcess` |
 | Interactive terminal | `SpawnWithPty` | `SpawnInContainerWithPty` | `MxcPtyProcess` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
 and operation options. Create-and-run PTY support covers IsolationSession, Bubblewrap,
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
-IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
-`launchMethod: "open"`. Terminal handles
+IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
 give the caller explicit input, output, resize, and process ownership; there
-is no separate public attached-console launch API or API accepting ["MXC request JSON"](../../../schema.md#mxc-request-json).
+is no separate public attached-console launch API. Typed V1 does not accept
+["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
+[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
+accepts caller-authored requests separately.
+
+Captured existing-container execution closes its output readers on timeout
+and returns the text collected so far with `TimedOut = true`.
+
+Read the terminal output concurrently rather than only after waiting. On macOS
+a workload cannot exit while its terminal output is still unread, so a caller
+that waits first without reading can block indefinitely.
 
 ## Discovery and validation
 
@@ -119,7 +129,8 @@ public static Task<ExecutionResult> RunAsync(
 
 ## `Microsoft.Mxc.Sdk.V1.MxcContainer` — Spawn
 
-Spawn a container request and return its live process handle.
+Spawn a container request and return its live process handle. A WSLC command
+reads end-of-file on stdin.
 
 ```csharp
 public static MxcProcess Spawn(ContainerRequest request, SpawnOptions? options = null);
@@ -132,6 +143,30 @@ Spawn a complete request asynchronously with live standard streams.
 
 ```csharp
 public static Task<MxcProcess> SpawnAsync(
+    ContainerRequest request,
+    SpawnOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcContainer` — SpawnWithStdin
+
+Spawn a container request and return its live process handle, including a
+writable `StandardInput`. Disposing it gives the command end-of-file, as does
+`Wait`, `WaitAsync`, or `WaitForExitWithOutputAsync` if `StandardInput` was never
+taken.
+
+```csharp
+public static MxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcContainer` — SpawnWithStdinAsync
+
+Asynchronous form of `SpawnWithStdin`.
+
+```csharp
+public static Task<MxcProcess> SpawnWithStdinAsync(
     ContainerRequest request,
     SpawnOptions? options = null,
     CancellationToken cancellationToken = default);
@@ -191,7 +226,8 @@ public static ValidationResult ValidateStart(ContainerId id, StartOptions? optio
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainer
 
-Run a command in a started container and return live stdio streams.
+Run a command in a started container and return live stdio streams. A WSLC
+command reads end-of-file on stdin.
 
 ```csharp
 public static MxcProcess SpawnInContainer(
@@ -207,6 +243,34 @@ Spawn a command asynchronously and return live stdio streams.
 
 ```csharp
 public static Task<MxcProcess> SpawnInContainerAsync(
+    ContainerId id,
+    ExecutionRequest request,
+    SpawnInContainerOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithStdin
+
+Run a command in a started container and return live stdio streams, including a
+writable `StandardInput`. Disposing it gives the command end-of-file, as does
+`Wait`, `WaitAsync`, or `WaitForExitWithOutputAsync` if `StandardInput` was never
+taken.
+
+```csharp
+public static MxcProcess SpawnInContainerWithStdin(
+    ContainerId id,
+    ExecutionRequest request,
+    SpawnInContainerOptions? options = null);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithStdinAsync
+
+Asynchronous form of `SpawnInContainerWithStdin`.
+
+```csharp
+public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
     ContainerId id,
     ExecutionRequest request,
     SpawnInContainerOptions? options = null,
@@ -315,6 +379,9 @@ public static IReadOnlyList<AvailableBackend> GetAvailableBackends();
 ## `Microsoft.Mxc.Sdk.V1.MxcPlatform` — GetPlatformSupport
 
 Probe whether the public SDK can launch containers on this host and which backends it can launch.
+
+On Windows, ProcessContainer requires native PSEC support. Other supported
+backends are detected independently; the host is unsupported when none are available.
 
 ```csharp
 public static PlatformSupport GetPlatformSupport();

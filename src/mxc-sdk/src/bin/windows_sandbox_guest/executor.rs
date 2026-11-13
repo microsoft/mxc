@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
-use mxc_internal::windows_sandbox_common::sandbox_protocol::{
+use crate::windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, encode_preamble, ControlMessage, DecodeResult, ExecRequest,
     ExitNotification,
 };
@@ -28,7 +28,7 @@ pub async fn run_command_loop(
     stdout_stream: TcpStream,
     stderr_stream: TcpStream,
     listener: &TcpListener,
-    expected_nonce: &mxc_internal::windows_sandbox_common::auth::Nonce,
+    expected_nonce: &crate::windows_sandbox_common::auth::Nonce,
 ) -> Result<()> {
     // Announce the protocol magic + version so the host can fail fast on a
     // version/identity mismatch before any framed messages are exchanged.
@@ -144,7 +144,7 @@ async fn handle_exec(
 async fn reconnect_streams(
     control: &mut TcpStream,
     listener: &TcpListener,
-    expected_nonce: &mxc_internal::windows_sandbox_common::auth::Nonce,
+    expected_nonce: &crate::windows_sandbox_common::auth::Nonce,
 ) -> Result<(TcpStream, TcpStream, TcpStream)> {
     let ready_frame =
         encode_message(&ControlMessage::StreamsReady).context("encode StreamsReady")?;

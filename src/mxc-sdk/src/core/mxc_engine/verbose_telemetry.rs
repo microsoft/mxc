@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::learning_mode_core::{
     capture_diagnostics::{
         parse_supported_verbose_document, CaptureVerboseLoggingDocument,
-        CaptureVerboseLoggingProvider,
+        CaptureVerboseLoggingProvider, SEATBELT_PROVIDER_ID,
     },
     verbose_logging_sibling_path,
 };
@@ -43,7 +43,7 @@ pub fn emit_verbose_telemetry(
     requested_sandbox_kind: Option<&'static str>,
     response: &ScriptResponse,
 ) -> Result<(), String> {
-    if !active {
+    if !active || !telemetry::session::legacy_events_enabled() {
         return Ok(());
     }
     let Some(prepared) = prepare_from_response(response)? else {
@@ -177,8 +177,9 @@ fn canonical_provider_guid(provider: CaptureVerboseLoggingProvider) -> &'static 
             "{811A1DDB-2E69-5F25-ADC0-4B186170E760}"
         }
         CaptureVerboseLoggingProvider::LearningModeNetworkDecision => {
-            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+            "{301EC03D-2951-5EFB-6D99-59C64628BBFC}"
         }
+        CaptureVerboseLoggingProvider::Seatbelt => SEATBELT_PROVIDER_ID,
     }
 }
 
@@ -419,6 +420,53 @@ mod tests {
     }
 
     #[test]
+    fn development_inventory_skips_verbose_transport_without_removing_local_reports() {
+        use crate::mxc_common::logger::{Logger, Mode};
+        use crate::mxc_contract::ContractVersion;
+
+        let directory = tempfile::tempdir().unwrap();
+        let denials_path = directory.path().join("denials.json");
+        let verbose_path = verbose_logging_sibling_path(&denials_path).unwrap();
+        std::fs::write(&denials_path, b"{}").unwrap();
+        let verbose_bytes = br#"{"secret":"retained-local-only"}"#;
+        std::fs::write(&verbose_path, verbose_bytes).unwrap();
+        let response = ScriptResponse {
+            output_metadata: Some(Box::new(SandboxOutputMetadata {
+                capture_denials: Some(CaptureDenialsOutput {
+                    kind: CaptureDenialsOutput::KIND.to_string(),
+                    output_path: denials_path.to_string_lossy().into_owned(),
+                    exit_code: 0,
+                    total_denials: 0,
+                    denied_resources_truncated: false,
+                    etl_path: None,
+                }),
+                capture_denials_error: None,
+            })),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let _development =
+            telemetry::session::start(true, "", Some(ContractVersion::V1_1_0Alpha), &mut logger);
+        assert!(emit_verbose_telemetry(
+            true,
+            &ContainmentBackend::ProcessContainer,
+            None,
+            &response
+        )
+        .is_ok());
+        assert_eq!(std::fs::read(&denials_path).unwrap(), b"{}");
+        assert_eq!(std::fs::read(&verbose_path).unwrap(), verbose_bytes);
+
+        let _published =
+            telemetry::session::start(true, "", Some(ContractVersion::V1_0_0), &mut logger);
+        assert_eq!(
+            emit_verbose_telemetry(true, &ContainmentBackend::ProcessContainer, None, &response)
+                .unwrap_err(),
+            "verbose artifact is not valid supported typed JSON"
+        );
+    }
+
+    #[test]
     fn telemetry_projection_drops_injected_strings() {
         let injected = "customer-secret";
         let mut doc = document(vec![aggregate(1, injected)]);
@@ -475,7 +523,7 @@ mod tests {
     fn network_provider_uses_the_canonical_guid() {
         assert_eq!(
             canonical_provider_guid(CaptureVerboseLoggingProvider::LearningModeNetworkDecision),
-            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+            "{301EC03D-2951-5EFB-6D99-59C64628BBFC}"
         );
     }
 }

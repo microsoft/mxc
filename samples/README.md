@@ -6,6 +6,10 @@ These samples demonstrate the supported V1 SDK surfaces in Rust, .NET, and
 Node. They are organized by scenario so equivalent operations are easy to
 compare while each implementation remains idiomatic for its language.
 
+The .NET samples target `net10.0` and require the .NET 10 SDK. Their project
+references also build the native SDK, so install the Rust toolchain selected
+by `src/rust-toolchain.toml`.
+
 | Scenario | Purpose | Rust | .NET | Node |
 |---|---|---|---|---|
 | [Run in a persisted container](run-in-persisted-container/README.md) | Provision, start, execute, stop, and deprovision | `run-in-persisted-container/rust` | `run-in-persisted-container/dotnet` | `run-in-persisted-container/node` |

@@ -1,0 +1,12 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision-session",
+  "containment": "wslc",
+  "wslc": {
+    "provisionSession": {
+      "cpuCount": 4,
+      "memoryMb": 8192,
+      "gpu": true
+    }
+  }
+}

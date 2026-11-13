@@ -12,7 +12,8 @@ behind a unified containment model and typed SDKs.
 - **JSON-based configuration**: Versioned container-creation requests and
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
-  Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, IsolationSession, and WSLC
+  Bubblewrap, Seatbelt, MicroVM (NVX on Windows x64), Hyperlight,
+  IsolationSession, and WSLC
 - **Policy-driven sandboxing**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
@@ -52,10 +53,10 @@ Linux, and macOS.
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
 | Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | [Windows OS-version support](docs/backends/process-container/os-version-support.md)|
-| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | - |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight` | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
-\* These backends are **experimental**.
+\* These backends are **experimental**. MicroVM is currently available on Windows x64 only.
 
 ## How do I use MXC?
 
@@ -131,19 +132,26 @@ wxc-exec.exe --audit policy.json
 ```
 
 MXC records the observed accesses and produces policy-authoring artifacts. See
-[logging access denied](docs/logging-access-denied.md) for safe
+[learning mode](docs/learning-mode.md) for safe
 deny-and-record diagnostics, audit outputs, and supported workflows.
 
 ## Telemetry
 
-Official Microsoft builds can send optional diagnostic telemetry to Microsoft.
-Telemetry is off unless the individual run opts in, the Windows user has
-explicitly consented, administrative policy permits collection, and your
-application enables the telemetry option in a contained workload request. An
-administrator can block telemetry but cannot grant consent for the user.
+Official Microsoft builds send Required diagnostic data to Microsoft for the
+development `1.1.0-alpha` request contract. MXC is moving to Required telemetry
+to keep MXC secure, reliable, and up to date: four events describe execution
+start and end, categorized failures, and process exits. They need no user
+consent or per-request opt-in, and administrative policy does not block them.
 
-Local open-source builds are not configured to route telemetry to Microsoft,
-and telemetry is a no-op on non-Windows platforms. See
+Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
+unless the run opts in, the Windows user has consented, and administrative
+policy permits collection. An administrator can block that telemetry but cannot
+grant consent for the user.
+
+Local open-source debug builds are not configured to route telemetry to
+Microsoft. Windows release builds from source use the bundled signed telemetry
+component and are routed; set an empty `MXC_TELEMETRY_COMPONENT_PATH` to build
+without routing. Telemetry is a no-op on non-Windows platforms. See
 [telemetry policy and consent](docs/telemetry.md) for controls and privacy
 details.
 
@@ -191,8 +199,8 @@ build.bat --all             # Release build for current architecture
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
-| Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
-| Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |
+| Learning mode | [`docs/learning-mode.md`](docs/learning-mode.md) | Diagnose blocked accesses and author policy |
+| Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Required diagnostic data and administrative controls |
 | Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
 
 Repository contributors should start with the

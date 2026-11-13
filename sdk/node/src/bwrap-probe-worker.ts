@@ -21,6 +21,7 @@ interface ProbeWorkerData {
   probeTimeoutMs: number;
   publishTimeoutMs: number;
   outputLimit: number;
+  fallbackDirectories: string;
 }
 
 const data = workerData as ProbeWorkerData;
@@ -97,6 +98,7 @@ if (Atomics.load(header, 0) === 0) {
         data.helperPath,
         String(data.probeTimeoutMs),
         String(data.outputLimit),
+        data.fallbackDirectories,
       ],
       { detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: spawnEnv },
     );

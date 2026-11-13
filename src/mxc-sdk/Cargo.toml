@@ -8,31 +8,59 @@ repository = "https://github.com/microsoft/mxc"
 readme = "README.md"
 build = "build.rs"
 autobins = false
-autotests = false
-autoexamples = false
-exclude = ["tests", "src/bin", "examples/isolation_session_console.rs", "examples/learning_mode_windows_lm_analyze.rs", "examples/process_container_common_lm_capture.rs", "examples/process_container_common_lm_probe.rs"]
+include = [
+    "build.rs",
+    "build/**",
+    "src/**",
+    "resources/**",
+    "examples/sta_probe.rs",
+    "tests/nvx_e2e.rs",
+    "tests/nvx_e2e/**",
+    "tests/nvx/**",
+    "tests/fixtures/microvm/**",
+]
 
 [lib]
 name = "mxc_sdk"
 path = "src/public.rs"
 test = false
 
+[[test]]
+name = "nvx_bundle_integrity"
+path = "tests/nvx/crate_bundle_integrity.rs"
+
+[[bin]]
+name = "wxc-windows-sandbox-daemon"
+path = "src/bin/windows_sandbox_daemon/portable_main.rs"
+test = false
+
+[[bin]]
+name = "wxc-windows-sandbox-guest"
+path = "src/bin/windows_sandbox_guest/portable_main.rs"
+test = false
+
+[[bin]]
+name = "wxc-wslc-daemon"
+path = "src/bin/wslc_daemon/main.rs"
+required-features = ["wslc"]
+test = false
+
 [features]
+# Cargo omits forwarding to the workspace-only test implementation when packaging.
 default = []
-wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
-link-wslcsdk = ["dep:zip"]
-isolation_session = ["dep:windows-collections", "dep:windows-future"]
-test-support = []
-microvm = []
+wslc = ["link-wslcsdk", "dep:libloading", "dep:tar", "mxc-internal/wslc"]
+link-wslcsdk = ["dep:zip", "mxc-internal/link-wslcsdk"]
+isolation_session = ["dep:windows-collections", "dep:windows-future", "mxc-internal/isolation_session"]
+test-support = ["mxc-internal/test-support"]
+microvm = ["dep:aci_edge_sandboxes", "dep:libloading", "mxc-internal/microvm"]
 hyperlight = [
+    "mxc-internal/hyperlight",
     "dep:hyperlight-unikraft",
     "dep:ureq",
     "dep:flate2",
     "dep:tar",
 ]
-force-tier-testing = []
-tier2_bfs = []
-schema-gen = ["dep:schemars"]
+schema-gen = ["dep:schemars", "mxc-internal/schema-gen"]
 
 [dependencies]
 anyhow.workspace = true
@@ -65,19 +93,28 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
+mxc-internal.workspace = true
 filetime = "0.2"
+libloading = "0.8"
 quick-xml.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+serial_test.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 flate2 = { version = "1", optional = true }
-hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }
-ureq = { version = "3", optional = true }
+hyperlight-unikraft = { version = "=0.21.0", default-features = false, optional = true }
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"], optional = true }
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+aci_edge_sandboxes = { version = "=0.1.2", default-features = false, features = ["agent-bundled"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tracelogging.workspace = true
@@ -86,6 +123,8 @@ windows = { workspace = true, features = [
     "UI",
     "Win32_Globalization",
     "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_System_EventLog",
 ] }
@@ -96,8 +135,25 @@ winreg.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_System_LibraryLoader",
+] }
 winresource = { version = "0.1.31", default-features = false }
+
+[[example]]
+name = "isolation_session_console"
+required-features = ["isolation_session"]
 
 [[example]]
 name = "sta_probe"
 required-features = ["isolation_session"]
+
+[[example]]
+name = "module_lifetime_fixture"
+path = "tests/fixtures/module_lifetime.rs"
+crate-type = ["cdylib"]

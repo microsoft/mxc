@@ -13,7 +13,6 @@ in the corresponding guides under `docs/`.
 | `src/mxc-sdk/src/core/` | Engine, exact contracts, shared runtime, telemetry, and cross-backend support modules |
 | `src/mxc-sdk/src/backends/` | Backend validation, policy, bindings, and execution modules |
 | `src/ffi/` | Native interfaces used by language bindings |
-| `src/host/` | Host preparation and helper processes |
 | `src/testing/` | Rust E2E infrastructure, drivers, proxies, and probes |
 | `src/tools/` | Thin executors and developer tools |
 | `sdk/` | TypeScript and C# SDKs |
@@ -31,7 +30,7 @@ The workspace members and shared Rust dependencies are declared in
 | `mxc-sdk` | Public Rust API and the internal engine, exact contracts, shared runtime, backend implementations, telemetry, build support, and schema support |
 | `mxc_ffi` | C ABI shared/static library used by language SDKs |
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
-| Host helpers and tools | PLM, host preparation, diagnostics, schema generation, and test executables |
+| Tools | Diagnostics, schema generation, and test executables |
 
 Within `mxc-sdk`, `mxc_common` remains the backend-neutral foundation and
 `mxc_engine` owns dispatch. Backend modules depend on shared modules through
@@ -50,17 +49,18 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
-| NanVix | SDK common, runner, binary-staging, and build modules under `backends/nanvix/` |
+| NVX MicroVM | SDK backend modules under `backends/nvx/`; bundle staging owned by `aci_edge_sandboxes`; independent file-hash and signature checks shared by the runtime and `build/verify_nvx_runtime_signatures.rs` |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
 Shared parsing and normalization live in the `mxc_common` module; backend-specific policy
 validation and enforcement live with each backend.
 
 `mxc_engine/src/backend_registry.rs` owns backend registration metadata,
-including experimental classification, keyed by the shared `ContainmentBackend`
-enum. Runtime authorization consults that registry. Exact-contract publication,
-build-feature availability, and host-capability probing remain separate; the
-registry neither dispatches workloads nor adds backend dependencies to
+including experimental classification and probe coverage, keyed by the shared
+`ContainmentBackend` enum. Runtime authorization consults that registry.
+Exact-contract publication, build-feature availability, and host-capability
+probing remain separate; the registry declares which backends the probe covers
+but neither detects them, dispatches workloads, nor adds backend dependencies to
 `mxc_common`.
 
 ## Request flow

@@ -30,8 +30,11 @@
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
       - isolation_session_timeout.json --timeout enforcement
+      - isolation_session_stdin_line.json --pipe/file line delivery with console stdout
       - isolation_session_streaming_smoke.json --output arrives incrementally
         rather than as a burst at exit
+      - isolation_session_post_exit_output.json --stdout/stderr keep arriving
+        after the workload exits
 
     Manual smoke configs (NOT asserted --observe the output yourself):
       - isolation_session_powershell_interactive.json --launches
@@ -136,13 +139,9 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 #                  be reported as a skip.
 #
 # stdout and stderr are captured SEPARATELY. Merging them would let any stderr
-# line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
-# best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
-# stderr (`tools/wxc/src/main.rs`), so a host carrying leftover state from a
-# crashed prior run would emit unparseable output and be judged "unavailable"
-# while being perfectly capable. That failure mode is inverted with respect to
-# risk — the dirtier the host, the likelier the false skip — which is exactly
-# the kind of silent green this gate exists to prevent.
+# line corrupt the JSON. A native-command diagnostic on stderr must not turn
+# a valid probe response into an "unavailable" result or hide an infrastructure
+# failure behind a skip.
 function Get-IsolationSessionProbe {
     param([string]$Exe)
 
@@ -151,7 +150,7 @@ function Get-IsolationSessionProbe {
     try {
         # This script runs under `$ErrorActionPreference = "Stop"`, which turns
         # a native command's stderr output into a terminating error. The probe
-        # is expected to write to stderr on a host carrying leftover state, so
+        # may write diagnostics to stderr, so
         # relax it for the duration of the call — the same idiom used around
         # the wxc-exec invocation in Run-IsolationSessionTest below.
         $ErrorActionPreference = "Continue"
@@ -232,9 +231,10 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
         [string[]]$OutputLineNotEqual = @(),
+        [string]$ExpectedErrorCode,
+        [string]$ExpectedErrorMessageContains,
         [hashtable]$Request,
         [switch]$DryRun
     )
@@ -280,12 +280,7 @@ function Run-IsolationSessionTest {
     $pass = $true
     $reason = ""
 
-    if ($ExpectedExitAnyOf.Count -gt 0) {
-        if ($ExpectedExitAnyOf -notcontains $exitCode) {
-            $pass = $false
-            $reason = "Expected exit one of $($ExpectedExitAnyOf -join ', '), got $exitCode"
-        }
-    } elseif ($exitCode -ne $ExpectedExit) {
+    if ($exitCode -ne $ExpectedExit) {
         $pass = $false
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
@@ -313,6 +308,25 @@ function Run-IsolationSessionTest {
         }
     }
 
+    if ($pass -and $ExpectedErrorCode) {
+        $envelope = $null
+        foreach ($line in ($output -split "`r?`n")) {
+            if (-not $line.Trim().StartsWith('{"error"')) { continue }
+            try { $envelope = $line | ConvertFrom-Json } catch { $envelope = $null }
+        }
+        if ($null -eq $envelope) {
+            $pass = $false
+            $reason = "No error envelope in output"
+        } elseif ($envelope.error.code -ne $ExpectedErrorCode) {
+            $pass = $false
+            $reason = "Expected error code '$ExpectedErrorCode', got '$($envelope.error.code)'"
+        } elseif ($ExpectedErrorMessageContains -and
+                  -not ([string]$envelope.error.message).Contains($ExpectedErrorMessageContains)) {
+            $pass = $false
+            $reason = "Error message missing '$ExpectedErrorMessageContains': $($envelope.error.message)"
+        }
+    }
+
     if ($pass) {
         Write-Host "PASS" -ForegroundColor Green
     } else {
@@ -336,6 +350,82 @@ function Run-IsolationSessionTest {
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
+function Run-StdinRoutingTest {
+    param([ValidateSet('pipe', 'file')][string]$InputKind)
+
+    $name = "$InputKind stdin with console stdout"
+    $root = Join-Path $env:TEMP ("mxc_stdin_routing_" + [guid]::NewGuid().ToString('N'))
+    $process = $null
+    $pass = $false
+    $reason = ''
+    Write-Host "  $name ... " -NoNewline
+    try {
+        New-Item -Path $root -ItemType Directory | Out-Null
+        $inputPath = Join-Path $root 'input.txt'
+        $requestPath = Join-Path $ConfigDir 'isolation_session_stdin_line.json'
+        $batchPath = Join-Path $root 'run.cmd'
+        $stderrPath = Join-Path $root 'stderr.txt'
+        Set-Content -LiteralPath $inputPath -Value 'MXC_STDIN_ROUTING' -Encoding Ascii
+
+        # cmd supplies either a real pipe or a file handle. Do not redirect stdout:
+        # that would bypass the console-output routing regression.
+        $invocation = '"{0}" "{1}" 2>"{2}"' -f $WxcExec, $requestPath, $stderrPath
+        $command = if ($InputKind -eq 'pipe') {
+            'type "{0}" | {1}' -f $inputPath, $invocation
+        } else {
+            '{0} <"{1}"' -f $invocation, $inputPath
+        }
+        Set-Content -LiteralPath $batchPath -Encoding Ascii -Value @(
+            '@echo off'
+            $command
+            'exit /b %errorlevel%'
+        )
+        # Start-Process gives cmd its own console even when CI captures the suite's stdout.
+        $process = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"$batchPath`"" `
+            -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(120000)) {
+            throw 'Executor did not finish within 120 seconds.'
+        }
+        # exit code established in isolation_session_stdin_line.json commandLine.
+        if ($process.ExitCode -ne 42) {
+            $stderr = if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath -Raw
+            } else { 'Executor stderr was not created; console launcher may have failed.' }
+            throw "Expected exit 42 after reading the input line, got $($process.ExitCode). $stderr"
+        }
+        $pass = $true
+    } catch {
+        $reason = $_.Exception.Message
+    } finally {
+        try {
+            if ($null -ne $process -and -not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(10000)) {
+                    throw "Could not stop stdin routing launcher $($process.Id)."
+                }
+            }
+            if ($pass) {
+                Remove-Item -LiteralPath $root -Recurse -Force
+            }
+        } catch {
+            $pass = $false
+            $reason = "$reason Cleanup failed: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $process) {
+                $process.Dispose()
+            }
+        }
+    }
+    if ($pass) {
+        Write-Host 'PASS' -ForegroundColor Green
+    } else {
+        Write-Host 'FAIL' -ForegroundColor Red
+        Write-Host "    Reason: $reason" -ForegroundColor Red
+        Write-Host "    Diagnostics: $root" -ForegroundColor Gray
+    }
+    return @{ Name = $name; Pass = $pass; Skipped = $false; Reason = $reason }
+}
+
 [System.Collections.ArrayList]$results = @()
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
@@ -356,6 +446,8 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejec
     -OutputContains @("at ``isolationSession``", "unknown field ``isolationSession``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
+$null = $results.Add((Run-StdinRoutingTest -InputKind pipe))
+$null = $results.Add((Run-StdinRoutingTest -InputKind file))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
 # Both reach this script's captured output via wxc-exec's `2>&1` merge above; the assertion
 # proves stderr is being relayed (not dropped) on the non-ConPTY plain-pipes path.
@@ -365,11 +457,12 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s against a 1500ms deadline. The service-side timer and
-# the local wait report different codes, and either can win the race to end the
-# run.
+# Timeout: ping runs ~30s against a 1500ms deadline. The service timer is armed
+# with a grace margin, so the local wait ends the run and reports the timeout.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
-    -ExpectedExitAnyOf 1, -1))
+    -ExpectedExit -1 `
+    -ExpectedErrorCode "backend_error" `
+    -ExpectedErrorMessageContains "script timed out after 1500ms"))
 
 # Any IsolationSession-specific object is rejected at the same closed exact
 # contract boundary, before the command can run.
@@ -798,6 +891,128 @@ if (-not (Test-Path $streamingConfig)) {
     $null = $results.Add(@{ Name = 'streaming (incremental delivery)'; Pass = $streamingPass; Skipped = $false; Reason = $streamingReason })
 }
 
+
+function Run-PostExitOutputTest {
+    $name = 'post-exit stdout/stderr draining'
+    $root = 'C:\mxc_post_exit_output'
+    $process = $null
+    $pass = $false
+    $reason = ''
+    Write-Host "  $name ... " -NoNewline
+    try {
+        # A fixed public path lets the sandbox read the script without access to
+        # the caller's profile.
+        if (Test-Path -LiteralPath $root) {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+        }
+        New-Item -Path $root -ItemType Directory -ErrorAction Stop | Out-Null
+        $aclOutput = & icacls.exe $root /grant '*S-1-5-11:(OI)(CI)RX' 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not grant script read access: $aclOutput"
+        }
+        Set-Content -LiteralPath "$root\producer.ps1" -Encoding Ascii -Value @'
+param([int]$WaitForParent)
+$ErrorActionPreference = 'Stop'
+if ($WaitForParent) {
+    $parent = $null
+    try {
+        $parent = [Diagnostics.Process]::GetProcessById($WaitForParent)
+    } catch [ArgumentException] {
+        # The workload already exited before this child started.
+    }
+    if ($null -ne $parent) {
+        try {
+            if (-not $parent.WaitForExit(30000)) {
+                throw 'Workload did not exit before child output.'
+            }
+        } finally {
+            $parent.Dispose()
+        }
+    }
+    [Console]::Out.WriteLine('STDOUT-AFTER-PARENT-EXIT')
+    [Console]::Error.WriteLine('STDERR-AFTER-PARENT-EXIT')
+    1..60 | ForEach-Object {
+        [Console]::Out.WriteLine(('STDOUT-LINE {0:D3}' -f $_))
+        [Console]::Out.Flush()
+        [Console]::Error.WriteLine(('STDERR-LINE {0:D3}' -f $_))
+        [Console]::Error.Flush()
+        Start-Sleep -Milliseconds 500
+    }
+    [Console]::Out.WriteLine('STDOUT-END')
+    [Console]::Error.WriteLine('STDERR-END')
+    exit 0
+}
+# The backend wraps this PowerShell process in cmd.exe. Wait for that workload
+# process, not just this script, before the child starts its output sequence.
+$workloadId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+if (-not $workloadId) { throw 'Could not identify the workload process.' }
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -WaitForParent {1}' -f $PSCommandPath, $workloadId
+$start.UseShellExecute = $false
+$child = [Diagnostics.Process]::Start($start)
+$child.Dispose()
+exit 42
+'@
+        $config = Join-Path $ConfigDir 'isolation_session_post_exit_output.json'
+        if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
+            throw "Required config missing: $config"
+        }
+        $stdout = Join-Path $root 'stdout.txt'
+        $stderr = Join-Path $root 'stderr.txt'
+        $command = '/d /s /c ""{0}" "{1}" 1>"{2}" 2>"{3}""' -f $WxcExec, $config, $stdout, $stderr
+        $process = Start-Process -FilePath $env:ComSpec -ArgumentList $command `
+            -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(120000)) {
+            throw 'Executor did not finish within 120 seconds.'
+        }
+        if ($process.ExitCode -ne 42) {
+            throw "Expected workload exit 42, got $($process.ExitCode)."
+        }
+        foreach ($stream in @(
+                @{ Prefix = 'STDOUT'; Path = $stdout },
+                @{ Prefix = 'STDERR'; Path = $stderr }
+            )) {
+            $expected = @("$($stream.Prefix)-AFTER-PARENT-EXIT")
+            $expected += 1..60 | ForEach-Object { '{0}-LINE {1:D3}' -f $stream.Prefix, $_ }
+            $expected += "$($stream.Prefix)-END"
+            $actual = @(Get-Content -LiteralPath $stream.Path)
+            if (($actual -join "`n") -cne ($expected -join "`n")) {
+                throw "$($stream.Prefix) incomplete or unexpected: expected 62 lines, got $($actual.Count). See $($stream.Path)."
+            }
+        }
+        $pass = $true
+    } catch {
+        $reason = $_.Exception.Message
+    } finally {
+        try {
+            if ($null -ne $process -and -not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(10000)) {
+                    throw "Could not stop output-drain launcher $($process.Id)."
+                }
+            }
+            if ($pass) {
+                Remove-Item -LiteralPath $root -Recurse -Force
+            }
+        } catch {
+            $pass = $false
+            $reason = "$reason Cleanup failed: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+        }
+    }
+    if ($pass) {
+        Write-Host 'PASS' -ForegroundColor Green
+    } else {
+        Write-Host 'FAIL' -ForegroundColor Red
+        Write-Host "    Reason: $reason" -ForegroundColor Red
+        Write-Host "    Diagnostics: $root (preserved until the next run)" -ForegroundColor Gray
+    }
+    return @{ Name = $name; Pass = $pass; Skipped = $false; Reason = $reason }
+}
+
+$null = $results.Add((Run-PostExitOutputTest))
 
 # Summary -- wrap each filtered pipeline in @(...) to force array context.
 # Without @(), a Where-Object that returns a single hashtable is unwrapped

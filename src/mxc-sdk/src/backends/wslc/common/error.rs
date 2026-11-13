@@ -11,16 +11,53 @@
 //! the message. Each variant here attributes the failure to a lifecycle phase
 //! instead.
 //!
-//! `Display` reproduces the pre-existing message verbatim and
-//! [`WslcError::into_response`] fills the same fields `ScriptResponse::error`
-//! did, so the text a user sees is unchanged; `failure_phase` is the only
-//! addition.
+//! `Display` reproduces the pre-existing message verbatim, so the text a user
+//! sees is unchanged.
 
 use std::fmt;
 
 use crate::mxc_common::models::{FailurePhase, ScriptResponse};
+use crate::mxc_common::mxc_error::ApiFailure;
 
 use crate::wslc_common::wslc_bindings::HRESULT;
+
+#[derive(Debug)]
+pub struct WslcStepError {
+    pub failure_phase: FailurePhase,
+    pub error_message: String,
+    pub api_failure: Option<Box<ApiFailure>>,
+}
+
+impl WslcStepError {
+    pub fn with_api_failure(mut self, failure: ApiFailure) -> Self {
+        self.api_failure = Some(Box::new(failure));
+        self
+    }
+
+    pub fn into_response(self) -> ScriptResponse {
+        ScriptResponse::failed(self.failure_phase, &self.error_message)
+    }
+}
+
+impl From<ScriptResponse> for WslcStepError {
+    fn from(response: ScriptResponse) -> Self {
+        Self {
+            failure_phase: response.failure_phase,
+            error_message: response.error_message,
+            api_failure: None,
+        }
+    }
+}
+
+impl From<WslcStepError> for ScriptResponse {
+    fn from(error: WslcStepError) -> Self {
+        error.into_response()
+    }
+}
+
+pub(crate) fn sdk_api_failure(operation: &str, hr: HRESULT) -> ApiFailure {
+    ApiFailure::new(operation).with_native_code(format!("{:#010x}", hr as u32))
+}
 
 /// A WSLc backend failure, tagged with the phase it is attributable to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,18 +105,17 @@ impl WslcError {
         }
     }
 
-    /// Render as a [`ScriptResponse`], preserving the exact message text the
-    /// untyped construction produced.
-    pub(crate) fn into_response(self) -> ScriptResponse {
-        let failure_phase = self.failure_phase();
-        let msg = self.to_string();
-        ScriptResponse {
-            exit_code: -1,
-            standard_err: msg.clone(),
-            error_message: msg,
-            failure_phase,
-            ..Default::default()
+    pub(crate) fn into_step_error(self) -> WslcStepError {
+        WslcStepError {
+            failure_phase: self.failure_phase(),
+            error_message: self.to_string(),
+            api_failure: None,
         }
+    }
+
+    /// Render as a [`ScriptResponse`] carrying the message verbatim.
+    pub(crate) fn into_response(self) -> ScriptResponse {
+        ScriptResponse::failed(self.failure_phase(), &self.to_string())
     }
 }
 
@@ -109,6 +145,12 @@ impl fmt::Display for WslcError {
 impl From<WslcError> for ScriptResponse {
     fn from(err: WslcError) -> Self {
         err.into_response()
+    }
+}
+
+impl From<WslcError> for WslcStepError {
+    fn from(err: WslcError) -> Self {
+        err.into_step_error()
     }
 }
 
@@ -161,16 +203,49 @@ mod tests {
     }
 
     #[test]
-    fn response_matches_the_untyped_shape_apart_from_the_phase() {
-        let typed = WslcError::Rejected("bad path".to_string()).into_response();
-        let untyped = ScriptResponse::error("bad path");
+    fn response_carries_the_message_and_the_phase() {
+        let typed = WslcError::Host("bring-up failed".to_string()).into_response();
 
-        assert_eq!(typed.exit_code, untyped.exit_code);
-        assert_eq!(typed.standard_err, untyped.standard_err);
-        assert_eq!(typed.error_message, untyped.error_message);
-        // The untyped helper left this at the default, which is the bug.
-        assert_eq!(untyped.failure_phase, FailurePhase::None);
-        assert_eq!(typed.failure_phase, FailurePhase::Rejected);
+        assert_eq!(typed.exit_code, -1);
+        assert_eq!(typed.error_message, "bring-up failed");
+        assert_eq!(typed.failure_phase, FailurePhase::LaunchFailed);
+    }
+
+    #[test]
+    fn a_step_error_becomes_the_response_create_and_run_returns() {
+        let hr = 0x8007_2740_u32 as HRESULT;
+        let error = WslcError::sdk("WslcStartContainer failed", hr, "collision");
+        let create_and_run = error.clone().into_response();
+        let step = error
+            .into_step_error()
+            .with_api_failure(sdk_api_failure("WslcStartContainer", hr));
+
+        assert_eq!(
+            serde_json::to_value(step.into_response()).unwrap(),
+            serde_json::to_value(create_and_run).unwrap()
+        );
+    }
+
+    /// A WSLc rejection has to cost the caller the same exit code a rejection
+    /// from any other backend does.
+    #[test]
+    fn exit_codes_follow_the_shared_phase_contract() {
+        let s = || "x".to_string();
+        assert_eq!(
+            WslcError::Rejected(s()).into_response().exit_code,
+            ScriptResponse::rejected("x").exit_code
+        );
+        assert_eq!(
+            WslcError::Unavailable(s()).into_response().exit_code,
+            ScriptResponse::unavailable("x").exit_code
+        );
+        for err in [
+            WslcError::Host(s()),
+            WslcError::Runtime(s()),
+            WslcError::sdk("op", -1, ""),
+        ] {
+            assert_eq!(err.into_response().exit_code, -1);
+        }
     }
 
     #[test]

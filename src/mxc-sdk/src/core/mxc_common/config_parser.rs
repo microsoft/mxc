@@ -15,16 +15,19 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
-use crate::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::mxc_common::state_aware_request::{
+    MxcRequest, ParsedStateAwareRequest, Phase, TargetIdKind,
+};
 use crate::mxc_common::wire;
 use crate::mxc_contract::dev::{probe_phase, Phase as ContractPhase};
 use crate::mxc_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
 use std::fs;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
-/// variant to choose the failure-output convention: state-aware failures
-/// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
-/// pre-discrimination failures keep the existing diagnostic-on-stderr path.
+/// variant to choose where the failure is written: state-aware failures emit a
+/// JSON `{"error": ...}` envelope on stdout, because there the envelope *is*
+/// the operation's response document, while one-shot and pre-discrimination
+/// failures emit theirs on stderr alongside the diagnostics.
 #[derive(Debug)]
 pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
@@ -40,6 +43,23 @@ pub enum ParseError {
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
+}
+
+impl ParseError {
+    /// The typed error this failure is reported to the caller as.
+    ///
+    /// Every variant resolves to a code, so a request that never reached a
+    /// backend is still classified rather than being reported as an
+    /// unexplained non-zero exit.
+    pub fn to_mxc_error(&self) -> MxcError {
+        match self {
+            ParseError::Decode(error)
+            | ParseError::Version(error)
+            | ParseError::OneShot(error)
+            | ParseError::OneShotMalformed(error) => error.to_mxc_error(),
+            ParseError::StateAware(error) => error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +121,12 @@ pub struct LoadOptions<'a> {
     /// Trailing CLI argv spliced into `process.commandLine` before parsing.
     /// Empty means no override.
     pub cli_command: &'a [String],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliTargetId<'a> {
+    pub flag: &'a str,
+    pub value: &'a str,
 }
 
 /// Workspace-internal exact one-shot contract selected by a trusted typed
@@ -202,6 +228,52 @@ fn exact_containment_error(error: crate::mxc_contract::dev::ContainmentProbeErro
         }
     };
     ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn session_containment_error(
+    phase: ContractPhase,
+    error: crate::mxc_contract::dev::ContainmentProbeError,
+) -> ParseError {
+    use crate::mxc_contract::dev::ContainmentProbeError;
+
+    let phase = phase.as_str();
+    match error {
+        ContainmentProbeError::InvalidDeclaration(source) => {
+            ParseError::StateAware(MxcError::malformed_request(format!(
+                "Invalid containment declaration for {phase} phase: {source}"
+            )))
+        }
+        ContainmentProbeError::UnsupportedContainment(_) => {
+            ParseError::StateAware(unsupported_session_containment(phase))
+        }
+    }
+}
+
+fn unsupported_session_containment(phase: &str) -> MxcError {
+    MxcError::unsupported_containment(format!(
+        "the {phase} phase requires containment \"wslc\": no other backend owns a session that \
+         sandboxes are placed into"
+    ))
+}
+
+fn deserialize_session_root<T>(
+    json: &str,
+    phase: ContractPhase,
+    contract: &'static str,
+) -> Result<T, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match crate::mxc_contract::dev::probe_containment(json)
+        .map_err(|error| session_containment_error(phase, error))?
+    {
+        crate::mxc_contract::dev::Containment::Wslc => {
+            deserialize_development_root(json, contract, "1.1", true)
+        }
+        _ => Err(ParseError::StateAware(unsupported_session_containment(
+            phase.as_str(),
+        ))),
+    }
 }
 
 fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&'static str> {
@@ -484,6 +556,10 @@ fn deserialize_development_request(
                 .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
             Ok(Request::OneShot(Box::new(request)))
         }
+        Some(Phase::ProvisionSession) => {
+            deserialize_session_root(json, Phase::ProvisionSession, "WSLC provision-session")
+                .map(Request::ProvisionSession)
+        }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
@@ -494,9 +570,17 @@ fn deserialize_development_request(
                     deserialize_development_root(json, "IsolationSession provision", "1.1", true)
                         .map(ProvisionRequest::IsolationSession)
                 }
+                Containment::MicroVm => {
+                    deserialize_development_root(json, "MicroVM provision", "1.1", true)
+                        .map(ProvisionRequest::MicroVm)
+                }
                 Containment::Wslc => {
                     deserialize_development_root(json, "WSLC provision", "1.1", true)
                         .map(ProvisionRequest::Wslc)
+                }
+                Containment::W365Agents => {
+                    deserialize_development_root(json, "W365 Agents provision", "1.1", true)
+                        .map(ProvisionRequest::W365Agents)
                 }
             }?;
             Ok(Request::Provision(request))
@@ -513,6 +597,10 @@ fn deserialize_development_request(
         Some(Phase::Deprovision) => {
             deserialize_development_root(json, "deprovision", "1.1", true).map(Request::Deprovision)
         }
+        Some(Phase::DeprovisionSession) => {
+            deserialize_session_root(json, Phase::DeprovisionSession, "WSLC deprovision-session")
+                .map(Request::DeprovisionSession)
+        }
     }
 }
 
@@ -520,7 +608,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
     let phase = crate::mxc_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
     let request = deserialize_development_request(json, phase)?;
     let adapted = crate::mxc_common::config_contract_adapters::dev::adapt_request(request)
-        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+        .map_err(|error| ParseError::StateAware(error.into_state_aware()))?;
 
     match adapted {
         crate::mxc_common::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
@@ -532,9 +620,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
             input,
         ) => normalize_state_aware(input, logger, true)
             .map(MxcRequest::StateAware)
-            .map_err(|error| {
-                ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-            }),
+            .map_err(|error| ParseError::StateAware(error.into_state_aware())),
     }
 }
 
@@ -662,7 +748,7 @@ pub fn load_mxc_request_from_json_with_options(
     result
 }
 
-/// Parses a state-aware request whose operation and sandbox identity were
+/// Parses a state-aware request whose operation and target identity were
 /// supplied by the executor command line.
 ///
 /// Raw exact JSON entry points continue to accept the registered phase-bearing
@@ -672,7 +758,7 @@ pub fn load_state_aware_request_from_json_with_options(
     json_str: &str,
     logger: &mut Logger,
     phase: Phase,
-    sandbox_id: Option<&str>,
+    target_id: Option<CliTargetId<'_>>,
     cli_command: &[String],
 ) -> Result<ParsedStateAwareRequest, ParseError> {
     let result = (|| {
@@ -687,24 +773,37 @@ pub fn load_state_aware_request_from_json_with_options(
             )));
         }
 
-        match (phase, sandbox_id) {
-            (Phase::Provision, Some(_)) => {
+        let required_flag = match phase.target_id_kind() {
+            TargetIdKind::None => None,
+            TargetIdKind::SandboxId => Some("--container-id"),
+            TargetIdKind::SessionId => Some("--session-id"),
+        };
+        match (required_flag, target_id) {
+            (None, Some(supplied)) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "the provision operation does not accept --container-id",
+                    format!("the {phase} operation does not accept {}", supplied.flag),
                 )));
             }
-            (Phase::Provision, None) => {}
-            (_, None) => {
+            (None, None) => {}
+            (Some(flag), None) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    format!("the {phase} operation requires --container-id"),
+                    format!("the {phase} operation requires {flag}"),
                 )));
             }
-            (_, Some("")) => {
+            (Some(flag), Some(supplied)) if supplied.flag != flag => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "--container-id must not be empty",
+                    format!(
+                        "the {phase} operation requires {flag}, not {}",
+                        supplied.flag
+                    ),
                 )));
             }
-            (_, Some(_)) => {}
+            (Some(flag), Some(supplied)) if supplied.value.is_empty() => {
+                return Err(ParseError::StateAware(MxcError::malformed_request(
+                    format!("{flag} must not be empty"),
+                )));
+            }
+            (Some(_), Some(_)) => {}
         }
 
         let source =
@@ -714,7 +813,13 @@ pub fn load_state_aware_request_from_json_with_options(
                 ))
             })?;
         let routed_json = source
-            .splice_lifecycle_routing(phase.as_str(), sandbox_id)
+            .splice_lifecycle_routing(
+                phase.as_str(),
+                phase
+                    .target_id_kind()
+                    .wire_member()
+                    .zip(target_id.map(|supplied| supplied.value)),
+            )
             .ok_or_else(|| {
                 ParseError::StateAware(MxcError::malformed_request(
                     "failed to apply lifecycle routing arguments",
@@ -980,24 +1085,31 @@ fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     Ok(())
 }
 
-/// Normalizes cross-list filesystem path constraints by applying
-/// **most-restrictive-wins** precedence (`deny` > `readonly` > `readwrite`):
-///
-/// 1. Same-path conflict: if a path string appears in multiple lists, it is kept
-///    only in the most restrictive list (e.g. a path in both `readwritePaths` and
-///    `deniedPaths` is normalized to denied).
-/// 2. Paths should exist: logs a WARNING for paths that don't exist on the host
-///    (advisory — some backends create mount targets dynamically; not a hard error).
-///
-/// This never rejects the config — conflicting intents are resolved deterministically
-/// rather than erroring, matching the roadmap's most-restrictive-wins decision.
-fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger) {
+fn normalize_filesystem_paths(
+    policy: &mut ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
+    normalize_filesystem_paths_with(policy, logger, |path| {
+        probe.run(path, |path| {
+            #[cfg(test)]
+            crate::mxc_common::filesystem_probe::launch_tests::stall("parser", path);
+            fs::metadata(path).is_err()
+        })
+    })
+}
+
+fn normalize_filesystem_paths_with(
+    policy: &mut ContainerPolicy,
+    logger: &mut Logger,
+    mut path_missing: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<(), WxcError> {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
         && policy.enumerate_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
-        return;
+        return Ok(());
     }
 
     // 1. Same-path (string) conflict: drop a path from a list if it also appears
@@ -1069,14 +1181,13 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
         }
     });
 
-    // 2. Existence warning (advisory; not a hard gate).
     for (paths, list_name) in [
         (&policy.readwrite_paths, "readwritePaths"),
         (&policy.readonly_paths, "readonlyPaths"),
         (&policy.denied_paths, "deniedPaths"),
     ] {
         for path in paths {
-            if fs::metadata(path).is_err() {
+            if path_missing(path).map_err(WxcError::ConfigParse)? {
                 logger.log_line(&format!(
                     "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
                      the backend may fail at mount time",
@@ -1086,6 +1197,7 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             }
         }
     }
+    Ok(())
 }
 
 // ---------- Conversion from normalized config input to runtime model ----------
@@ -1161,18 +1273,33 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
     let wire::Seatbelt {
         profile_override,
         gui_access,
-        launch_method,
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        capture_denials,
     } = sb;
+    // outputPath may start with `~`; the backend expands and validates it.
+    let capture_denials = capture_denials.map(
+        |wire::SeatbeltCaptureDenials {
+             mode,
+             output_path,
+             retain_etl,
+         }| CaptureDenialsConfig {
+            mode: match mode {
+                Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
+                Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
+            },
+            output_path,
+            retain_etl: retain_etl.unwrap_or(false),
+        },
+    );
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
-        launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
+        capture_denials,
     }
 }
 
@@ -1193,6 +1320,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "wslc" => Some(wire::Containment::Wslc),
         "wsb" => Some(wire::Containment::WindowsSandbox),
         "iso" => Some(wire::Containment::IsolationSession),
+        "microvm" => Some(wire::Containment::Microvm),
         _ => None,
     }
 }
@@ -1213,58 +1341,20 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
     }
 }
 
-/// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
-/// must be an absolute path whose parent directory already exists (the runner
-/// writes the JSON denials output file there after the workload exits). The
-/// path itself must not be an existing directory. A relative path, directory
-/// path, or missing parent yields an actionable error.
-fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
-    let candidate = std::path::Path::new(path);
-    if !candidate.is_absolute() {
-        let msg = format!(
-            "processContainer.captureDenials.outputPath must be an absolute path: '{path}'"
-        );
+/// Logs and rejects an invalid `captureDenials.outputPath` (`field` names it).
+fn validate_capture_denials_output_path(
+    field: &str,
+    path: &str,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    crate::learning_mode_core::capture_output::validate_output_path(
+        field,
+        std::path::Path::new(path),
+    )
+    .map_err(|msg| {
         logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
-    }
-    match candidate.parent() {
-        // A filesystem root ("/", "C:\\") has either no parent (`None`) or an
-        // empty parent, and cannot name a trace file.
-        None => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not a \
-                 directory root: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(parent) if parent.as_os_str().is_empty() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not a \
-                 directory root: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(parent) if !parent.is_dir() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath parent directory does not \
-                 exist: '{}'",
-                parent.display()
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(_) if candidate.is_dir() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not an \
-                 existing directory: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        _ => Ok(()),
-    }
+        WxcError::ConfigParse(msg)
+    })
 }
 
 fn normalize_common_request_ir(
@@ -1273,6 +1363,8 @@ fn normalize_common_request_ir(
     require_process: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
+    let microvm_memory_mib = cfg.microvm.as_ref().and_then(|config| config.memory_mib);
+    crate::mxc_common::models::MicroVmProvisionConfig::validate_memory_mib(microvm_memory_mib)?;
 
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1294,6 +1386,15 @@ fn normalize_common_request_ir(
 
     let source_contract = cfg.source_contract;
     let container_id = cfg.container_id.unwrap_or_default();
+    // JSON may legally carry `\u0000`. `string_util::to_wide` truncates at that
+    // NUL, so a value used as a session or profile name would collapse to its
+    // prefix. This is the single funnel for every entry point. Do not echo the
+    // raw id; the NUL would also truncate logs.
+    if container_id.contains('\0') {
+        return Err(WxcError::ConfigParse(
+            "containerId must not contain null bytes".to_string(),
+        ));
+    }
 
     // Process section: required for one-shot and state-aware exec; optional for
     // non-exec state-aware phases (require_process == false).
@@ -1410,7 +1511,11 @@ fn normalize_common_request_ir(
         // eagerly so a bad path fails at parse time rather than deep in the runner.
         if let Some(cd) = ac.capture_denials {
             if let Some(path) = cd.output_path.as_deref() {
-                validate_capture_denials_output_path(path, logger)?;
+                validate_capture_denials_output_path(
+                    "processContainer.captureDenials.outputPath",
+                    path,
+                    logger,
+                )?;
             }
             let mode = match cd.mode {
                 Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
@@ -1497,14 +1602,7 @@ fn normalize_common_request_ir(
         }
     }
     validate_filesystem_paths(&policy)?;
-    normalize_filesystem_paths(&mut policy, logger);
-
-    // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
-        if let Some(v) = fbcfg.allow_dacl_mutation {
-            policy.fallback.allow_dacl_mutation = v;
-        }
-    }
+    normalize_filesystem_paths(&mut policy, logger)?;
 
     parse_network_policy(
         &mut policy,
@@ -1620,6 +1718,8 @@ fn normalize_common_request_ir(
         test_feature,
         windows_sandbox,
         hyperlight,
+        microvm_image: cfg.microvm.map(|config| config.image),
+        microvm_memory_mib,
         experimental_enabled: false,
         dry_run: false,
     })
@@ -1637,9 +1737,12 @@ fn normalize_state_aware(
         NormalizationContext {
             phase: operation.phase(),
             containment: match &operation {
+                StateAwareOperation::ProvisionSession(_)
+                | StateAwareOperation::DeprovisionSession { .. } => Some(wire::Containment::Wslc),
                 StateAwareOperation::Provision(provision) => Some(match provision {
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
+                    StateAwareProvision::MicroVm(_) => wire::Containment::Microvm,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
                 }),
                 StateAwareOperation::Start { .. }
@@ -1680,7 +1783,7 @@ fn normalize_state_aware_common(
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, WxcError> {
     let network_supplied = common.network.is_some();
-    common.containment = if context.phase == Phase::Provision {
+    common.containment = if context.phase.routes_by_containment() {
         context.containment
     } else {
         context.sandbox_id.and_then(state_aware_containment_from_id)
@@ -1709,6 +1812,56 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    fn container_flag(value: &str) -> CliTargetId<'_> {
+        CliTargetId {
+            flag: "--container-id",
+            value,
+        }
+    }
+
+    fn session_flag(value: &str) -> CliTargetId<'_> {
+        CliTargetId {
+            flag: "--session-id",
+            value,
+        }
+    }
+
+    #[test]
+    fn filesystem_probe_failure_is_not_a_missing_path_warning() {
+        let mut policy = ContainerPolicy {
+            denied_paths: vec!["slow".to_string()],
+            ..Default::default()
+        };
+        let mut logger = test_logger();
+        let error = normalize_filesystem_paths_with(&mut policy, &mut logger, |path| {
+            Err(format!("probe for {path} timed out"))
+        })
+        .unwrap_err();
+        assert!(matches!(error, WxcError::ConfigParse(_)));
+        assert!(error.to_string().contains("probe for slow timed out"));
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn filesystem_normalization_preserves_missing_path_warnings() {
+        let mut policy = ContainerPolicy {
+            readwrite_paths: vec!["missing".to_string()],
+            readonly_paths: vec!["missing".to_string()],
+            ..Default::default()
+        };
+        let mut logger = test_logger();
+        let mut probes = 0;
+        normalize_filesystem_paths_with(&mut policy, &mut logger, |_| {
+            probes += 1;
+            Ok(true)
+        })
+        .unwrap();
+        assert!(policy.readwrite_paths.is_empty());
+        assert_eq!(policy.readonly_paths, ["missing"]);
+        assert_eq!(probes, 1);
+        assert!(logger.get_buffer().contains("does not exist on the host"));
     }
 
     fn repository_root() -> PathBuf {
@@ -1743,6 +1896,79 @@ mod tests {
 
         let parsed = parse_exact_mxc_request_json(json, &mut test_logger()).unwrap();
         assert!(matches!(parsed, MxcRequest::OneShot(_)));
+    }
+
+    #[test]
+    fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
+        const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
+            'containment' is 'microvm' (no per-backend section is defined for this backend), but \
+            the config includes backend section(s): processContainer. Only one backend section is \
+            allowed; remove the unused section(s).";
+
+        for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","microvm":{{"image":"docker.io/library/python:3.12-alpine"}},"process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert_eq!(error.message(), ERROR);
+        }
+
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "microvm": {"image": "docker.io/library/python:3.12-alpine"},
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn legacy_fallback_settings_do_not_change_runtime_policy() {
+        for (version, containment) in [
+            ("0.9.0-alpha", "processcontainer"),
+            ("1.0.0", "processcontainer"),
+            ("1.1.0-alpha", "processcontainer"),
+            ("1.1.0-alpha", "microvm"),
+        ] {
+            let mut expected = None;
+            for fallback in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"allowDaclMutation": true})),
+                Some(serde_json::json!({"allowDaclMutation": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": containment,
+                    "process": {"commandLine": "echo hello"}
+                });
+                if containment == "microvm" {
+                    json["microvm"] =
+                        serde_json::json!({"image": "docker.io/library/python:3.12-alpine"});
+                }
+                if let Some(fallback) = fallback {
+                    json["fallback"] = fallback;
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                let serialized = serde_json::to_value(request.policy).unwrap();
+                assert!(serialized.get("fallback").is_none());
+                if let Some(expected) = &expected {
+                    assert_eq!(&serialized, expected);
+                } else {
+                    expected = Some(serialized);
+                }
+            }
+        }
     }
 
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
@@ -1808,6 +2034,7 @@ mod tests {
     enum ProvisionSnapshot {
         IsolationSession(Option<Option<String>>),
         WindowsSandbox,
+        MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
     }
 
@@ -1830,6 +2057,9 @@ mod tests {
                             StateAwareProvision::WindowsSandbox => {
                                 ProvisionSnapshot::WindowsSandbox
                             }
+                            StateAwareProvision::MicroVm(config) => ProvisionSnapshot::MicroVm(
+                                config.as_ref().map(|config| config.memory_mib),
+                            ),
                             StateAwareProvision::Wslc(config) => {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())
@@ -2064,6 +2294,10 @@ mod tests {
             "0.9.0",
             "0.9.1-alpha",
             "0.10.1-alpha",
+            "0.10.0-alpha",
+            "0.5.0-alpha",
+            "1.2.0-alpha",
+            "not-a-version",
         ] {
             let json = format!(
                 r#"{{
@@ -2102,6 +2336,65 @@ mod tests {
             );
             assert!(error.message().contains("Unsupported contract version"));
         }
+    }
+
+    #[test]
+    fn capture_output_path_requires_an_absolute_file_with_an_existing_parent() {
+        let directory = tempfile::tempdir().expect("temporary capture directory");
+        let missing = directory.path().join("missing").join("capture.json");
+        let root = directory.path().ancestors().last().unwrap();
+        for (path, message) in [
+            (
+                std::path::Path::new("capture.json"),
+                "must be an absolute path",
+            ),
+            (root, "directory root"),
+            (missing.as_path(), "parent directory does not exist"),
+            (directory.path(), "existing directory"),
+        ] {
+            let error = validate_capture_denials_output_path(
+                "f",
+                &path.to_string_lossy(),
+                &mut test_logger(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(message), "{path:?}: {error}");
+        }
+        validate_capture_denials_output_path(
+            "f",
+            &directory.path().join("capture.json").to_string_lossy(),
+            &mut test_logger(),
+        )
+        .expect("valid absolute output file");
+    }
+
+    #[test]
+    fn development_seatbelt_capture_denials_maps_to_config() {
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "seatbelt",
+            "seatbelt": {"captureDenials": {"mode": "allow"}},
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let capture = request.seatbelt.unwrap().capture_denials.unwrap();
+        assert_eq!(capture.mode, CaptureDenialsMode::Allow);
+        assert_eq!(capture.output_path, None);
+
+        // The backend expands `~` and validates the path, so parsing keeps it as written.
+        let tilde = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "seatbelt",
+            "seatbelt": {"captureDenials": {"outputPath": "~/denials.json"}},
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(tilde).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let capture = request.seatbelt.unwrap().capture_denials.unwrap();
+        assert_eq!(capture.output_path.as_deref(), Some("~/denials.json"));
     }
 
     #[test]
@@ -2954,6 +3247,7 @@ mod tests {
                 StateAwareProvision::Wslc(Some(crate::mxc_common::models::WslcProvisionConfig {
                     image: Some("alpine:latest".into()),
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings: None,
                 })),
             ),
@@ -2962,6 +3256,7 @@ mod tests {
                 StateAwareProvision::Wslc(Some(crate::mxc_common::models::WslcProvisionConfig {
                     image: Some("python:3.12-alpine".into()),
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
                         windows_port: 18081,
                         container_port: 8080,
@@ -4470,6 +4765,39 @@ mod tests {
     }
 
     #[test]
+    fn container_id_embedded_nul_is_rejected_on_every_entry_point() {
+        let one_shot = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let one_shot_error = load_mxc_request_from_json(one_shot, &mut test_logger()).unwrap_err();
+        assert!(
+            one_shot_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {one_shot_error:?}"
+        );
+        assert!(
+            !one_shot_error.message().contains('\0'),
+            "diagnostic must not echo the raw NUL id"
+        );
+
+        let v09 = "{\n            \"version\": \"0.9.0-alpha\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let v09_error = load_mxc_request_from_json(v09, &mut test_logger()).unwrap_err();
+        assert!(
+            v09_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {v09_error:?}"
+        );
+
+        let distinct = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha-evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(distinct, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.container_id, "alpha-evil");
+    }
+
+    #[test]
     fn exact_contracts_reject_experimental_telemetry() {
         for (version, telemetry) in [
             ("0.9.0-alpha", r#"{"enabled":true}"#),
@@ -4528,7 +4856,7 @@ mod tests {
                 json,
                 &mut test_logger(),
                 phase,
-                sandbox_id,
+                sandbox_id.map(container_flag),
                 &[],
             )
             .unwrap_or_else(|error| panic!("{phase}: {error:?}"));
@@ -4547,7 +4875,7 @@ mod tests {
                 json,
                 &mut test_logger(),
                 Phase::Start,
-                Some("iso:cli"),
+                Some(container_flag("iso:cli")),
                 &[],
             )
             .unwrap_err();
@@ -4561,7 +4889,7 @@ mod tests {
             r#"{"version":"1.0.0","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::Provision,
-            Some("wslc:abc"),
+            Some(container_flag("wslc:abc")),
             &[],
         )
         .unwrap_err();
@@ -4578,6 +4906,233 @@ mod tests {
         )
         .unwrap_err();
         assert!(start_error.message().contains("requires --container-id"));
+    }
+
+    #[test]
+    fn operation_cli_transport_gives_session_phases_their_own_identity_category() {
+        let provision_session_error = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
+            &[],
+        )
+        .unwrap_err();
+        assert!(provision_session_error
+            .message()
+            .contains("the provision-session operation does not accept --session-id"));
+
+        let missing = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(missing
+            .message()
+            .contains("the deprovision-session operation requires --session-id"));
+
+        let empty = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(session_flag("")),
+            &[],
+        )
+        .unwrap_err();
+        assert!(empty.message().contains("--session-id must not be empty"));
+    }
+
+    #[test]
+    fn a_rejection_names_the_identity_flag_the_caller_supplied() {
+        let wrong_flag_for_a_sandbox = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha"}"#,
+            &mut test_logger(),
+            Phase::Start,
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_flag_for_a_sandbox.message(),
+            "malformed_request: the start operation requires --container-id, not --session-id"
+        );
+
+        let wrong_flag_for_a_session = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(container_flag("wslc:abcd")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_flag_for_a_session.message(),
+            "malformed_request: the deprovision-session operation requires --session-id, not \
+             --container-id"
+        );
+
+        let unwanted_container_id = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            Some(container_flag("wslc:abcd")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            unwanted_container_id.message(),
+            "malformed_request: the provision-session operation does not accept --container-id"
+        );
+    }
+
+    #[test]
+    fn session_phases_route_through_the_development_contract() {
+        let provisioned = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(provisioned.phase(), Phase::ProvisionSession);
+        assert_eq!(
+            provisioned.containment(),
+            Some(ContainmentBackend::Wslc),
+            "a session phase routes by its declared containment"
+        );
+        assert!(provisioned.session_id().is_none());
+
+        let released = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(released.phase(), Phase::DeprovisionSession);
+        assert_eq!(
+            released.session_id(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+        assert!(released.sandbox_id().is_none());
+    }
+
+    #[test]
+    fn malformed_session_ids_keep_their_error_code_in_cli_requests() {
+        for session_id in [
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            let error = load_state_aware_request_from_json_with_options(
+                r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+                &mut test_logger(),
+                Phase::DeprovisionSession,
+                Some(session_flag(session_id)),
+                &[],
+            )
+            .unwrap_err();
+            let ParseError::StateAware(error) = error else {
+                panic!("a session release must return a lifecycle error");
+            };
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+        }
+    }
+
+    #[test]
+    fn session_phases_are_refused_by_the_published_contracts() {
+        for version in [r#""0.9.0-alpha""#, r#""1.0.0""#] {
+            let error = load_state_aware_request_from_json_with_options(
+                &format!(r#"{{"version":{version},"containment":"wslc"}}"#),
+                &mut test_logger(),
+                Phase::ProvisionSession,
+                None,
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(error.message(), "malformed_request: Unsupported phase");
+        }
+    }
+
+    #[test]
+    fn a_session_phase_refuses_a_containment_that_owns_no_session() {
+        for (containment, phase, target) in [
+            (
+                r#""isolation_session""#,
+                Phase::ProvisionSession,
+                None::<&str>,
+            ),
+            (r#""windows_sandbox""#, Phase::ProvisionSession, None),
+            (r#""not_a_backend""#, Phase::ProvisionSession, None),
+            (
+                r#""isolation_session""#,
+                Phase::DeprovisionSession,
+                Some("wslcsess:0123456789abcdef0123456789abcdef"),
+            ),
+        ] {
+            let error = load_state_aware_request_from_json_with_options(
+                &format!(r#"{{"version":"1.1.0-alpha","containment":{containment}}}"#),
+                &mut test_logger(),
+                phase,
+                target.map(session_flag),
+                &[],
+            )
+            .unwrap_err();
+
+            let message = error.message();
+            assert!(
+                message.starts_with("unsupported_containment:"),
+                "{containment} on {phase} must be refused as an unsupported containment, got \
+                 {message}"
+            );
+            assert!(message.contains(r#"containment "wslc""#), "{message}");
+        }
+    }
+
+    #[test]
+    fn typed_session_operations_normalize_to_wslc_with_no_network_posture() {
+        let normalize = |operation| {
+            let input = crate::mxc_common::sdk_input::SdkStateAwareInput::new(
+                ContractVersion::V1_1_0Alpha,
+                operation,
+            )
+            .unwrap();
+            normalize_sdk_state_aware_request(input, &mut test_logger()).unwrap()
+        };
+
+        let provision = normalize(StateAwareOperation::Provision(StateAwareProvision::Wslc(
+            None,
+        )));
+        assert!(
+            provision.request().policy.network_ingress.is_some(),
+            "a provision without a network section must get the default ingress posture"
+        );
+
+        for operation in [
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:0123456789abcdef0123456789abcdef".into(),
+            },
+        ] {
+            let parsed = normalize(operation);
+            let phase = parsed.phase();
+            let policy = &parsed.request().policy;
+            assert_eq!(
+                parsed.request().containment,
+                ContainmentBackend::Wslc,
+                "{phase}"
+            );
+            assert!(!policy.network_specified, "{phase}");
+            assert!(
+                policy.network_egress.is_none() && policy.network_ingress.is_none(),
+                "{phase} declares no network posture, so it must not inherit the provision default"
+            );
+        }
     }
 
     #[test]
@@ -4629,7 +5184,7 @@ mod tests {
             }"#,
             &mut logger,
             Phase::Exec,
-            Some("iso:abc"),
+            Some(container_flag("iso:abc")),
             &["echo".to_string(), "hello".to_string()],
         )
         .unwrap();

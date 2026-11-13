@@ -71,6 +71,9 @@ take a caller-supplied schema version. Each v1 SDK targets the published exact
 
 Raw configuration APIs require the caller to declare a registered `version`
 to select an immutable published or mutable development contract.
+The [V1.Dev SDK APIs](#sdk-major-version-namespaces) accept these documents.
+Experimental backend authorization is supplied separately in invocation
+options, not inferred from the document's version.
 
 ```typescript
 // sdk/node/src/types.ts
@@ -97,25 +100,54 @@ version:
 
 Contract-mapped SDK types live in a namespace for their schema-contract major:
 `Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`.
-The V1 namespace contains `SandboxPolicy`, its policy sections, containment
-selection and backend settings, policy-to-request builders, and typed
-state-aware lifecycle request/result/option types and entry points. These APIs
+The typed V1 surface contains `ContainerRequest`, its policy sections,
+containment selection and backend settings, and container lifecycle
+request/result/option types and entry points. These typed APIs
 evolve additively as published 1.x contracts grow; the SDK owns the exact
 contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
-replacing V1.
+replacing V1. See [Required V2 changes](#required-v2-changes).
 
-Version-independent APIs stay at the package root: errors and error codes,
-running-sandbox handles and output/wait types, platform/backend discovery,
-telemetry consent, schema-version constants, raw exact-JSON APIs that take
-caller-declared versions, and executor-backed raw config APIs.
+V1.Dev is a separate API family within the supported V1 entrypoint:
+`mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev`, and
+`@microsoft/mxc-sdk/v1/dev`. Its callers declare a registered JSON contract
+version instead of using the typed V1 target. The SDK API major and the
+document's contract version are independent; `Dev` does not implicitly
+select the development contract or authorize experimental backends.
+
+Version-independent operations and types, including errors, process handles,
+output/wait types, discovery, and telemetry consent, use supported V*
+entrypoints.
 
 ### Versioning follows Semver
 
-Per [semver.org](https://semver.org/):
-- **Patch** (x.y.Z) — bug fixes only
-- **Minor** (x.Y.0) — new features, backward compatible
-- **Major** (X.0.0) — breaking changes
+SDK releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html):
+
+- **Major** (X.0.0): breaking public API or incompatible documented behavior changes.
+- **Minor** (x.Y.0): backward-compatible API additions, newly exposed schema
+  capabilities, or new behavior. Public API deprecations require at least a
+  minor release.
+- **Patch** (x.y.Z): backward-compatible bug fixes and internal refactoring,
+  without new public APIs, schema capabilities, or feature behavior.
+
+Correcting behavior to match the documented contract can be a patch; introducing
+an incompatible contract requires a major version. The highest required change
+determines the release version, including urgent out-of-cycle releases.
+
+Features and fixes ship in new releases on the current release line; they are
+not backported to older release lines. Dependent projects must update to an SDK
+version that includes the change to receive it.
+
+SDK package versions and schema versions are independent. Evaluate compatibility
+on each axis separately: changing a schema does not automatically bump an SDK
+package, and releasing an SDK does not automatically bump a schema. Published
+contracts remain immutable. See [How MXC is managed](../../repository-management.md)
+for release cadence and milestone policy.
+
+A development prerelease for the next minor must retain accepted fields from
+the published major line. Retired settings such as `fallback.allowDaclMutation`
+remain accepted and ignored in 1.x; removing their accepted JSON form requires
+a new major contract, even when the setting no longer affects execution.
 
 ## The three version axes
 
@@ -136,9 +168,12 @@ reasons:
   Raw SDK entry points enforce the same exact set. High-level v1 one-shot and
   state-aware APIs select stable `1.0.0` internally and expose only the
   backends supported by that contract. Capabilities the published contract does
-  not declare — Windows Sandbox state-aware, and
-  `wslc.provision.portMappings` — are reachable through the raw `1.1.0-alpha`
-  path only. The compatibility constants in
+  not declare — Windows Sandbox state-aware, `wslc.provision.portMappings`,
+  and WSLc session operations (`provision-session`, `deprovision-session`,
+  and `wslc.provision.sessionId`) — require MXC request JSON declaring
+  `1.1.0-alpha`, or the in-process engine with that contract.
+  `stateAwareWslc` names this development contract; it does not change the
+  published `1.0.0` target of the V1 SDKs. The compatibility constants in
   `schemas/schema-version.json` do not authorize other versions within their
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
@@ -152,8 +187,8 @@ reasons:
   constants in step — but the two axes are not tied to each other.
 - **Host capability** is resolved by runtime negotiation, not by a version string.
   The schema `version` does not select the Windows backend:
-  ProcessContainer resolves to BaseContainer or AppContainer purely by host
-  capability (see [Version Negotiation](#version-negotiation)). An identical
+  ProcessContainer requires native PSEC support for the complete policy
+  (see [Version Negotiation](#version-negotiation)). An identical
   policy that is expressible in multiple registered contracts retains the same
   host-capability-driven backend selection.
 
@@ -273,8 +308,8 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
-accepted by v1.0.
+provision, Seatbelt `captureDenials`, and the `vm`, `microvm`, and `hyperlight`
+one-shot surfaces, are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -292,6 +327,34 @@ version when the old default is a security bug. The older stable schema is
 left unchanged so the release contract stays auditable; newer schemas
 document the corrected default. Consumers that need the legacy behavior
 must set the field explicitly.
+
+### Security-servicing exception: PowerShell tool discovery
+
+On Windows, the Rust V1
+`mxc_sdk::v1::policy::filesystem::available_tools_policy` and Node V1
+`policy.filesystem.getAvailableToolsPolicy` helpers must not implicitly grant
+recursive read access to the system-drive root when discovering `pwsh.exe`.
+Such a grant can expose host files beyond the discovered tool directories.
+Discovery grants access to tool directories and the PSReadLine history
+directory.
+
+This specific security-servicing exception applies within V1 and does not
+require a new versioned API surface.
+
+For PowerShell startup failures, see
+[troubleshooting](../../troubleshooting.md#powershell-startup).
+
+### Fail-closed servicing exception: WSLc `targetOs`
+
+The published `0.9.0-alpha` and `1.0.0` create-and-run contracts, and the
+Node V1 `WslcConfig.targetOs` property, accept any string for
+`wslc.targetOs`. WSLc runs only Linux containers and cannot select another
+operating system, so the WSLc backend rejects every value other than `"linux"`
+with `policy_validation` before it creates a session or container. Omit the
+field or set it to `"linux"`.
+
+This fail-closed exception applies within V1 and does not require a new
+versioned API surface.
 
 ### Shipped vs Experimental
 
@@ -402,25 +465,11 @@ silently ignored. Contract version and backend authorization are separate.
 The authorization switch is excluded from policy identity because it does not
 change the selected backend's enforcement.
 
-**2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
-spawning comes from `@microsoft/mxc-sdk`.
-```typescript
-// With policy:
-const pty = spawnSandbox("python app.py", policy, {
-  experimental: true,
-  debug: false
-});
-
-// Or with config:
-const config = createConfigFromPolicy(policy, "process");
-config.process!.commandLine = "python app.py";
-const pty = spawnSandboxFromConfig(config, {
-  experimental: true,
-  debug: false,
-});
-```
-
-The SDK passes `--experimental` to the underlying binary when this option is set.
+**2. SDK:** the published v1 SDKs do not authorize experimental backends.
+Their create-and-run and container lifecycle operations always pass the native
+entry points' `experimental` argument as off, so a request that selects an
+experimental backend fails with `backend_unavailable`. Exercise experimental
+backends through `wxc-exec --experimental`.
 
 ### Forking Code for Experimental Features
 
@@ -510,8 +559,8 @@ MXC validates the request against the selected contract and policy
 Stage 2: resolve `containment` intent → concrete backend
         │
         ▼
-Stage 3: probe host capability → select backend tier
-        │  (ProcessContainer: BaseContainer if usable, else AppContainer)
+Stage 3: probe host capability → validate backend availability
+        │  (ProcessContainer: native PSEC or backend_unavailable)
         │
         ▼
 For the BaseContainer tier: translate policy → PSEC flat buffer
@@ -627,12 +676,9 @@ Stage 2 — Containment resolve (independent of schema version)
 
 Stage 3 — Host-capability negotiate (runtime probe, no version input)
   For ProcessContainer on Windows:
-    BaseContainer usable on this host?  (is_base_container_usable())
-      yes → BaseContainer (native OS sandbox API)
-      no  → AppContainer fallback tier (BFS when compiled in with the
-            `tier2_bfs` feature and `bfscfg.exe` is present, else DACL)
-  The chosen tier and any fallback are logged (warnings + "selected isolation
-  tier: …"). This capability fallback is the ONLY fallback.
+    PSEC compatible and usable? → PSEC
+    otherwise → backend_unavailable
+  MXC does not emulate native containment by modifying host filesystem ACLs.
 ```
 
 For the BaseContainer tier, Stage 3 translates the policy into a PSEC
@@ -698,12 +744,53 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   phase when the requested backend's API is absent (e.g. the BaseContainer OS
   sandbox API is not present on this build), with a hint pointing at the host
   requirement — not a downgrade to a weaker backend behind the caller's back.
-  (BaseContainer-vs-AppContainer is the one exception, and it is an explicit,
-  logged capability tier, not a security relaxation.)
 - **Policy-unsupported failures** (a backend that cannot honor a specific policy
   field, e.g. `deniedPaths`) fail with a specific message naming the
   unsupported field. Security policy is deterministic — no relaxation, no fuzzy
   fallback.
+
+Every executor failure is classified by **which side can act on it**, and that
+classification drives both the wire code and the process exit code:
+
+| Side at fault | Failure phase | Wire code | Exit code |
+|---|---|---|---|
+| The request — a different request succeeds | `Rejected` | `policy_validation` | `1` |
+| The host — no request change helps | `BackendUnavailable` | `backend_unavailable` | `-1` |
+| The runtime, during an accepted run | all other phases | `backend_error` | `-1` |
+
+Common cases:
+
+| Failure | Wire code |
+|---|---|
+| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `backend_unavailable`¹ |
+| Policy path the invoking user cannot access | `backend_error`¹ |
+| Host fault while checking a policy path (I/O error, unresolvable path) | `backend_error` |
+| Missing host capability (e.g. no native PSEC, no denial-capture provider) | `backend_unavailable` |
+| Backend not compiled into this build | `unsupported_containment`¹ |
+| Experimental backend without the experimental opt-in | `backend_unavailable` |
+| Backend for another OS: create-and-run / container lifecycle operations | `unsupported_containment` / `backend_unavailable` |
+
+Unsupported policy is never silently dropped, and no failure above starts the
+run. The phase-specific codes `malformed_request`, `unsupported_containment`,
+`unsupported_phase`, and `malformed_id` also exit `1`.
+
+¹ Kept for SDK v1 compatibility, as are some backend refusals that still report
+`backend_error`. See the [SDK v2 error codes plan](../plans/sdk-v2-error-codes.md).
+
+Envelope lines share stderr with the workload's own output, so a workload can
+print text that looks like an envelope. Treat stderr envelopes as diagnostics,
+not as an authenticated result; the exit code and a held `ScriptResponse` are
+authoritative.
+
+`ScriptResponse` carries an optional `warnings` array of diagnostic strings.
+Warnings are advisory and never change the exit code; they are omitted from the
+wire entirely when a run produced none. The serialized response and the
+executor's stderr stream are two distinct shapes of the same warnings: on the
+response they are a `warnings: string[]` field, while an executor writes each
+one to stderr as its own line-delimited JSON object,
+`{"warning":{"message":"..."}}`, matching the error envelope
+`{"error":{"code":"...","message":"..."}}`. A caller reading stderr must parse
+the per-line objects; the array exists only on a response it holds directly.
 
 The MXC ↔ OS contract therefore reports: which feature failed, whether it was a
 version mismatch or a runtime/capability unavailability (e.g. Hyper-V off), and
@@ -789,3 +876,13 @@ standard exact-contract diagnostic.
 7. **Experimental features modifying stable behavior:** Experimental features
    may need to modify stable behavior. How do we reason about
    and test this?
+
+## Required V2 changes
+
+These changes would break V1 callers, so they wait for V2:
+
+- Rename `captureDenials.retainEtl` and the result's `etlPath` to
+  `retainTrace` and `tracePath`. On macOS the file is a Seatbelt log, not an
+  ETL.
+- Move `captureDenials` to a top-level request field that each backend
+  accepts or rejects, instead of a backend-specific field.

@@ -29,7 +29,7 @@ pub enum ControlMessage {
     /// Agent → Host: new data streams are ready to be connected.
     ///
     /// Sent after the agent has re-opened its TCP listener for the next
-    /// set of stdin/stdout/stderr connections following an [`Exit`].
+    /// set of stdin/stdout/stderr connections following an [`ControlMessage::Exit`].
     StreamsReady,
 
     /// Either direction: keepalive probe.

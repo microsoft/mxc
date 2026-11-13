@@ -143,12 +143,24 @@ const V1_1_ROOTS: &[ContractRequestRoot] = &[
         schema_definition: "OneShotRequest",
     },
     ContractRequestRoot {
+        fixture_directory: "wslc_provision_session",
+        schema_definition: "WslcProvisionSessionRequest",
+    },
+    ContractRequestRoot {
         fixture_directory: "windows_sandbox_provision",
         schema_definition: "WindowsSandboxProvisionRequest",
     },
     ContractRequestRoot {
         fixture_directory: "isolation_session_provision",
         schema_definition: "IsolationSessionProvisionRequest",
+    },
+    ContractRequestRoot {
+        fixture_directory: "microvm_provision",
+        schema_definition: "MicroVmProvisionRequest",
+    },
+    ContractRequestRoot {
+        fixture_directory: "w365_agents_provision",
+        schema_definition: "W365AgentsProvisionRequest",
     },
     ContractRequestRoot {
         fixture_directory: "wslc_provision",
@@ -169,6 +181,10 @@ const V1_1_ROOTS: &[ContractRequestRoot] = &[
     ContractRequestRoot {
         fixture_directory: "deprovision",
         schema_definition: "DeprovisionRequest",
+    },
+    ContractRequestRoot {
+        fixture_directory: "wslc_deprovision_session",
+        schema_definition: "WslcDeprovisionSessionRequest",
     },
 ];
 
@@ -285,6 +301,34 @@ mod tests {
             .request_roots()
             .iter()
             .any(|root| root.fixture_directory() == "wslc_provision"));
+    }
+
+    #[test]
+    fn only_the_development_contract_advertises_the_session_roots() {
+        let session_roots = ["wslc_provision_session", "wslc_deprovision_session"];
+        let development = descriptor(ContractVersion::V1_1_0Alpha);
+
+        for root in session_roots {
+            assert!(
+                development
+                    .request_roots()
+                    .iter()
+                    .any(|candidate| candidate.fixture_directory() == root),
+                "the development contract must advertise {root}"
+            );
+        }
+
+        for version in [ContractVersion::V0_9_0Alpha, ContractVersion::V1_0_0] {
+            for root in session_roots {
+                assert!(
+                    !descriptor(version)
+                        .request_roots()
+                        .iter()
+                        .any(|candidate| candidate.fixture_directory() == root),
+                    "published {version:?} must not advertise {root}"
+                );
+            }
+        }
     }
 
     #[test]

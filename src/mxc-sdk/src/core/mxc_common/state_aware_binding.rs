@@ -7,7 +7,8 @@
 //! Binding neither parses configuration nor supplies backend defaults.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
+    WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::StatefulSandboxBackend;
@@ -17,6 +18,7 @@ use crate::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 
 /// Backend-typed operation. Construction is restricted to checked binding.
 pub(crate) enum BoundStateAwareOperation<B: StatefulSandboxBackend> {
+    ProvisionSession(Option<WslcProvisionSessionConfig>),
     Provision(Option<B::ProvisionConfig>),
     Start {
         sandbox_id: String,
@@ -33,6 +35,9 @@ pub(crate) enum BoundStateAwareOperation<B: StatefulSandboxBackend> {
     Deprovision {
         sandbox_id: String,
         config: Option<B::DeprovisionConfig>,
+    },
+    DeprovisionSession {
+        session_id: String,
     },
 }
 
@@ -51,6 +56,7 @@ impl<B: StatefulSandboxBackend> std::fmt::Debug for BoundStateAwareRequest<B> {
             .field("backend", &B::BACKEND_KEY)
             .field("phase", &self.phase())
             .field("sandbox_id", &self.sandbox_id())
+            .field("session_id", &self.session_id())
             .finish_non_exhaustive()
     }
 }
@@ -59,11 +65,13 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
     /// The operation's phase.
     pub fn phase(&self) -> Phase {
         match self.operation {
+            BoundStateAwareOperation::ProvisionSession(_) => Phase::ProvisionSession,
             BoundStateAwareOperation::Provision(_) => Phase::Provision,
             BoundStateAwareOperation::Start { .. } => Phase::Start,
             BoundStateAwareOperation::Exec { .. } => Phase::Exec,
             BoundStateAwareOperation::Stop { .. } => Phase::Stop,
             BoundStateAwareOperation::Deprovision { .. } => Phase::Deprovision,
+            BoundStateAwareOperation::DeprovisionSession { .. } => Phase::DeprovisionSession,
         }
     }
 
@@ -72,14 +80,29 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
         &self.request
     }
 
-    /// The ID of a non-provision operation.
+    /// The ID of a sandbox-addressed operation.
     pub fn sandbox_id(&self) -> Option<&str> {
         match &self.operation {
-            BoundStateAwareOperation::Provision(_) => None,
+            BoundStateAwareOperation::ProvisionSession(_)
+            | BoundStateAwareOperation::Provision(_)
+            | BoundStateAwareOperation::DeprovisionSession { .. } => None,
             BoundStateAwareOperation::Start { sandbox_id, .. }
             | BoundStateAwareOperation::Exec { sandbox_id, .. }
             | BoundStateAwareOperation::Stop { sandbox_id, .. }
             | BoundStateAwareOperation::Deprovision { sandbox_id, .. } => Some(sandbox_id),
+        }
+    }
+
+    /// The ID of a session-addressed operation.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.operation {
+            BoundStateAwareOperation::DeprovisionSession { session_id } => Some(session_id),
+            BoundStateAwareOperation::ProvisionSession(_)
+            | BoundStateAwareOperation::Provision(_)
+            | BoundStateAwareOperation::Start { .. }
+            | BoundStateAwareOperation::Exec { .. }
+            | BoundStateAwareOperation::Stop { .. }
+            | BoundStateAwareOperation::Deprovision { .. } => None,
         }
     }
 
@@ -118,6 +141,9 @@ where
         }
         let (request, operation) = parsed.into_parts();
         let operation = match operation {
+            StateAwareOperation::ProvisionSession(config) => {
+                BoundStateAwareOperation::ProvisionSession(config)
+            }
             StateAwareOperation::Provision(config) => {
                 BoundStateAwareOperation::Provision(provision(config)?)
             }
@@ -138,6 +164,9 @@ where
                     sandbox_id,
                     config: None,
                 }
+            }
+            StateAwareOperation::DeprovisionSession { session_id } => {
+                BoundStateAwareOperation::DeprovisionSession { session_id }
             }
         };
         Ok(Self { request, operation })
@@ -193,6 +222,44 @@ where
         "wsb",
         |provision| match provision {
             StateAwareProvision::WindowsSandbox => Ok(None),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+    )
+}
+
+/// Bind a MicroVM operation, preserving provision configuration and rejecting
+/// network and proxy settings on existing-container execution.
+pub fn bind_microvm<B>(
+    parsed: ParsedStateAwareRequest,
+) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = MicroVmProvisionConfig,
+        StartConfig = (),
+        ExecConfig = (),
+        StopConfig = (),
+        DeprovisionConfig = (),
+    >,
+{
+    if parsed.phase() == Phase::Exec
+        && (parsed.request().policy.runtime_network_proxy_specified
+            || parsed.request().policy.network_proxy.is_enabled())
+    {
+        return Err(MxcError::policy_validation(
+            "MicroVM network proxy policy is fixed at provision",
+        ));
+    }
+    if parsed.phase() == Phase::Exec && parsed.request().policy.network_specified {
+        return Err(MxcError::policy_validation(
+            "MicroVM network policy is fixed at provision",
+        ));
+    }
+    BoundStateAwareRequest::bind(
+        parsed,
+        ContainmentBackend::MicroVm,
+        "microvm",
+        |provision| match provision {
+            StateAwareProvision::MicroVm(config) => Ok(config),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         },
     )

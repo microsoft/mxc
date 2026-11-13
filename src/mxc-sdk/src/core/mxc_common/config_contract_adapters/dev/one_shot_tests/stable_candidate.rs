@@ -32,7 +32,7 @@ const PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
         "deniedPaths": ["/path/to/denied"]
     },
     "fallback": {
-        "allowDaclMutation": true
+        "allowDaclMutation": false
     },
     "network": {
         "egress": {"default": "deny"},
@@ -339,7 +339,6 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.process_container.is_none());
     assert!(wire.lxc.is_none());
     assert!(wire.filesystem.is_none());
-    assert!(wire.fallback.is_none());
     assert!(wire.network.is_none());
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
@@ -394,9 +393,6 @@ fn process_container_request_maps_expected_wire_fields() {
         filesystem.denied_paths.unwrap().as_slice(),
         &["/path/to/denied"]
     );
-
-    let fallback = wire.fallback.expect("fallback should be populated");
-    assert_eq!(fallback.allow_dacl_mutation, Some(true));
 
     let network = wire.network.expect("network should be populated");
     assert!(matches!(
@@ -604,7 +600,6 @@ fn seatbelt_request_maps_expected_wire_fields() {
         Some("custom-profile.sb")
     );
     assert_eq!(seatbelt.gui_access, Some(true));
-    assert!(seatbelt.launch_method.is_none());
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
     assert_eq!(
@@ -625,9 +620,6 @@ fn empty_optional_sections_map_to_present_empty_wire_sections() {
     assert!(filesystem.readwrite_paths.is_none());
     assert!(filesystem.readonly_paths.is_none());
     assert!(filesystem.denied_paths.is_none());
-
-    let fallback = wire.fallback.expect("fallback should be populated");
-    assert!(fallback.allow_dacl_mutation.is_none());
 
     let network = wire.network.expect("network should be populated");
     assert!(network.egress.is_none());
@@ -683,7 +675,6 @@ fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
     let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
     assert!(seatbelt.profile_override.is_none());
     assert!(seatbelt.gui_access.is_none());
-    assert!(seatbelt.launch_method.is_none());
     assert!(seatbelt.nested_pty.is_none());
     assert!(seatbelt.keychain_access.is_none());
     assert!(seatbelt.extra_mach_lookups.is_none());

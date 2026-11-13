@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::mxc_common::mxc_error::ApiFailure;
 use crate::wslc_common::process_env::EnvScope;
 
 /// Upper bound on a single decoded frame (16 MiB). Guards the decoder against a
@@ -50,7 +51,13 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 /// A new optional field counts: these structs do not deny unknown fields, so a
 /// daemon predating one drops it and acts on a request it only partly
 /// understood.
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// Changing this strands whatever a running daemon is holding, since the SDK
+/// offers no way to re-attach to a live session from another process.
+pub const PROTOCOL_VERSION: u32 = 10;
+
+/// Largest payload one [`StreamFrame::Stdin`] may carry.
+pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;
 
 fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -108,8 +115,33 @@ pub struct PortMapping {
     pub container_port: u16,
 }
 
-/// Inputs to `provision`: ensure the shared session (booting the WSL2 utility VM
-/// on first provision), resolve the image, and create the container. Mirrors the
+/// Inputs to `provision_session`: size and boot one WSL2 utility VM, so later
+/// `provision` requests can place containers in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProvisionSessionConfig {
+    /// Virtual CPUs, or absent for the host default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_count: Option<u32>,
+
+    /// Memory in MB, or absent for the host default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+
+    /// Whether to enable GPU passthrough.
+    #[serde(default)]
+    pub gpu: bool,
+}
+
+/// Inputs to `deprovision_session`: release one session and the utility VM
+/// behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeprovisionSessionConfig {
+    #[serde(rename = "session_id")]
+    pub session_ref: String,
+}
+
+/// Inputs to `provision`: ensure the session (booting the WSL2 utility VM on
+/// first provision), resolve the image, and create the container. Mirrors the
 /// session/container-level fields of the one-shot `WslcConfig` plus the
 /// container's volume and network policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +160,18 @@ pub struct ProvisionConfig {
     /// Host → container TCP forwards for this sandbox's container.
     #[serde(default)]
     pub port_mappings: Vec<PortMapping>,
+
+    /// Which session to place this container in, from an earlier
+    /// [`DaemonResponse::SessionProvisioned`].
+    ///
+    /// Absent joins the daemon's implicit session, shared by every request that
+    /// names none.
+    #[serde(
+        rename = "session_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_ref: Option<String>,
 }
 
 /// Inputs to `start`: the container was created at provision; start boots it.
@@ -165,6 +209,12 @@ pub struct ExecConfig {
     /// Timeout in milliseconds (0 = no timeout).
     #[serde(default)]
     pub timeout_ms: u32,
+
+    /// Whether the client will send the process's stdin over
+    /// [`DaemonRequest::ExecStdin`]; without it the process reads end-of-file
+    /// immediately.
+    #[serde(default)]
+    pub stdin: bool,
 }
 
 /// Inputs to `stop`: stop the running container, keeping it created for a later
@@ -191,6 +241,16 @@ pub struct CancelExecConfig {
     pub run_token: String,
 }
 
+/// Inputs to `exec_stdin`: attach the stdin of one admitted exec that asked for
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStdinConfig {
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub exec_id: String,
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub run_token: String,
+}
+
 /// Confirmed terminal outcome shared by the daemon worker and client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecTerminal {
@@ -210,6 +270,12 @@ pub enum ExecTerminal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    /// Boot a sized session. Replies [`DaemonResponse::SessionProvisioned`].
+    ProvisionSession(ProvisionSessionConfig),
+
+    /// Release a session and the utility VM behind it. Replies
+    /// [`DaemonResponse::Ok`].
+    DeprovisionSession(DeprovisionSessionConfig),
     /// Ensure session + create container. Replies [`DaemonResponse::Provisioned`].
     Provision(ProvisionConfig),
     /// Boot the created container. Replies [`DaemonResponse::Ok`].
@@ -219,6 +285,10 @@ pub enum DaemonRequest {
     Exec(ExecConfig),
     /// Request termination of one admitted exec. Replies [`DaemonResponse::Ok`].
     CancelExec(CancelExecConfig),
+
+    /// Attach an admitted exec's stdin; after [`DaemonResponse::Ok`] the client
+    /// sends [`StreamFrame::Stdin`] frames, ending with an empty one.
+    ExecStdin(ExecStdinConfig),
     /// Stop the running container. Replies [`DaemonResponse::Ok`].
     Stop(StopConfig),
     /// Delete the container (refcount--). Replies [`DaemonResponse::Ok`].
@@ -231,6 +301,12 @@ pub enum DaemonRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DaemonResponse {
+    /// `provision_session` succeeded; carries the minted session id, which a
+    /// later `provision` presents to place a container in that session.
+    SessionProvisioned {
+        #[serde(rename = "session_id")]
+        session_ref: String,
+    },
     /// `provision` succeeded; carries the minted sandbox id (the addressable
     /// handle a later phase presents).
     Provisioned { sandbox_id: String },
@@ -240,7 +316,12 @@ pub enum DaemonResponse {
     Pong,
     /// The request failed or was refused. `kind` is a stable machine-readable
     /// token (see [`ErrKind`]); `message` is human-readable detail.
-    Err { kind: ErrKind, message: String },
+    Err {
+        kind: ErrKind,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_failure: Option<DaemonApiFailure>,
+    },
 }
 
 /// Stable, machine-readable classification of a [`DaemonResponse::Err`], so the
@@ -280,16 +361,42 @@ pub enum ErrKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonApiFailure {
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_code: Option<String>,
+}
+
+impl From<&ApiFailure> for DaemonApiFailure {
+    fn from(failure: &ApiFailure) -> Self {
+        Self {
+            operation: failure.operation.clone(),
+            native_code: failure.native_code.clone(),
+        }
+    }
+}
+
+impl From<DaemonApiFailure> for ApiFailure {
+    fn from(failure: DaemonApiFailure) -> Self {
+        Self {
+            operation: failure.operation,
+            native_code: failure.native_code,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exec data-phase stream frames
 // ---------------------------------------------------------------------------
 
-/// A frame exchanged during the exec data phase (after an admitted
-/// [`DaemonRequest::Exec`]). Client→daemon carries [`StreamFrame::Stdin`];
+/// A frame exchanged during the exec data phase. Client→daemon carries
+/// [`StreamFrame::Stdin`] on a [`DaemonRequest::ExecStdin`] connection;
 /// daemon→client carries [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] and
-/// one terminal exit, timeout, cancellation, or error frame.
+/// one terminal exit, timeout, cancellation, or error frame on the
+/// [`DaemonRequest::Exec`] connection.
 ///
-/// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
+/// The raw byte payloads are base64-encoded on the wire (see `base64_bytes`).
 /// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
 /// 105, ...]`), roughly **4 bytes of wire per payload byte**, and since
 /// [`MAX_FRAME_SIZE`] is measured against the *encoded* frame that would cut
@@ -326,7 +433,11 @@ pub enum StreamFrame {
     /// Daemon→client: live output was dropped; the terminal frame still follows.
     Truncated,
     /// Daemon→client: terminal frame; the exec failed before or during the run.
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_failure: Option<DaemonApiFailure>,
+    },
 }
 
 /// serde adapter that (de)serializes a `Vec<u8>` as a base64 string rather than
@@ -436,6 +547,7 @@ mod tests {
                 windows_port: 8080,
                 container_port: 80,
             }],
+            session_ref: Some("wslcsess:abc".to_string()),
         }));
     }
 
@@ -453,8 +565,13 @@ mod tests {
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             env_scope: EnvScope::Replace,
             timeout_ms: 30_000,
+            stdin: true,
         }));
         roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
+        }));
+        roundtrip(DaemonRequest::ExecStdin(ExecStdinConfig {
             exec_id: "exec-1".to_string(),
             run_token: "run-1".to_string(),
         }));
@@ -464,6 +581,16 @@ mod tests {
         roundtrip(DaemonRequest::Deprovision(DeprovisionConfig {
             sandbox_id: "wslc:abc123".to_string(),
         }));
+        roundtrip(DaemonRequest::ProvisionSession(ProvisionSessionConfig {
+            cpu_count: Some(4),
+            memory_mb: Some(8192),
+            gpu: true,
+        }));
+        roundtrip(DaemonRequest::DeprovisionSession(
+            DeprovisionSessionConfig {
+                session_ref: "wslcsess:abc123".to_string(),
+            },
+        ));
         roundtrip(DaemonRequest::Ping);
     }
 
@@ -485,6 +612,7 @@ mod tests {
             ],
             env_scope: EnvScope::Replace,
             timeout_ms: 0,
+            stdin: false,
         };
 
         let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
@@ -501,6 +629,9 @@ mod tests {
 
     #[test]
     fn roundtrip_each_response_variant() {
+        roundtrip(DaemonResponse::SessionProvisioned {
+            session_ref: "wslcsess:abc123".to_string(),
+        });
         roundtrip(DaemonResponse::Provisioned {
             sandbox_id: "wslc:abc123".to_string(),
         });
@@ -520,8 +651,92 @@ mod tests {
             roundtrip(DaemonResponse::Err {
                 kind,
                 message: "detail".to_string(),
+                api_failure: None,
             });
         }
+
+        roundtrip(DaemonResponse::Err {
+            kind: ErrKind::Backend,
+            message: "start failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcStartContainer".to_string(),
+                native_code: Some("0x80072740".to_string()),
+            }),
+        });
+    }
+
+    #[test]
+    fn a_provision_without_a_session_joins_the_implicit_one() {
+        // Every caller predating addressable sessions omits this field, and
+        // must keep getting the daemon's shared session rather than a decode
+        // failure.
+        let wire = r#"{"op":"provision","image":"alpine:latest"}"#;
+        let decoded: DaemonRequest = serde_json::from_str(wire).expect("decode without a session");
+
+        let DaemonRequest::Provision(config) = decoded else {
+            panic!("expected a provision request");
+        };
+        assert_eq!(config.session_ref, None);
+    }
+
+    #[test]
+    fn an_absent_session_is_left_off_the_wire() {
+        let frame = serde_json::to_string(&ProvisionConfig {
+            image: "alpine:latest".to_string(),
+            image_tar_path: None,
+            volumes: Vec::new(),
+            network: NetworkMode::None,
+            port_mappings: Vec::new(),
+            session_ref: None,
+        })
+        .expect("serialize");
+
+        assert!(
+            !frame.contains("session_id"),
+            "an absent session must not serialize as a present null: {frame}"
+        );
+    }
+
+    #[test]
+    fn the_session_field_keeps_its_wire_name() {
+        let provision: DaemonRequest = serde_json::from_str(
+            r#"{"op":"provision","image":"alpine:latest","session_id":"wslcsess:abc"}"#,
+        )
+        .expect("decode a provision that names a session");
+        let deprovision: DaemonRequest =
+            serde_json::from_str(r#"{"op":"deprovision_session","session_id":"wslcsess:abc"}"#)
+                .expect("decode a session deprovision");
+        let provisioned: DaemonResponse =
+            serde_json::from_str(r#"{"status":"session_provisioned","session_id":"wslcsess:abc"}"#)
+                .expect("decode a session reply");
+
+        for encoded in [
+            serde_json::to_value(&provision),
+            serde_json::to_value(&deprovision),
+            serde_json::to_value(&provisioned),
+        ] {
+            let encoded = encoded.expect("encode");
+            assert_eq!(
+                encoded["session_id"], "wslcsess:abc",
+                "a session must travel under the documented `session_id` key: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_sizing_omitted_is_the_host_default() {
+        let wire = r#"{"op":"provision_session"}"#;
+        let decoded: DaemonRequest = serde_json::from_str(wire).expect("decode bare sizing");
+
+        assert_eq!(
+            decoded,
+            DaemonRequest::ProvisionSession(ProvisionSessionConfig {
+                cpu_count: None,
+                memory_mb: None,
+                gpu: false,
+            }),
+            "absent sizing is the host default, which is distinct from a zero"
+        );
     }
 
     #[test]
@@ -533,6 +748,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::Unknown,
                 message: "detail".to_string(),
+                api_failure: None,
             }
         );
     }
@@ -558,6 +774,21 @@ mod tests {
             "run_token": "x".repeat(MAX_EXEC_ID_BYTES + 1)
         });
         assert!(serde_json::from_value::<DaemonRequest>(cancel).is_err());
+
+        let stdin = serde_json::json!({
+            "op": "exec_stdin",
+            "exec_id": "",
+            "run_token": "run-1"
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(stdin).is_err());
+    }
+
+    #[test]
+    fn an_exec_config_without_stdin_gives_the_process_none() {
+        let without = r#"{"exec_id":"e","run_token":"r","sandbox_id":"s","script_code":"run"}"#;
+        let parsed: ExecConfig = serde_json::from_str(without).expect("stdin is optional");
+
+        assert!(!parsed.stdin);
     }
 
     #[test]
@@ -577,7 +808,31 @@ mod tests {
         roundtrip(StreamFrame::Truncated);
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcCreateContainerProcess".to_string(),
+                native_code: Some("0x80004005".to_string()),
+            }),
         });
+    }
+
+    #[test]
+    fn an_api_failure_travels_under_snake_case_keys() {
+        let encoded = serde_json::to_value(StreamFrame::Error {
+            message: "spawn failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcCreateContainerProcess".to_string(),
+                native_code: Some("0x80004005".to_string()),
+            }),
+        })
+        .expect("encode");
+
+        assert_eq!(
+            encoded["api_failure"],
+            serde_json::json!({
+                "operation": "WslcCreateContainerProcess",
+                "native_code": "0x80004005"
+            })
+        );
     }
 
     #[test]

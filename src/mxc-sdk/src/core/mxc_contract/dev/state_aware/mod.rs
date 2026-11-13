@@ -56,23 +56,34 @@ macro_rules! string_marker {
 }
 
 mod deprovision;
+mod deprovision_session;
 mod exec;
 mod phase;
 mod provision;
+mod provision_session;
 mod start;
 mod stop;
 
 pub use deprovision::{DeprovisionPhase, DeprovisionRequest};
+pub use deprovision_session::{DeprovisionSessionPhase, WslcDeprovisionSessionRequest};
 pub use exec::{ExecPhase, ExecRequest};
 pub use phase::{probe_phase, Phase, PhaseProbeError};
 pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
+pub use provision::{
+    StateAwareW365AgentsProvision, W365AgentsContainment, W365AgentsGuid, W365AgentsProvision,
+    W365AgentsProvisionRequest, W365AgentsUserType,
+};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
+pub use provision_session::{
+    ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
+};
 pub use start::{StartPhase, StartRequest};
 pub use stop::{StopPhase, StopRequest};

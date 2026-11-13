@@ -3,6 +3,32 @@
 
 use serde::{de, Deserialize, Deserializer};
 
+/// Deserialize a present optional settings object without accepting Serde's
+/// positional-array representation of structs.
+pub(crate) fn deserialize_optional_object<'de, D, T>(
+    deserializer: D,
+) -> Result<OptionalField<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = OptionalField<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a settings object")
+        }
+
+        fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            T::deserialize(de::value::MapAccessDeserializer::new(map)).map(OptionalField::present)
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+}
+
 /// A marker that deserializes only from the JSON value `true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct True;
@@ -152,6 +178,79 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     {
         let value = String::deserialize(deserializer)?;
         Self::new(value).map_err(de::Error::custom)
+    }
+}
+
+/// An image reference with an explicit registry. The runtime validates its
+/// complete syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageReference(String);
+
+impl ImageReference {
+    /// Validate image input before any backend state is opened.
+    pub fn new(value: String) -> Result<Self, String> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Require a registry and repository without validating the complete reference.
+    pub fn validate(value: &str) -> Result<(), String> {
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\u{feff}')
+        {
+            return Err("microvm.image must be a nonempty image reference without whitespace or control characters".to_owned());
+        }
+        let valid_registry = |registry: &str| {
+            registry == "localhost"
+                || registry
+                    .char_indices()
+                    .any(|(index, c)| c == '.' && index > 0 && index + 1 < registry.len())
+                || registry.rsplit_once(':').is_some_and(|(host, port)| {
+                    !host.is_empty()
+                        && !port.is_empty()
+                        && port.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        };
+        if !value.split_once('/').is_some_and(|(registry, repository)| {
+            valid_registry(registry)
+                && repository
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !matches!(c, '/' | ':' | '@'))
+        }) {
+            return Err("microvm.image must include a registry host and image repository, such as docker.io/library/python:3.12-alpine".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Consume the validated input.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageReference {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for ImageReference {
+    fn schema_name() -> String {
+        "ImageReference".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut schema = <String as schemars::JsonSchema>::json_schema(generator).into_object();
+        let string = schema.string.get_or_insert_with(Default::default);
+        string.min_length = Some(1);
+        string.pattern = Some(
+            r"^(?:localhost|[^\s\x00-\x1f\x7f-\x9f/][^\s\x00-\x1f\x7f-\x9f/.]*\.[^\s\x00-\x1f\x7f-\x9f/]+|[^\s\x00-\x1f\x7f-\x9f/]+:[0-9]+)/[^/:\u0040\s\x00-\x1f\x7f-\x9f][^\s\x00-\x1f\x7f-\x9f]*(?![\s\S])".to_owned(),
+        );
+        schema.into()
     }
 }
 

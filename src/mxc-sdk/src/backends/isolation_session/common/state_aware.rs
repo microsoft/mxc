@@ -25,7 +25,9 @@ use crate::mxc_common::validator::{
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
+use super::manager::{
+    log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome, WAIT_FOR_EXIT_TIMEOUT,
+};
 use super::policy::{
     reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
 };
@@ -316,9 +318,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 );
 
                 let mut logger = Logger::inherit_thread_diagnostic_sink();
-                let exit_code = manager
+                let outcome = manager
                     .create_process(&options, Some(&mut logger))
                     .map_err(map_lifecycle_error)?;
+                let exit_code = relayed_exit_code(outcome);
 
                 // The output relay completed inside `create_process`. The
                 // dispatcher sees zero pipe handles, skips its own relay setup,
@@ -364,6 +367,16 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
         spawn_existing_session_pty(manager, request, size)
+    }
+}
+
+// SDK v2: a timeout returns backend_error "script timed out after {timeout_ms}ms"
+// instead of an exit code a workload could also return.
+// See docs/development/plans/sdk-v2-error-codes.md.
+fn relayed_exit_code(outcome: ExecOutcome) -> i32 {
+    match outcome {
+        ExecOutcome::Exited(exit_code) => exit_code,
+        ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
     }
 }
 

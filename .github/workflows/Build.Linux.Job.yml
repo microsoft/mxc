@@ -5,20 +5,34 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.arch }}
+    name: ${{ matrix.arch }} (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             features: hyperlight
+            upload_artifacts: true
+          - arch: x64
+            runner: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+            features: hyperlight
+            upload_artifacts: false
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ''
+            upload_artifacts: true
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ''
+            upload_artifacts: false
     runs-on: ${{ matrix.runner }}
+    # A wedged PTY child would otherwise hold the runner for the 6-hour cap.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: src/tools/lxc
@@ -48,7 +62,7 @@ jobs:
           workspaces: |
             src -> target
             src/tools/lxc -> target
-          key: ${{ matrix.target }}-v2
+          key: ${{ matrix.runner }}-${{ matrix.target }}-v2
           cache-on-failure: false
 
       - name: Install ARM64 cross linker
@@ -78,7 +92,7 @@ jobs:
             --no-default-features "${features[@]}"
 
       # The step above runs from src/tools/lxc and so covers only the thin lxc
-      # package. The consolidated SDK module holds the LXC-gated unit tests.
+      # package. The internal crate holds the LXC-gated unit tests.
       - name: Test lxc_common module
         working-directory: src
         shell: bash
@@ -104,11 +118,50 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap slirp4netns iptables
+          sudo apt-get install -y bubblewrap slirp4netns iptables iproute2
           # Ubuntu 24.04 runners restrict unprivileged user namespaces via
           # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # The proxy-network unit tests drive the real supervisor script against
+      # stubs and need `ip` (iproute2) from the install above. The module is not
+      # covered by any other filter, so a zero-test run must fail.
+      - name: Test Bubblewrap proxy_network module
+        working-directory: src
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-internal --lib 'backend_modules::bubblewrap::common::proxy_network::' 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+            echo "::error::Bubblewrap proxy_network module filter ran no tests."
+            exit 1
+          fi
+
+      - name: Test Bubblewrap seccomp, resolver, argument-builder, runner, tool lookup, and version modules
+        working-directory: src
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
+            cargo test --locked --release --target "${{ matrix.target }}" \
+              -p mxc-internal --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+              echo "::error::Bubblewrap $module module filter ran no tests."
+              exit 1
+            fi
+          done
 
       # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
@@ -119,7 +172,7 @@ jobs:
         env:
           MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: cargo test --locked --release --target ${{ matrix.target }}
-             -p mxc-internal --test streaming_bubblewrap
+             -p mxc-sdk --test streaming_bubblewrap
 
       - name: Test common contracts and state-aware SDK boundaries
         working-directory: src
@@ -129,7 +182,48 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-internal --lib mxc_common::
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --doc
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-internal -p mxc_ffi --lib state_aware
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-internal --test state_aware
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
+
+      - name: Test native module lifetime
+        working-directory: src
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" -p mxc-sdk --example module_lifetime_fixture
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test module_lifetime
+
+      - name: Test and stage filesystem probe request deadlines
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-internal --lib --no-run --message-format=json |
+            python3 -c 'import json,sys; items=[json.loads(line) for line in sys.stdin]; paths=[m["executable"] for m in items if m.get("reason")=="compiler-artifact" and m["target"]["name"]=="mxc_internal" and m["profile"]["test"] and m.get("executable")]; assert len(paths)==1, paths; print(paths[0])')"
+          destination="target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
+          cp "$payload" "$destination"
+          for case in bubblewrap_launch_rejects_stalled_paths lxc_launch_rejects_stalled_paths \
+            bubblewrap_mount_paths_reject_stalls lxc_mount_paths_reject_stalls; do
+            test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+            "$destination" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
+          done
+          "$destination" --ignored filesystem_probe::launch_tests:: --skip lxc_mount_paths_reject_stalls
+
+      - name: Test LXC mount-probe deadlines
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lxc
+          sudo "target/${{ matrix.target }}/release/mxc-filesystem-probe-tests" --ignored --exact \
+            core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::lxc_mount_paths_reject_stalls
+
+      # This lane selects lib tests by module, so mxc_pty needs an explicit
+      # step; the macOS lane picks it up via the package-wide run. The tests
+      # drive /dev/ptmx directly and need no sandbox backend installed.
+      - name: Test unix pty bridge
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-internal --lib 'core_modules::mxc_pty::'
 
       # These need no LXC installed: the engine tests inject their probes, and
       # the dispatch and FFI pins are refused before a container is created.
@@ -159,35 +253,35 @@ jobs:
           run_pinned "LXC discovery matrix" -p mxc-internal --lib linux_support
           run_pinned "LXC dispatch arm" -p mxc-internal --lib streaming_lxc_reaches_the_backend_on_linux
           run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_lxc_backend
-          run_pinned "SDK platform helpers" -p mxc-internal --test sdk_helpers
+          run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
+          run_pinned "Probe coverage" -p mxc-internal --lib mxc_engine::probe
+          run_pinned "Backend registry" -p mxc-internal --lib mxc_engine::backend_registry
+
+          # Hyperlight is a Linux backend only on x64, and the probe reports it
+          # from a feature-gated branch the default build never compiles.
+          if [ -n "${{ matrix.features }}" ]; then
+            run_pinned "Probe coverage (${{ matrix.features }})" \
+              --features "${{ matrix.features }}" -p mxc-internal --lib mxc_engine::probe
+            run_pinned "Backend registry (${{ matrix.features }})" \
+              --features "${{ matrix.features }}" -p mxc-internal --lib mxc_engine::backend_registry
+          fi
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
+      # Strict mode fails a test whose Bubblewrap or python3 prerequisite is
+      # missing instead of letting it pass without running.
       - name: Test Bubblewrap executor characterization
         working-directory: src
+        env:
+          MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: cargo test --locked --release --target ${{ matrix.target }}
-             -p mxc-internal --test wxc_e2e_tests_e2e_bubblewrap_characterization
+             -p mxc-sdk --test wxc_e2e_tests_e2e_bubblewrap_characterization
 
       - name: Test MicroVM executor characterization
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
-             -p mxc-internal --test wxc_e2e_tests_e2e_linux_microvm
+             -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
-      # PLM (Permissive Learning Mode) is functionally Windows-only, but the
-      # crate builds cross-platform: the lib's helper modules compile on every
-      # target, and the binary has a no-op stub `fn main()` for non-Windows so
-      # the crate lives in the workspace `default-members` list. This gate
-      # keeps the cross-platform/Windows-only split a CI-enforced contract — if
-      # someone adds a `use windows::…` without a `#[cfg]` gate the Linux
-      # build fails fast rather than rotting silently.
-      - name: Build plm (cross-platform stub + lib)
-        working-directory: src
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
-
-      - name: Test plm (cross-platform modules)
-        working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
-
       # These are separate workspace members, not dependencies of lxc.
       - name: Build Node runtime dependencies
         working-directory: src
@@ -206,6 +300,7 @@ jobs:
         run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
       - name: Upload binaries
+        if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lxc-binaries-${{ matrix.target }}
@@ -213,5 +308,6 @@ jobs:
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
             src/target/${{ matrix.target }}/release/libmxc_ffi.so
+            src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests
           if-no-files-found: error
           retention-days: 1

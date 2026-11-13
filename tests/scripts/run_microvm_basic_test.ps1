@@ -24,7 +24,7 @@ if (-not $BinDir) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$TestConfig = Join-Path $RepoRoot "tests\configs\microvm_hello.json"
+$TestConfig = Join-Path $RepoRoot "src\mxc-sdk\tests\fixtures\microvm\microvm_hello.json"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red

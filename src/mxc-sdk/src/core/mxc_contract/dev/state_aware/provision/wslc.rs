@@ -23,6 +23,10 @@ pub struct WslcProvision {
     #[serde(default)]
     pub image_tar_path: OptionalField<String>,
 
+    /// Session to join; omitted to use the shared default VM.
+    #[serde(default)]
+    pub session_id: OptionalField<String>,
+
     /// Optional host-to-container TCP port mappings.
     #[serde(default)]
     pub port_mappings: OptionalField<Vec<PortMapping>>,

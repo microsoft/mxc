@@ -43,7 +43,7 @@ use crate::nanvix_common::{
     github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig,
 };
 
-pub(crate) fn run(source_dir: &Path) -> Option<(PathBuf, bool)> {
+pub(crate) fn run() -> Option<(PathBuf, bool)> {
     // The build script's output (`NANVIX_BIN_DIR` and whether the download /
     // verify path runs) depends on the `microvm` feature, surfaced here as the
     // `CARGO_FEATURE_MICROVM` env var. Declare it as a rerun trigger so toggling
@@ -56,7 +56,7 @@ pub(crate) fn run(source_dir: &Path) -> Option<(PathBuf, bool)> {
     // when the micro-VM backend is actually being built. Gate it behind this
     // crate's `microvm` feature so that a default `cargo build` (which still
     // compiles this crate as a workspace member) performs no network or hashing
-    // work. The thin executors enable `mxc-internal/microvm` through their own
+    // work. The thin executors enable `mxc-sdk/microvm` through their own
     // `microvm` features.
     //
     // `NANVIX_BIN_DIR` must still be emitted in every configuration because
@@ -86,10 +86,9 @@ pub(crate) fn run(source_dir: &Path) -> Option<(PathBuf, bool)> {
     // resolution lives in the build-only `nanvix_build_common` crate.
     let (bin_dir, use_prefetched_binaries) = crate::nanvix_build_common::resolve_bin_dir(&out_dir);
 
-    let versions_path = source_dir.join("build/nanvix_binaries/versions.json");
-    let checksums_path = source_dir.join("build/nanvix_binaries/checksums.json");
-    let versions: ReleaseConfig = load_json(&versions_path);
-    let checksums: HashMap<String, String> = load_checksums(&checksums_path, &target);
+    let versions: ReleaseConfig = load_json("build/nanvix_binaries/versions.json");
+    let checksums: HashMap<String, String> =
+        load_checksums("build/nanvix_binaries/checksums.json", &target);
 
     if target == "linux" {
         // Linux: download tar.gz and extract Linux binaries.
@@ -207,8 +206,8 @@ pub(crate) fn run(source_dir: &Path) -> Option<(PathBuf, bool)> {
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", versions_path.display());
-    println!("cargo:rerun-if-changed={}", checksums_path.display());
+    println!("cargo:rerun-if-changed=build/nanvix_binaries/versions.json");
+    println!("cargo:rerun-if-changed=build/nanvix_binaries/checksums.json");
     println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
     println!("cargo:rerun-if-env-changed=NANVIX_BIN");

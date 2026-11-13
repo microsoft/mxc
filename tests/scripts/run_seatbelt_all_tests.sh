@@ -69,8 +69,10 @@ run_test() {
 }
 
 run_test "Seatbelt Basic" "$SCRIPT_DIR/run_seatbelt_basic_test.sh"
+run_test "Seatbelt Process Lifetime" "$SCRIPT_DIR/run_seatbelt_process_lifetime_test.sh"
 run_test "Seatbelt Filesystem" "$SCRIPT_DIR/run_seatbelt_filesystem_test.sh"
 run_test "Seatbelt Path Resolution" "$SCRIPT_DIR/run_seatbelt_path_resolution_test.sh"
+run_test "Seatbelt Symlinks" "$SCRIPT_DIR/run_seatbelt_symlink_test.sh"
 run_test "Seatbelt UNIX Sockets" "$SCRIPT_DIR/run_seatbelt_unix_socket_test.sh"
 run_test "Seatbelt Directional Network" "$SCRIPT_DIR/run_seatbelt_network_test.sh"
 run_test "Seatbelt Rejections" "$SCRIPT_DIR/run_seatbelt_rejections_test.sh"
@@ -79,6 +81,8 @@ run_test "Seatbelt Environment" "$SCRIPT_DIR/run_seatbelt_environment_test.sh"
 run_test "Seatbelt UI" "$SCRIPT_DIR/run_seatbelt_ui_test.sh"
 run_test "Seatbelt guiAccess" "$SCRIPT_DIR/run_seatbelt_gui_access_test.sh"
 run_test "Seatbelt Options" "$SCRIPT_DIR/run_seatbelt_options_test.sh"
+run_test "Seatbelt captureDenials" "$SCRIPT_DIR/run_seatbelt_capture_denials_test.sh"
+run_test "Seatbelt Terminal Isolation" "$SCRIPT_DIR/run_seatbelt_tty_test.sh"
 run_test "Seatbelt Profile Output" "$SCRIPT_DIR/run_seatbelt_profile_test.sh"
 run_test "Seatbelt Examples" "$SCRIPT_DIR/run_seatbelt_examples_test.sh"
 

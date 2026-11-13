@@ -318,8 +318,12 @@ public enum ContainmentBackend
     IsolationSession,
     Bubblewrap,
     Hyperlight,
+    MicroVm,
 }
 ```
+
+`MicroVm` identifies NVX in host discovery. MicroVM streaming and container
+lifecycle operations remain restricted to Rust development JSON APIs.
 
 
 ## `Microsoft.Mxc.Sdk.V1.DeprovisionOptions`
@@ -558,6 +562,13 @@ public static class MxcContainer
         SpawnOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    public static MxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null);
+
+    public static Task<MxcProcess> SpawnWithStdinAsync(
+        ContainerRequest request,
+        SpawnOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     public static MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);
@@ -614,6 +625,17 @@ public static class MxcLifecycle
         SpawnInContainerOptions? options = null);
 
     public static Task<MxcProcess> SpawnInContainerAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    public static MxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null);
+
+    public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
         ContainerId id,
         ExecutionRequest request,
         SpawnInContainerOptions? options = null,
@@ -945,7 +967,7 @@ public sealed class PlatformSupport
 
 ## `Microsoft.Mxc.Sdk.V1.ProbeFacts`
 
-Raw host facts used by request tier selection.
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```csharp
 public sealed class ProbeFacts
@@ -976,6 +998,10 @@ public sealed class ProbeFacts
 ## `Microsoft.Mxc.Sdk.V1.ProbeOutput`
 
 Result of probing which Windows ProcessContainer tier can serve a request.
+
+When native ProcessContainer cannot serve the request, `Tier` and
+`NeedsDaclAugmentation` are null and `Error` explains why. `Probes` still
+contains host capability facts.
 
 ```csharp
 public sealed class ProbeOutput

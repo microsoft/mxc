@@ -436,10 +436,20 @@ public class MxcContainerTests
         Assert.NotNull(backends);
         if (OperatingSystem.IsWindows())
         {
-            var processContainer = Assert.Single(
-                backends,
-                backend => backend.Backend == ContainmentBackend.ProcessContainer);
-            Assert.NotNull(processContainer.Tier);
+            var probe = MxcContainer.Probe();
+            if (probe.Probes.BaseContainerApiPresent)
+            {
+                var processContainer = Assert.Single(
+                    backends,
+                    backend => backend.Backend == ContainmentBackend.ProcessContainer);
+                Assert.Equal(IsolationTier.BaseContainer, processContainer.Tier);
+            }
+            else
+            {
+                Assert.DoesNotContain(
+                    backends,
+                    backend => backend.Backend == ContainmentBackend.ProcessContainer);
+            }
         }
     }
 
@@ -468,6 +478,7 @@ public class MxcContainerTests
     [InlineData("isolation_session", ContainmentBackend.IsolationSession)]
     [InlineData("bubblewrap", ContainmentBackend.Bubblewrap)]
     [InlineData("hyperlight", ContainmentBackend.Hyperlight)]
+    [InlineData("microvm", ContainmentBackend.MicroVm)]
     public void Discovery_MapsEveryNativeBackend(
         string wireName,
         ContainmentBackend expected)
