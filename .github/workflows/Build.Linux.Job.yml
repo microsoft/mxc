@@ -127,6 +127,14 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      - name: Test Bubblewrap filesystem policy and denied-path masking
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: |
+          bash tests/scripts/run_bwrap_filesystem_test.sh
+          bash tests/scripts/run_bwrap_denied_masking_test.sh
+
       # The proxy-network unit tests drive the real supervisor script against
       # stubs and need `ip` (iproute2) from the install above. The module is not
       # covered by any other filter, so a zero-test run must fail.

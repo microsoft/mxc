@@ -243,6 +243,8 @@ impl BubblewrapScriptRunner {
     where
         F: FnOnce() -> Result<bwrap_version::ProbedBwrap, bwrap_version::BwrapUnavailable>,
     {
+        crate::mxc_common::filesystem_resolve::validate_mount_paths(&request.policy)
+            .map_err(|message| ScriptResponse::rejected(&message))?;
         validate_network_policy_support(request, self.network_policy_support())?;
 
         // User-input validation runs before the environmental `bwrap`
@@ -2540,6 +2542,35 @@ mod tests {
             .validate_prepared_with_probe(&req, || Err(unavailable))
             .unwrap_err();
         assert_eq!(err.error_message, expected);
+    }
+
+    #[test]
+    fn filesystem_parent_components_are_rejected_before_environment_probe() {
+        for field in ["readwritePaths", "readonlyPaths", "deniedPaths"] {
+            for path in [
+                "/work/secret/..",
+                "/work/a/../b/../",
+                "/work/./secret/../public",
+            ] {
+                let mut request = base_request();
+                match field {
+                    "readwritePaths" => request.policy.readwrite_paths.push(path.into()),
+                    "readonlyPaths" => request.policy.readonly_paths.push(path.into()),
+                    _ => request.policy.denied_paths.push(path.into()),
+                }
+                let error = BubblewrapScriptRunner::new()
+                    .validate_prepared_with_probe(&request, || {
+                        panic!("invalid policy must be rejected before probing bwrap")
+                    })
+                    .expect_err("parent component");
+                assert!(error.error_message.contains(field), "{error:?}");
+                assert!(error.error_message.contains("'..'"), "{error:?}");
+                assert_eq!(
+                    error.failure_phase,
+                    crate::mxc_common::models::FailurePhase::Rejected
+                );
+            }
+        }
     }
 
     #[test]
