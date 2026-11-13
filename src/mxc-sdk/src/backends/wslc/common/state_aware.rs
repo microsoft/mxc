@@ -475,24 +475,24 @@ fn exec_piped(
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     config.stdin = forward_stdin;
 
-    std::thread::Builder::new()
+    // Admit before returning a handle so a daemon rejection reaches the caller
+    // with its error code, as on the relayed path.
+    let exec = client.admit_exec(config).map_err(map_daemon_error)?;
+
+    let spawned = std::thread::Builder::new()
         .name("wslc-state-aware-exec".to_string())
         .spawn(move || {
             let forwarding = StdinForwarding::default();
-            let result = client
-                .admit_exec(config)
-                .and_then(|exec| {
-                    if relay_cancellation.load(Ordering::Acquire) {
-                        client.cancel_exec(relay_exec_id, relay_run_token)?;
-                    } else if let Some(input) = stdin_read {
-                        start_stdin_pump(
-                            &client,
-                            relay_exec_id,
-                            relay_run_token,
-                            input,
-                            &forwarding,
-                        );
-                    }
+            let started = if relay_cancellation.load(Ordering::Acquire) {
+                client.cancel_exec(relay_exec_id, relay_run_token)
+            } else {
+                if let Some(input) = stdin_read {
+                    start_stdin_pump(&client, relay_exec_id, relay_run_token, input, &forwarding);
+                }
+                Ok(())
+            };
+            let result = started
+                .and_then(|()| {
                     exec.read_to_completion(|stream, bytes| match stream {
                         OutStream::Stdout => stdout_writer.write(bytes),
                         OutStream::Stderr => stderr_writer.write(bytes),
@@ -534,10 +534,13 @@ fn exec_piped(
             // during ExecHandle teardown lets the blocked write unwind.
             drop(stdout_pump);
             drop(stderr_pump);
-        })
-        .map_err(|error| {
-            MxcError::backend_error(format!("start WSLC exec stream thread: {error}"))
-        })?;
+        });
+    if let Err(error) = spawned {
+        let _ = terminator_client.cancel_exec(exec_id, run_token);
+        return Err(MxcError::backend_error(format!(
+            "start WSLC exec stream thread: {error}"
+        )));
+    }
 
     let stdin_closer: Option<Box<dyn FnOnce() + Send>> = forward_stdin.then(|| {
         Box::new(move || {
@@ -591,35 +594,25 @@ fn exec_piped(
     ))
 }
 
-/// The daemon's inputs for one exec, with the cooperative proxy applied.
+/// The daemon's inputs for one exec. The daemon applies the cooperative proxy,
+/// because it also holds the one set at provision.
 fn exec_config(
     sandbox_id: &str,
     request: &ExecutionRequest,
     exec_id: String,
     run_token: String,
 ) -> ExecConfig {
-    // `exec_proxy_url` yields the routable URL only when the proxy is enabled
-    // *and* in the required `url` form — `validate_exec` has already rejected
-    // the non-`url` form before we get here, so a `None` here means the proxy
-    // is disabled, not malformed.
-    let env = match exec_proxy_url(request) {
-        Some(proxy_url) => split_env(&crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
-            request.env_entries(),
-            proxy_url,
-        )),
-        None => split_env(request.env_entries()),
-    };
-
     ExecConfig {
         exec_id,
         run_token,
         sandbox_id: sandbox_id.to_string(),
         script_code: request.script_code.clone(),
         working_directory: request.working_directory.clone(),
-        env,
+        env: split_env(request.env_entries()),
         env_scope: EnvScope::of(request),
         timeout_ms: request.script_timeout,
         stdin: false,
+        network_proxy: exec_proxy_url(request).map(str::to_string),
     }
 }
 
@@ -879,6 +872,7 @@ fn build_provision_config(
         network,
         port_mappings,
         session_ref: session_id,
+        network_proxy: exec_proxy_url(request).map(str::to_string),
     })
 }
 
@@ -948,9 +942,9 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(all(test, windows))]
 mod stdin_relay_tests {
     use super::*;
-    use crate::wslc_common::daemon_client::test_daemon::TestDaemon;
+    use crate::wslc_common::daemon_client::test_daemon::{Connection, TestDaemon};
     use crate::wslc_common::daemon_protocol::{
-        DaemonApiFailure, DaemonRequest, DaemonResponse, StreamFrame,
+        DaemonApiFailure, DaemonRequest, DaemonResponse, ErrKind, StreamFrame,
     };
     use std::os::windows::io::BorrowedHandle;
     use std::time::Duration;
@@ -966,6 +960,7 @@ mod stdin_relay_tests {
             env_scope: EnvScope::Merge,
             timeout_ms: 0,
             stdin: false,
+            network_proxy: None,
         }
     }
 
@@ -1068,38 +1063,78 @@ mod stdin_relay_tests {
         assert_process_launch_failure(&running.join().unwrap());
     }
 
-    #[test]
-    fn a_piped_exec_preserves_structured_daemon_failure() {
-        let daemon = TestDaemon::start();
+    /// Start a piped exec, admitting it as the daemon would. Returns the handle
+    /// and the exec's daemon connection.
+    fn admitted_piped_exec(
+        daemon: TestDaemon,
+        forward_stdin: bool,
+    ) -> (ExecHandle, TestDaemon, Connection) {
+        let client = daemon.client.clone();
+        let admitting = std::thread::spawn(move || {
+            let mut exec = daemon.next();
+            exec.reply(&DaemonResponse::Ok);
+            (daemon, exec)
+        });
         let handle = exec_piped(
-            daemon.client.clone(),
+            client,
             config(),
             "exec-1".to_string(),
             "run-1".to_string(),
-            false,
+            forward_stdin,
         )
         .unwrap();
-        let mut exec = daemon.next();
-        exec.reply(&DaemonResponse::Ok);
+        let (daemon, exec) = admitting.join().unwrap();
+        (handle, daemon, exec)
+    }
+
+    #[test]
+    fn a_piped_exec_preserves_structured_daemon_failure() {
+        let (handle, _daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), false);
         exec.reply(&process_launch_failure());
 
         assert_process_launch_failure(&within("the waiter", handle.waiter).unwrap_err());
     }
 
     #[test]
-    fn a_piped_exec_without_stdin_gives_the_command_end_of_file() {
+    fn a_piped_exec_the_daemon_rejects_fails_before_a_handle_is_returned() {
         let daemon = TestDaemon::start();
-        let handle = exec_piped(
-            daemon.client.clone(),
+        let client = daemon.client.clone();
+        let rejecting = std::thread::spawn(move || {
+            let mut exec = daemon.next();
+            exec.reply(&DaemonResponse::Err {
+                kind: ErrKind::Rejected,
+                message: "proxy mismatch".to_string(),
+                api_failure: None,
+            });
+        });
+
+        let result = exec_piped(
+            client,
             config(),
             "exec-1".to_string(),
             "run-1".to_string(),
             false,
-        )
-        .unwrap();
-        let mut exec = daemon.next();
+        );
+        rejecting.join().unwrap();
+        let Err(error) = result else {
+            panic!("a rejected exec must not return a handle");
+        };
+
+        assert_eq!(
+            error.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            error.message.contains("proxy mismatch"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_piped_exec_without_stdin_gives_the_command_end_of_file() {
+        let (handle, _daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), false);
         assert!(matches!(&exec.request, DaemonRequest::Exec(config) if !config.stdin));
-        exec.reply(&DaemonResponse::Ok);
         exec.reply(&StreamFrame::Exit { code: 0 });
 
         assert!(handle.stdin.0.is_null());
@@ -1112,18 +1147,7 @@ mod stdin_relay_tests {
 
     #[test]
     fn killing_a_piped_exec_while_its_stdin_is_backed_up_ends_the_exec_and_the_write() {
-        let daemon = TestDaemon::start();
-        let handle = exec_piped(
-            daemon.client.clone(),
-            config(),
-            "exec-1".to_string(),
-            "run-1".to_string(),
-            true,
-        )
-        .unwrap();
-        let mut exec = daemon.next();
-        exec.reply(&DaemonResponse::Ok);
-
+        let (handle, daemon, mut exec) = admitted_piped_exec(TestDaemon::start(), true);
         // SAFETY: the handle stays open until the waiter runs, below.
         let stdin = unsafe { BorrowedHandle::borrow_raw(handle.stdin.0) }
             .try_clone_to_owned()
@@ -1701,6 +1725,25 @@ mod tests {
     }
 
     #[test]
+    fn provision_forwards_the_proxy_url_to_the_daemon() {
+        let mut request = bridged_request();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                "http://proxy.example:8080",
+                "proxy.example".to_string(),
+                8080,
+            )),
+        };
+
+        let cfg = build_provision_config(&request, None).unwrap();
+
+        assert_eq!(
+            cfg.network_proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+    }
+
+    #[test]
     fn isolated_networking_rejects_port_mappings_before_the_daemon_sees_them() {
         let phase = WslcProvisionConfig {
             port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
@@ -2010,12 +2053,9 @@ mod tests {
     }
 
     #[test]
-    fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
+    fn the_exec_config_leaves_the_cooperative_proxy_to_the_daemon() {
         let request = ExecutionRequest {
-            env: Some(vec![
-                "FOO=bar".to_string(),
-                "HTTP_PROXY=http://attacker.invalid:1".to_string(),
-            ]),
+            env: Some(vec!["HTTP_PROXY=http://attacker.invalid:1".to_string()]),
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
                     address: Some(ProxyAddress::from_url(
@@ -2036,23 +2076,17 @@ mod tests {
             "run-1".to_string(),
         );
 
-        // Replacement still applies, so the proxy variables must survive into
-        // the entries argv carries rather than being left to the SDK's setter.
-        assert_eq!(config.env_scope, EnvScope::Replace);
-        let value = |name: &str| {
-            config
-                .env
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.clone())
-        };
-        assert_eq!(value("FOO").as_deref(), Some("bar"));
         assert_eq!(
-            value("HTTP_PROXY").as_deref(),
+            config.network_proxy.as_deref(),
             Some("http://127.0.0.1:8888")
         );
-        assert_eq!(value("NO_PROXY").as_deref(), Some(""));
-        assert!(!config.env.iter().any(|(_, v)| v.contains("attacker")));
+        assert_eq!(
+            config.env,
+            vec![(
+                "HTTP_PROXY".to_string(),
+                "http://attacker.invalid:1".to_string()
+            )]
+        );
     }
 
     #[test]

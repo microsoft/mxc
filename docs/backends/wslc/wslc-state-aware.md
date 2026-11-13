@@ -731,8 +731,9 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **10** as of the addition of optional WSLc
-SDK failure detail to lifecycle error responses and exec error frames.
+old one first. `PROTOCOL_VERSION` is **11** as of the addition of
+`network_proxy` to `provision` and `exec`, which moved applying the cooperative
+proxy from the client to the daemon.
 
 ## Daemon idle-timeout env overrides
 
