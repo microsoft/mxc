@@ -126,6 +126,7 @@ pub(crate) fn create_and_run_network_mode(
     // rules are already enforced.
     if egress.default == NetworkAction::Deny
         && egress.allow.is_empty()
+        && ingress.default == NetworkAction::Deny
         && ingress.host_loopback == NetworkAction::Deny
     {
         if proxy {
@@ -165,11 +166,14 @@ pub(crate) fn create_and_run_network_mode(
     }
     let mut proxied = proxied_egress(&egress)?;
     if ingress.default == NetworkAction::Allow {
-        proxied.warnings.push(
+        let warning = if egress.default == NetworkAction::Deny && egress.allow.is_empty() {
+            "the workload has no network access: network.ingress.default 'allow' has no effect \
+             behind the built-in proxy, and everything else is denied"
+        } else {
             "network.ingress.default 'allow' has no effect: nothing can connect in to a \
              workload behind the built-in proxy"
-                .to_string(),
-        );
+        };
+        proxied.warnings.push(warning.to_string());
     }
     Ok(NetworkMode::Proxied(proxied))
 }
@@ -1145,12 +1149,16 @@ mod tests {
     #[test]
     fn create_and_run_uses_the_proxy_only_for_postures_the_sdk_cannot_express() {
         assert_eq!(mode("{}").unwrap(), NetworkMode::None);
-        assert_eq!(
-            mode(
-                r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]},"ingress":{"default":"allow"}}"#
-            )
-            .unwrap(),
-            NetworkMode::None
+        let ingress_only = proxied(
+            r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]},"ingress":{"default":"allow"}}"#,
+        );
+        assert!(
+            ingress_only
+                .warnings
+                .iter()
+                .any(|w| w.contains("no network access")),
+            "{:?}",
+            ingress_only.warnings
         );
         assert_eq!(
             mode(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#)

@@ -519,7 +519,7 @@ no separate `--setup-wslc` step is required.
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
 | Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. |
-| Isolated | All three defaults omitted or `deny`, without egress rules | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
+| Isolated | All three defaults omitted or `deny`, without egress allow rules | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
 | Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
 | Built-in proxy | Any other combination, container lifecycle operations | Rejected |
 
