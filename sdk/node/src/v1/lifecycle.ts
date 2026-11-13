@@ -273,7 +273,7 @@ export async function spawnInContainerWithPty<C extends LifecycleContainmentKind
 
 /**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
- * on script completion; the command reads end-of-file on stdin. Native
+ * on script completion; a WSLC command reads end-of-file on stdin. Native
  * dispatch failures reject with `MxcError`; workload failures are returned
  * through the process exit code and streams.
  */

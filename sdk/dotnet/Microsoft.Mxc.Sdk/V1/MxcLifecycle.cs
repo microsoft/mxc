@@ -344,7 +344,7 @@ public static class MxcLifecycle
     }
 
     /// <summary>
-    /// Run an execution request to completion and capture its output. The
+    /// Run an execution request to completion and capture its output; a WSLC
     /// command reads end-of-file on stdin.
     /// </summary>
     public static async Task<ExecutionResult> RunInContainerAsync(

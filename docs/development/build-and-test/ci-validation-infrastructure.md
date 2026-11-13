@@ -205,7 +205,8 @@ called by the native policy suite.
 
 `isolation-session` and `wslc` run every suite and report each one. For
 `wslc` that is the command-line suite from the build artifact plus the .NET and
-Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites skip unless
+Node create-and-run and lifecycle suites and the ignored Rust `streaming_wslc`
+tests from the SDK bundle. The .NET and Node suites skip unless
 `MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
@@ -238,8 +239,12 @@ against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
 IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
 validation, and cleanup cases. IsolationSession also covers existing-container
 PTYs; its Rust and Node cases check partial capture on timeout with
-descendant-held pipes. Bundle discovery and runtime result gates require the
-named scenarios to pass.
+descendant-held pipes. WSLC also requires its stdin cases in Rust, .NET, and
+Node: spawn gives the command a writable stdin pipe, and run gives it
+end-of-file, for new and existing containers. Bundle discovery and runtime
+result gates require the named scenarios to pass. A skipped Node suite lists no
+test names, so the bundle checks that the Node WSLC test files still define
+them.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'

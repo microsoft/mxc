@@ -175,6 +175,31 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
+    public async Task SpawnInContainer_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+        var ct = TestContext.Current.CancellationToken;
+
+        using var proc = MxcLifecycle.SpawnInContainer(
+            container.Id,
+            new ExecutionRequest("sh -c 'cat; echo SPAWN-SAW-EOF'") { TimeoutMs = 60_000 });
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        await stdin.WriteAsync(Encoding.UTF8.GetBytes("SPAWN-INPUT\n"), ct);
+        stdin.Dispose();
+        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
+        var reading = reader.ReadToEndAsync(ct);
+        var finished = await Task.WhenAny(reading, Task.Delay(TimeSpan.FromSeconds(60), ct));
+
+        Assert.Same(reading, finished);
+        var result = await proc.WaitAsync(ct);
+        Assert.False(result.TimedOut);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("SPAWN-INPUT\nSPAWN-SAW-EOF", (await reading).Trim());
+    }
+
+    [Fact]
     public async Task RunInContainer_GivesACommandThatReadsStdinEndOfFile()
     {
         RequireWslc();
@@ -212,19 +237,22 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public void SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook()
+    public async Task SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
         using var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
-            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
+            new ExecutionRequest("sh -c 'readlink /proc/self/fd/0; cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
+        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
+        var stdout = reader.ReadToEndAsync(TestContext.Current.CancellationToken);
         var result = proc.Wait();
 
         Assert.False(result.TimedOut, "waiting must give an untaken stdin end-of-file");
         Assert.Equal(0, result.ExitCode);
         Assert.Null(proc.StandardInput);
+        Assert.Matches(@"^pipe:\[\d+\]\nWAIT-SAW-EOF$", (await stdout).Trim());
     }
 
     [Fact]
@@ -232,15 +260,19 @@ public class MxcLifecycleWslcE2ETests
     {
         RequireWslc();
         using var container = new StartedContainer();
+        var ct = TestContext.Current.CancellationToken;
 
         using var proc = await MxcLifecycle.SpawnInContainerAsync(
             container.Id,
-            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 },
-            cancellationToken: TestContext.Current.CancellationToken);
-        var result = await proc.WaitAsync(TestContext.Current.CancellationToken);
+            new ExecutionRequest("sh -c 'readlink /proc/self/fd/0; cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 },
+            cancellationToken: ct);
+        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
+        var stdout = reader.ReadToEndAsync(ct);
+        var result = await proc.WaitAsync(ct);
 
         Assert.False(result.TimedOut, "waiting must give an untaken stdin end-of-file");
         Assert.Equal(0, result.ExitCode);
+        Assert.Matches(@"^pipe:\[\d+\]\nWAIT-SAW-EOF$", (await stdout).Trim());
     }
 
     [Fact]

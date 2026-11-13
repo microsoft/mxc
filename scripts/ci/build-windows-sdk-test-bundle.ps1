@@ -116,6 +116,7 @@ if (-not $nativeLibrary) {
     throw 'cargo reported no mxc_ffi.dll.'
 }
 $wslcDaemon = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'mxc-sdk', '--features', 'wslc', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
+$wslcTestArtifacts = Invoke-CargoBuild @('test', '-p', 'mxc-sdk', '--features', 'wslc', '--test', 'streaming_wslc', '--no-run')
 
 # The wslc build feature stages the WSLC SDK library beside mxc_ffi.
 $wslcSdk = Join-Path (Split-Path -Parent $nativeLibrary) 'wslcsdk.dll'
@@ -161,7 +162,12 @@ Invoke-Checked 'Building the native final-path fixture' {
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'isolation_session') -Destination (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'sdk_helpers') -Destination (Join-Path $inproc 'mxc-sdk-helpers-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'streaming_processcontainer') -Destination (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe')
+Copy-Item -LiteralPath (Get-CargoExecutable $wslcTestArtifacts 'streaming_wslc') -Destination (Join-Path $inproc 'mxc-sdk-wslc-streaming-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $probeArtifacts 'sta_probe') -Destination (Join-Path $inproc 'sta_probe.exe')
+
+# The Rust SDK starts the WSLC daemon from beside the running test binary, and
+# both load wslcsdk.dll from there.
+Copy-Item -LiteralPath $wslcDaemon, $wslcSdk -Destination $inproc
 
 $nodeExe = (Get-Command node -CommandType Application | Select-Object -First 1).Source
 Copy-Item -LiteralPath $nodeExe, (Join-Path (Split-Path -Parent $nodeExe) 'LICENSE') -Destination (New-Directory (Join-Path $OutputDirectory 'node'))
@@ -212,6 +218,9 @@ $required = @(
     'inproc\mxc-sdk-isolation-session-tests.exe',
     'inproc\mxc-sdk-helpers-tests.exe',
     'inproc\mxc-sdk-process-container-streaming-tests.exe',
+    'inproc\mxc-sdk-wslc-streaming-tests.exe',
+    'inproc\wxc-wslc-daemon.exe',
+    'inproc\wslcsdk.dll',
     'inproc\mxc-final-path-probe.exe',
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
@@ -273,6 +282,11 @@ foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_pr
         & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
     }
 }
+foreach ($test in 'streaming_wslc_spawn_forwards_stdin', 'streaming_wslc_run_reads_end_of_file', 'streaming_wslc_lifecycle_stdin') {
+    Assert-Discovery "WSLC $test" "(?m)^${test}: test\r?$" {
+        & (Join-Path $inproc 'mxc-sdk-wslc-streaming-tests.exe') --list --ignored --exact $test
+    }
+}
 Assert-Discovery '.NET tests' 'Microsoft\.Mxc\.Sdk\.Tests' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full
 }
@@ -297,6 +311,21 @@ Assert-Discovery '.NET WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.' {
 Assert-Discovery '.NET WSLC create-and-run tests' 'MxcContainerWslcE2ETests\.' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerWslcE2ETests'
 }
+foreach ($test in @(
+        'MxcLifecycleWslcE2ETests.SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput',
+        'MxcLifecycleWslcE2ETests.SpawnInContainer_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'MxcLifecycleWslcE2ETests.SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook',
+        'MxcLifecycleWslcE2ETests.SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook',
+        'MxcLifecycleWslcE2ETests.RunInContainer_GivesACommandThatReadsStdinEndOfFile',
+        'MxcContainerWslcE2ETests.Spawn_ForwardsEveryByteAndClosingStdinEndsInput',
+        'MxcContainerWslcE2ETests.Spawn_WaitClosesAnUntakenStdin',
+        'MxcContainerWslcE2ETests.Spawn_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'MxcContainerWslcE2ETests.Run_GivesACommandThatReadsStdinEndOfFile')) {
+    $class = $test.Split('.')[0]
+    Assert-Discovery ".NET $test" ([regex]::Escape($test)) {
+        & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class "*.$class"
+    }
+}
 Push-Location $integrationOut
 $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
 try {
@@ -314,6 +343,24 @@ try {
     }
     Assert-Discovery 'Node WSLC create-and-run suite' 'WSLC SDK E2E' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-e2e.test.js
+    }
+
+    # A skipped Node suite lists no test names, so check that the bundled files
+    # still define the stdin tests.
+    $wslcNodeStdinTests = [ordered]@{
+        'wslc-state-aware.test.js' = @('preserves lifecycle, streaming, stdin, timeout, and stale-id behavior')
+        'wslc-e2e.test.js'         = @(
+            'should forward every stdin byte to a spawned command',
+            'should give a spawned command end-of-file when wait ends an untaken stdin',
+            'should let output be read to the end before waiting once stdin is ended',
+            'should give a command run to completion end-of-file on stdin')
+    }
+    foreach ($file in $wslcNodeStdinTests.Keys) {
+        foreach ($name in $wslcNodeStdinTests[$file]) {
+            if (-not (Select-String -LiteralPath (Join-Path 'dist' $file) -SimpleMatch -Pattern $name -Quiet)) {
+                throw "The Node WSLC suite $file no longer defines '$name'."
+            }
+        }
     }
 }
 finally {

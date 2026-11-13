@@ -223,6 +223,27 @@ describe('WSLC state-aware lifecycle E2E', {
           echoed.dispose();
         }
 
+        const readsToEnd = await spawnInContainer(containerId, {
+          command: "sh -c 'cat; echo SPAWN_SAW_EOF'",
+          timeoutMs: 60_000,
+        });
+        try {
+          const stdin = readsToEnd.standardInput;
+          assert.ok(stdin !== null, 'spawnInContainer exposes stdin');
+          stdin.end('SPAWN_INPUT\n');
+          const stdout = await collect(readsToEnd.standardOutput);
+          const result = await readsToEnd.wait();
+          assert.equal(result.timedOut, false, 'ending stdin must let the command finish');
+          assert.equal(result.exitCode, 0);
+          assert.equal(
+            stdout.trim(),
+            'SPAWN_INPUT\nSPAWN_SAW_EOF',
+            'output must reach its end before any wait once stdin is ended',
+          );
+        } finally {
+          readsToEnd.dispose();
+        }
+
         const readsStdin = await runInContainer(containerId, {
           command: "sh -c 'readlink /proc/self/fd/0; cat; echo RUN_SAW_EOF'",
           timeoutMs: 60_000,

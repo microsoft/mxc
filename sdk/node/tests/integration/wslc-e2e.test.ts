@@ -247,13 +247,17 @@ srv.handle_request()
   });
 
   it('should give a spawned command end-of-file when wait ends an untaken stdin', { timeout: 120_000 }, async () => {
-    const child = await sdk.spawn(stdinRequest("sh -c 'cat; echo WAIT_SAW_EOF'"));
+    const child = await sdk.spawn(stdinRequest("sh -c 'readlink /proc/self/fd/0; cat; echo WAIT_SAW_EOF'"));
     try {
       const stdoutPromise = collectBytes(child.standardOutput);
       const [result, stdout] = await Promise.all([child.wait(), stdoutPromise]);
       assert.strictEqual(result.timedOut, false, 'waiting must end a stdin the caller never took');
       assert.strictEqual(result.exitCode, 0);
-      assert.strictEqual(stdout.toString('utf8').trim(), 'WAIT_SAW_EOF');
+      assert.match(
+        stdout.toString('utf8').trim(),
+        /^pipe:\[\d+\]\nWAIT_SAW_EOF$/,
+        'the command must read a stdin pipe that wait ended',
+      );
     } finally {
       child.dispose();
     }

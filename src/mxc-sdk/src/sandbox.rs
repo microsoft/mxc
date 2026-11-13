@@ -296,7 +296,7 @@ impl MxcProcess {
         self.inner.output_metadata()
     }
 
-    /// Take the child's stdin pipe; dropping it gives the child end-of-file.
+    /// Take the child's stdin pipe; on WSLC, dropping it gives the child end-of-file.
     /// Returns `None` after the first call.
     pub fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         if self.stdio_access == StdioAccess::Native {

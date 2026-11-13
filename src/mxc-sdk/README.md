@@ -46,8 +46,8 @@ println!("{}", String::from_utf8_lossy(&output.stdout));
 
 `spawn` returns an `MxcProcess` with separate standard streams, wait and
 termination methods. On piped backends, including WSLC, `take_stdin` returns
-a writable stdin; drop it to give the command end-of-file. `run` gives the
-command end-of-file, captures stdout and stderr, and returns an
+a writable stdin; on WSLC, dropping it gives the command end-of-file, and `run`
+gives the command end-of-file. `run` captures stdout and stderr and returns an
 `ExecutionResult` with its `WaitResult`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 Captured execution drains both streams concurrently. Output-read failures are
@@ -117,7 +117,7 @@ v1::container::deprovision_container(&id, Default::default())?;
 
 Use `v1::container::spawn_in_container` for live piped execution. On WSLC,
 `MxcProcess::take_stdin` returns a writable stdin; drop it to give the command
-end-of-file. `run_in_container` gives the command end-of-file.
+end-of-file. `run_in_container` gives a WSLC command end-of-file.
 `v1::container::spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and

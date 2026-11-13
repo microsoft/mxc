@@ -321,9 +321,30 @@ function Invoke-NamedSuites {
 
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
-    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
+    $rustTests = Join-Path $bundle 'inproc\mxc-sdk-wslc-streaming-tests.exe'
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js', 'inproc\mxc-sdk-wslc-streaming-tests.exe') {
         Assert-File -Path (Join-Path $bundle $file)
     }
+    $nodeLifecycleTests = @(
+        'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership',
+        'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior')
+    $nodeCreateAndRunTests = @(
+        'should forward every stdin byte to a spawned command',
+        'should give a spawned command end-of-file when wait ends an untaken stdin',
+        'should let output be read to the end before waiting once stdin is ended',
+        'should give a command run to completion end-of-file on stdin',
+        'should reject an unsupported targetOs before starting a container')
+    $dotnetMethods = @(
+        'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership',
+        'SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput',
+        'SpawnInContainer_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook',
+        'SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook',
+        'RunInContainer_GivesACommandThatReadsStdinEndOfFile',
+        'Spawn_ForwardsEveryByteAndClosingStdinEndsInput',
+        'Spawn_WaitClosesAnUntakenStdin',
+        'Spawn_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'Run_GivesACommandThatReadsStdinEndOfFile')
 
     # The SDK suites skip unless asked to run, and a skip is reported as a
     # failure below.
@@ -348,9 +369,17 @@ function Invoke-WslcSuites {
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
+        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests $nodeLifecycleTests }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests $nodeCreateAndRunTests }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods $dotnetMethods }
+        'Rust' = {
+            foreach ($case in 'streaming_wslc_spawn_forwards_stdin', 'streaming_wslc_run_reads_end_of_file', 'streaming_wslc_lifecycle_stdin') {
+                $run = Invoke-LoggedNative -FilePath $rustTests -LogName "wslc-rust-$case.log" `
+                    -ArgumentList @('--ignored', '--exact', $case, '--test-threads=1')
+                $failure = Get-LibtestFailure -Run $run -RequiredTests $case
+                if ($failure) { throw "${case}: $failure" }
+            }
+        }
     })
 }
 

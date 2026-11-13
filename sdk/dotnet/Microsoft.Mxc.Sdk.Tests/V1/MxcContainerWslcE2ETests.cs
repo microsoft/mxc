@@ -60,13 +60,14 @@ public class MxcContainerWslcE2ETests
     {
         RequireWslc();
 
-        using var proc = MxcContainer.Spawn(Request("sh -c 'cat; echo WAIT-SAW-EOF'"));
+        using var proc = MxcContainer.Spawn(
+            Request("sh -c 'readlink /proc/self/fd/0; cat; echo WAIT-SAW-EOF'"));
         var (result, stdout, _) =
             await proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
 
         Assert.False(result.TimedOut, "waiting must close a stdin the caller never took");
         Assert.Equal(0, result.ExitCode);
-        Assert.Equal("WAIT-SAW-EOF", Encoding.UTF8.GetString(stdout).Trim());
+        Assert.Matches(@"^pipe:\[\d+\]\nWAIT-SAW-EOF$", Encoding.UTF8.GetString(stdout).Trim());
     }
 
     [Fact]

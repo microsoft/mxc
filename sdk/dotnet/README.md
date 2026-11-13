@@ -68,7 +68,7 @@ Console.WriteLine($"exit={result.ExitCode}");
 and stderr streams, plus wait, termination, and disposal operations. On WSLC,
 `StandardInput` is writable; dispose it to give the command end-of-file.
 Waiting before taking it also gives the command end-of-file. `Run` / `RunAsync`
-give the command end-of-file. Shared filesystem, network, and UI restrictions
+give a WSLC command end-of-file. Shared filesystem, network, and UI restrictions
 are authored directly on `ContainerRequest`, alongside the selected backend
 configuration. The SDK selects the contract version; `ContainerRequest` does
 not accept a caller-selected schema version.
@@ -178,7 +178,7 @@ finally
 Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. On
 WSLC, `StandardInput` is writable; dispose it to give the command end-of-file.
 Waiting before taking it also gives the command end-of-file.
-`RunInContainer` / `RunInContainerAsync` give the command end-of-file. The
+`RunInContainer` / `RunInContainerAsync` give a WSLC command end-of-file. The
 asynchronous methods are convenience wrappers over native operations and support
 cancellation. Backend and phase-specific policy requirements are described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
