@@ -38,8 +38,8 @@ the individual local test scripts are documented in
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
-| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests in the existing Windows artifact and checks required test discovery. |
-| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, and compiles `nvx_e2e` with `microvm` on Windows x64 without running a VM. |
+| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests, checks required test discovery, and verifies Microsoft signatures and integrity of the staged runtime without starting a VM. |
+| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, compiles `nvx_e2e`, and runs host-only signature and integrity validation with `microvm` on Windows x64. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
@@ -72,7 +72,7 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
@@ -185,6 +185,16 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+The IsolationSession command-line suite also checks that piped and file stdin
+reach the workload when stdout is a console. A workload reads one line and
+returns a distinct exit code only if the line matches.
+
+The suite also runs `isolation_session_post_exit_output.json`. A child waits
+for the workload to exit, then writes numbered lines to stdout and stderr
+for about 30 seconds. The test requires every line, both final markers, and
+workload exit code 42. The streaming smoke test, by contrast, checks output
+while the workload is still running.
+
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
 SDK regressions block each policy probe in a subprocess, require a bounded
@@ -268,7 +278,10 @@ The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
 They check executor configurations, JSON requests that collect output, image
 selection, file access rules, and network address and port rules. They also
 check that traffic through a proxy works while direct connections are blocked,
-and that interrupting startup or execution removes the VM and its temporary files.
+and that interrupting startup or execution removes the VM and leaves the agent
+state directory usable. Another scenario checks that concurrent first requests
+for an unregistered image all succeed, and that later concurrent requests boot
+it while its registry is unreachable.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 
@@ -305,7 +318,7 @@ required cases fail the job even when the runner exits successfully.
 Every scheduled `isolation-session` job runs
 `run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
 the architecture-matched telemetry test executor. That artifact is built with
-an empty `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input, so the single registration
+an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
 has no UTC routing. Consent is granted only in a temporary test store (needed by
 the published contract; development Required collection ignores it) and policy is
 redirected to an isolated HKCU key; real user consent and HKLM policy are not

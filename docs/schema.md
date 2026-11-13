@@ -277,7 +277,16 @@ that can be executed independently.
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
+                                           // Not combinable with profileOverride.
+            "mode": "block",               // "block" (default) or "allow" (default-denied access is
+                                           // allowed and recorded; explicit denies still apply)
+            "outputPath": "~/denials.json",// Absolute or ~/ path; parent dir must exist. Omit for a
+                                           // temp file. Actual path is printed on stderr.
+            "retainEtl": false             // Keep the raw log as a .seatbelt.log and report its
+                                           // path as etlPath
+        }
     },
 
     "telemetry": {                         // Telemetry (Windows only)
@@ -412,6 +421,14 @@ On Windows, `deniedPaths` is enforced natively when PSEC advertises
 `PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
 rejected before execution.
 
+Windows BaseContainer can also receive access through Windows permissions granted
+to `ALL_APPLICATION_PACKAGES`. An applicable explicit `deniedPaths` rule takes
+precedence over access supplied by that group. See
+[ProcessContainer filesystem access](backends/process-container/filesystem.md)
+for implicit grants, their interaction with explicit policy, and an observed
+common baseline. Baseline fragments are documentation, not replacement policies;
+overlapping explicit grants and denies follow the rules below.
+
 #### Overlapping paths for Windows BaseContainer
 
 When paths overlap across `readwritePaths` and `deniedPaths`:
@@ -437,8 +454,9 @@ validation and mounting.
 
 Each policy-path probe has a **five-second deadline**, including time waiting
 for a worker. This also covers the parser's advisory existence probes on all
-backends, Bubblewrap and LXC mask-target resolution, and WSLC overlap
-canonicalization (including missing-tail ancestor lookup). A timeout or worker
+backends, Bubblewrap and LXC mask-target resolution, Bubblewrap grant
+resolution, and WSLC overlap canonicalization (including missing-tail ancestor
+lookup). A timeout or worker
 failure **rejects startup**, even without denied paths; it never treats the path
 as missing or skips a security check. The error names the path and the failure.
 Ordinary missing-path warnings and returned filesystem-error handling remain

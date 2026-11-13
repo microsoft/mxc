@@ -212,7 +212,22 @@
             "else": {
               "else": {
                 "else": {
-                  "else": false,
+                  "else": {
+                    "else": false,
+                    "if": {
+                      "properties": {
+                        "containment": {
+                          "const": "w365_agents"
+                        }
+                      },
+                      "required": [
+                        "containment"
+                      ]
+                    },
+                    "then": {
+                      "$ref": "#/definitions/W365AgentsProvisionRequest"
+                    }
+                  },
                   "if": {
                     "properties": {
                       "containment": {
@@ -1433,6 +1448,10 @@
       "additionalProperties": false,
       "description": "macOS Seatbelt backend settings.",
       "properties": {
+        "captureDenials": {
+          "$ref": "#/definitions/SeatbeltCaptureDenials",
+          "description": "Records sandbox denials to a JSON report."
+        },
         "extraMachLookups": {
           "description": "Additional Mach service global names the process may resolve.",
           "items": {
@@ -1455,6 +1474,25 @@
         "profileOverride": {
           "description": "Optional override of the generated sandbox profile.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SeatbeltCaptureDenials": {
+      "additionalProperties": false,
+      "description": "macOS Seatbelt denial-capture settings.",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/CaptureDenialsMode",
+          "description": "How each ungranted access is handled while it is recorded."
+        },
+        "outputPath": {
+          "description": "Optional absolute file path for the denial report; may start with `~/`.",
+          "type": "string"
+        },
+        "retainEtl": {
+          "description": "Whether to keep the run's raw `log stream` lines as `.seatbelt.log` next to the report. The trace can contain sensitive paths; callers are responsible for deleting it.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1527,6 +1565,17 @@
       "required": [
         "image"
       ],
+      "type": "object"
+    },
+    "StateAwareW365AgentsProvision": {
+      "additionalProperties": false,
+      "description": "A closed W365 settings object containing only checkout settings.",
+      "properties": {
+        "provision": {
+          "$ref": "#/definitions/W365AgentsProvision",
+          "description": "Optional provision settings; an empty wrapper remains distinct from omission."
+        }
+      },
       "type": "object"
     },
     "StateAwareWslc": {
@@ -1681,6 +1730,104 @@
           "description": "V1_1_0Alpha",
           "enum": [
             "1.1.0-alpha"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "W365AgentsContainment": {
+      "enum": [
+        "w365_agents"
+      ],
+      "type": "string"
+    },
+    "W365AgentsGuid": {
+      "maxLength": 36,
+      "minLength": 36,
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+      "type": "string"
+    },
+    "W365AgentsProvision": {
+      "additionalProperties": false,
+      "description": "W365 checkout settings. Defaults and resolved service validation belong to the backend.",
+      "properties": {
+        "poolId": {
+          "$ref": "#/definitions/W365AgentsGuid",
+          "description": "Required pool identifier; no automatic pool selection."
+        },
+        "userObjectId": {
+          "$ref": "#/definitions/W365AgentsGuid",
+          "description": "Optional user object identifier."
+        },
+        "userType": {
+          "$ref": "#/definitions/W365AgentsUserType",
+          "description": "Optional user type."
+        }
+      },
+      "required": [
+        "poolId"
+      ],
+      "type": "object"
+    },
+    "W365AgentsProvisionRequest": {
+      "additionalProperties": false,
+      "description": "The complete development W365 provision request, excluding unenforceable local policy.",
+      "properties": {
+        "$schema": {
+          "description": "Optional editor schema reference.",
+          "type": "string"
+        },
+        "_comment": {
+          "description": "Optional annotation."
+        },
+        "containment": {
+          "$ref": "#/definitions/W365AgentsContainment",
+          "description": "W365 containment marker."
+        },
+        "phase": {
+          "$ref": "#/definitions/ProvisionPhase",
+          "description": "Provision phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry settings."
+        },
+        "version": {
+          "$ref": "#/definitions/Version",
+          "description": "Development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsProvision",
+          "description": "Optional provision settings; missing configuration is not defaulted by parsing."
+        }
+      },
+      "required": [
+        "containment",
+        "phase",
+        "version"
+      ],
+      "type": "object"
+    },
+    "W365AgentsUserType": {
+      "oneOf": [
+        {
+          "description": "Local",
+          "enum": [
+            "Local"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "HumanUser",
+          "enum": [
+            "HumanUser"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Agentic",
+          "enum": [
+            "Agentic"
           ],
           "type": "string"
         }

@@ -9,17 +9,29 @@ const CHILD_ENV: &str = "MXC_MODULE_LIFETIME_TEST_CHILD";
 
 #[test]
 fn detached_worker_survives_library_unload() {
+    run_isolated_unload_test(
+        "detached_worker_survives_library_unload",
+        b"timed_out_worker",
+    );
+}
+
+#[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
+#[test]
+fn nvx_error_keeps_pending_worker_code_loaded() {
+    run_isolated_unload_test(
+        "nvx_error_keeps_pending_worker_code_loaded",
+        b"nvx_error_with_pending_worker",
+    );
+}
+
+fn run_isolated_unload_test(name: &str, export: &[u8]) {
     if std::env::var_os(CHILD_ENV).is_some() {
-        exercise_library_unload();
+        exercise_library_unload(export);
         return;
     }
 
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "detached_worker_survives_library_unload",
-            "--nocapture",
-        ])
+        .args(["--exact", name, "--nocapture"])
         .env(CHILD_ENV, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -47,7 +59,7 @@ fn detached_worker_survives_library_unload() {
     );
 }
 
-fn exercise_library_unload() {
+fn exercise_library_unload(export: &[u8]) {
     let executable = std::env::current_exe().unwrap();
     let library_path = executable
         .parent()
@@ -72,13 +84,32 @@ fn exercise_library_unload() {
     // SAFETY: the fixture exports this signature and state remains alive for process lifetime.
     unsafe {
         let start: libloading::Symbol<unsafe extern "C" fn(*const AtomicU8) -> bool> =
-            library.get(b"timed_out_worker").unwrap();
+            library.get(export).unwrap();
         assert!(
             start(state),
-            "the worker must time out before it is released"
+            "the production call must return while its worker is pending"
         );
     }
     drop(library);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let path: Vec<u16> = library_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // Check before resuming the worker so a missing pin fails without relying on a crash.
+        assert!(
+            unsafe {
+                windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::PCWSTR(
+                    path.as_ptr(),
+                ))
+            }
+            .is_ok(),
+            "the production call did not retain the module for its pending worker"
+        );
+    }
     state.store(1, Ordering::Release);
     let deadline = Instant::now() + Duration::from_secs(5);
     while state.load(Ordering::Acquire) != 2 {

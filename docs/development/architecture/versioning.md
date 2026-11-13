@@ -106,7 +106,7 @@ request/result/option types and entry points. These typed APIs
 evolve additively as published 1.x contracts grow; the SDK owns the exact
 contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
-replacing V1.
+replacing V1. See [Required V2 changes](#required-v2-changes).
 
 V1.Dev is a separate API family within the supported V1 entrypoint:
 `mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev`, and
@@ -308,8 +308,8 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
-accepted by v1.0.
+provision, Seatbelt `captureDenials`, and the `vm`, `microvm`, and `hyperlight`
+one-shot surfaces, are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -343,6 +343,18 @@ require a new versioned API surface.
 
 For PowerShell startup failures, see
 [troubleshooting](../../troubleshooting.md#powershell-startup).
+
+### Fail-closed servicing exception: WSLc `targetOs`
+
+The published `0.9.0-alpha` and `1.0.0` create-and-run contracts, and the
+Node V1 `WslcConfig.targetOs` property, accept any string for
+`wslc.targetOs`. WSLc runs only Linux containers and cannot select another
+operating system, so the WSLc backend rejects every value other than `"linux"`
+with `policy_validation` before it creates a session or container. Omit the
+field or set it to `"linux"`.
+
+This fail-closed exception applies within V1 and does not require a new
+versioned API surface.
 
 ### Shipped vs Experimental
 
@@ -864,3 +876,13 @@ standard exact-contract diagnostic.
 7. **Experimental features modifying stable behavior:** Experimental features
    may need to modify stable behavior. How do we reason about
    and test this?
+
+## Required V2 changes
+
+These changes would break V1 callers, so they wait for V2:
+
+- Rename `captureDenials.retainEtl` and the result's `etlPath` to
+  `retainTrace` and `tracePath`. On macOS the file is a Seatbelt log, not an
+  ETL.
+- Move `captureDenials` to a top-level request field that each backend
+  accepts or rejects, instead of a backend-specific field.

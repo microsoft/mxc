@@ -10,16 +10,16 @@ mod build_mxc_build_common;
 mod build_mxc_common;
 #[path = "build/build_mxc_telemetry.rs"]
 mod build_mxc_telemetry;
-#[path = "build/build_nvx_bundled.rs"]
-mod build_nvx_bundled;
 #[cfg(feature = "link-wslcsdk")]
 #[path = "build/build_wslc_common.rs"]
 mod build_wslc_common;
+#[path = "build/verify_nvx_runtime_signatures.rs"]
+mod verify_nvx_runtime_signatures;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_isolation_session_bindings::run();
     build_mxc_telemetry::run();
-    build_nvx_bundled::run();
+    verify_nvx_runtime_signatures::run()?;
     #[cfg(feature = "link-wslcsdk")]
     build_wslc_common::run();
     build_mxc_common::run()?;

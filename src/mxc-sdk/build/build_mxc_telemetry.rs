@@ -28,11 +28,46 @@
 //! unit-tested from `lib.rs` (Cargo never runs build-script test modules).
 
 include!("../src/core/mxc_telemetry/provider_codegen.rs");
+include!("build_mxc_telemetry_component.rs");
+
+// Picks the telemetry component. `MXC_TELEMETRY_COMPONENT_PATH` names a DLL;
+// set it empty to force an unrouted build. When it is unset, release builds on
+// Windows use the signed DLL bundled in `resources/telemetry-component/` for
+// the build host's architecture. Debug builds stay unrouted so tests and local
+// development never emit under the routing group.
+fn component_path(telemetry_target: bool) -> Option<std::path::PathBuf> {
+    if !telemetry_target {
+        return None;
+    }
+    if let Some(path) = std::env::var_os("MXC_TELEMETRY_COMPONENT_PATH") {
+        return (!path.is_empty()).then(|| std::path::PathBuf::from(path));
+    }
+    // The bundled DLL can only be loaded by a Windows build host.
+    if !cfg!(windows) || std::env::var("PROFILE").as_deref() != Ok("release") {
+        return None;
+    }
+    let host = std::env::var("HOST").unwrap_or_default();
+    let arch = if host.starts_with("x86_64") {
+        "x64"
+    } else if host.starts_with("aarch64") {
+        "arm64"
+    } else {
+        return None;
+    };
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
+    let bundled = std::path::Path::new(&manifest)
+        .join("resources")
+        .join("telemetry-component")
+        .join(arch)
+        .join("mxc_telemetry.dll");
+    bundled.is_file().then_some(bundled)
+}
 
 pub(crate) fn run() {
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_PROVIDER_GROUP_GUID");
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID");
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_TEST_KEYWORDS");
+    println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_COMPONENT_PATH");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -41,13 +76,30 @@ pub(crate) fn run() {
     // for Windows builds so a stray or malformed environment value cannot break
     // cross-platform builds — e.g. a CI host that exports the variable globally
     // while cross-compiling the Linux/macOS binaries.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let group_guid = if target_os == "windows" {
-        std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID").ok()
+    // Single place to extend when another target gains a telemetry provider.
+    let telemetry_target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
+    let component_path = component_path(telemetry_target);
+    let component = match component_path {
+        Some(path) => {
+            println!("cargo::rerun-if-changed={}", path.to_string_lossy());
+            Some(read_component_metadata(&path))
+        }
+        None => None,
+    };
+    let group_guid = if telemetry_target {
+        std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID")
+            .ok()
+            .filter(|group| !group.is_empty())
     } else {
         None
     };
-    if target_os == "windows" {
+    assert!(
+        group_guid.is_none(),
+        "MXC_TELEMETRY_PROVIDER_GROUP_GUID is no longer supported; routing metadata \
+         comes only from the signed component (MXC_TELEMETRY_COMPONENT_PATH)"
+    );
+    let group_guid = component.as_ref().map(|c| c.group.clone());
+    if telemetry_target {
         assert!(
             std::env::var_os("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID")
                 .is_none_or(|value| value.is_empty()),
@@ -58,16 +110,17 @@ pub(crate) fn run() {
 
     let test_keywords = local_keyword_test_enabled(
         std::env::var("MXC_TELEMETRY_TEST_KEYWORDS").ok().as_deref(),
-        target_os == "windows"
+        telemetry_target
             && std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
-            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some(),
+            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some()
+            && component.is_none(),
         group_guid.as_deref(),
     );
-    let mut provider_def = generate_provider_def(group_guid.as_deref());
-    provider_def.push_str(&generate_event_metadata_consts(
-        group_guid.as_deref(),
-        test_keywords,
-    ));
+    let provider_def = generate_provider_def(group_guid.as_deref());
+    let metadata = event_metadata(group_guid.as_deref(), test_keywords, component.as_ref());
+    for directive in metadata_rustc_env(&metadata) {
+        println!("{directive}");
+    }
 
     std::fs::write(out.join("provider_def.rs"), provider_def).unwrap();
 }

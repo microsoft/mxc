@@ -34,6 +34,7 @@ unsafe extern "C" fn timed_out_worker(state: *const AtomicU8) -> bool {
         while state.load(Ordering::Acquire) == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
+
         state.store(2, Ordering::Release);
     });
     match result {
@@ -43,4 +44,44 @@ unsafe extern "C" fn timed_out_worker(state: *const AtomicU8) -> bool {
             false
         }
     }
+}
+
+#[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
+#[no_mangle]
+unsafe extern "C" fn nvx_error_with_pending_worker(state: *const AtomicU8) -> bool {
+    use mxc_sdk::v1::{dev, ErrorCode};
+
+    // Native validation rejects this proxy before provisioning; no filesystem probe pins MXC.
+    let result = dev::run_json(
+        r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"runtimeConfig":{"networkProxy":"http://[::1]:3128"},"process":{"commandLine":"printf forbidden"}}"#,
+        dev::JsonOptions { experimental: true },
+    );
+    match result {
+        Err(error)
+            if error.code == ErrorCode::PolicyValidation
+                && error.message
+                    == "NVX signed bundled agent: policy_validation: OpenVMM reaches host \
+                        loopback over IPv4 only; name 127.0.0.1 or localhost" => {}
+        result => {
+            eprintln!("expected native proxy validation failure, got {result:?}");
+            return false;
+        }
+    }
+
+    // Model a crate-owned pump surviving an error return without inducing native teardown failure.
+    let started = Arc::new(AtomicBool::new(false));
+    let worker_started = Arc::clone(&started);
+    // SAFETY: the isolated test host retains state until process exit.
+    let state = unsafe { &*state };
+    std::thread::spawn(move || {
+        worker_started.store(true, Ordering::Release);
+        while state.load(Ordering::Acquire) == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        state.store(2, Ordering::Release);
+    });
+    while !started.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
 }

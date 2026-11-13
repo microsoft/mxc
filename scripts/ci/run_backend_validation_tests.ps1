@@ -349,7 +349,7 @@ function Invoke-WslcSuites {
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
         'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
         'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
     })
 }
@@ -460,6 +460,7 @@ function Invoke-MicroVmTests {
         'SDK JSON capture' = 'VM_EXECUTED SDK JSON binary capture timeout limit and cleanup'
         'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem '
         'executor' = 'VM_EXECUTED executor sequential '
+        'executor image reuse' = 'VM_EXECUTED executor registered-image reuse offline and concurrent'
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
         'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'

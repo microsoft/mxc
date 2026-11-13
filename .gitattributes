@@ -2,3 +2,5 @@
 * text=auto eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true
+
+*.dll binary
