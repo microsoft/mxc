@@ -1021,12 +1021,159 @@ fn execution_fresh_executor_fixture() {
     let envelope: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(envelope["error"]["code"], "backend_error");
     assert!(!envelope["error"]["message"].as_str().unwrap().is_empty());
-    assert_eq!(fixture.fixture.count(), 12);
-    for n in 0..12 {
+    for example_mode in [false, true] {
+        unread_host_output(&fixture, || command(example_mode));
+    }
+    assert_eq!(fixture.fixture.count(), 24);
+    for n in 0..24 {
         assert!(fixture.fixture.request(n).contains(concat!(
             "\r\nUser-Agent: mxc/",
             env!("CARGO_PKG_VERSION"),
             " (w365_agents)\r\n"
         )));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "requires a separately built test-support execution example"]
+fn execution_host_output_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = ExecFixture::new(&env);
+    let example = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("w365_execution");
+    assert!(example.is_file(), "build the W365 execution example");
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(exec_request().to_string().as_bytes())
+        .unwrap();
+    unread_host_output(&fixture, || {
+        let mut command = std::process::Command::new(&example);
+        command.args(["--experimental", "live"]).arg(file.path());
+        command
+    });
+    let (release, released) = mpsc::channel();
+    fixture.script(move |stream| {
+        started(stream);
+        assert!(eof(stream).is_empty());
+        for _ in 0..4 {
+            send(stream, 0x12, &[0x42; 65536]);
+            send(stream, 0x13, &[0x43; 65536]);
+        }
+        exit(stream, 0);
+        released.recv_timeout(Duration::from_secs(20)).unwrap();
+    });
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(&example);
+        command
+            .args(["--experimental", "live"])
+            .arg(file.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(writer.try_clone().unwrap())
+            .stderr(writer);
+        command.spawn().unwrap()
+    };
+    let began = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if began.elapsed() > Duration::from_secs(15) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            release.send(()).unwrap();
+            panic!("shared unread stdout/stderr must not block execution completion");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!child.wait().unwrap().success());
+    release.send(()).unwrap();
+    let mut prefix = Vec::new();
+    // Both streams shared the write description; its original flags must be restored.
+    reader.read_to_end(&mut prefix).unwrap();
+    assert!(!prefix.is_empty());
+    assert!(prefix.len() < 8 * 65536);
+    assert_eq!(fixture.fixture.count(), 7);
+}
+
+fn unread_host_output(fixture: &ExecFixture, command: impl Fn() -> std::process::Command) {
+    for blocked_stderr in [false, true] {
+        for terminal in [Some(false), Some(true), None] {
+            let (release, released) = mpsc::channel();
+            fixture.script(move |stream| {
+                started(stream);
+                assert!(eof(stream).is_empty());
+                for _ in 0..4 {
+                    send(
+                        stream,
+                        if blocked_stderr { 0x13 } else { 0x12 },
+                        &[0x42; 65536],
+                    );
+                }
+                if terminal == Some(true) {
+                    send(
+                        stream,
+                        0x15,
+                        br#"{"code":"failed","message":"service failure"}"#,
+                    );
+                } else if terminal == Some(false) {
+                    exit(stream, 0);
+                }
+                released.recv_timeout(Duration::from_secs(45)).unwrap();
+            });
+            let diagnostic = tempfile::NamedTempFile::new().unwrap();
+            let mut command = command();
+            command.stdin(std::process::Stdio::null());
+            if blocked_stderr {
+                command
+                    .stdout(diagnostic.reopen().unwrap())
+                    .stderr(std::process::Stdio::piped());
+            } else {
+                command
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(diagnostic.reopen().unwrap());
+            }
+            let mut child = command.spawn().unwrap();
+            let began = Instant::now();
+            // Retain the output pipe without reading it: closing it would
+            // exercise BrokenPipe instead of cancellation of a blocked write.
+            while child.try_wait().unwrap().is_none() {
+                let budget = if terminal.is_none() { 45 } else { 15 };
+                if began.elapsed() > Duration::from_secs(budget) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    release.send(()).unwrap();
+                    panic!("open unread host output must not prevent execution completion");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            release.send(()).unwrap();
+            assert!(
+                !output.status.success(),
+                "undelivered output must not become success"
+            );
+            let prefix = if blocked_stderr {
+                output.stderr
+            } else {
+                output.stdout
+            };
+            assert!(!prefix.is_empty());
+            assert!(prefix.len() < 4 * 65536);
+            if !blocked_stderr {
+                let text = std::fs::read_to_string(diagnostic.path()).unwrap();
+                assert!(text.contains("host_output_undelivered"), "{text}");
+                if terminal == Some(true) {
+                    assert!(text.contains("service failure"), "{text}");
+                }
+                if terminal.is_none() {
+                    assert!(text.contains("exec_client_timeout"), "{text}");
+                }
+            }
+        }
     }
 }

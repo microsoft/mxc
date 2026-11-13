@@ -192,12 +192,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo build --locked -p mxc-sdk --example w365_execution --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture
           names="$(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --list)"
           for case in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture \
             readiness_contract_fixture execution::native_execution_streams_fixture \
             execution::native_execution_backpressure_fixture \
             execution::native_execution_failure_and_disposal_fixture \
-            execution::execution_upgrade_validation_fixture; do
+            execution::execution_upgrade_validation_fixture execution::execution_host_output_fixture; do
             grep -Fxq "$case: test" <<< "$names"
           done
           cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --include-ignored

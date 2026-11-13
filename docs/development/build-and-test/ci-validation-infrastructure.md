@@ -45,7 +45,10 @@ Its engine fixtures
 run in GitHub Actions and Azure build jobs on Windows, Linux and macOS.
 Windows additionally runs checkout/release and exec through fresh executor
 processes, plus the execution example's early-exit, input-error and capture cases.
-Linux and macOS retain SDK/native-engine coverage; their shipping
+All three platforms run the example with open, unread host-output pipes to
+check bounded final draining and unsuccessful completion for undelivered output.
+Linux and macOS retain SDK/native-engine coverage and build the isolated execution
+example for that fixture; their shipping
 executors do not expose W365 lifecycle commands.
 The .NET SDK test suite and Node SDK integration jobs exercise the public
 Dev JSON lifecycle, readiness, captured and streaming APIs, including stdin EOF,

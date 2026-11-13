@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 mod frame;
+mod output;
 mod payload;
 mod piped;
 mod stream_buffer;
@@ -102,20 +103,6 @@ fn input_pipe_closed(error: &io::Error) -> bool {
     }
 }
 
-fn relay_output(mut source: impl Read, mut output: impl Write) -> io::Result<()> {
-    let mut bytes = [0; 8192];
-    loop {
-        let count = match source.read(&mut bytes) {
-            Ok(0) => return Ok(()),
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        output.write_all(&bytes[..count])?;
-        output.flush()?;
-    }
-}
-
 fn relay(mut handle: ExecHandle) -> Result<ExecHandle, MxcError> {
     // Keep backend details for the executor without changing the shared process error contract.
     let wait_error = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -152,31 +139,53 @@ fn relay(mut handle: ExecHandle) -> Result<ExecHandle, MxcError> {
     let stderr = process
         .take_stderr()
         .ok_or_else(|| MxcError::backend_error("W365 relay has no stderr"))?;
-    let out = std::thread::Builder::new()
-        .name("w365-console-output".into())
-        .spawn(move || relay_output(stdout, std::io::stdout().lock()))
-        .map_err(|_| MxcError::backend_error("cannot start W365 stdout relay"))?;
-    let err = std::thread::Builder::new()
-        .name("w365-console-error".into())
-        .spawn(move || relay_output(stderr, std::io::stderr().lock()))
-        .map_err(|_| MxcError::backend_error("cannot start W365 stderr relay"))?;
+    let close_stdout = process.stdout_closer();
+    let close_stderr = process.stderr_closer();
+    let outputs = output::OutputRelays::start(
+        stdout,
+        stderr,
+        move || {
+            if let Some(closer) = &close_stdout {
+                closer.close();
+            }
+        },
+        move || {
+            if let Some(closer) = &close_stderr {
+                closer.close();
+            }
+        },
+    )
+    .map_err(|error| MxcError::backend_error(format!("cannot start W365 output relay: {error}")))?;
     let outcome = process.wait();
-    let output = out
-        .join()
-        .map_err(|_| MxcError::backend_error("W365 stdout relay panicked"))?;
-    let errors = err
-        .join()
-        .map_err(|_| MxcError::backend_error("W365 stderr relay panicked"))?;
+    let output = outputs.finish();
     let code = outcome.map_err(|error| {
-        wait_error
+        let mut error = wait_error
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .unwrap_or_else(|| MxcError::backend_error(format!("W365 relay wait failed: {error}")))
+            .unwrap_or_else(|| MxcError::backend_error(format!("W365 relay wait failed: {error}")));
+        if output.undelivered.iter().any(|value| *value) {
+            error
+                .message
+                .push_str("; host_output_undelivered: host output did not drain");
+            let details = error.details.get_or_insert_with(|| serde_json::json!({}));
+            details["hostStderrUndelivered"] = serde_json::json!(output.undelivered[1]);
+            details["hostStdoutUndelivered"] = serde_json::json!(output.undelivered[0]);
+        }
+        error
     })?;
-    output
-        .and(errors)
-        .map_err(|error| MxcError::backend_error(format!("W365 output relay failed: {error}")))?;
+    output.writes.map_err(|error| {
+        MxcError::backend_error(format!("W365 output relay failed: {error}")).with_details(
+            serde_json::json!({
+                "code": if output.undelivered.iter().any(|value| *value) {
+                    "host_output_undelivered"
+                } else { "output_io" },
+                "hostStdoutUndelivered":output.undelivered[0],
+                "hostStderrUndelivered":output.undelivered[1],
+                "exitCode":code
+            }),
+        )
+    })?;
     if let Some(error) = input_fault
         .lock()
         .unwrap_or_else(|error| error.into_inner())

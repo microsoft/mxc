@@ -101,12 +101,13 @@ jobs:
     - script: |
         set -euo pipefail
         fixture_target="$(Agent.TempDirectory)/w365-fixture"
+        cargo build --locked --release --target $(targetTriple) -p mxc-sdk --example w365_execution --features test-support --target-dir "$fixture_target"
         tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --list)"
         for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture \
           readiness_contract_fixture execution::native_execution_streams_fixture \
           execution::native_execution_backpressure_fixture \
           execution::native_execution_failure_and_disposal_fixture \
-          execution::execution_upgrade_validation_fixture; do
+          execution::execution_upgrade_validation_fixture execution::execution_host_output_fixture; do
           grep -Fxq "$name: test" <<< "$tests"
         done
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --include-ignored

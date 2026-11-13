@@ -148,6 +148,13 @@ socket writes are nonblocking, so cancellation and the client deadline remain
 effective while the guest is not reading stdin.
 The executor and live execution example flush each forwarded output chunk,
 including prompts without a newline; write or flush failures remain errors.
+After execution completes or fails, host stdout/stderr forwarding has a shared
+five-second final-drain budget. An open, unread host pipe is cancelled rather
+than blocking completion. Undelivered output returns `host_output_undelivered`
+as an error, preserving any earlier execution failure and the forwarded prefix.
+If host stderr itself cannot drain, the executor/example exits unsuccessfully
+without attempting another blocking diagnostic write; no envelope can be
+guaranteed on that unavailable stream.
 The frame consumer never blocks on output: overflow preserves the queued
 prefix, discards later bytes and returns `output_truncated`, even after Exit.
 Already queued output drains before EOF. Full capture uses memory proportional
@@ -439,9 +446,13 @@ forwarded; ordinary executor diagnostics remain on stderr. Repeated execs
 retain one ID without checkout/release.
 The same fixture runs the actual execution example for early zero/nonzero exits,
 host stdin read failures, binary capture and remote errors.
+It also keeps host stdout/stderr pipes open without reading them and checks
+bounded failure after both Exit and remote Error, preserving the forwarded prefix.
 Windows build jobs require discovery of all nine functional fixtures.
-Linux/macOS jobs require the seven SDK/native-engine fixtures, without the
-two Windows-only fresh-executor fixtures.
+Linux/macOS jobs require eight fixtures, including the execution example's
+unread host-output scenario and shared stdout/stderr pipe cleanup, without the
+two Windows-only fresh-executor fixtures. They build the test-support example
+in the same isolated target directory.
 The scheduled/nightly workflow invokes those same build jobs, so these are
 also scheduled native backend scenarios, not orphan test files.
 
