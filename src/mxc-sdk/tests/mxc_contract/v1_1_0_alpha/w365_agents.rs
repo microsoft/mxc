@@ -76,7 +76,7 @@ fn w365_agents_contract_acceptance_never_enables_execution() {
                 );
                 let telemetry = parsed.request().telemetry.as_ref().unwrap();
                 assert_eq!(telemetry.enabled, Some(false));
-                assert_eq!(telemetry.requested_sandbox_kind, Some("w365_agents"));
+                assert_eq!(parsed.request().requested_sandbox_kind, Some("w365_agents"));
                 if phase != "provision" { assert_eq!(parsed.sandbox_id(), Some(ID)); }
                 assert_eq!(
                     mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),
