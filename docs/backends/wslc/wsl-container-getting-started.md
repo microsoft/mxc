@@ -583,6 +583,9 @@ as follows:
   for `udp` or `icmp` have no effect, because only TCP leaves through the
   proxy, and log a warning.
 
+- Nothing can connect in to the workload, so `network.ingress.default:
+  "allow"` has no effect and logs a warning.
+
 - The proxy image ships as `mxc-wslc-gateway.tar` beside the MXC binaries and
   is imported into the image store on first use. If the tar is missing or
   holds a different image than the MXC build expects, the run fails before any

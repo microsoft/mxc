@@ -541,7 +541,7 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_deny_rules.json" -ForceD
 # Proxied only because hostLoopback differs from the defaults. Reserved ranges
 # stay denied even under an allow default, and the exit code passes through.
 $null = $results.Add((Run-WslcTest "wslc_network_egress_reserved.json" -ExpectedExit 7 -ForceDebug -OutputNotContains $NotClean `
-    -OutputContains 'DNS  "host.wslc.internal" refused (host loopback denied)', $Clean `
+    -OutputContains 'DNS  "host.wslc.internal" refused (host loopback denied)', "network.ingress.default 'allow' has no effect", $Clean `
     -Probes ([ordered]@{
         DEFAULT = "200"; LOOPBACK = "403"; LOCALHOST = "403"; PROXY_SELF = "403"; GATEWAY_NET = "403"
         LINK_LOCAL = "403"; MULTICAST = "403"; UNSPECIFIED = "403"; HOST_LOOPBACK = "403"

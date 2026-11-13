@@ -163,7 +163,15 @@ pub(crate) fn create_and_run_network_mode(
              built-in proxy. Remove the proxy, or use bridged networking",
         ));
     }
-    proxied_egress(&egress).map(NetworkMode::Proxied)
+    let mut proxied = proxied_egress(&egress)?;
+    if ingress.default == NetworkAction::Allow {
+        proxied.warnings.push(
+            "network.ingress.default 'allow' has no effect: nothing can connect in to a \
+             workload behind the built-in proxy"
+                .to_string(),
+        );
+    }
+    Ok(NetworkMode::Proxied(proxied))
 }
 
 /// Lower egress rules to the proxy's TCP-only rules.
@@ -1153,6 +1161,13 @@ mod tests {
         let open = proxied(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#);
         assert_eq!(open.egress.default, gateway::Action::Allow);
         assert!(open.egress.allow.is_empty() && open.egress.deny.is_empty());
+        assert!(
+            open.warnings
+                .iter()
+                .any(|w| w.contains("ingress.default 'allow' has no effect")),
+            "{:?}",
+            open.warnings
+        );
 
         let filtered = proxied(
             r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24","except":["192.0.2.8/29"]}],"ports":[{"protocol":"tcp","port":8000,"endPort":8010},{"protocol":"tcp","port":443}]}]}}"#,
