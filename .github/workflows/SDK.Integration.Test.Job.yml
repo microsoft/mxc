@@ -46,7 +46,7 @@ jobs:
       # coverage on GHA. ADO sets the same env var in
       # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
-      MXC_TEST_PROXY_DIR: ${{ github.workspace }}/test-proxy
+      MXC_TEST_BIN_DIR: ${{ github.workspace }}/test-tools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -62,24 +62,24 @@ jobs:
           name: npm-packages
           path: sdk-pkg
 
-      - name: Download Windows test proxy
+      - name: Download Windows test tools
         if: matrix.os_label == 'windows'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: node-test-proxy-x86_64-pc-windows-msvc
-          path: test-proxy
+          name: node-test-tools-x86_64-pc-windows-msvc
+          path: test-tools
 
-      - name: Download Linux test proxy
+      - name: Download Linux test tools
         if: matrix.os_label == 'linux'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: node-test-proxy-x86_64-unknown-linux-gnu
-          path: test-proxy
+          name: node-test-tools-x86_64-unknown-linux-gnu
+          path: test-tools
 
-      - name: Restore test proxy execute permission
+      - name: Restore test tool execute permissions
         if: matrix.os_label == 'linux'
         shell: bash
-        run: chmod +x "$MXC_TEST_PROXY_DIR/unix-test-proxy"
+        run: chmod +x "$MXC_TEST_BIN_DIR/unix-test-proxy" "$MXC_TEST_BIN_DIR/lxc-exec"
 
       - name: Install dependencies + SDK from artifact
         shell: bash
@@ -221,14 +221,6 @@ jobs:
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
-      - name: Restore execute permission on mxc-exec-mac
-        if: matrix.os_label == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
-
       # Linux needs root for Bubblewrap unprivileged-userns paths.
       # Pass test controls explicitly because Ubuntu 26.04's sudo ignores -E.
       #
@@ -247,7 +239,7 @@ jobs:
             sudo env "PATH=$PATH" \
               "MXC_SKIP_OS_BUILD_DEPENDENT_TESTS=$MXC_SKIP_OS_BUILD_DEPENDENT_TESTS" \
               "MXC_SKIP_LXC_NETWORK_TESTS=$MXC_SKIP_LXC_NETWORK_TESTS" \
-              "MXC_TEST_PROXY_DIR=$MXC_TEST_PROXY_DIR" \
+              "MXC_TEST_BIN_DIR=$MXC_TEST_BIN_DIR" \
               MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
           else
             npm test

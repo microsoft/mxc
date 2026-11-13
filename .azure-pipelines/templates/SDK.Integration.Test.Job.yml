@@ -50,7 +50,7 @@ jobs:
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/node/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
-      MXC_TEST_PROXY_DIR: $(Pipeline.Workspace)/test-proxy
+      MXC_TEST_BIN_DIR: $(Pipeline.Workspace)/test-tools
 
     steps:
       - checkout: self
@@ -68,19 +68,21 @@ jobs:
 
       - ${{ if ne(target.os, 'macos') }}:
         - task: DownloadPipelineArtifact@2
-          displayName: Download test proxy
+          displayName: Download native test tools
           inputs:
             ${{ if eq(target.os, 'windows') }}:
               artifact: wxc-binaries-x86_64-pc-windows-msvc
               patterns: wxc-test-proxy.exe
             ${{ if eq(target.os, 'linux') }}:
               artifact: lxc-binaries-x86_64-unknown-linux-gnu
-              patterns: unix-test-proxy
-            path: $(MXC_TEST_PROXY_DIR)
+              patterns: |
+                unix-test-proxy
+                lxc-exec
+            path: $(MXC_TEST_BIN_DIR)
 
       - ${{ if eq(target.os, 'linux') }}:
-        - script: chmod +x "$(MXC_TEST_PROXY_DIR)/unix-test-proxy"
-          displayName: Restore test proxy execute permission
+        - script: chmod +x "$(MXC_TEST_BIN_DIR)/unix-test-proxy" "$(MXC_TEST_BIN_DIR)/lxc-exec"
+          displayName: Restore test tool execute permissions
 
       - task: CopyFiles@2
         displayName: Copy .npmrc to integration tests
@@ -137,7 +139,7 @@ jobs:
             sudo apt-get install -y -qq lxc dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
-        - script: sudo MXC_TEST_PROXY_DIR="$(MXC_TEST_PROXY_DIR)" MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+        - script: sudo MXC_TEST_BIN_DIR="$(MXC_TEST_BIN_DIR)" MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
 
@@ -150,15 +152,6 @@ jobs:
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
 
       - ${{ if eq(target.os, 'macos') }}:
-        # Restore execute bit on the mac binary; pipeline artifact
-        # downloads (via npm pack/unpack) drop Unix execute permissions.
-        - script: |
-            set -euo pipefail
-            BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed package" && exit 1; fi
-          workingDirectory: $(integrationDirectory)
-          displayName: Restore execute permission on mxc-exec-mac
-
         - script: npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test

@@ -110,7 +110,7 @@ describe('native backend discovery', () => {
       (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
   });
 
-  it('reads the FFI discovery export in process and frees before unloading', () => {
+  it('uses FFI discovery for backend and network support without a CLI executor', () => {
     const events: string[] = [];
     const pointer = { address: 1 };
     _setProbeNativeDependencies(
@@ -128,16 +128,22 @@ describe('native backend discovery', () => {
       (value: unknown) => {
         assert.strictEqual(value, pointer);
         events.push('decode');
-        return '[{"backend":"lxc"}]';
+        return '[{"backend":"lxc"},{"backend":"bubblewrap","capabilities":["proxyEnforcement"]}]';
       },
     );
     const first = getAvailableBackends();
     first[0].warnings.push('caller mutation');
-    assert.deepStrictEqual(getAvailableBackends(), [{
-      backend: 'lxc', capabilities: [], warnings: [],
-    }]);
+    assert.deepStrictEqual(getAvailableBackends(), [
+      { backend: 'lxc', capabilities: [], warnings: [] },
+      { backend: 'bubblewrap', capabilities: ['proxyEnforcement'], warnings: [] },
+    ]);
+    assert.deepStrictEqual(_probeBubblewrapNetwork(), {
+      proxyEnforcement: 'supported',
+      warnings: [],
+    });
     assert.deepStrictEqual(events, [
       'discover', 'decode', 'free', 'unload', 'discover', 'decode', 'free', 'unload',
+      'discover', 'decode', 'free', 'unload',
     ]);
   });
 

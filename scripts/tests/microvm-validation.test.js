@@ -418,13 +418,9 @@ test("npm pack excludes test, diagnostic, and symbol payloads without removing s
     [
       "wxc-exec.exe",
       "mxc_ffi.dll",
-      "wxc-windows-sandbox-daemon.exe",
-      "wxc-windows-sandbox-guest.exe",
       "wxc-wslc-daemon.exe",
       "wslcsdk.dll",
-      "lxc-exec",
       "libmxc_ffi.so",
-      "mxc-exec-mac",
       "libmxc_ffi.dylib",
     ].map((name) => ({ arch, name }))
   );
@@ -446,6 +442,10 @@ test("npm pack excludes test, diagnostic, and symbol payloads without removing s
       "wxc-test-proxy.exe",
       "unix-test-proxy",
       "mxc-diagnostic-console.exe",
+      "lxc-exec",
+      "mxc-exec-mac",
+      "wxc-windows-sandbox-daemon.exe",
+      "wxc-windows-sandbox-guest.exe",
       "mxc_ffi.pdb",
       "lxc-exec.dwp",
       "symbols/mxc_ffi.dll",

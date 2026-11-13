@@ -48,16 +48,6 @@ jobs:
           name: mxc-binaries-aarch64-apple-darwin
           path: sdk/node/bin/arm64
 
-      # Artifact downloads strip Unix execute permissions. Restore +x.
-      # Path is `bin` (not `sdk/node/bin`) because of the job's working-directory default.
-      - name: Restore execute permissions
-        shell: bash
-        run: |
-          set -euo pipefail
-          for name in lxc-exec mxc-exec-mac; do
-            find bin -name "$name" -exec chmod +x {} +
-          done
-
       - run: npm ci
       - run: npm run build
       - run: npm pack

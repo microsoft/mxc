@@ -138,12 +138,10 @@ in the checkout. Test-only private type imports must resolve from the installed
 package, matching the runtime helpers. The isolated check prevents local
 checkout build output from hiding missing package imports.
 
-The npm package excludes test proxies and other validation tools. Integration
-jobs stage the matching native test proxy separately and set `MXC_TEST_PROXY_DIR`
-to its directory. For local proxy tests, set that variable to the directory
-containing `wxc-test-proxy.exe` on Windows or `unix-test-proxy` on Linux.
-Without it, the Node test helpers look in the SDK's platform binary directory,
-which supports locally staged native builds.
+The npm package excludes native test tools and Linux/macOS executors. Integration
+jobs stage test proxies and the Linux CLI separately in `MXC_TEST_BIN_DIR`.
+For local tests, set that variable to the directory containing those binaries;
+otherwise the helpers use the SDK's platform binary directory.
 
 ### Linux LXC dispatch coverage
 

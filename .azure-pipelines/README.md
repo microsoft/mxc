@@ -17,11 +17,6 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 ### Production Build and Release pipelines
 - The ADO pipeline is the official build pipeline that signs the binaries and
   drives public releases. It runs on merge to `main` and on a nightly schedule.
-- Native build, lint, and IsolationSession bundle jobs allow four hours.
-  ADO jobs fetch dependencies from the configured feeds without restoring or
-  uploading Rust or npm caches.
-- Windows builds read telemetry routing metadata from the bundled signed
-  component. Pipeline variables do not supply telemetry provider group GUIDs.
 - The shared build stages assemble the managed and native .NET SDK binaries
   into two `Microsoft.Mxc.Sdk` NuGet packages in both official and unofficial
   builds. Official builds sign the managed and native binaries before packaging,
@@ -38,10 +33,6 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 - `1ES.Release.Nuget.yml` lets the runner publish the signed .NET SDK package to
   the internal `Mxc-Azure-Feed` by default, or to NuGet.org through ESRP.
 - `1ES.Release.Npm.yml` publishes the signed npm SDK package through ESRP.
-  The npm package retains the native SDK libraries, executors, and required
-  sidecars, but excludes test tools, diagnostic tools, symbols, and the NVX
-  runtime bundle. Integration jobs download test proxies separately from the
-  native build artifacts.
 
 ### Rust crates.io release
 

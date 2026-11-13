@@ -155,8 +155,8 @@ function isWindowsSandboxAvailable(): boolean {
  * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
  * capability facts. On Linux, `unavailableReasons` contains per-backend
  * diagnostics for unavailable LXC or Bubblewrap backends, and — when
- * bubblewrap is available — `lxc-exec --available-backends` is invoked to
- * populate `bubblewrapNetwork`. macOS currently does not expose native probe
+ * bubblewrap is available — the native library is queried to populate
+ * `bubblewrapNetwork`. macOS currently does not expose native probe
  * data. `uiCapabilities` is omitted outside Windows.
  *
  * **Synchronous; successful discovery is cached for the module's lifetime.** The first call blocks
@@ -290,8 +290,8 @@ function populateIsolationFromProbe(support: PlatformSupport, runner: ProbeRunne
 }
 
 /**
- * Linux probe runner injection seam. Spawns `lxc-exec --available-backends` and
- * returns its stdout. Replaceable in unit tests via {@link _setLinuxProbeRunner}.
+ * Linux probe runner injection seam. Reads native backend discovery JSON.
+ * Replaceable in unit tests via {@link _setLinuxProbeRunner}.
  */
 type LinuxProbeRunner = () => string;
 
@@ -331,7 +331,7 @@ export const _linuxProbeTimeouts = {
 } as const;
 
 /**
- * The `execFileSync` call the default runner makes.
+ * The `execFileSync` call used to test CLI discovery.
  *
  * Injectable so a test can assert the spawn options actually reach the child.
  * Asserting the timeout *constant* is not enough — the option can stop being
@@ -353,8 +353,7 @@ export function _setLinuxProbeExec(exec: LinuxProbeExec | null): void {
 /**
  * Spawn the probe at an already-resolved path.
  *
- * @internal Test-only export: split from {@link defaultLinuxProbeRunner} so the
- * spawn options are testable without a real `lxc-exec` on disk.
+ * @internal Test-only CLI transport helper, independent of in-process discovery.
  */
 export function _runLinuxProbe(lxcPath: string): string {
   return linuxProbeExec(lxcPath, ['--available-backends'], {
@@ -368,19 +367,15 @@ export function _runLinuxProbe(lxcPath: string): string {
 }
 
 function defaultLinuxProbeRunner(): string {
-  const lxcPath = findLxcExecutable();
-  if (!lxcPath) {
-    throw new Error('lxc-exec not found');
-  }
-  return _runLinuxProbe(lxcPath);
+  return readAvailableBackendsJson();
 }
 
 /**
- * Ask `lxc-exec --available-backends` whether this host can enforce Bubblewrap
+ * Ask the native library whether this host can enforce Bubblewrap
  * proxy-only egress.
  *
  * Unlike the Windows isolation probe, this reports **fail closed**: a missing
- * binary, timeout, or malformed payload yields `'unsupported'` with the reason
+ * library, failed probe, or malformed payload yields `'unsupported'` with the reason
  * as a warning, never an absent field. Reporting "unknown" as "supported"
  * would let a caller launch a 0.8 proxy policy the host cannot satisfy, and
  * that policy has no fallback.

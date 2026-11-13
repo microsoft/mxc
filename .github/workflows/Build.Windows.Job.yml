@@ -223,11 +223,11 @@ jobs:
             -AcceptRealMachineMutation `
             -RequirePolicyCeiling
 
-      - name: Upload Node integration test proxy
+      - name: Upload Node integration test tools
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-test-proxy-${{ matrix.target }}
+          name: node-test-tools-${{ matrix.target }}
           path: src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
           if-no-files-found: error
           retention-days: 1

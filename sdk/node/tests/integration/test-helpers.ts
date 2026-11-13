@@ -110,23 +110,23 @@ export function getSdkBinDir(): string {
   return path.join(getSdkPackageRoot(), 'bin', arch);
 }
 
+export function getTestBinDir(): string {
+  return process.env.MXC_TEST_BIN_DIR ?? getSdkBinDir();
+}
+
 // Expected package binaries
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'mxc_ffi.dll',
   'wxc-exec.exe',
-  'wxc-windows-sandbox-daemon.exe',
-  'wxc-windows-sandbox-guest.exe',
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
   'libmxc_ffi.so',
-  'lxc-exec',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
   'libmxc_ffi.dylib',
-  'mxc-exec-mac',
 ];
 
 // Binaries that are optional (feature-gated or only present in certain builds)
@@ -459,7 +459,7 @@ export function withToolPaths(
 
 /** Locate the test proxy staged separately from the published SDK. */
 function findTestProxyBinary(): string {
-  const binDir = process.env.MXC_TEST_PROXY_DIR ?? getSdkBinDir();
+  const binDir = getTestBinDir();
   const proxyPath = path.join(binDir, 'wxc-test-proxy.exe');
   if (fs.existsSync(proxyPath)) {
     return proxyPath;
@@ -508,7 +508,7 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
 
 /** Locate the Unix test proxy staged separately from the published SDK. */
 function findUnixTestProxyBinary(): string {
-  const binDir = process.env.MXC_TEST_PROXY_DIR ?? getSdkBinDir();
+  const binDir = getTestBinDir();
   const proxyPath = path.join(binDir, 'unix-test-proxy');
   if (fs.existsSync(proxyPath)) {
     return proxyPath;

@@ -7,6 +7,10 @@
 */wxc-test-proxy.exe
 */unix-test-proxy
 */mxc-diagnostic-console.exe
+*/lxc-exec
+*/mxc-exec-mac
+*/wxc-windows-sandbox-daemon.exe
+*/wxc-windows-sandbox-guest.exe
 */symbols/
 **/*.pdb
 **/*.dwp
