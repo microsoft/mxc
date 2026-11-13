@@ -390,9 +390,11 @@ function Invoke-IsolationSessionSuites {
                     'V1.Dev captured timeout returns partial output despite descendant-held pipes')
         }
         'Rust' = {
-            Get-LibtestFailure -Run (Invoke-LoggedNative -FilePath $inProcTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust.log') `
+            Get-LibtestFailure -Run (Invoke-LoggedNative -FilePath $inProcTests -ArgumentList '--test-threads=1 --show-output' -LogName 'isolation-session-rust.log') `
                 -RequiredTests @('dev_json_one_shot_pty_supports_interactive_input',
-                    'dev_json_lifecycle_preserves_execution_and_caller_ownership')
+                    'dev_json_lifecycle_preserves_execution_and_caller_ownership',
+                    'relayed_pipe_and_file_stdin_reach_eof_with_redirected_stdout',
+                    'a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops')
         }
         'Rust SDK helpers' = {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $helperTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust-helpers.log')
