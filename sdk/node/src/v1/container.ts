@@ -18,6 +18,7 @@ import {
   type BindingRunResult,
 } from '../bindings/run.js';
 import {
+  spawnBindingInheritedStdioProcessJson,
   spawnBindingSandboxProcess,
 } from '../bindings/streaming.js';
 import type { MxcProcess } from './container-process.js';
@@ -25,7 +26,12 @@ import { spawnBindingSandboxWithPty } from '../bindings/pty.js';
 import { spawnProcessContainerWithPty } from '../bindings/process-container-pty.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
-import type { RunOptions, SpawnOptions, SpawnWithPtyOptions } from './operation-options.js';
+import type {
+  RunOptions,
+  SpawnOptions,
+  SpawnWithInheritedStdioOptions,
+  SpawnWithPtyOptions,
+} from './operation-options.js';
 
 export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<ContainmentChoice>([
@@ -483,6 +489,20 @@ export async function spawnWithPty(
     false,
     size.rows,
     size.columns,
+  );
+}
+
+/** Create a container request attached to this process's standard input, output, and error. */
+export async function spawnWithInheritedStdio(
+  request: ContainerRequest,
+  options: SpawnWithInheritedStdioOptions = {},
+): Promise<MxcProcess> {
+  validateOperationOptions('spawnWithInheritedStdio', options, false);
+  const preparedRequest = prepareContainerRequest(request, options.telemetry);
+  return spawnBindingInheritedStdioProcessJson(
+    JSON.stringify(preparedRequest),
+    false,
+    preparedRequest.process.timeout,
   );
 }
 

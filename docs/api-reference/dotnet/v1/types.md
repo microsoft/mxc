@@ -572,6 +572,10 @@ public static class MxcContainer
     public static MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);
+
+    public static MxcProcess SpawnWithInheritedStdio(
+        ContainerRequest request,
+        SpawnWithInheritedStdioOptions? options = null);
 }
 ```
 
@@ -1308,6 +1312,20 @@ public sealed class SpawnWithPtyOptions
 
     public TelemetryConfig? Telemetry { get; set; }
     public MxcPtySize? Size { get; set; }
+}
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.SpawnWithInheritedStdioOptions`
+
+Invocation controls for spawning a process that inherits the caller's standard streams.
+
+```csharp
+public sealed class SpawnWithInheritedStdioOptions
+{
+    public SpawnWithInheritedStdioOptions();
+
+    public TelemetryConfig? Telemetry { get; set; }
 }
 ```
 

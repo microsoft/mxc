@@ -828,6 +828,17 @@ export interface SpawnWithPtyOptions {
 ```
 
 
+## `@microsoft/mxc-sdk/v1::SpawnWithInheritedStdioOptions`
+
+Invocation controls for spawnWithInheritedStdio.
+
+```typescript
+export interface SpawnWithInheritedStdioOptions {
+  telemetry?: TelemetryConfig;
+}
+```
+
+
 
 ## `@microsoft/mxc-sdk/v1::StartOptions`
 

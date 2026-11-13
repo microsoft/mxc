@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Diagnostics;
 using System.Text;
+using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
@@ -67,6 +69,87 @@ public class MxcProcessTests
     public void Spawn_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(() => MxcContainer.Spawn(null!));
+    }
+
+    [Fact]
+    public void SpawnWithInheritedStdio_NullRequest_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => MxcContainer.SpawnWithInheritedStdio(null!));
+    }
+
+    [Fact]
+    public async Task SpawnWithInheritedStdio_UsesCallerStdio()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        var hostVariant = Environment.GetEnvironmentVariable(InheritedStdioHostVariable);
+        if (hostVariant is not null)
+        {
+            RunInheritedStdioHost(hostVariant);
+            return;
+        }
+
+        foreach (var variant in new[] { "typed", "1.0.0", "1.1.0-alpha" })
+        {
+            var start = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            if (Path.GetFileNameWithoutExtension(start.FileName) == "dotnet")
+            {
+                start.ArgumentList.Add(typeof(MxcProcessTests).Assembly.Location);
+            }
+            start.ArgumentList.Add("-method");
+            start.ArgumentList.Add(
+                $"{typeof(MxcProcessTests).FullName}.{nameof(SpawnWithInheritedStdio_UsesCallerStdio)}");
+            start.Environment[InheritedStdioHostVariable] = variant;
+
+            using var host = Process.Start(start)!;
+            var cancellation = TestContext.Current.CancellationToken;
+            var stdout = host.StandardOutput.ReadToEndAsync(cancellation);
+            var stderr = host.StandardError.ReadToEndAsync(cancellation);
+            await host.StandardInput.WriteAsync(
+                (InheritedStdioInput + (OperatingSystem.IsWindows() ? "\r\n" : "\n")).AsMemory(),
+                cancellation);
+            host.StandardInput.Close();
+            await host.WaitForExitAsync(cancellation).WaitAsync(TimeSpan.FromMinutes(2), cancellation);
+            var output = await stdout;
+            var error = await stderr;
+            var marker = InheritedStdioMarker(variant);
+            Assert.True(host.ExitCode == 0, $"{variant} host exited {host.ExitCode}:\n{output}\n{error}");
+            Assert.Contains($"{marker}_OUT:{InheritedStdioInput}", output);
+            Assert.Contains($"{marker}_ERR", error);
+        }
+    }
+
+    private const string InheritedStdioHostVariable = "MXC_DOTNET_INHERITED_STDIO_HOST";
+    private const string InheritedStdioInput = "INHERITED_STDIN_LINE";
+
+    private static string InheritedStdioMarker(string variant) =>
+        "INHERITED_STDIO_" + variant.Replace('.', '_').Replace('-', '_');
+
+    private static void RunInheritedStdioHost(string variant)
+    {
+        var marker = InheritedStdioMarker(variant);
+        var command = OperatingSystem.IsWindows()
+            ? $"cmd.exe /v:on /c \"set /p L= & echo {marker}_OUT:!L! & echo {marker}_ERR 1>&2 & exit /b 7\""
+            : $"IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit 7";
+        using var process = variant == "typed"
+            ? MxcContainer.SpawnWithInheritedStdio(new ContainerRequest(command) { TimeoutMs = 30_000 })
+            : Dev.MxcContainer.SpawnWithInheritedStdioJson(new JsonObject
+            {
+                ["version"] = variant,
+                ["containment"] = "process",
+                ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
+            }.ToJsonString());
+        Assert.Null(process.StandardInput);
+        Assert.Null(process.StandardOutput);
+        Assert.Null(process.StandardError);
+        var result = process.Wait();
+        Assert.False(result.TimedOut);
+        Assert.Equal(7, result.ExitCode);
     }
 
     [Fact]

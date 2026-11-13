@@ -886,3 +886,6 @@ These changes would break V1 callers, so they wait for V2:
   ETL.
 - Move `captureDenials` to a top-level request field that each backend
   accepts or rejects, instead of a backend-specific field.
+- Mark every Rust SDK options struct `#[non_exhaustive]` so options can gain
+  fields without a new operation, and reconsider whether the separate pipe,
+  stdin, PTY, and inherited-stdio spawn operations should share one entry point.

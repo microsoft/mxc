@@ -32,6 +32,15 @@ pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions) -> Result<MxcPty
     crate::__ffi::spawn_with_pty_json(json, options.experimental, options.size)
 }
 
+/// Spawn a caller-authored exact-version one-shot request attached to the
+/// calling process's stdin, stdout, and stderr.
+pub fn spawn_with_inherited_stdio_json(
+    json: &str,
+    options: JsonOptions,
+) -> Result<MxcProcess, Error> {
+    crate::__ffi::spawn_with_inherited_stdio_json(json, options.experimental)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,8 +59,13 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("missing version must fail"),
         };
+        let inherited_error = match spawn_with_inherited_stdio_json(json, options) {
+            Err(error) => error,
+            Ok(_) => panic!("missing version must fail"),
+        };
         assert_eq!(pipe_error.code, ErrorCode::MalformedRequest);
         assert_eq!(pty_error.code, ErrorCode::MalformedRequest);
+        assert_eq!(inherited_error.code, ErrorCode::MalformedRequest);
     }
 
     #[test]

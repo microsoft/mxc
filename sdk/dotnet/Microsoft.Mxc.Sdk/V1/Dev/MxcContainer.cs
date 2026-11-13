@@ -125,6 +125,38 @@ public static class MxcContainer
         }
     }
 
+    /// <summary>
+    /// Spawn caller-authored exact JSON attached to the calling process's
+    /// standard input, output, and error.
+    /// </summary>
+    public static MxcProcess SpawnWithInheritedStdioJson(string json, JsonOptions? options = null)
+    {
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithInheritedStdioJson));
+        unsafe
+        {
+            fixed (byte* requestPtr = request)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_with_inherited_stdio_json(
+                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status, error, "spawning exact JSON with inherited stdio failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+            }
+        }
+    }
+
     private static unsafe string? PtrToString(byte* pointer) =>
         pointer is null ? null : Marshal.PtrToStringUTF8((IntPtr)pointer);
 }

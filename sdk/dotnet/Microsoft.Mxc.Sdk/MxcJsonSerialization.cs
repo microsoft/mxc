@@ -46,6 +46,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(RunOptions))]
 [JsonSerializable(typeof(SpawnOptions))]
 [JsonSerializable(typeof(SpawnWithPtyOptions))]
+[JsonSerializable(typeof(SpawnWithInheritedStdioOptions))]
 [JsonSerializable(typeof(JsonOptions))]
 [JsonSerializable(typeof(PtyJsonOptions))]
 [JsonSerializable(typeof(ProvisionOptions))]

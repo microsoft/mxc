@@ -25,6 +25,7 @@ MxcProcess SpawnJson(string json, JsonOptions? options = null);
 Task<MxcProcess> SpawnJsonAsync(string json, JsonOptions? options = null,
     CancellationToken cancellationToken = default);
 MxcPtyProcess SpawnWithPtyJson(string json, PtyJsonOptions? options = null);
+MxcProcess SpawnWithInheritedStdioJson(string json, JsonOptions? options = null);
 
 // Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle
 ExecutionResult RunInContainerJson(string json, JsonOptions? options = null);
@@ -56,7 +57,9 @@ string ValidateProcessJson(string json, JsonOptions? options = null);
 Task<string> ValidateProcessJsonAsync(string json, JsonOptions? options = null);
 ```
 
-PTY methods are synchronous. Async run/spawn methods accept cancellation
+PTY methods are synchronous. `SpawnWithInheritedStdioJson` is synchronous,
+attaches the workload to the calling process's standard streams, and
+supports ProcessContainer, Bubblewrap, and Seatbelt. Async run/spawn methods accept cancellation
 tokens. Canceling `RunJsonAsync` stops awaiting, not native execution;
 canceling `RunInContainerJsonAsync` disposes its owned process. Async
 lifecycle management and validation calls run off the caller's thread

@@ -148,6 +148,34 @@ pub fn spawn_pty_runner(
     }
 }
 
+pub fn spawn_inherited_stdio_runner(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    ensure_host_supported()?;
+    if request.dry_run {
+        return Err(MxcError::malformed_request(
+            "dry_run is not supported for inherited-stdio spawns",
+        ));
+    }
+    crate::mxc_engine::run::log_policy_hash(request, logger);
+    match &request.containment {
+        ContainmentBackend::ProcessContainer => {
+            spawn_process_container_with_stdio(request, logger, StdioMode::Inherit)
+        }
+        ContainmentBackend::Bubblewrap => {
+            spawn_bubblewrap_with_stdio(request, logger, StdioMode::Inherit)
+        }
+        ContainmentBackend::Seatbelt => {
+            spawn_seatbelt_with_stdio(request, logger, StdioMode::Inherit)
+        }
+        other => Err(MxcError::unsupported_containment(format!(
+            "the mxc engine does not support inherited-stdio spawning for the '{}' backend",
+            other.wire_name()
+        ))),
+    }
+}
+
 /// Map a backend's `spawn` failure `ScriptResponse` to an
 /// [`MxcError`], preserving the failure phase (so callers can fall back to a
 /// lower tier, or tell a rejected request from a broken one) and folding any
@@ -303,24 +331,33 @@ fn spawn_seatbelt_with_stdio(
     ))
 }
 
-#[cfg(target_os = "windows")]
 fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    spawn_process_container_with_stdio(request, logger, StdioMode::Pipes)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_process_container_with_stdio(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::SandboxBackend;
     use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
     let mut backend = BaseContainerRunner::for_request(request)?;
     backend
-        .spawn(request, logger, StdioMode::Pipes)
+        .spawn(request, logger, stdio)
         .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn spawn_process_container(
+fn spawn_process_container_with_stdio(
     _request: &ExecutionRequest,
     _logger: &mut Logger,
+    _stdio: StdioMode,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
         "ProcessContainer (PSEC) is only available on Windows",
@@ -446,7 +483,10 @@ fn spawn_isolation_session_pty(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_host_supported, map_spawn_error, spawn_pty_runner, spawn_runner};
+    use super::{
+        ensure_host_supported, map_spawn_error, spawn_inherited_stdio_runner, spawn_pty_runner,
+        spawn_runner,
+    };
     use crate::mxc_common::logger::{Logger, Mode};
     use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest};
     use crate::mxc_common::mxc_error::MxcErrorCode;
@@ -548,6 +588,42 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("vm"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn inherited_stdio_spawn_rejects_backends_without_inherited_stdio() {
+        for containment in [
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Vm,
+        ] {
+            let mut request = minimal_request();
+            request.containment = containment.clone();
+            let mut logger = Logger::new(Mode::Buffer);
+            let err = match spawn_inherited_stdio_runner(&request, &mut logger) {
+                Ok(_) => panic!("{} must be rejected", containment.wire_name()),
+                Err(error) => error,
+            };
+            assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+            assert!(
+                err.message.contains(containment.wire_name()),
+                "got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_stdio_spawn_rejects_dry_run() {
+        let mut request = minimal_request();
+        request.dry_run = true;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_inherited_stdio_runner(&request, &mut logger) {
+            Ok(_) => panic!("dry_run must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

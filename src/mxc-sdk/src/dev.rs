@@ -6,7 +6,7 @@
 mod one_shot;
 mod state_aware;
 
-pub use one_shot::{run_json, spawn_json, spawn_with_pty_json};
+pub use one_shot::{run_json, spawn_json, spawn_with_inherited_stdio_json, spawn_with_pty_json};
 pub use state_aware::{
     deprovision_container_json, provision_container_json, run_in_container_json,
     spawn_in_container_json, spawn_in_container_with_pty_json, start_container_json,

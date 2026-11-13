@@ -30,6 +30,14 @@ pub struct SpawnWithPtyOptions {
     pub size: crate::sandbox::MxcPtySize,
 }
 
+/// Invocation controls for spawning a process that inherits the caller's stdio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpawnWithInheritedStdioOptions {
+    /// Per-invocation telemetry opt-in, subject to consent and policy.
+    pub telemetry: Option<TelemetryConfig>,
+}
+
 /// Invocation controls for provisioning a container.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProvisionOptions {

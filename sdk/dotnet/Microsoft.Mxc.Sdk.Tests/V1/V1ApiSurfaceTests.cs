@@ -66,6 +66,7 @@ public sealed class V1ApiSurfaceTests
             typeof(RunOptions),
             typeof(SpawnOptions),
             typeof(SpawnWithPtyOptions),
+            typeof(SpawnWithInheritedStdioOptions),
             typeof(ProvisionOptions),
             typeof(StartOptions),
             typeof(StopOptions),

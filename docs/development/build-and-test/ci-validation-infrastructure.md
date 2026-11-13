@@ -235,6 +235,12 @@ pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
 direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
 against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
 
+Inherited-stdio cases run the SDK in a child process and check that the
+workload reads that process's stdin and writes to its stdout and stderr, for
+the typed API and V1.Dev on `1.0.0` and `1.1.0-alpha`. ProcessContainer
+requires the Rust, .NET, and Node cases. Bubblewrap and Seatbelt run the Rust
+case in their streaming suites and the Node case in `dev.test.js`.
+
 IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
 validation, and cleanup cases. IsolationSession also covers existing-container
 PTYs; its Rust and Node cases check partial capture on timeout with

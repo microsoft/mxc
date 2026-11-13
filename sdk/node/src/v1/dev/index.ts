@@ -11,6 +11,7 @@ import { captureProcessOutput } from '../capture.js';
 import { diagLog } from '../../diagnostic.js';
 import { runRawOneShotJsonAsync, type BindingRunResult } from '../../bindings/run.js';
 import {
+  spawnBindingInheritedStdioProcessJson,
   spawnBindingSandboxProcessJson,
   spawnStateAwareBindingSandboxProcessAsync,
 } from '../../bindings/streaming.js';
@@ -142,6 +143,16 @@ export async function spawnJson(json: string, options: JsonOptions = {}): Promis
   checkOptions('spawnJson', options);
   const { timeoutMs } = requestInfo(json, 'spawnJson');
   return spawnBindingSandboxProcessJson(json, options.experimental === true, timeoutMs);
+}
+
+/** Spawn a one-shot request attached to this process's standard streams. */
+export async function spawnWithInheritedStdioJson(
+  json: string,
+  options: JsonOptions = {},
+): Promise<MxcProcess> {
+  checkOptions('spawnWithInheritedStdioJson', options);
+  const { timeoutMs } = requestInfo(json, 'spawnWithInheritedStdioJson');
+  return spawnBindingInheritedStdioProcessJson(json, options.experimental === true, timeoutMs);
 }
 
 /** Spawn a one-shot request with a PTY. */

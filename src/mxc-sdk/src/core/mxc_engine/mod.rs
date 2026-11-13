@@ -325,6 +325,29 @@ pub fn spawn_one_shot_pty_json(
     })
 }
 
+pub fn spawn_with_inherited_stdio(
+    request: &ExecutionRequest,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    spawn_execution_request_with_logger_and(
+        request,
+        Logger::new(Mode::Buffer),
+        dispatch::spawn_inherited_stdio_runner,
+    )
+}
+
+pub fn spawn_one_shot_inherited_stdio_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    spawn_execution_request_with_logger_and(
+        &request,
+        logger,
+        dispatch::spawn_inherited_stdio_runner,
+    )
+}
+
 pub(crate) struct TelemetryRegistration {
     active: bool,
 }
@@ -1244,6 +1267,52 @@ mod telemetry_process_tests {
             ends[0].failure_reason,
             Some(telemetry::FailureReason::InitError)
         );
+        test_sink::clear();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inherited_stdio_spawns_report_start_and_end() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+
+        let request = ExecutionRequest {
+            script_code: "exit 0".to_string(),
+            containment: ContainmentBackend::Vm,
+            telemetry: Some(crate::mxc_common::models::TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = match spawn_with_inherited_stdio(&request) {
+            Ok(_) => panic!("inherited stdio must reject the vm backend"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+        let starts = test_sink::take_starts();
+        let ends = test_sink::take_executions();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].session_id, starts[0].session_id);
+        assert_eq!(ends[0].backend, "vm");
+        assert!(ends[0].failure_reason.is_some());
+        test_sink::take_errors();
+
+        // The development contract reports without consent on eligible builds.
+        telemetry::consent::set_consent(false, "test").unwrap();
+        let json =
+            r#"{"version":"1.1.0-alpha","containment":"vm","process":{"commandLine":"exit 0"}}"#;
+        assert!(spawn_one_shot_inherited_stdio_json(json, false).is_err());
+        let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+        assert_eq!(test_sink::take_starts().len(), expected);
+        assert_eq!(test_sink::take_executions().len(), expected);
         test_sink::clear();
     }
 

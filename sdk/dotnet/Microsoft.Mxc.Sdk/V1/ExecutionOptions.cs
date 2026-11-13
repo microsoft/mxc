@@ -27,6 +27,13 @@ public sealed class SpawnWithPtyOptions
     public MxcPtySize? Size { get; set; }
 }
 
+/// <summary>Invocation controls for SpawnWithInheritedStdio.</summary>
+public sealed class SpawnWithInheritedStdioOptions
+{
+    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    public TelemetryConfig? Telemetry { get; set; }
+}
+
 /// <summary>Invocation controls for spawning a workload in an existing container.</summary>
 public sealed class SpawnInContainerOptions
 {

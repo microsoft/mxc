@@ -56,6 +56,13 @@ internal interface IContainerRunner
     MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);
+
+    /// <summary>Spawn a complete request attached to the calling process's standard streams.</summary>
+    IMxcProcess SpawnWithInheritedStdio(
+        ContainerRequest request,
+        SpawnWithInheritedStdioOptions? options = null) =>
+        throw new NotSupportedException(
+            "This container runner does not support inherited standard streams.");
 }
 
 /// <summary>
@@ -116,6 +123,12 @@ internal sealed class MxcContainerRunner : IContainerRunner
         ContainerRequest request,
         SpawnWithPtyOptions? options = null) =>
         MxcContainer.SpawnWithPty(request, options);
+
+    /// <inheritdoc/>
+    public IMxcProcess SpawnWithInheritedStdio(
+        ContainerRequest request,
+        SpawnWithInheritedStdioOptions? options = null) =>
+        MxcContainer.SpawnWithInheritedStdio(request, options);
 }
 
 /// <summary>

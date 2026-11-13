@@ -342,6 +342,7 @@ for (const [name, fields] of [
   ["RunOptions", ["telemetry"]],
   ["SpawnOptions", ["telemetry"]],
   ["SpawnWithPtyOptions", ["telemetry", "size"]],
+  ["SpawnWithInheritedStdioOptions", ["telemetry"]],
 ]) {
   compare(`${name} invocation fields`, managedJsonFields(managedOptions, name), fields);
 }

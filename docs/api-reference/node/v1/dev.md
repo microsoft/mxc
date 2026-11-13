@@ -18,6 +18,7 @@ methods reject a different phase before native dispatch.
 export function runJson(json: string, options?: JsonOptions): Promise<ExecutionResult>;
 export function spawnJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
 export function spawnWithPtyJson(json: string, options?: PtyJsonOptions): Promise<MxcPtyProcess>;
+export function spawnWithInheritedStdioJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
 
 export function runInContainerJson(json: string, options?: JsonOptions): Promise<ExecutionResult>;
 export function spawnInContainerJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
@@ -37,7 +38,9 @@ export function validateProcessJson(json: string, options?: JsonOptions): Promis
 ```
 
 Captured stdout and stderr are lossy UTF-8 text. Callers own pipe and PTY
-handles. Existing-container execution leaves the container caller-owned.
+handles. `spawnWithInheritedStdioJson` attaches the workload to this process's
+standard streams and supports ProcessContainer, Bubblewrap, and Seatbelt.
+Existing-container execution leaves the container caller-owned.
 On timeout, in-container capture returns partial text without waiting for
 output streams to close. Read failures reject promptly, and cleanup
 preserves the original read or wait error.

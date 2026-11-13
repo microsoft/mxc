@@ -55,6 +55,8 @@ foreach (var enabled in new bool?[] { null, true, false })
         new SpawnWithPtyOptions { Size = initialPtySize, Telemetry = telemetry },
         x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
+    CheckRoundTrip(new SpawnWithInheritedStdioOptions { Telemetry = telemetry },
+        x => x.Telemetry?.Enabled == enabled, "inherited-stdio spawn options");
 }
 CheckRoundTrip(new ProvisionOptions(), x => x.Telemetry is null, "provision options");
 CheckRoundTrip(new StartOptions(), x => x.Telemetry is null, "start options");

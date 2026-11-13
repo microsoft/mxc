@@ -379,6 +379,47 @@ public static class MxcContainer
         }
     }
 
+    /// <summary>
+    /// Spawn a container request attached to the calling process's standard
+    /// input, output, and error.
+    /// </summary>
+    public static MxcProcess SpawnWithInheritedStdio(
+        ContainerRequest request,
+        SpawnWithInheritedStdioOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_with_inherited_stdio_json(
+                    requestPtr, 0, &handle, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning sandbox with inherited stdio failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    request.TimeoutMs);
+            }
+        }
+    }
+
     private static byte[] ToNullTerminatedUtf8(string value)
     {
         var byteCount = Encoding.UTF8.GetByteCount(value);

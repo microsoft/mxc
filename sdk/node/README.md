@@ -85,7 +85,7 @@ stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
 streams before awaiting completion; any untaken streams are drained internally
 to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`.
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithInheritedStdioOptions`.
 Execution options do not support `dryRun`.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI
@@ -130,6 +130,25 @@ Unsupported combinations are rejected before sandbox creation.
 ProcessContainer PTY passes `timeoutMs` to `wxc-exec`, but the executor
 channel reports only an exit code: `terminal.wait().timedOut` is `false`
 even if that timeout ended the workload.
+
+## Spawn with this process's own console
+
+`spawnWithInheritedStdio` attaches the workload to this Node.js process's
+standard input, output, and error, such as a console, pseudo-console, or pipes
+set up by the parent. MXC allocates no pipes or PTY, and the returned
+`MxcProcess` has no streams to take. ProcessContainer, Bubblewrap, and
+Seatbelt support it.
+
+```typescript
+import { spawnWithInheritedStdio } from '@microsoft/mxc-sdk/v1';
+
+const proc = await spawnWithInheritedStdio({ command: 'echo hello', timeoutMs: 30_000 });
+try {
+  console.log(await proc.wait());
+} finally {
+  proc.dispose();
+}
+```
 
 ## Lifecycle API
 

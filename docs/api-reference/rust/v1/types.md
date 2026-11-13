@@ -768,6 +768,21 @@ pub struct SpawnWithPtyOptions {
 ```
 
 
+## `mxc_sdk::v1::SpawnWithInheritedStdioOptions`
+
+Invocation controls for spawning a process that inherits the caller's stdio.
+
+This struct is `#[non_exhaustive]` so it can gain fields in V1. Construct it
+from `Default::default()` and assign fields rather than using a struct literal.
+
+```rust
+#[non_exhaustive]
+pub struct SpawnWithInheritedStdioOptions {
+  pub telemetry: Option<TelemetryConfig>,
+}
+```
+
+
 ## `mxc_sdk::v1::StartOptions`
 
 Invocation controls for starting a container.

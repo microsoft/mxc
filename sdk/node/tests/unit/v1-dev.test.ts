@@ -7,6 +7,7 @@ import { PassThrough, Readable } from 'node:stream';
 import { afterEach, it } from 'node:test';
 import { _setBindingRawRunAsyncImplementation } from '../../src/bindings/run.js';
 import {
+  _setBindingInheritedStdioProcessFactory,
   _setBindingRawSandboxProcessFactory,
   _setStateAwareBindingSandboxProcessFactory,
 } from '../../src/bindings/streaming.js';
@@ -19,12 +20,14 @@ import { MxcProcess, type NativeLifecycleDriver } from '../../src/v1/container-p
 import { captureProcessOutput } from '../../src/v1/capture.js';
 import { MxcPtyProcess } from '../../src/v1/mxc-pty-process.js';
 import { runInContainer } from '../../src/v1/lifecycle.js';
+import { spawnWithInheritedStdio } from '../../src/v1/container.js';
 import type { ContainerId } from '../../src/v1/lifecycle-types.js';
 import * as dev from '../../src/v1/dev/index.js';
 
 afterEach(() => {
   _setBindingRawRunAsyncImplementation();
   _setBindingRawSandboxProcessFactory();
+  _setBindingInheritedStdioProcessFactory();
   _setStateAwareBindingSandboxProcessFactory();
   _setSpawnBindingSandboxWithPtyJsonImplementation();
   _setExecStateAwareBindingSandboxWithPtyImplementation();
@@ -103,6 +106,52 @@ it('one-shot live modes pass the exact request and timeout to their bindings', a
   assert.deepStrictEqual(ptyArgs, [json, false, 30, 90, 120]);
   spawned.dispose();
   terminal.dispose();
+});
+
+it('inherited-stdio exact JSON passes the request, authorization and timeout unchanged', async () => {
+  const json = '{"version":"1.1.0-alpha","containment":"process","process":{"commandLine":"echo","timeout":90}}';
+  let received: unknown[] = [];
+  const proc = fakeProcess();
+  _setBindingInheritedStdioProcessFactory(async (...args) => {
+    received = args;
+    return proc;
+  });
+  assert.strictEqual(await dev.spawnWithInheritedStdioJson(json, { experimental: true }), proc);
+  assert.deepStrictEqual(received, [json, true, 90]);
+  await assert.rejects(
+    dev.spawnWithInheritedStdioJson(json, { size: { rows: 1, columns: 1 } } as never),
+    /does not support option 'size'/,
+  );
+  await assert.rejects(
+    dev.spawnWithInheritedStdioJson('{"version":"1.0.0","phase":"exec"}'),
+    /one-shot document without phase/,
+  );
+  proc.dispose();
+});
+
+it('typed inherited-stdio spawn sends a prepared V1 request', async () => {
+  let received: unknown[] = [];
+  const proc = fakeProcess();
+  _setBindingInheritedStdioProcessFactory(async (...args) => {
+    received = args;
+    return proc;
+  });
+  assert.strictEqual(
+    await spawnWithInheritedStdio({ command: 'echo hi', timeoutMs: 45 }, { telemetry: { enabled: true } }),
+    proc,
+  );
+  const [requestJson, experimental, timeoutMs] = received as [string, boolean, number];
+  const request = JSON.parse(requestJson);
+  assert.strictEqual(request.version, '1.0.0');
+  assert.strictEqual(request.process.commandLine, 'echo hi');
+  assert.deepStrictEqual(request.telemetry, { enabled: true });
+  assert.strictEqual(experimental, false);
+  assert.strictEqual(timeoutMs, 45);
+  await assert.rejects(
+    spawnWithInheritedStdio({ command: 'echo hi' }, { dryRun: true } as never),
+    /does not support dryRun/,
+  );
+  proc.dispose();
 });
 
 it('state-aware execution captures streams and preserves container ownership', async () => {

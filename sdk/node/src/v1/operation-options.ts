@@ -23,6 +23,12 @@ export interface SpawnWithPtyOptions {
   size?: MxcPtySize;
 }
 
+/** Invocation controls for spawnWithInheritedStdio. */
+export interface SpawnWithInheritedStdioOptions {
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
+}
+
 /** Invocation controls for provisioning a container. */
 export interface ProvisionOptions {
   telemetry?: TelemetryConfig;

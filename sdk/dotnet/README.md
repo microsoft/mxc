@@ -80,8 +80,9 @@ SDK-owned nested choice such as `Containment.Process` (the default),
 `Containment.ProcessContainer`, or `Containment.Wslc`. Backend semantics are
 validated by the native engine.
 
-Creation methods accept their own `RunOptions`, `SpawnOptions`, or
-`SpawnWithPtyOptions` after the request. Set `SpawnWithPtyOptions.Size` to
+Creation methods accept their own `RunOptions`, `SpawnOptions`,
+`SpawnWithPtyOptions`, or `SpawnWithInheritedStdioOptions` after the request.
+Set `SpawnWithPtyOptions.Size` to
 choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellation
 tokens come last.
 
@@ -127,6 +128,22 @@ PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
 canonical mode; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
+
+## Spawn with the caller's own console
+
+`SpawnWithInheritedStdio` attaches the workload to the calling process's
+standard input, output, and error, such as a console, pseudo-console, or pipes
+the caller already set up. MXC allocates no pipes or PTY, and the returned
+`MxcProcess` has no streams to take. ProcessContainer, Bubblewrap, and
+Seatbelt support it.
+
+```csharp
+using Microsoft.Mxc.Sdk.V1;
+
+using var process = MxcContainer.SpawnWithInheritedStdio(
+    new ContainerRequest("cmd.exe /c echo hello") { TimeoutMs = 30_000 });
+WaitResult result = process.Wait();
+```
 
 ## Lifecycle API
 
