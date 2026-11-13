@@ -186,14 +186,16 @@ function Invoke-ProcessContainerPsecLifetimeTests {
     $rustTests = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-sdk-process-container-psec-lifetime-tests.exe'
     Assert-File -Path $rustTests
 
-    foreach ($rustCase in 'psec_handle_serves_sequential_launches', 'psec_handle_serves_concurrent_launches',
+    # Run every case so one failed assertion does not hide the other observations.
+    $failures = foreach ($rustCase in 'psec_handle_serves_sequential_launches', 'psec_handle_serves_concurrent_launches',
         'psec_handle_close_with_running_and_terminated_children',
         'psec_failures_leave_no_profile_and_do_not_poison_the_handle') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-psec-lifetime-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--nocapture', '--test-threads=1')
         $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
-        if ($failure) { throw "ProcessContainer PSEC lifetime: $failure" }
+        if ($failure) { "${rustCase}: $failure" }
     }
+    if ($failures) { throw "ProcessContainer PSEC lifetime: $($failures -join '; ')" }
 }
 
 function Invoke-ProcessContainerStreamingTests {

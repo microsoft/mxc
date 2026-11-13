@@ -486,13 +486,15 @@ fn psec_handle_serves_sequential_launches() {
     observe("b_marker_matches_a", b.required("MARKER") == token);
     observe("b_marker", b.required("MARKER"));
 
-    // Per-launch environment: an explicit TEMP/TMP reaches the child. This is
-    // the shape of a host-side TEMP/TMP restoration, and it is separate from
-    // the container's own TEMP observed above.
+    // Per-launch environment. Like production, pass the host LOCALAPPDATA with
+    // an explicit TEMP/TMP. The launch derives the container LOCALAPPDATA,
+    // TEMP and TMP from the LOCALAPPDATA it receives, so the explicit TEMP/TMP
+    // do not reach the child.
     let scratch_text = scratch.path().to_string_lossy().into_owned();
+    let host_local_app_data = std::env::var("LOCALAPPDATA").expect("host LOCALAPPDATA");
     let explicit = environment_block(&[
         ("SystemRoot", a.required("SYSTEMROOT")),
-        ("LOCALAPPDATA", a.required("LOCALAPPDATA")),
+        ("LOCALAPPDATA", &host_local_app_data),
         ("TEMP", &scratch_text),
         ("TMP", &scratch_text),
     ]);
@@ -505,6 +507,9 @@ fn psec_handle_serves_sequential_launches() {
     .collect();
     observe("c_exit", c.exit_code);
     observe("c_output", one_line(&c.output));
+    observe("c_temp", c.required("TEMP"));
+    observe("c_tmp", c.required("TMP"));
+    observe("c_localappdata", c.required("LOCALAPPDATA"));
     let scratch_marker = scratch.path().join(MARKER_FILE);
     observe("c_marker_in_scratch_on_host", scratch_marker.exists());
 
@@ -535,9 +540,19 @@ fn psec_handle_serves_sequential_launches() {
         token,
         "launch B must see the file launch A wrote through the container TEMP"
     );
+    assert_eq!(
+        c.required("TEMP"),
+        temp,
+        "the launch must derive TEMP from LOCALAPPDATA instead of keeping the explicit TEMP"
+    );
+    assert_eq!(
+        c.required("TMP"),
+        temp,
+        "the launch must derive TMP from LOCALAPPDATA instead of keeping the explicit TMP"
+    );
     assert!(
-        scratch_marker.exists(),
-        "an explicit TEMP/TMP must reach a launch in a reused environment"
+        !scratch_marker.exists(),
+        "an explicit TEMP/TMP must not reach a launch in the AppContainer"
     );
     assert!(
         removal.is_some(),
