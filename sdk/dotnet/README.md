@@ -271,10 +271,12 @@ cannot serve the request, `Tier` is null and `Error` explains why; `Probes`
 still contains host capability facts.
 
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
-leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`
-explicitly disables it. Opt-in is still gated by MXC's persisted user consent
-and administrative policy.
+`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. These
+preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `Enabled = false`, consent, or policy.
+Consent-management APIs retain their stored-state behavior; they do not
+disable Required collection. See [Telemetry](../../docs/telemetry.md).
 
 Filesystem discovery helpers are on `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`
 and return `FilesystemPolicyResult` from the same namespace. They take an

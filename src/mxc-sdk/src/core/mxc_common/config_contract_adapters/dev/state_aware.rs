@@ -302,6 +302,7 @@ fn wslc_provision_into_input(
         containment: contract::WslcContainment,
         filesystem,
         network,
+        runtime_config,
         telemetry,
         wslc,
     } = request;
@@ -309,6 +310,7 @@ fn wslc_provision_into_input(
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.filesystem = filesystem.into_option().map(convert_filesystem);
     common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
     StateAwareInput::new(
         common,
         StateAwareOperation::Provision(StateAwareProvision::Wslc(provision)),

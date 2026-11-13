@@ -62,8 +62,16 @@ fn bundle_rejects_modified_guest_with_self_declared_checksums() {
 
 #[test]
 fn crate_staged_bundle_opens_and_rejects_an_unverified_library() {
+    if std::env::var_os(BUNDLE_CHILD).is_some_and(|value| value == "runtime-with-extra-file") {
+        mxc_sdk::v1::dev::validate_provision_json(
+            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"}}"#,
+            mxc_sdk::v1::dev::JsonOptions { experimental: true },
+        )
+        .expect("public validation does not repeat build-time bundle inventory checks");
+        return;
+    }
     if std::env::var_os(BUNDLE_CHILD).is_some() {
-        json_execution_and_build_reject_unapproved_bundle_before_agent_load();
+        build_rejects_unapproved_bundle();
         return;
     }
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
@@ -100,7 +108,40 @@ fn crate_staged_bundle_opens_and_rejects_an_unverified_library() {
         "{error}"
     );
     // Package and staging gates select this test, so their success includes these negative controls.
-    json_execution_and_build_reject_unapproved_bundle_before_agent_load();
+    runtime_does_not_repeat_build_inventory_checks();
+    build_rejects_unapproved_bundle();
+}
+
+fn runtime_does_not_repeat_build_inventory_checks() {
+    let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
+    let state = tempfile::tempdir().expect("private runtime bundle");
+    copy_bundle(bundle.directory(), state.path());
+    std::fs::write(
+        state.path().join("unapproved.extra"),
+        b"not part of the build",
+    )
+    .unwrap();
+    let error = signature_verification::verify_bundle(state.path()).unwrap_err();
+    assert!(error.to_string().contains("inventory differs"), "{error}");
+
+    let local_app_data = tempfile::tempdir().expect("private SDK validation state");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "crate_staged_bundle_opens_and_rejects_an_unverified_library",
+            "--nocapture",
+        ])
+        .env(BUNDLE_CHILD, "runtime-with-extra-file")
+        .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
+        .env("LOCALAPPDATA", local_app_data.path())
+        .output()
+        .expect("isolated public runtime validation without starting a VM");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -188,26 +229,8 @@ fn verified_bundle_keeps_its_binary_directory_in_place() {
         .unwrap();
 }
 
-fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
+fn build_rejects_unapproved_bundle() {
     if std::env::var_os(BUNDLE_CHILD).is_some() {
-        // Even a broken pre-load gate must not reach VM provisioning.
-        let error = mxc_sdk::__ffi::run_json(
-            r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"runtimeConfig":{"networkProxy":"http://[::1]:3128"},"process":{"commandLine":"printf forbidden"}}"#,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::BackendUnavailable);
-        assert!(error.message.contains("NVX bundle"), "{error}");
-        let module = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!(
-                "aci_edge_agent.dll"
-            ))
-        };
-        assert_eq!(
-            module.unwrap_err().code(),
-            windows::core::HRESULT::from_win32(126),
-            "bundle rejection must precede agent loading"
-        );
         let error = verify_nvx_runtime_signatures::run().unwrap_err();
         assert!(error.to_string().contains("NVX bundle"), "{error}");
         return;
@@ -215,6 +238,7 @@ fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
 
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
     let _approved = signature_verification::verify_bundle(bundle.directory()).unwrap();
+    let local_app_data = tempfile::tempdir().expect("private bundle-rejection state");
     for changed in [
         "guest/vmlinux",
         "guest/initramfs-edge.cpio.gz",
@@ -247,6 +271,7 @@ fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
                 "--nocapture",
             ])
             .env(BUNDLE_CHILD, changed)
+            .env("LOCALAPPDATA", local_app_data.path())
             .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("DEP_ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("CARGO_FEATURE_MICROVM", "1")
@@ -292,33 +317,9 @@ fn verified_tools_can_execute_while_file_guards_are_held() {
 }
 
 #[test]
-fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
+fn build_rejects_each_unsigned_binary() {
     const CHILD: &str = "MXC_NVX_SIGNATURE_CHILD";
     if let Some(name) = std::env::var_os(CHILD) {
-        let error = mxc_sdk::__ffi::run_json(
-            r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"process":{"commandLine":"printf forbidden"}}"#,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::BackendUnavailable);
-        // This isolated child has not opened an agent through any other test.
-        let module = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!(
-                "aci_edge_agent.dll"
-            ))
-        };
-        assert_eq!(
-            module.unwrap_err().code(),
-            windows::core::HRESULT::from_win32(126),
-            "signature rejection must precede loading the agent"
-        );
-        assert!(
-            error
-                .message
-                .contains("Authenticode trust verification failed"),
-            "{error}"
-        );
-        assert!(error.message.contains(&*name.to_string_lossy()), "{error}");
         let error = verify_nvx_runtime_signatures::run().unwrap_err();
         assert!(
             error
@@ -334,6 +335,7 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
     }
 
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
+    let local_app_data = tempfile::tempdir().expect("private binary-rejection state");
     for rejected in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
         let state = tempfile::tempdir().expect("isolated invalid runtime");
         std::fs::create_dir(state.path().join("bin")).unwrap();
@@ -353,10 +355,11 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "json_execution_rejects_each_unsigned_binary_before_agent_load",
+                "build_rejects_each_unsigned_binary",
                 "--nocapture",
             ])
             .env(CHILD, rejected)
+            .env("LOCALAPPDATA", local_app_data.path())
             .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("DEP_ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
             .env("CARGO_FEATURE_MICROVM", "1")

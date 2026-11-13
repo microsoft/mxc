@@ -6,21 +6,21 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// <summary>Invocation controls for Run and RunAsync.</summary>
 public sealed class RunOptions
 {
-    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
 
 /// <summary>Invocation controls for Spawn and SpawnAsync.</summary>
 public sealed class SpawnOptions
 {
-    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
 
 /// <summary>Invocation controls for spawning a caller-controlled terminal.</summary>
 public sealed class SpawnWithPtyOptions
 {
-    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 
     /// <summary>Optional initial terminal dimensions; defaults to 24 rows by 80 columns.</summary>

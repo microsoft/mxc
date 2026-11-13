@@ -301,8 +301,8 @@ that can be executed independently.
     },
 
     "telemetry": {                         // Telemetry (Windows only)
-        "enabled": true                    // Request emission for this run; MXC-owned user consent
-                                           // and a permitting administrative policy are also required
+        "enabled": true                    // Accepted for compatibility; does not control
+                                           // the four Required events on supported Windows builds
     },
 
     "wslc": {                              // WSL Container settings (v0.9+)

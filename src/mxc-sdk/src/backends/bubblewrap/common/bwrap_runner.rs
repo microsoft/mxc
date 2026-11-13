@@ -727,7 +727,7 @@ impl BubblewrapScriptRunner {
 
         // Keep namespace init in the killable group before parent-death cleanup is armed.
         // SAFETY: setsid is async-signal-safe and runs only in the forked child.
-        if stdio == StdioMode::Pipes {
+        if stdio == StdioMode::Pipes || (stdio == StdioMode::Inherit && network_startup.is_some()) {
             unsafe {
                 command.pre_exec(|| {
                     nix::unistd::setsid()
@@ -764,7 +764,7 @@ impl BubblewrapScriptRunner {
                 network.userns_handed_off();
             }
             let startup_result = startup
-                .child_pid(&mut child)
+                .child_pid(&child)
                 .map_err(|error| {
                     format!(
                         "{error}. If Bubblewrap cannot create a network namespace, \
@@ -779,9 +779,20 @@ impl BubblewrapScriptRunner {
                     network.check_alive()
                 })
                 .and_then(|()| startup.release());
-            if let Err(error) = startup_result {
-                let _ = child.kill();
-                let _ = child.wait();
+
+            // Closing --block-fd releases the child before --die-with-parent is armed.
+            if let Err(mut error) = startup_result {
+                if let Err(cleanup_error) = group_kill(&mut child) {
+                    error.push_str(&format!(
+                        "; failed to terminate Bubblewrap startup: {cleanup_error}"
+                    ));
+                }
+                if let Err(cleanup_error) = child.wait() {
+                    error.push_str(&format!(
+                        "; failed to reap Bubblewrap startup: {cleanup_error}"
+                    ));
+                }
+                drop(startup);
                 let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
                     Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
                     Ok(_) => error,
@@ -871,9 +882,8 @@ struct BwrapChild {
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
     pty: Option<LivePty>,
-    /// `true` when bwrap leads its own process group (`Pipes` or `Pty`), so
-    /// termination signals the whole group; `false` for `Inherit` mode, where
-    /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
+
+    /// Whether the running workload stays in Bubblewrap's process group.
     group: bool,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     monitor: Option<ProviderMonitor>,
@@ -1141,14 +1151,8 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             return Ok(());
         }
         if self.inner.group {
-            // Pipes and PTY modes give bwrap its own process group.
             group_kill(&mut child)
         } else {
-            // Inherit mode: bwrap shares the executor's group (no
-            // `process_group(0)`), so a group-kill would hit the executor.
-            // Killing bwrap alone suffices because `--die-with-parent` makes
-            // the sandbox die with it — bwrap is *not* pid 1 of the namespace
-            // (it forks), so without that flag descendants would survive.
             child.kill()
         }
     }

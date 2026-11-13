@@ -54,7 +54,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 ///
 /// Changing this strands whatever a running daemon is holding, since the SDK
 /// offers no way to re-attach to a live session from another process.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Largest payload one [`StreamFrame::Stdin`] may carry.
 pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;
@@ -172,6 +172,10 @@ pub struct ProvisionConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub session_ref: Option<String>,
+
+    /// Cooperative proxy URL applied to every exec in this container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<String>,
 }
 
 /// Inputs to `start`: the container was created at provision; start boots it.
@@ -199,7 +203,8 @@ pub struct ExecConfig {
     /// Working directory inside the container (empty = container default).
     #[serde(default)]
     pub working_directory: String,
-    /// Environment variables applied to the process, as `(name, value)` pairs.
+    /// Environment variables applied to the process, as `(name, value)` pairs,
+    /// before the daemon applies the cooperative proxy.
     #[serde(default)]
     pub env: Vec<(String, String)>,
 
@@ -215,6 +220,11 @@ pub struct ExecConfig {
     /// immediately.
     #[serde(default)]
     pub stdin: bool,
+
+    /// This exec's cooperative proxy URL. It must match the one set at
+    /// provision, if any; absent uses that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<String>,
 }
 
 /// Inputs to `stop`: stop the running container, keeping it created for a later
@@ -548,6 +558,7 @@ mod tests {
                 container_port: 80,
             }],
             session_ref: Some("wslcsess:abc".to_string()),
+            network_proxy: None,
         }));
     }
 
@@ -566,6 +577,7 @@ mod tests {
             env_scope: EnvScope::Replace,
             timeout_ms: 30_000,
             stdin: true,
+            network_proxy: None,
         }));
         roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
             exec_id: "exec-1".to_string(),
@@ -613,6 +625,7 @@ mod tests {
             env_scope: EnvScope::Replace,
             timeout_ms: 0,
             stdin: false,
+            network_proxy: None,
         };
 
         let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
@@ -688,6 +701,7 @@ mod tests {
             network: NetworkMode::None,
             port_mappings: Vec::new(),
             session_ref: None,
+            network_proxy: None,
         })
         .expect("serialize");
 

@@ -533,11 +533,7 @@ fn run_state_aware_main(
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
 
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
@@ -1307,10 +1303,7 @@ fn main() {
         learning_mode,
         &mut logger,
     );
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still

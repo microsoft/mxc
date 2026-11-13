@@ -173,10 +173,12 @@ features. See the backend documentation under
 host prerequisites and enforcement details.
 
 Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
-leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
-explicitly disables it. Opt-in remains
-subject to MXC's persisted user consent and administrative policy.
+`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. These
+preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `enabled: Some(false)`, consent, or policy.
+Consent-management APIs retain their stored-state behavior; they do not
+disable Required collection. See [Telemetry](../../docs/telemetry.md).
 
 Filesystem discovery helpers and their result/options types live under
 `mxc_sdk::v1::policy::filesystem`. They take `environment: Option<&[(String, String)]>`;
