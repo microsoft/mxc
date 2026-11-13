@@ -319,6 +319,17 @@ function Invoke-NamedSuites {
     }
 }
 
+# Daemon discovery reuses any running daemon, including one another suite started.
+function Stop-WslcDaemons {
+    foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
+        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id) from an earlier suite."
+        Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+        if (-not $daemon.WaitForExit(30000)) {
+            throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
+        }
+    }
+}
+
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
     foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
@@ -348,9 +359,28 @@ function Invoke-WslcSuites {
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
+        'Node' = {
+            Stop-WslcDaemons
+            Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' `
+                -RequiredTests @('V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership',
+                    'captured exec preserves structured post-admission wait failures',
+                    'process wait preserves structured post-admission wait failures')
+        }
+        'Node create-and-run' = {
+            Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' `
+                -RequiredTests @('should reject an unsupported targetOs before starting a container',
+                    'captured run preserves structured post-admission wait failures',
+                    'spawned process wait preserves structured post-admission wait failures')
+        }
+        'C#' = {
+            Stop-WslcDaemons
+            Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' `
+                -RequiredMethods @('DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership',
+                    'RunInContainer_PreservesStructuredPostAdmissionWaitFailure',
+                    'SpawnInContainer_WaitPreservesStructuredPostAdmissionWaitFailure',
+                    'Run_PreservesStructuredPostAdmissionWaitFailure',
+                    'Spawn_WaitPreservesStructuredPostAdmissionWaitFailure')
+        }
     })
 }
 

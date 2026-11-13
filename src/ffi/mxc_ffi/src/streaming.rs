@@ -70,7 +70,9 @@ use std::ptr;
 use mxc_sdk::__ffi::{spawn_container_json, spawn_container_with_stdin_json};
 use mxc_sdk::mxc_common::models::SandboxOutputMetadata;
 use mxc_sdk::mxc_common::sandbox_process::NativeStdio;
-use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
+use mxc_sdk::v1::{
+    Error, ErrorCode, MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult,
+};
 
 use crate::{
     alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
@@ -116,6 +118,8 @@ impl MxcSandbox {
     }
 }
 
+pub(crate) type DetailedWaitResult<T> = Result<T, Error>;
+
 pub(crate) trait LiveSandbox: Send {
     fn warnings(&self) -> Vec<String>;
     fn output_metadata(&self) -> Option<SandboxOutputMetadata>;
@@ -126,10 +130,31 @@ pub(crate) trait LiveSandbox: Send {
     fn stdout_closer(&self) -> Option<StreamCloser>;
     fn stderr_closer(&self) -> Option<StreamCloser>;
     fn try_wait(&mut self) -> std::io::Result<Option<i32>>;
+    fn try_wait_detailed(&mut self) -> DetailedWaitResult<Option<WaitResult>> {
+        match self.try_wait() {
+            Ok(Some(code)) => Ok(Some(WaitResult::Exited(code))),
+            Ok(None) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                Ok(Some(WaitResult::TimedOut))
+            }
+            Err(error) => Err(Error::new(
+                ErrorCode::BackendError,
+                format!("querying the sandbox process status failed: {error}"),
+            )),
+        }
+    }
     fn id(&self) -> u32;
     fn kill(&mut self) -> std::io::Result<()>;
     fn kill_for_timeout(&mut self) -> std::io::Result<()>;
     fn wait(&mut self) -> std::io::Result<WaitResult>;
+    fn wait_detailed(&mut self) -> DetailedWaitResult<WaitResult> {
+        self.wait().map_err(|error| {
+            Error::new(
+                ErrorCode::BackendError,
+                format!("waiting for the sandbox process failed: {error}"),
+            )
+        })
+    }
     fn resize_pty(&self, _size: MxcPtySize) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -175,6 +200,10 @@ impl LiveSandbox for MxcProcess {
         self.try_wait()
     }
 
+    fn try_wait_detailed(&mut self) -> DetailedWaitResult<Option<WaitResult>> {
+        MxcProcess::try_wait_detailed(self)
+    }
+
     fn id(&self) -> u32 {
         self.id()
     }
@@ -189,6 +218,10 @@ impl LiveSandbox for MxcProcess {
 
     fn wait(&mut self) -> std::io::Result<WaitResult> {
         self.wait()
+    }
+
+    fn wait_detailed(&mut self) -> DetailedWaitResult<WaitResult> {
+        MxcProcess::wait_detailed(self)
     }
 }
 
@@ -1050,7 +1083,7 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
-        match try_wait_result_to_abi(sandbox.inner.try_wait()) {
+        match try_wait_result_to_abi(sandbox.inner.try_wait_detailed()) {
             Ok((exit, running, timed_out)) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
@@ -1060,7 +1093,7 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
                 }
                 MXC_STATUS_SUCCESS
             }
-            Err(status) => status,
+            Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
     status.unwrap_or_else(|panic| {
@@ -1069,12 +1102,82 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
     })
 }
 
-fn try_wait_result_to_abi(result: std::io::Result<Option<i32>>) -> Result<(i32, i32, i32), i32> {
+fn try_wait_result_to_abi(
+    result: DetailedWaitResult<Option<WaitResult>>,
+) -> DetailedWaitResult<(i32, i32, i32)> {
     match result {
-        Ok(Some(code)) => Ok((code, 0, 0)),
+        Ok(Some(WaitResult::Exited(code))) => Ok((code, 0, 0)),
+        Ok(Some(WaitResult::TimedOut)) => Ok((-1, 0, 1)),
         Ok(None) => Ok((0, 1, 0)),
-        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok((-1, 0, 1)),
-        Err(_) => Err(MXC_STATUS_BACKEND_ERROR),
+        Err(error) => Err(error),
+    }
+}
+
+/// Non-blocking completion check that preserves structured wait failures.
+///
+/// `out_error` may be null. A non-null detail must be freed with
+/// [`crate::mxc_error_detail_free`].
+///
+/// # Safety
+/// `handle` and the numeric outputs follow [`mxc_sandbox_try_wait`]'s contract.
+/// `out_error`, when non-null, must point to writable [`MxcErrorDetail`] storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_try_wait_with_error(
+    handle: *mut MxcSandbox,
+    out_exit: *mut i32,
+    out_running: *mut i32,
+    out_timed_out: *mut i32,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    unsafe {
+        if !out_exit.is_null() {
+            *out_exit = 0;
+        }
+        if !out_running.is_null() {
+            *out_running = 0;
+        }
+        if !out_timed_out.is_null() {
+            *out_timed_out = 0;
+        }
+        if !out_error.is_null() {
+            ptr::write(out_error, MxcErrorDetail::none());
+        }
+    }
+    if handle.is_null() || out_exit.is_null() || out_running.is_null() || out_timed_out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let sandbox = unsafe { &mut *handle };
+        try_wait_result_to_abi(sandbox.inner.try_wait_detailed())
+    }));
+    match outcome {
+        Ok(Ok((exit, running, timed_out))) => {
+            unsafe {
+                *out_exit = exit;
+                *out_running = running;
+                *out_timed_out = timed_out;
+            }
+            MXC_STATUS_SUCCESS
+        }
+        Ok(Err(error)) => {
+            if !out_error.is_null() {
+                unsafe { ptr::write(out_error, MxcErrorDetail::from_error(&error)) };
+            }
+            status_from_error_code(error.code)
+        }
+        Err(panic) => {
+            crate::report_panic("mxc_sandbox_try_wait_with_error", &*panic);
+            if !out_error.is_null() {
+                unsafe {
+                    ptr::write(
+                        out_error,
+                        MxcErrorDetail::from_message("the mxc engine panicked"),
+                    )
+                };
+            }
+            MXC_STATUS_PANIC
+        }
     }
 }
 
@@ -1109,20 +1212,12 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
-        match sandbox.inner.wait() {
-            Ok(WaitResult::Exited(code)) => {
+        match wait_result_to_abi(sandbox.inner.wait_detailed()) {
+            Ok((code, timed_out)) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
                     *out_exit = code;
-                    *out_timed_out = 0;
-                }
-                MXC_STATUS_SUCCESS
-            }
-            Ok(WaitResult::TimedOut) => {
-                // SAFETY: out-params non-null writable per the caller contract.
-                unsafe {
-                    *out_exit = -1;
-                    *out_timed_out = 1;
+                    *out_timed_out = timed_out;
                 }
                 MXC_STATUS_SUCCESS
             }
@@ -1133,6 +1228,77 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
         crate::report_panic("mxc_sandbox_wait", &*panic);
         MXC_STATUS_PANIC
     })
+}
+
+fn wait_result_to_abi(result: DetailedWaitResult<WaitResult>) -> DetailedWaitResult<(i32, i32)> {
+    match result {
+        Ok(WaitResult::Exited(code)) => Ok((code, 0)),
+        Ok(WaitResult::TimedOut) => Ok((-1, 1)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Blocking wait that preserves structured backend failures.
+///
+/// `out_error` may be null. A non-null detail must be freed with
+/// [`crate::mxc_error_detail_free`].
+///
+/// # Safety
+/// `handle` and the numeric outputs follow [`mxc_sandbox_wait`]'s contract.
+/// `out_error`, when non-null, must point to writable [`MxcErrorDetail`] storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_wait_with_error(
+    handle: *mut MxcSandbox,
+    out_exit: *mut i32,
+    out_timed_out: *mut i32,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    unsafe {
+        if !out_exit.is_null() {
+            *out_exit = 0;
+        }
+        if !out_timed_out.is_null() {
+            *out_timed_out = 0;
+        }
+        if !out_error.is_null() {
+            ptr::write(out_error, MxcErrorDetail::none());
+        }
+    }
+    if handle.is_null() || out_exit.is_null() || out_timed_out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let sandbox = unsafe { &mut *handle };
+        wait_result_to_abi(sandbox.inner.wait_detailed())
+    }));
+    match outcome {
+        Ok(Ok((exit, timed_out))) => {
+            unsafe {
+                *out_exit = exit;
+                *out_timed_out = timed_out;
+            }
+            MXC_STATUS_SUCCESS
+        }
+        Ok(Err(error)) => {
+            if !out_error.is_null() {
+                unsafe { ptr::write(out_error, MxcErrorDetail::from_error(&error)) };
+            }
+            status_from_error_code(error.code)
+        }
+        Err(panic) => {
+            crate::report_panic("mxc_sandbox_wait_with_error", &*panic);
+            if !out_error.is_null() {
+                unsafe {
+                    ptr::write(
+                        out_error,
+                        MxcErrorDetail::from_message("the mxc engine panicked"),
+                    )
+                };
+            }
+            MXC_STATUS_PANIC
+        }
+    }
 }
 
 /// Kill the child and its whole process tree. Reaping happens in a subsequent
@@ -1276,27 +1442,284 @@ pub unsafe extern "C" fn mxc_stream_closer_free(closer: *mut MxcStreamCloser) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{CStr, CString};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn try_wait_preserves_timeout_as_a_terminal_outcome() {
-        assert_eq!(try_wait_result_to_abi(Ok(Some(42))), Ok((42, 0, 0)));
+        assert_eq!(
+            try_wait_result_to_abi(Ok(Some(WaitResult::Exited(42)))),
+            Ok((42, 0, 0))
+        );
         assert_eq!(try_wait_result_to_abi(Ok(None)), Ok((0, 1, 0)));
         assert_eq!(
-            try_wait_result_to_abi(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "deadline elapsed"
-            ))),
+            try_wait_result_to_abi(Ok(Some(WaitResult::TimedOut))),
             Ok((-1, 0, 1))
         );
+        let error = Error::new(ErrorCode::BackendError, "wait failed");
+        assert_eq!(try_wait_result_to_abi(Err(error.clone())), Err(error));
+    }
+    use crate::MXC_STATUS_MALFORMED_REQUEST;
+
+    fn error_field(value: *mut c_char) -> Option<String> {
+        (!value.is_null()).then(|| {
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    fn assert_test_wait_error(detail: &MxcErrorDetail) {
         assert_eq!(
-            try_wait_result_to_abi(Err(std::io::Error::other("wait failed"))),
-            Err(MXC_STATUS_BACKEND_ERROR)
+            error_field(detail.message_utf8).as_deref(),
+            Some("test process wait failed")
+        );
+        assert_eq!(
+            error_field(detail.operation_utf8).as_deref(),
+            Some("TestSandbox.Wait")
+        );
+        assert_eq!(
+            error_field(detail.native_code_utf8).as_deref(),
+            Some("0x80004005")
+        );
+        assert_eq!(
+            error_field(detail.remediation_utf8).as_deref(),
+            Some("Retry the test process wait.")
         );
     }
-    use std::ffi::CString;
 
-    use crate::MXC_STATUS_MALFORMED_REQUEST;
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn detailed_try_wait_preserves_fields_and_legacy_status() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::test_fake_sandbox::mxc_test_fake_sandbox_new_try_wait_failure(&mut handle)
+            },
+            MXC_STATUS_SUCCESS
+        );
+
+        for _ in 0..2 {
+            let mut exit = 91;
+            let mut running = 92;
+            let mut timed_out = 93;
+            let mut detail = MxcErrorDetail::none();
+            let status = unsafe {
+                mxc_sandbox_try_wait_with_error(
+                    handle,
+                    &mut exit,
+                    &mut running,
+                    &mut timed_out,
+                    &mut detail,
+                )
+            };
+
+            assert_eq!(status, MXC_STATUS_BACKEND_UNAVAILABLE);
+            assert_eq!((exit, running, timed_out), (0, 0, 0));
+            assert_test_wait_error(&detail);
+            unsafe { crate::mxc_error_detail_free(&mut detail) };
+            assert!(detail.message_utf8.is_null());
+        }
+
+        let mut exit = 91;
+        let mut running = 92;
+        let mut timed_out = 93;
+        assert_eq!(
+            unsafe { mxc_sandbox_try_wait(handle, &mut exit, &mut running, &mut timed_out) },
+            MXC_STATUS_BACKEND_ERROR
+        );
+        assert_eq!((exit, running, timed_out), (0, 0, 0));
+
+        unsafe { mxc_sandbox_free(handle) };
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn detailed_wait_preserves_fields_after_a_running_poll() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::test_fake_sandbox::mxc_test_fake_sandbox_new_wait_failure(&mut handle)
+            },
+            MXC_STATUS_SUCCESS
+        );
+
+        let mut exit = 91;
+        let mut running = 92;
+        let mut timed_out = 93;
+        let mut detail = MxcErrorDetail::none();
+        assert_eq!(
+            unsafe {
+                mxc_sandbox_try_wait_with_error(
+                    handle,
+                    &mut exit,
+                    &mut running,
+                    &mut timed_out,
+                    &mut detail,
+                )
+            },
+            MXC_STATUS_SUCCESS
+        );
+        assert_eq!((exit, running, timed_out), (0, 1, 0));
+        assert!(detail.message_utf8.is_null());
+
+        assert_eq!(
+            unsafe {
+                mxc_sandbox_try_wait_with_error(
+                    handle,
+                    &mut exit,
+                    &mut running,
+                    &mut timed_out,
+                    ptr::null_mut(),
+                )
+            },
+            MXC_STATUS_SUCCESS
+        );
+        assert_eq!((exit, running, timed_out), (23, 0, 0));
+
+        for _ in 0..2 {
+            let mut detail = MxcErrorDetail::none();
+            assert_eq!(
+                unsafe {
+                    mxc_sandbox_wait_with_error(handle, &mut exit, &mut timed_out, &mut detail)
+                },
+                MXC_STATUS_BACKEND_UNAVAILABLE
+            );
+            assert_eq!((exit, timed_out), (0, 0));
+            assert_test_wait_error(&detail);
+            unsafe { crate::mxc_error_detail_free(&mut detail) };
+        }
+
+        assert_eq!(
+            unsafe { mxc_sandbox_wait(handle, &mut exit, &mut timed_out) },
+            MXC_STATUS_BACKEND_ERROR
+        );
+        assert_eq!((exit, timed_out), (0, 0));
+
+        unsafe { mxc_sandbox_free(handle) };
+    }
+
+    #[test]
+    fn detailed_wait_initializes_outputs_before_rejecting_a_null_handle() {
+        let mut exit = 91;
+        let mut running = 92;
+        let mut timed_out = 93;
+        let mut detail = MxcErrorDetail::none();
+        assert_eq!(
+            unsafe {
+                mxc_sandbox_try_wait_with_error(
+                    ptr::null_mut(),
+                    &mut exit,
+                    &mut running,
+                    &mut timed_out,
+                    &mut detail,
+                )
+            },
+            MXC_STATUS_NULL_ARGUMENT
+        );
+        assert_eq!((exit, running, timed_out), (0, 0, 0));
+        assert!(detail.message_utf8.is_null());
+    }
+
+    struct PanicWaitSandbox;
+
+    impl LiveSandbox for PanicWaitSandbox {
+        fn warnings(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn output_metadata(&self) -> Option<SandboxOutputMetadata> {
+            None
+        }
+
+        fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+            Ok(None)
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn stdout_closer(&self) -> Option<StreamCloser> {
+            None
+        }
+
+        fn stderr_closer(&self) -> Option<StreamCloser> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            panic!("forced try-wait panic")
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<WaitResult> {
+            panic!("forced wait panic")
+        }
+    }
+
+    #[test]
+    fn detailed_wait_catches_panics_and_sets_error_detail() {
+        let mut handle = MxcSandbox {
+            inner: Box::new(PanicWaitSandbox),
+        };
+        let mut exit = 91;
+        let mut running = 92;
+        let mut timed_out = 93;
+        let mut detail = MxcErrorDetail::none();
+
+        assert_eq!(
+            unsafe {
+                mxc_sandbox_try_wait_with_error(
+                    &mut handle,
+                    &mut exit,
+                    &mut running,
+                    &mut timed_out,
+                    &mut detail,
+                )
+            },
+            MXC_STATUS_PANIC
+        );
+        assert_eq!((exit, running, timed_out), (0, 0, 0));
+        assert_eq!(
+            error_field(detail.message_utf8).as_deref(),
+            Some("the mxc engine panicked")
+        );
+        unsafe { crate::mxc_error_detail_free(&mut detail) };
+
+        assert_eq!(
+            unsafe {
+                mxc_sandbox_wait_with_error(&mut handle, &mut exit, &mut timed_out, &mut detail)
+            },
+            MXC_STATUS_PANIC
+        );
+        assert_eq!((exit, timed_out), (0, 0));
+        assert_eq!(
+            error_field(detail.message_utf8).as_deref(),
+            Some("the mxc engine panicked")
+        );
+        unsafe { crate::mxc_error_detail_free(&mut detail) };
+    }
 
     static NEXT_CONTAINER_ID: AtomicU64 = AtomicU64::new(0);
 

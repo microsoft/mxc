@@ -1,0 +1,15 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-test-hook-marker",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "true # mxc-test-force-wslc-get-exit-code-failure"
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest"
+  }
+}

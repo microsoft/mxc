@@ -15,6 +15,9 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcContainerWslcE2ETests
 {
+    private const string ForcedWaitFailureCommand =
+        "true # mxc-test-force-wslc-get-exit-code-failure";
+
     private static void RequireWslc()
     {
 #if MXC_WITH_WSLC
@@ -26,11 +29,18 @@ public class MxcContainerWslcE2ETests
 #endif
     }
 
-    private static ContainerRequest Request(string command) => new(command)
+    private static ContainerRequest Request(string command, string? containerName = null) => new(command)
     {
         TimeoutMs = 60_000,
+        ContainerName = containerName,
         Containment = new Containment.Wslc(),
     };
+
+    private static string UniqueContainerName() => $"mxc-wait-{Guid.NewGuid():N}";
+
+    // WSLc refuses a session name that is still in use.
+    private static void AssertContainerNameReleased(string containerName, string marker) =>
+        Assert.Equal(marker, MxcContainer.Run(Request($"echo {marker}", containerName)).Stdout.Trim());
 
     [Fact]
     public async Task SpawnWithStdin_ForwardsEveryByteAndClosingStdinEndsInput()
@@ -329,5 +339,65 @@ public class MxcContainerWslcE2ETests
         Assert.False(run.TimedOut, "a captured run has no input to wait for");
         Assert.Equal(0, run.ExitCode);
         Assert.Equal("RUN-SAW-EOF", run.Stdout.Trim());
+    }
+
+    [Fact]
+    public void Run_PreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        var containerName = UniqueContainerName();
+
+        var error = Assert.Throws<MxcException>(() =>
+            MxcContainer.Run(Request(ForcedWaitFailureCommand, containerName)));
+
+        AssertForcedWaitFailure(error);
+        AssertContainerNameReleased(containerName, "RUN-RECOVERED");
+    }
+
+    [Fact]
+    public async Task Spawn_WaitPreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        var containerName = UniqueContainerName();
+
+        using (var process = MxcContainer.Spawn(Request(ForcedWaitFailureCommand, containerName)))
+        {
+            AssertForcedWaitFailure(PollForWaitFailure(process));
+            AssertForcedWaitFailure(Assert.Throws<MxcException>(() => process.Wait()));
+            AssertForcedWaitFailure(await Assert.ThrowsAsync<MxcException>(
+                () => process.WaitAsync(TestContext.Current.CancellationToken)));
+        }
+
+        AssertContainerNameReleased(containerName, "PROCESS-RECOVERED");
+    }
+
+    private static MxcException PollForWaitFailure(MxcProcess process)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (true)
+        {
+            try
+            {
+                Assert.False(process.TryGetExitCode(out var exitCode), $"the poll reported exit code {exitCode}");
+            }
+            catch (MxcException error)
+            {
+                return error;
+            }
+
+            Assert.True(DateTime.UtcNow < deadline, "the poll did not report the wait failure within 60 s");
+            Thread.Sleep(100);
+        }
+    }
+
+    private static void AssertForcedWaitFailure(MxcException error)
+    {
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Equal(
+            "WslcGetProcessExitCode failed: HRESULT 0x80004005",
+            error.Message);
+        Assert.Equal("WslcGetProcessExitCode", error.Operation);
+        Assert.Equal("0x80004005", error.NativeCode);
+        Assert.Null(error.Remediation);
     }
 }

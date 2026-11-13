@@ -378,6 +378,21 @@ impl MxcProcess {
         self.inner.try_wait()
     }
 
+    /// Non-blocking terminal check that preserves structured backend failures.
+    pub fn try_wait_detailed(&mut self) -> Result<Option<WaitResult>, Error> {
+        match self.inner.try_wait() {
+            Ok(Some(code)) => Ok(Some(WaitResult::Exited(code))),
+            Ok(None) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                Ok(Some(WaitResult::TimedOut))
+            }
+            Err(error) => Err(detailed_wait_error(
+                error,
+                "querying the sandbox process status failed",
+            )),
+        }
+    }
+
     /// The child's process id.
     pub fn id(&self) -> u32 {
         self.inner.id()
@@ -409,6 +424,18 @@ impl MxcProcess {
         }
     }
 
+    /// Wait for the child to finish while preserving structured backend failures.
+    pub fn wait_detailed(&mut self) -> Result<WaitResult, Error> {
+        match self.inner.wait() {
+            Ok(code) => Ok(WaitResult::Exited(code)),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(WaitResult::TimedOut),
+            Err(error) => Err(detailed_wait_error(
+                error,
+                "waiting for the sandbox process failed",
+            )),
+        }
+    }
+
     /// Wait for the child to exit, capturing its stdout and stderr.
     ///
     /// The safe alternative to [`take_stdout`](Self::take_stdout) +
@@ -420,7 +447,28 @@ impl MxcProcess {
     /// as [`ExecutionResult`] with `outcome: WaitResult::TimedOut` and whatever each
     /// stream captured before cancellation. Timeout and wait failures cancel
     /// outstanding reads so descendants retaining pipe ends cannot block capture.
-    pub fn wait_with_output(mut self) -> std::io::Result<ExecutionResult> {
+    pub fn wait_with_output(self) -> std::io::Result<ExecutionResult> {
+        self.wait_with_output_impl(|process| process.wait(), |_, error| error)
+    }
+
+    /// Capture stdout and stderr while preserving structured backend wait failures.
+    pub fn wait_with_output_detailed(self) -> Result<ExecutionResult, Error> {
+        self.wait_with_output_impl(
+            |process| process.wait_detailed(),
+            |stream, error| {
+                Error::new(
+                    crate::ErrorCode::BackendError,
+                    format!("reading sandbox {stream} failed: {error}"),
+                )
+            },
+        )
+    }
+
+    fn wait_with_output_impl<E>(
+        mut self,
+        wait: impl FnOnce(&mut Self) -> Result<WaitResult, E>,
+        map_output_error: impl Fn(&str, std::io::Error) -> E,
+    ) -> Result<ExecutionResult, E> {
         fn capture(
             stream: Option<Box<dyn Read + Send>>,
         ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
@@ -439,7 +487,7 @@ impl MxcProcess {
         let stderr_closer = self.stderr_closer();
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
-        let outcome = self.wait();
+        let outcome = wait(&mut self);
         // Sampled after the wait: a backend whose teardown runs there reports
         // its failures here.
         let warnings = self.inner.warnings();
@@ -466,10 +514,20 @@ impl MxcProcess {
         Ok(ExecutionResult {
             outcome: outcome?,
             warnings,
-            stdout: stdout?,
-            stderr: stderr?,
+            stdout: stdout.map_err(|error| map_output_error("stdout", error))?,
+            stderr: stderr.map_err(|error| map_output_error("stderr", error))?,
             output_metadata,
         })
+    }
+}
+
+fn detailed_wait_error(error: std::io::Error, context: &str) -> Error {
+    match crate::mxc_common::mxc_error::from_io_error(&error) {
+        Some(error) => error.into(),
+        None => Error::new(
+            crate::ErrorCode::BackendError,
+            format!("{context}: {error}"),
+        ),
     }
 }
 
@@ -749,6 +807,7 @@ impl StreamCloser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::mxc_error::{ApiFailure, MxcError};
 
     struct FakeProcess {
         warnings: Vec<String>,
@@ -803,6 +862,11 @@ mod tests {
     }
 
     struct NativeOnlyFake;
+
+    struct StructuredWaitErrorFake {
+        error: MxcError,
+        stdout: Option<Box<dyn Read + Send>>,
+    }
 
     impl SandboxProcess for NativeOnlyFake {
         fn warnings(&self) -> Vec<String> {
@@ -903,6 +967,49 @@ mod tests {
         }
     }
 
+    impl SandboxProcess for StructuredWaitErrorFake {
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.stdout.take()
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Err(crate::mxc_common::mxc_error::into_io_error(
+                self.error.clone(),
+            ))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Err(crate::mxc_common::mxc_error::into_io_error(
+                self.error.clone(),
+            ))
+        }
+    }
+
+    fn structured_wait_error() -> MxcError {
+        MxcError::backend_unavailable("the process status is unavailable")
+            .with_details(serde_json::json!({"phase": "wait"}))
+            .with_api_failure(
+                ApiFailure::new("WslcGetProcessExitCode").with_native_code("0x80004005"),
+            )
+            .with_remediation("Retry the process wait.")
+    }
+
     #[test]
     fn sandbox_and_output_expose_security_warnings() {
         let warning = "permissive mode weakens containment".to_string();
@@ -998,6 +1105,71 @@ mod tests {
         }));
         let error = sandbox.wait_with_output().expect_err("read must fail");
         assert_eq!(error.to_string(), "capture read failed");
+    }
+
+    #[test]
+    fn detailed_wait_methods_preserve_structured_backend_errors() {
+        let expected = Error::from(structured_wait_error());
+        let mut process = MxcProcess::new(Box::new(StructuredWaitErrorFake {
+            error: structured_wait_error(),
+            stdout: None,
+        }));
+
+        assert_eq!(
+            process
+                .try_wait_detailed()
+                .expect_err("polling must preserve the failure"),
+            expected
+        );
+        assert_eq!(
+            process
+                .wait_detailed()
+                .expect_err("waiting must preserve the failure"),
+            expected
+        );
+
+        let legacy = process.wait().expect_err("legacy wait still fails");
+        assert_eq!(legacy.kind(), std::io::ErrorKind::Other);
+        assert_eq!(legacy.to_string(), expected.message);
+    }
+
+    #[test]
+    fn detailed_capture_prefers_the_wait_failure_over_a_read_failure() {
+        let expected = Error::from(structured_wait_error());
+        let process = MxcProcess::new(Box::new(StructuredWaitErrorFake {
+            error: structured_wait_error(),
+            stdout: Some(Box::new(FailedReader)),
+        }));
+
+        assert_eq!(
+            process
+                .wait_with_output_detailed()
+                .expect_err("the structured wait failure wins"),
+            expected
+        );
+    }
+
+    #[test]
+    fn detailed_capture_contextualizes_output_read_failures() {
+        let process = MxcProcess::new(Box::new(FakeProcess {
+            warnings: Vec::new(),
+            wait_warning: None,
+            output_metadata: None,
+            stdout: Some(Box::new(FailedReader)),
+            release_output: None,
+            output_closer: None,
+            timed_out: false,
+        }));
+
+        let error = process
+            .wait_with_output_detailed()
+            .expect_err("read must fail");
+
+        assert_eq!(error.code, crate::ErrorCode::BackendError);
+        assert_eq!(
+            error.message,
+            "reading sandbox stdout failed: capture read failed"
+        );
     }
 
     #[test]

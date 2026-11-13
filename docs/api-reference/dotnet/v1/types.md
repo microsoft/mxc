@@ -725,6 +725,13 @@ public class MxcProcess : IMxcProcess
 ```
 
 
+`TryGetExitCode`, `Wait`, `WaitAsync`, and `WaitForExitWithOutputAsync` throw
+`MxcException` when MXC cannot obtain a terminal process result after
+admission. The exception preserves `Code`, `Message`, `Operation`,
+`NativeCode`, and `Remediation`; the failure is not converted into an exit
+code. `MxcPtyProcess` does not preserve these fields.
+
+
 ## `Microsoft.Mxc.Sdk.V1.MxcPtyProcess`
 
 A live container process attached to a caller-driven pseudo-terminal.

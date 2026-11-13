@@ -512,20 +512,33 @@ public class MxcProcess : IMxcProcess
             var running = 1;
             var nativeExitCode = 0;
             var nativeTimedOut = 0;
-            int status;
-            unsafe
+            MxcErrorDetail error = default;
+            try
             {
-                status = NativeMethods.mxc_sandbox_try_wait(
-                    _handle.Ptr,
-                    &nativeExitCode,
-                    &running,
-                    &nativeTimedOut);
+                int status;
+                unsafe
+                {
+                    status = NativeMethods.mxc_sandbox_try_wait_with_error(
+                        _handle.Ptr,
+                        &nativeExitCode,
+                        &running,
+                        &nativeTimedOut,
+                        &error);
+                }
+                if (status != (int)ErrorCode.Success)
+                {
+                    throw NativeError.ToException(
+                        status,
+                        error,
+                        "querying the sandbox process status failed");
+                }
             }
-            if (status != (int)ErrorCode.Success)
+            finally
             {
-                throw new MxcException(
-                    (ErrorCode)status,
-                    "querying the sandbox process status failed");
+                unsafe
+                {
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
             }
             exitCode = nativeExitCode;
             timedOut = nativeTimedOut != 0;
@@ -679,23 +692,35 @@ public class MxcProcess : IMxcProcess
     {
         int exit = 0;
         int nativeTimedOut = 0;
-        int status;
+        MxcErrorDetail error = default;
         try
         {
+            int status;
             unsafe
             {
-                status = NativeMethods.mxc_sandbox_wait(_handle.Ptr, &exit, &nativeTimedOut);
+                status = NativeMethods.mxc_sandbox_wait_with_error(
+                    _handle.Ptr,
+                    &exit,
+                    &nativeTimedOut,
+                    &error);
             }
+            if (status != (int)ErrorCode.Success)
+            {
+                throw NativeError.ToException(
+                    status,
+                    error,
+                    "waiting on the sandbox failed");
+            }
+            return new WaitResult { ExitCode = exit, TimedOut = timedOut || nativeTimedOut != 0 };
         }
         finally
         {
+            unsafe
+            {
+                NativeMethods.mxc_error_detail_free(&error);
+            }
             EndFinishing();
         }
-        if (status != (int)ErrorCode.Success)
-        {
-            throw new MxcException((ErrorCode)status, "waiting on the sandbox failed");
-        }
-        return new WaitResult { ExitCode = exit, TimedOut = timedOut || nativeTimedOut != 0 };
     }
 
     // A Dispose during the native wait leaves the release to here, before any

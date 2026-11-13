@@ -76,6 +76,23 @@ function Invoke-CargoBuild {
     } | Where-Object { $_.reason -eq 'compiler-artifact' }
 }
 
+function Invoke-CargoDebugBuild {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    Push-Location $srcRoot
+    try {
+        $messages = Invoke-Checked "cargo $($Arguments -join ' ')" {
+            cargo @Arguments --locked --target $triple --message-format=json
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    $messages | ForEach-Object {
+        try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { }
+    } | Where-Object { $_.reason -eq 'compiler-artifact' }
+}
+
 function Get-CargoExecutable {
     param([object[]]$Artifacts, [string]$TargetName)
 
@@ -115,7 +132,18 @@ $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'is
 if (-not $nativeLibrary) {
     throw 'cargo reported no mxc_ffi.dll.'
 }
+$testNativeLibrary = Invoke-CargoDebugBuild @(
+    'build', '-p', 'mxc_ffi', '--features', 'isolation_session,wslc,test-support') |
+    Where-Object { $_.target.name -eq 'mxc_ffi' } |
+    ForEach-Object { $_.filenames } |
+    Where-Object { [IO.Path]::GetExtension($_) -eq '.dll' } |
+    Select-Object -Last 1
+if (-not $testNativeLibrary) {
+    throw 'cargo reported no test-support mxc_ffi.dll.'
+}
 $wslcDaemon = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'mxc-sdk', '--features', 'wslc', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
+$testWslcDaemon = Get-CargoExecutable (Invoke-CargoDebugBuild @(
+    'build', '-p', 'mxc-sdk', '--features', 'wslc,test-support', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
 
 # The wslc build feature stages the WSLC SDK library beside mxc_ffi.
 $wslcSdk = Join-Path (Split-Path -Parent $nativeLibrary) 'wslcsdk.dll'
@@ -145,6 +173,13 @@ if ($NuGetSource) {
     $publish += @('--source', $NuGetSource)
 }
 Invoke-Checked 'dotnet publish' { dotnet @publish }
+foreach ($source in $testNativeLibrary, $testWslcDaemon) {
+    $destination = Join-Path $dotnetOut (Split-Path -Leaf $source)
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+        throw "The published .NET test bundle did not stage $(Split-Path -Leaf $source)."
+    }
+}
 
 Copy-Item -LiteralPath $WxcExecPath -Destination (New-Directory (Join-Path $OutputDirectory "bin\$Architecture"))
 
@@ -189,6 +224,14 @@ foreach ($name in 'bin', 'dist', 'node_modules', 'package.json', 'LICENSE.md') {
         Copy-Item -LiteralPath $source -Destination $sdkOut -Recurse -Force
     }
 }
+$nodeSdkBin = Join-Path $sdkOut "bin\$Architecture"
+foreach ($source in $testNativeLibrary, $testWslcDaemon) {
+    $destination = Join-Path $nodeSdkBin (Split-Path -Leaf $source)
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+        throw "The Node integration bundle did not stage $(Split-Path -Leaf $source)."
+    }
+}
 
 $manifest = [ordered]@{
     format_version = 1
@@ -227,6 +270,7 @@ $required = @(
     'sdk-integration\dist\dev.test.js',
     'sdk-integration\dist\wslc-state-aware.test.js',
     'sdk-integration\dist\wslc-e2e.test.js',
+    "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc_ffi.dll",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wslcsdk.dll",
     'test_scripts\run_isolation_session_tests.ps1',
@@ -294,8 +338,20 @@ Assert-Discovery '.NET exact-JSON WSLC lifecycle tests' 'MxcLifecycleWslcE2ETest
 Assert-Discovery '.NET WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
 }
+foreach ($test in 'RunInContainer_PreservesStructuredPostAdmissionWaitFailure',
+    'SpawnInContainer_WaitPreservesStructuredPostAdmissionWaitFailure') {
+    Assert-Discovery ".NET WSLC $test" "MxcLifecycleWslcE2ETests\.${test}" {
+        & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
+    }
+}
 Assert-Discovery '.NET WSLC create-and-run tests' 'MxcContainerWslcE2ETests\.' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerWslcE2ETests'
+}
+foreach ($test in 'Run_PreservesStructuredPostAdmissionWaitFailure',
+    'Spawn_WaitPreservesStructuredPostAdmissionWaitFailure') {
+    Assert-Discovery ".NET WSLC $test" "MxcContainerWslcE2ETests\.${test}" {
+        & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerWslcE2ETests'
+    }
 }
 Push-Location $integrationOut
 $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
@@ -312,8 +368,20 @@ try {
     Assert-Discovery 'Node WSLC lifecycle suite' 'WSLC state-aware lifecycle E2E' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-state-aware.test.js
     }
+    foreach ($test in 'captured exec preserves structured post-admission wait failures',
+        'process wait preserves structured post-admission wait failures') {
+        if (-not (Select-String -LiteralPath 'dist/wslc-state-aware.test.js' -SimpleMatch $test -Quiet)) {
+            throw "The Node WSLC lifecycle payload is missing $test."
+        }
+    }
     Assert-Discovery 'Node WSLC create-and-run suite' 'WSLC SDK E2E' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-e2e.test.js
+    }
+    foreach ($test in 'captured run preserves structured post-admission wait failures',
+        'spawned process wait preserves structured post-admission wait failures') {
+        if (-not (Select-String -LiteralPath 'dist/wslc-e2e.test.js' -SimpleMatch $test -Quiet)) {
+            throw "The Node WSLC create-and-run payload is missing $test."
+        }
     }
 }
 finally {

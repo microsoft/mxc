@@ -323,7 +323,8 @@ administrative restriction. Options do not change the owned wire contract.
 and `validateProcess` use native dry-run validation and return no execution
 result. There is no `dryRun` execution option or public attached-exec API.
 Captured and streaming execution are asynchronous. Live processes own wait,
-kill, and disposal.
+kill, and disposal. A failure reported after exec admission but before MXC can
+confirm the terminal result is an operation failure, not an exit result.
 IsolationSession provides stdin, stdout, and stderr. WSLC provides stdout and
 stderr; only `spawnInContainerWithStdin` also gives it a writable stdin, as
 `spawnWithStdin` does for create-and-run execution.
@@ -955,6 +956,19 @@ enumerated codes surface as `backend_error` with structured information in `deta
 Process-runtime kill conditions (a script exceeding its `timeout`, a backend forcibly
 terminating a process) are not represented as typed wire-format errors. They surface as
 sentinel exit codes from the exec process, matching the existing one-shot convention.
+
+A backend can also fail while observing the process after admission. Captured
+execution and the .NET and Node live-process wait APIs preserve the resulting
+error code, message, operation, native code, and remediation instead of
+reporting a successful exit. PTY processes do not preserve these fields. Rust
+`MxcProcess::try_wait`, `wait`, and
+`wait_with_output` retain their existing `std::io::Error` contracts and
+message text. Their `*_detailed` counterparts return `mxc_sdk::v1::Error` with
+the structured fields intact.
+
+Once a live-process handle has observed a terminal failure, later wait calls
+replay that failure. The failure does not prove that the process exited, so the
+handle retains its termination path for an explicit kill or disposal cleanup.
 
 ### 8.2 Details payload
 
