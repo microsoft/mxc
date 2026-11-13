@@ -55,7 +55,7 @@ returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
 Creation takes `RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or
-`SpawnWithExtendedOptions` after the request. `SpawnWithPtyOptions.size`
+`SpawnExtendedOptions` after the request. `SpawnWithPtyOptions.size`
 carries initial dimensions and defaults to 24 rows by 80 columns.
 
 Set the request's typed `Containment` when a specific backend is required.
@@ -158,7 +158,7 @@ applications must use their own completion protocol. Untaken merged output is
 drained and discarded without waiting indefinitely for descendants that keep
 the terminal open. Ordinary `spawn` continues to use separate pipes.
 
-`v1::spawn_with_extended_options` takes `SpawnWithExtendedOptions`, which can
+`v1::spawn_with_extended_options` takes `SpawnExtendedOptions`, which can
 gain fields in V1. Its default `SpawnStdio::Pipes` behaves like `spawn`.
 `SpawnStdio::Inherit` attaches the workload to the calling process's own
 stdin, stdout, and stderr, such as a console, pseudo-console, or pipes the
@@ -167,9 +167,9 @@ ProcessContainer, Bubblewrap, and Seatbelt support it. The options and the
 enum are `#[non_exhaustive]`: start from `Default::default()` and assign fields.
 
 ```rust,no_run
-use mxc_sdk::v1::{self, SpawnStdio, SpawnWithExtendedOptions};
+use mxc_sdk::v1::{self, SpawnStdio, SpawnExtendedOptions};
 
-let mut options = SpawnWithExtendedOptions::default();
+let mut options = SpawnExtendedOptions::default();
 options.stdio = SpawnStdio::Inherit;
 let mut process = v1::spawn_with_extended_options(v1::ContainerRequest::new("echo hi"), options)?;
 process.wait()?;
@@ -192,7 +192,7 @@ features. See the backend documentation under
 host prerequisites and enforcement details.
 
 Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `RunOptions`,
-`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithExtendedOptions`, not
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`, not
 on `ContainerRequest`. Omission
 leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
 explicitly disables it. Opt-in remains

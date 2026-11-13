@@ -10,8 +10,8 @@ unknown fields, and malformed JSON.
 `JsonOptions { experimental: bool }` authorizes experimental backends
 independently of the JSON version. `PtyJsonOptions` also carries
 `size: MxcPtySize` (24 rows by 80 columns by default).
-`SpawnWithExtendedJsonOptions` carries `experimental` and `stdio: SpawnStdio`;
-like `SpawnWithExtendedOptions`, it is `#[non_exhaustive]`.
+`SpawnExtendedJsonOptions` carries `experimental` and `stdio: SpawnStdio`;
+like `SpawnExtendedOptions`, it is `#[non_exhaustive]`.
 Result and process types belong to `mxc_sdk::v1`.
 
 `run_json` and `run_in_container_json` return byte-preserving
@@ -28,7 +28,7 @@ pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Err
 pub fn spawn_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error>;
 pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions)
     -> Result<MxcPtyProcess, Error>;
-pub fn spawn_with_extended_options_json(json: &str, options: SpawnWithExtendedJsonOptions)
+pub fn spawn_with_extended_options_json(json: &str, options: SpawnExtendedJsonOptions)
     -> Result<MxcProcess, Error>;
 
 pub fn run_in_container_json(json: &str, options: JsonOptions)

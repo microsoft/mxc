@@ -575,7 +575,7 @@ public static class MxcContainer
 
     public static MxcProcess SpawnWithExtendedOptions(
         ContainerRequest request,
-        SpawnWithExtendedOptions? options = null);
+        SpawnExtendedOptions? options = null);
 }
 ```
 
@@ -1329,14 +1329,14 @@ public enum SpawnStdio
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.SpawnWithExtendedOptions`
+## `Microsoft.Mxc.Sdk.V1.SpawnExtendedOptions`
 
 Invocation controls for `SpawnWithExtendedOptions`.
 
 ```csharp
-public sealed class SpawnWithExtendedOptions
+public sealed class SpawnExtendedOptions
 {
-    public SpawnWithExtendedOptions();
+    public SpawnExtendedOptions();
 
     public TelemetryConfig? Telemetry { get; set; }
     public SpawnStdio Stdio { get; set; }

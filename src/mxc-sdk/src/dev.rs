@@ -35,7 +35,7 @@ pub struct PtyJsonOptions {
 /// Invocation controls for spawn_with_extended_options_json.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct SpawnWithExtendedJsonOptions {
+pub struct SpawnExtendedJsonOptions {
     /// Authorize experimental backends separately from the JSON contract version.
     pub experimental: bool,
     pub stdio: crate::options::SpawnStdio,

@@ -157,7 +157,7 @@ public class MxcProcessTests
         using var process = variant == "typed"
             ? MxcContainer.SpawnWithExtendedOptions(
                 new ContainerRequest(command) { TimeoutMs = 30_000 },
-                new SpawnWithExtendedOptions { Stdio = SpawnStdio.Inherit })
+                new SpawnExtendedOptions { Stdio = SpawnStdio.Inherit })
             : Dev.MxcContainer.SpawnWithExtendedOptionsJson(
                 new JsonObject
                 {
@@ -165,7 +165,7 @@ public class MxcProcessTests
                     ["containment"] = "process",
                     ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
                 }.ToJsonString(),
-                new Dev.SpawnWithExtendedJsonOptions { Stdio = SpawnStdio.Inherit });
+                new Dev.SpawnExtendedJsonOptions { Stdio = SpawnStdio.Inherit });
         Assert.Null(process.StandardInput);
         Assert.Null(process.StandardOutput);
         Assert.Null(process.StandardError);

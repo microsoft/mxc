@@ -27,7 +27,7 @@ export interface SpawnWithPtyOptions {
 export type SpawnStdio = 'pipes' | 'inherit';
 
 /** Invocation controls for spawnWithExtendedOptions. */
-export interface SpawnWithExtendedOptions {
+export interface SpawnExtendedOptions {
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
   /** Defaults to `'pipes'`, which behaves like `spawn`. */

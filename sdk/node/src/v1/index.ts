@@ -46,7 +46,7 @@ export type {
   SpawnOptions,
   SpawnWithPtyOptions,
   SpawnStdio,
-  SpawnWithExtendedOptions,
+  SpawnExtendedOptions,
   ProvisionOptions,
   StartOptions,
   StopOptions,

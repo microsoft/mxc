@@ -382,7 +382,7 @@ public static class MxcContainer
     /// <summary>Spawn a container request with stdio and other controls chosen in the options.</summary>
     public static MxcProcess SpawnWithExtendedOptions(
         ContainerRequest request,
-        SpawnWithExtendedOptions? options = null)
+        SpawnExtendedOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));

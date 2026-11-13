@@ -432,7 +432,6 @@ pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Keep the caller's stdin, stdout, and stderr open across `exec` in `command`'s child.
 #[cfg(unix)]
 pub fn keep_caller_stdio_across_exec(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;

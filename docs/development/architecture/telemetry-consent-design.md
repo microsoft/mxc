@@ -194,7 +194,7 @@ prompts, never persists consent, and never bypasses consent or administrative
 policy.
 
 For SDK container creation, opt-in is an invocation option on `RunOptions`,
-`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithExtendedOptions`,
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`,
 including the asynchronous variants that share those options.
 `ContainerRequest` has no telemetry field.
 

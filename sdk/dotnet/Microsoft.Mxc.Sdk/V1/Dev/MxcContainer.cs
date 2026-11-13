@@ -128,7 +128,7 @@ public static class MxcContainer
     /// <summary>Spawn caller-authored exact JSON with stdio chosen in the options.</summary>
     public static MxcProcess SpawnWithExtendedOptionsJson(
         string json,
-        SpawnWithExtendedJsonOptions? options = null)
+        SpawnExtendedJsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithExtendedOptionsJson));
         unsafe

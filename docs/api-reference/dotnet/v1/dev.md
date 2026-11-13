@@ -11,7 +11,7 @@ Phase-specific methods require the matching JSON `phase`.
 Use `JsonOptions` for non-PTY calls and `PtyJsonOptions` for PTY calls.
 Both define `Experimental`, independently of the JSON version; PTY options
 also define `MxcPtySize? Size` (24 rows by 80 columns by default).
-`SpawnWithExtendedJsonOptions` defines `Experimental` and `SpawnStdio Stdio`.
+`SpawnExtendedJsonOptions` defines `Experimental` and `SpawnStdio Stdio`.
 Execution returns V1 result and process types. Lifecycle and validation
 return complete response JSON strings, including backend metadata. When
 importing both namespaces, qualify the Dev facade, for example with
@@ -26,7 +26,7 @@ MxcProcess SpawnJson(string json, JsonOptions? options = null);
 Task<MxcProcess> SpawnJsonAsync(string json, JsonOptions? options = null,
     CancellationToken cancellationToken = default);
 MxcPtyProcess SpawnWithPtyJson(string json, PtyJsonOptions? options = null);
-MxcProcess SpawnWithExtendedOptionsJson(string json, SpawnWithExtendedJsonOptions? options = null);
+MxcProcess SpawnWithExtendedOptionsJson(string json, SpawnExtendedJsonOptions? options = null);
 
 // Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle
 ExecutionResult RunInContainerJson(string json, JsonOptions? options = null);

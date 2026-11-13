@@ -240,8 +240,8 @@ pub mod v1 {
     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
     pub use crate::options::{
         DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
-        SpawnInContainerOptions, SpawnInContainerWithPtyOptions, SpawnOptions, SpawnStdio,
-        SpawnWithExtendedOptions, SpawnWithPtyOptions, StartOptions, StopOptions, TelemetryConfig,
+        SpawnExtendedOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
+        SpawnOptions, SpawnStdio, SpawnWithPtyOptions, StartOptions, StopOptions, TelemetryConfig,
     };
 
     /// V1 telemetry consent administration.
@@ -364,10 +364,10 @@ pub mod v1 {
             .and_then(MxcPtyProcess::new)
     }
 
-    /// Spawn a [`ContainerRequest`] with stdio and other controls chosen in [`SpawnWithExtendedOptions`].
+    /// Spawn a [`ContainerRequest`] with stdio and other controls chosen in [`SpawnExtendedOptions`].
     pub fn spawn_with_extended_options(
         request: ContainerRequest,
-        options: SpawnWithExtendedOptions,
+        options: SpawnExtendedOptions,
     ) -> Result<MxcProcess, Error> {
         let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         match options.stdio {

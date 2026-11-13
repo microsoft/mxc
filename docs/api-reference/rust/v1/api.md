@@ -303,7 +303,7 @@ options: SpawnWithPtyOptions,
 
 ## `mxc_sdk::v1::spawn_with_extended_options`
 
-Spawn a [ContainerRequest] with stdio and other controls chosen in `SpawnWithExtendedOptions`.
+Spawn a [ContainerRequest] with stdio and other controls chosen in `SpawnExtendedOptions`.
 
 With `SpawnStdio::Inherit` the returned `MxcProcess` has no streams to take;
 use it to wait for or kill the process. Backends other than ProcessContainer,
@@ -312,7 +312,7 @@ Bubblewrap, and Seatbelt reject `Inherit` with `ErrorCode::UnsupportedContainmen
 ```rust
 pub fn spawn_with_extended_options(
 request: ContainerRequest,
-options: SpawnWithExtendedOptions,
+options: SpawnExtendedOptions,
 ) -> Result<MxcProcess, Error>;
 ```
 

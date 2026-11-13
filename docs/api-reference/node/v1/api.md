@@ -261,7 +261,7 @@ backends other than ProcessContainer, Bubblewrap, and Seatbelt reject with
 `unsupported_containment`.
 
 ```typescript
-export async function spawnWithExtendedOptions(request: ContainerRequest, options: SpawnWithExtendedOptions = {}): Promise<MxcProcess>;
+export async function spawnWithExtendedOptions(request: ContainerRequest, options: SpawnExtendedOptions = {}): Promise<MxcProcess>;
 ```
 
 

@@ -21,7 +21,7 @@ public sealed class PtyJsonOptions
 }
 
 /// <summary>Invocation controls for SpawnWithExtendedOptionsJson.</summary>
-public sealed class SpawnWithExtendedJsonOptions
+public sealed class SpawnExtendedJsonOptions
 {
     /// <summary>Authorize experimental backends independently of the JSON version.</summary>
     public bool Experimental { get; set; }

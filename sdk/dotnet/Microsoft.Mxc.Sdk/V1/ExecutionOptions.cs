@@ -38,7 +38,7 @@ public enum SpawnStdio
 }
 
 /// <summary>Invocation controls for SpawnWithExtendedOptions.</summary>
-public sealed class SpawnWithExtendedOptions
+public sealed class SpawnExtendedOptions
 {
     /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }

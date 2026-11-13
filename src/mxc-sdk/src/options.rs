@@ -44,7 +44,7 @@ pub enum SpawnStdio {
 /// Invocation controls for spawn_with_extended_options.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct SpawnWithExtendedOptions {
+pub struct SpawnExtendedOptions {
     /// Per-invocation telemetry opt-in, subject to consent and policy.
     pub telemetry: Option<TelemetryConfig>,
     pub stdio: SpawnStdio,

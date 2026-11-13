@@ -10,7 +10,7 @@ checks policy and backend availability.
 `JsonOptions` contains optional `experimental?: boolean` authorization,
 independent of the authored JSON version. `PtyJsonOptions` additionally
 contains optional `size?: MxcPtySize` (24 rows by 80 columns by default).
-`SpawnWithExtendedJsonOptions` additionally contains optional
+`SpawnExtendedJsonOptions` additionally contains optional
 `stdio?: SpawnStdio` (`'pipes'` by default).
 Execution returns the existing V1 result or process types. Lifecycle and
 validation return the complete native response JSON string. Phase-specific
@@ -21,7 +21,7 @@ export function runJson(json: string, options?: JsonOptions): Promise<ExecutionR
 export function spawnJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
 export function spawnWithPtyJson(json: string, options?: PtyJsonOptions): Promise<MxcPtyProcess>;
 export function spawnWithExtendedOptionsJson(
-  json: string, options?: SpawnWithExtendedJsonOptions
+  json: string, options?: SpawnExtendedJsonOptions
 ): Promise<MxcProcess>;
 
 export function runInContainerJson(json: string, options?: JsonOptions): Promise<ExecutionResult>;

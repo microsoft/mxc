@@ -30,7 +30,7 @@ import type {
   RunOptions,
   SpawnOptions,
   SpawnStdio,
-  SpawnWithExtendedOptions,
+  SpawnExtendedOptions,
   SpawnWithPtyOptions,
 } from './operation-options.js';
 
@@ -496,7 +496,7 @@ export async function spawnWithPty(
 /** Create a container request with stdio and other controls chosen in the options. */
 export async function spawnWithExtendedOptions(
   request: ContainerRequest,
-  options: SpawnWithExtendedOptions = {},
+  options: SpawnExtendedOptions = {},
 ): Promise<MxcProcess> {
   validateOperationOptions('spawnWithExtendedOptions', options, false, ['stdio']);
   const stdio = spawnStdio('spawnWithExtendedOptions', options.stdio);

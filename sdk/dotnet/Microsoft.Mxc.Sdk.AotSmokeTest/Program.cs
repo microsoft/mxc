@@ -42,7 +42,7 @@ CheckRoundTrip(new Dev.PtyJsonOptions(),
 CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },
     x => x.Experimental && x.Size == initialPtySize,
     "dev PTY options experimental authorization and initial dimensions");
-CheckRoundTrip(new Dev.SpawnWithExtendedJsonOptions { Experimental = true, Stdio = SpawnStdio.Inherit },
+CheckRoundTrip(new Dev.SpawnExtendedJsonOptions { Experimental = true, Stdio = SpawnStdio.Inherit },
     x => x.Experimental && x.Stdio == SpawnStdio.Inherit,
     "dev extended spawn options experimental authorization and stdio");
 CheckRoundTrip(new TelemetryConfig(), x => x.Enabled is null, "omitted telemetry enabled");
@@ -58,7 +58,7 @@ foreach (var enabled in new bool?[] { null, true, false })
         new SpawnWithPtyOptions { Size = initialPtySize, Telemetry = telemetry },
         x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
-    CheckRoundTrip(new SpawnWithExtendedOptions { Telemetry = telemetry, Stdio = SpawnStdio.Inherit },
+    CheckRoundTrip(new SpawnExtendedOptions { Telemetry = telemetry, Stdio = SpawnStdio.Inherit },
         x => x.Telemetry?.Enabled == enabled && x.Stdio == SpawnStdio.Inherit,
         "extended spawn options, telemetry, and stdio");
 }

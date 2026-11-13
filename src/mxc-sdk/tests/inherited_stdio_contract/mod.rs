@@ -4,10 +4,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use mxc_sdk::v1::dev::{self, SpawnWithExtendedJsonOptions};
+use mxc_sdk::v1::dev::{self, SpawnExtendedJsonOptions};
 use mxc_sdk::v1::{
-    spawn_with_extended_options, ContainerRequest, MxcProcess, SpawnStdio,
-    SpawnWithExtendedOptions, WaitResult,
+    spawn_with_extended_options, ContainerRequest, MxcProcess, SpawnExtendedOptions, SpawnStdio,
+    WaitResult,
 };
 
 const HOST_ENV: &str = "MXC_INHERITED_STDIO_HOST";
@@ -80,7 +80,7 @@ fn run_host(
     mark_stdio_close_on_exec();
     let command_line = command(&marker(variant), EXIT_CODE);
     let process = if variant == "typed" {
-        let mut options = SpawnWithExtendedOptions::default();
+        let mut options = SpawnExtendedOptions::default();
         options.stdio = SpawnStdio::Inherit;
         spawn_with_extended_options(typed_request(command_line), options)
             .expect("spawn with inherited stdio")
@@ -91,7 +91,7 @@ fn run_host(
             "process": { "commandLine": command_line, "timeout": 30000 },
         })
         .to_string();
-        let mut options = SpawnWithExtendedJsonOptions::default();
+        let mut options = SpawnExtendedJsonOptions::default();
         options.stdio = SpawnStdio::Inherit;
         dev::spawn_with_extended_options_json(&json, options)
             .expect("spawn exact JSON with inherited stdio")
@@ -100,7 +100,7 @@ fn run_host(
 }
 
 fn assert_default_pipes(request: ContainerRequest) {
-    let mut process = spawn_with_extended_options(request, SpawnWithExtendedOptions::default())
+    let mut process = spawn_with_extended_options(request, SpawnExtendedOptions::default())
         .expect("spawn with default extended options");
     let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
     let mut stdin = process.take_stdin().expect("pipes mode provides stdin");

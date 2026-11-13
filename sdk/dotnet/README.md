@@ -81,7 +81,7 @@ SDK-owned nested choice such as `Containment.Process` (the default),
 validated by the native engine.
 
 Creation methods accept their own `RunOptions`, `SpawnOptions`,
-`SpawnWithPtyOptions`, or `SpawnWithExtendedOptions` after the request.
+`SpawnWithPtyOptions`, or `SpawnExtendedOptions` after the request.
 Set `SpawnWithPtyOptions.Size` to
 choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellation
 tokens come last.
@@ -143,7 +143,7 @@ using Microsoft.Mxc.Sdk.V1;
 
 using var process = MxcContainer.SpawnWithExtendedOptions(
     new ContainerRequest("cmd.exe /c echo hello") { TimeoutMs = 30_000 },
-    new SpawnWithExtendedOptions { Stdio = SpawnStdio.Inherit });
+    new SpawnExtendedOptions { Stdio = SpawnStdio.Inherit });
 WaitResult result = process.Wait();
 ```
 

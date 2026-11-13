@@ -837,12 +837,12 @@ export type SpawnStdio = 'pipes' | 'inherit';
 ```
 
 
-## `@microsoft/mxc-sdk/v1::SpawnWithExtendedOptions`
+## `@microsoft/mxc-sdk/v1::SpawnExtendedOptions`
 
 Invocation controls for spawnWithExtendedOptions.
 
 ```typescript
-export interface SpawnWithExtendedOptions {
+export interface SpawnExtendedOptions {
   telemetry?: TelemetryConfig;
   stdio?: SpawnStdio; // defaults to 'pipes'
 }

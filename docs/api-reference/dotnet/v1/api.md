@@ -199,7 +199,7 @@ backends other than ProcessContainer, Bubblewrap, and Seatbelt throw
 ```csharp
 public static MxcProcess SpawnWithExtendedOptions(
     ContainerRequest request,
-    SpawnWithExtendedOptions? options = null);
+    SpawnExtendedOptions? options = null);
 ```
 
 

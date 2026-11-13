@@ -35,7 +35,7 @@ export interface PtyJsonOptions extends JsonOptions {
 }
 
 /** Invocation controls for spawnWithExtendedOptionsJson. */
-export interface SpawnWithExtendedJsonOptions extends JsonOptions {
+export interface SpawnExtendedJsonOptions extends JsonOptions {
   /** Defaults to `'pipes'`, which behaves like `spawnJson`. */
   stdio?: SpawnStdio;
 }
@@ -162,7 +162,7 @@ export async function spawnJson(json: string, options: JsonOptions = {}): Promis
 /** Spawn a one-shot request with stdio chosen in the options. */
 export async function spawnWithExtendedOptionsJson(
   json: string,
-  options: SpawnWithExtendedJsonOptions = {},
+  options: SpawnExtendedJsonOptions = {},
 ): Promise<MxcProcess> {
   checkOptions('spawnWithExtendedOptionsJson', options, false, true);
   const stdio = spawnStdio('spawnWithExtendedOptionsJson', options.stdio);

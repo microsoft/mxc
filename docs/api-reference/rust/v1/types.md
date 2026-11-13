@@ -783,7 +783,7 @@ pub enum SpawnStdio {
 ```
 
 
-## `mxc_sdk::v1::SpawnWithExtendedOptions`
+## `mxc_sdk::v1::SpawnExtendedOptions`
 
 Invocation controls for `spawn_with_extended_options`.
 
@@ -792,7 +792,7 @@ from `Default::default()` and assign fields rather than using a struct literal.
 
 ```rust
 #[non_exhaustive]
-pub struct SpawnWithExtendedOptions {
+pub struct SpawnExtendedOptions {
   pub telemetry: Option<TelemetryConfig>,
   pub stdio: SpawnStdio,
 }
