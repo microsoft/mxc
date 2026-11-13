@@ -114,8 +114,15 @@ async fn pump(
         if n == 0 {
             return to.shutdown().await;
         }
-        to.write_all(&buf[..n]).await?;
-        active_ms.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        let mut data = &buf[..n];
+        while !data.is_empty() {
+            let written = to.write(data).await?;
+            if written == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            data = &data[written..];
+            active_ms.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
     }
 }
 
@@ -366,5 +373,22 @@ mod tests {
             .expect("an idle connection is closed")
             .unwrap();
         assert_eq!(a_peer.read(&mut buf).await.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn splice_keeps_a_slowly_drained_connection_open() {
+        let (a, mut a_peer) = tokio::io::duplex(64);
+        let (b, mut b_peer) = tokio::io::duplex(1);
+        let relay = tokio::spawn(splice(a, b));
+        a_peer.write_all(b"abcd").await.unwrap();
+        let mut received = Vec::new();
+        let mut byte = [0u8; 1];
+        for _ in 0..4 {
+            tokio::time::sleep(IDLE_TIMEOUT - Duration::from_secs(60)).await;
+            assert_eq!(b_peer.read(&mut byte).await.unwrap(), 1);
+            received.push(byte[0]);
+        }
+        assert_eq!(received, b"abcd");
+        assert!(!relay.is_finished());
     }
 }
