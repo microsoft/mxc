@@ -216,6 +216,7 @@ struct ValidatedLaunch {
     egress_plan: Option<network_rules::EgressPlan>,
     bwrap: PathBuf,
     bwrap_version: bwrap_version::BwrapVersion,
+    bwrap_is_setuid: bool,
     network_tools: Option<proxy_network::NetworkTools>,
 }
 
@@ -380,6 +381,7 @@ impl BubblewrapScriptRunner {
             egress_plan,
             bwrap: bwrap.path,
             bwrap_version: bwrap.version,
+            bwrap_is_setuid: bwrap.is_setuid,
             network_tools,
         })
     }
@@ -525,6 +527,7 @@ impl BubblewrapScriptRunner {
             egress_plan,
             bwrap,
             bwrap_version,
+            bwrap_is_setuid,
             network_tools,
         } = launch;
         let checked_network_tools = || {
@@ -554,8 +557,9 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
-        let deny_mountpoints = missing_denials::prepare(&mut mounts, baseline_links, bwrap_version)
-            .map_err(|error| error.into_response())?;
+        let deny_mountpoints =
+            missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
+                .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -1637,6 +1641,7 @@ mod tests {
                     egress_plan: None,
                     bwrap: PathBuf::from("/usr/bin/bwrap"),
                     bwrap_version: bwrap_version::BwrapVersion::new(0, 11, 0),
+                    bwrap_is_setuid: false,
                     network_tools: None,
                 },
                 &mut Logger::new(Mode::Buffer),

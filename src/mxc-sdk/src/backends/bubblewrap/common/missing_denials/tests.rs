@@ -5,6 +5,14 @@ use super::*;
 use crate::bwrap_common::bwrap_command;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
 
+fn prepare(
+    mounts: &mut Vec<PolicyMount>,
+    baseline_links: &[BaselineLink],
+    version: BwrapVersion,
+) -> Result<Option<tempfile::TempDir>, FilesystemPolicyError> {
+    super::prepare(mounts, baseline_links, version, false)
+}
+
 fn mount(path: &Path, intent: FsIntent) -> PolicyMount {
     let path = path.to_str().unwrap().to_owned();
     PolicyMount {
@@ -92,6 +100,67 @@ fn missing_denials_require_overlay_support_only_when_needed() {
         .message()
         .contains(root.join("missing").to_str().unwrap()));
     assert!(!root.join("missing").exists());
+}
+
+#[test]
+fn setuid_bwrap_is_rejected_only_when_an_overlay_is_needed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let mut missing = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("missing"), FsIntent::Denied),
+    ];
+    let error = super::prepare(&mut missing, &[], BwrapVersion::new(0, 11, 0), true).unwrap_err();
+    assert!(error.message().contains("non-setuid bwrap"));
+
+    std::fs::write(root.join("existing"), "secret").unwrap();
+    let mut existing = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("existing"), FsIntent::Denied),
+    ];
+    assert!(
+        super::prepare(&mut existing, &[], BwrapVersion::new(0, 5, 0), true)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn mountinfo_decodes_nested_mountpoints() {
+    let mountinfo = concat!(
+        "1 0 8:1 / /mnt/source\\040root rw - ext4 /dev/root rw\n",
+        "2 1 0:44 / /mnt/source\\040root/nested\\040mount rw - tmpfs tmpfs rw\n"
+    );
+    let entries = parse_mountinfo(mountinfo).unwrap();
+    let nested = nested_mountpoint(Path::new("/mnt/source root"), &entries).unwrap();
+    assert_eq!(nested, Path::new("/mnt/source root/nested mount"));
+}
+
+#[test]
+fn malformed_or_oversized_mountinfo_is_rejected() {
+    assert!(parse_mountinfo("not mount information").is_err());
+    assert!(parse_mountinfo("1 0 8:1 /bad\\999 / rw - ext4 /dev/root rw").is_err());
+    let entry = "1 0 8:1 / / rw - ext4 /dev/root rw\n";
+    let contents = entry.repeat(MAX_MOUNTINFO_ENTRIES + 1);
+    assert!(parse_mountinfo(&contents)
+        .unwrap_err()
+        .contains("entry limit"));
+}
+
+#[test]
+fn writable_bind_aliases_of_private_storage_are_masked() {
+    let mountinfo = concat!(
+        "1 0 8:1 / / rw - ext4 /dev/root rw\n",
+        "2 1 8:1 /tmp /tmp-alias rw - ext4 /dev/root rw\n"
+    );
+    let entries = parse_mountinfo(mountinfo).unwrap();
+    let mut mounts = vec![mount(Path::new("/tmp-alias"), FsIntent::ReadWrite)];
+
+    add_alias_masks(Path::new("/tmp/private-storage"), &entries, &mut mounts).unwrap();
+
+    assert!(mounts.iter().any(|mount| {
+        mount.destination == "/tmp-alias/private-storage" && mount.intent == FsIntent::Denied
+    }));
 }
 
 #[test]

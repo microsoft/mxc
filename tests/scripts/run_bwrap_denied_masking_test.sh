@@ -33,6 +33,7 @@ fi
 
 BASE="/mnt/masktest"
 PRIVATE_TMP="${BASE}-private"
+PRIVATE_ALIAS="${BASE}-private-alias"
 VISIBLE="$BASE/visible.txt"
 FILE="$BASE/secret_file.txt"
 DIR="$BASE/secret_dir"
@@ -40,7 +41,13 @@ DIR="$BASE/secret_dir"
 # Second fixture tree for the denied-symlink rejection cases below.
 SYMBASE="/mnt/symmask"
 
-cleanup() { sudo rm -rf "$BASE" "$SYMBASE" "$PRIVATE_TMP"; }
+PRIVATE_ALIAS_MOUNTED=0
+NESTED_MOUNTED=0
+cleanup() {
+    if [ "$NESTED_MOUNTED" -eq 1 ]; then sudo umount "$BASE/nested-mount"; fi
+    if [ "$PRIVATE_ALIAS_MOUNTED" -eq 1 ]; then sudo umount "$PRIVATE_ALIAS"; fi
+    sudo rm -rf "$BASE" "$SYMBASE" "$PRIVATE_TMP" "$PRIVATE_ALIAS"
+}
 trap cleanup EXIT
 
 # Set up: a readable sibling (positive control), a denied secret file, and a
@@ -125,6 +132,9 @@ mkdir "$TOOLS"
 sudo rm -rf "$PRIVATE_TMP"
 sudo mkdir -p "$PRIVATE_TMP"
 sudo chown "$(id -u):$(id -g)" "$PRIVATE_TMP"
+sudo mkdir -p "$PRIVATE_ALIAS"
+sudo mount --bind "$PRIVATE_TMP" "$PRIVATE_ALIAS"
+PRIVATE_ALIAS_MOUNTED=1
 printf '%s\n' "$PRIVATE_TMP" > "$TOOLS/private-tmp"
 # The overlay root is in both layers; the sandbox must show the host's mode.
 chmod 750 "$BASE"
@@ -140,6 +150,9 @@ exec 3<> "$TOOLS/ready" 4<> "$TOOLS/continue"
         fi
         printf 'OVERLAY_SECRET\n' > "$PRIVATE_STORAGE/0/.env.local/secret"
         printf '%s\n' "$PRIVATE_STORAGE" > "$TOOLS/private-storage"
+        printf '%s\n' "$PRIVATE_ALIAS" > "$TOOLS/private-alias"
+        printf '%s\n' "$PRIVATE_ALIAS/$(basename "$PRIVATE_STORAGE")" \
+            > "$TOOLS/private-storage-alias"
         printf 'LATE_SECRET\n' > "$BASE/.env.local"
         mkdir -p "$BASE/absent/nested"
         printf 'LATE_SECRET\n' > "$BASE/absent/nested/secret"
@@ -155,15 +168,16 @@ config='{
   "containment": "bubblewrap",
   "process": {
     "cwd": "/mnt/masktest/tools",
-    "commandLine": "set -eu; if [ \"$(stat -c %a ..)\" != 750 ]; then exit 36; fi; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; PRIVATE_TMP=$(cat private-tmp); printf allowed > \"$PRIVATE_TMP/sibling\"; test \"$(cat \"$PRIVATE_TMP/sibling\")\" = allowed; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; PRIVATE_STORAGE=$(cat private-storage); if cat \"$PRIVATE_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 34; fi; if printf ATTACK > \"$PRIVATE_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 35; fi; echo READONLY_MISSING_DENIALS_OK"
+    "commandLine": "set -eu; if [ \"$(stat -c %a ..)\" != 750 ]; then exit 36; fi; test \"$(cat ../visible.txt)\" = VISIBLE_SECRET; test ! -s ../secret_file.txt; printf control > control; test \"$(cat control)\" = control; if touch ../parent-write 2>/dev/null; then exit 31; fi; PRIVATE_TMP=$(cat private-tmp); printf allowed > \"$PRIVATE_TMP/sibling\"; test \"$(cat \"$PRIVATE_TMP/sibling\")\" = allowed; PRIVATE_ALIAS=$(cat private-alias); printf allowed > \"$PRIVATE_ALIAS/alias-sibling\"; test \"$(cat \"$PRIVATE_ALIAS/alias-sibling\")\" = allowed; printf \"READY\\n\" > ready; read -r action < continue; test \"$action\" = continue; if cat ../.env.local 2>/dev/null | grep -q LATE_SECRET; then exit 32; fi; test -d ../.env.local; test -d ../absent/nested; test -z \"$(ls -A ../absent/nested)\"; if touch ../.env.local/write 2>/dev/null || touch ../absent/nested/write 2>/dev/null; then exit 33; fi; PRIVATE_STORAGE=$(cat private-storage); if cat \"$PRIVATE_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 34; fi; if printf ATTACK > \"$PRIVATE_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 35; fi; PRIVATE_ALIAS_STORAGE=$(cat private-storage-alias); if cat \"$PRIVATE_ALIAS_STORAGE/0/.env.local/secret\" 2>/dev/null; then exit 37; fi; if printf ATTACK > \"$PRIVATE_ALIAS_STORAGE/0/.env.local/attack\" 2>/dev/null; then exit 38; fi; echo READONLY_MISSING_DENIALS_OK"
   },
   "filesystem": {
     "readonlyPaths": ["/mnt/masktest"],
-    "readwritePaths": ["/mnt/masktest/tools", "PRIVATE_TMP_PLACEHOLDER"],
+    "readwritePaths": ["/mnt/masktest/tools", "PRIVATE_TMP_PLACEHOLDER", "PRIVATE_ALIAS_PLACEHOLDER"],
     "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/.env.local", "/mnt/masktest/absent/nested"]
   }
 }'
 config=${config/PRIVATE_TMP_PLACEHOLDER/$PRIVATE_TMP}
+config=${config/PRIVATE_ALIAS_PLACEHOLDER/$PRIVATE_ALIAS}
 echo "Running Bubblewrap missing denials beneath a read-only parent..."
 READONLY_STATUS=0
 READONLY_OUT=$(TMPDIR="$PRIVATE_TMP" timeout 60 "$LXC_EXEC" --experimental \
@@ -179,12 +193,46 @@ elif [ "$READONLY_STATUS" -eq 0 ] && [ "$PUBLISHER_STATUS" -eq 0 ] \
     && echo "$READONLY_OUT" | grep -qFx "READONLY_MISSING_DENIALS_OK" \
     && [ "$(cat "$BASE/.env.local")" = "LATE_SECRET" ] \
     && [ "$(cat "$BASE/absent/nested/secret")" = "LATE_SECRET" ]; then
-    echo "PASS: missing denials stay masked after host creation; the read-only parent keeps its host mode, the RW TMPDIR sibling remains writable and overlay backing storage stays hidden."
+    echo "PASS: missing denials stay masked after host creation; the read-only parent keeps its host mode, TMPDIR and its bind-alias siblings remain writable, and overlay backing storage stays hidden through both paths."
 else
     echo "$READONLY_OUT"
     echo "FAIL: missing denial enforcement or read-only-parent controls failed (sandbox $READONLY_STATUS, publisher $PUBLISHER_STATUS)."
     FAIL=1
 fi
+
+# A read-only overlay cannot retain nested host mounts. Reject the missing-deny
+# policy before workload execution rather than exposing the underlying tree.
+NESTED="$BASE/nested-mount"
+mkdir -p "$NESTED"
+sudo mount -t tmpfs -o mode=777 tmpfs "$NESTED"
+NESTED_MOUNTED=1
+printf 'NESTED_CONTROL\n' > "$NESTED/control"
+nested_config='{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo NESTED_MOUNT_POLICY_SHOULD_NOT_RUN"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/mnt/masktest"],
+    "deniedPaths": ["/mnt/masktest/nested-mount/missing"]
+  }
+}'
+NESTED_STATUS=0
+NESTED_OUT=$(TMPDIR="$PRIVATE_TMP" timeout 60 "$LXC_EXEC" --experimental \
+    --config-base64 "$(printf '%s' "$nested_config" | base64 -w0)" 2>&1) \
+    || NESTED_STATUS=$?
+if [ "$NESTED_STATUS" -ne 0 ] \
+    && echo "$NESTED_OUT" | grep -qF "nested host mount" \
+    && ! echo "$NESTED_OUT" | grep -qF "NESTED_MOUNT_POLICY_SHOULD_NOT_RUN"; then
+    echo "PASS: nested mounts beneath an overlay-backed read-only grant are rejected before execution."
+else
+    echo "$NESTED_OUT"
+    echo "FAIL: a missing deny beneath a nested read-only mount was not rejected (sandbox $NESTED_STATUS)."
+    FAIL=1
+fi
+sudo umount "$NESTED"
+NESTED_MOUNTED=0
 
 # --- Denied-symlink masking ----------------------------------------------------
 # Denying a symlink masks the object it points to: the runner rewrites a denied
