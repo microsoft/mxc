@@ -4,7 +4,7 @@
 //! Process-level cleanup for fatal signals.
 //!
 //! SIGHUP, SIGTERM, and SIGINT can interrupt the runner before normal cleanup
-//! runs.  The watchdog waits for them through `sigwait`, destroys the active
+//! runs.  The watchdog waits for them through `sigwait`, cleans up the active
 //! container, and exits with the signal-style status code.
 //!
 //! Only the executor binary installs it: one slot cannot describe the several
@@ -36,13 +36,16 @@ struct ActiveSandbox {
     name: Option<String>,
     created: CreatedResources,
     netns_pid: Option<u32>,
+
+    #[cfg(target_os = "linux")]
+    starting_container: Option<LxcContainer>,
 }
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
 static WATCHDOG_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "linux")]
-static STARTUP_ALLOCATION: Mutex<()> = Mutex::new(());
+static STARTUP_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(target_os = "linux")]
 static STARTUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -110,26 +113,51 @@ fn write_fatal_diagnostic(message: &str) {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn with_startup_allocation<T>(
-    allocate: impl FnOnce() -> Result<T, String>,
+pub(crate) fn with_container_startup<T>(
+    container: &LxcContainer,
+    start: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     if !watchdog_installed() {
-        return allocate();
+        return start();
     }
-    let allocation = STARTUP_ALLOCATION
+
+    let startup = STARTUP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let result = check_startup_cancellation().and_then(|()| allocate());
-    if check_startup_cancellation().is_err() {
-        if let Err(error) = &result {
-            write_fatal_diagnostic(error);
-        }
+
+    {
+        let mut slot = lock_slot();
+        check_startup_cancellation()?;
+        slot.starting_container = Some(LxcContainer::new(
+            container.name(),
+            Some(container.lxc_path()),
+        ));
     }
-    drop(allocation);
-    while check_startup_cancellation().is_err() {
+
+    let result = start();
+    let mut slot = lock_slot();
+    if check_startup_cancellation().is_ok() {
+        slot.starting_container = None;
+        return result;
+    }
+
+    if let Err(error) = &result {
+        write_fatal_diagnostic(error);
+    }
+
+    drop(slot);
+    drop(startup);
+    loop {
         thread::park();
     }
-    result
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn with_container_startup<T>(
+    _container: &crate::lxc_common::lxc_bindings::LxcContainer,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    start()
 }
 
 /// Registers the container the watchdog destroys.
@@ -220,7 +248,7 @@ fn run_watchdog(mask: SigSet) -> ! {
             let _slot = lock_slot();
             STARTUP_CANCELLED.store(true, Ordering::Release);
         }
-        let _allocation = STARTUP_ALLOCATION
+        let _startup = STARTUP_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let active = std::mem::take(&mut *lock_slot());
@@ -238,6 +266,10 @@ fn run_watchdog(mask: SigSet) -> ! {
             if let Err(error) =
                 LxcContainer::new(&name, None).destroy_with_reporter(write_fatal_diagnostic)
             {
+                write_fatal_diagnostic(&error);
+            }
+        } else if let Some(container) = active.starting_container {
+            if let Err(error) = container.stop() {
                 write_fatal_diagnostic(&error);
             }
         }

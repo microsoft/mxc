@@ -14,6 +14,166 @@ fn ready() -> bool {
     has_platform_exec() && has_lxc_host()
 }
 
+#[test]
+fn cancelling_startup_preserves_a_stopped_container() {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::{gettid, Pid};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+    use wxc_e2e_tests::run_platform_config_value_within_duration;
+
+    if !ready() {
+        return;
+    }
+
+    let fixture = tempfile::tempdir_in(".").expect("create startup fixture");
+    let directory = fixture.path().canonicalize().expect("startup fixture path");
+    let name = format!("lxc-cancel-startup-{}", std::process::id());
+    let entered = directory.join("entered");
+    let release = directory.join("release");
+    let outcome = std::panic::catch_unwind(|| {
+        let created = Command::new("lxc-create")
+            .args([
+                "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", "amd64",
+            ])
+            .output()
+            .expect("create existing container");
+        if !created.status.success() {
+            panic!("container fixture creation failed: {created:?}");
+        }
+        let hook = directory.join("startup.sh");
+
+        // Hold startup immediately before container init until SIGTERM has been sent.
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+                entered.display(),
+                release.display()
+            ),
+        )
+        .expect("write startup hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700))
+            .expect("make hook executable");
+        let definition = format!("/var/lib/lxc/{name}/config");
+        let mut contents = fs::read_to_string(&definition).expect("read existing definition");
+        contents.push_str(&format!("\nlxc.hook.start-host = {}\n", hook.display()));
+        fs::write(&definition, contents).expect("install startup gate");
+        let children = format!("/proc/self/task/{}/children", gettid());
+        let canceller = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !entered.exists() {
+                if Instant::now() >= deadline {
+                    panic!("container did not reach the startup hook");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let pid = fs::read_to_string(children)
+                .expect("read executor child PID")
+                .trim()
+                .parse::<i32>()
+                .expect("one executor child");
+            kill(Pid::from_raw(pid), Signal::SIGTERM).expect("cancel executor during startup");
+            fs::write(release, "").expect("release startup after SIGTERM");
+        });
+        let config = json!({
+            "version": "0.9.0-alpha",
+            "containerId": name,
+            "containment": "lxc",
+            "process": { "commandLine": "sleep 60" },
+            "lifecycle": { "destroyOnExit": false },
+            "lxc": { "distribution": "alpine", "release": "3.23" },
+            "network": { "egress": { "default": "allow" } }
+        });
+        let result = run_platform_config_value_within_duration(
+            "cancel persistent LXC startup",
+            &config,
+            &[],
+            None,
+            Duration::from_secs(40),
+        );
+        canceller.join().expect("startup cancellation thread");
+        let state = Command::new("lxc-info")
+            .args(["-n", &name, "-sH"])
+            .output()
+            .expect("read container state after cancellation");
+        (result, state)
+    });
+    let _ = fs::write(directory.join("release"), "");
+    let _ = Command::new("lxc-stop").args(["-n", &name, "-k"]).output();
+    let _ = Command::new("lxc-destroy")
+        .args(["-n", &name, "-f"])
+        .output();
+    let (result, state) = outcome.expect("startup cancellation fixture failed");
+
+    assert!(
+        result.is_some() && state.status.success()
+            && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED",
+        "cancelling startup must preserve a stopped container; state={state:?}, executor={result:?}"
+    );
+}
+
+#[test]
+fn unavailable_ipv6_firewall_refuses_network_startup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !ready() {
+        return;
+    }
+
+    if !std::path::Path::new("/proc/net/if_inet6").exists() {
+        println!("SKIP: IPv6 is disabled; startup refusal with active IPv6 was not tested.");
+        return;
+    }
+
+    let tools = tempfile::tempdir_in(".").expect("create firewall tool directory");
+    let firewall = tools.path().join("ip6tables");
+    std::fs::write(
+        &firewall,
+        "#!/bin/sh\necho IPV6_FIREWALL_UNAVAILABLE >&2\nexit 1\n",
+    )
+    .expect("write unavailable IPv6 firewall");
+    std::fs::set_permissions(&firewall, std::fs::Permissions::from_mode(0o700))
+        .expect("make firewall tool executable");
+    let path = format!(
+        "{}:{}",
+        tools
+            .path()
+            .canonicalize()
+            .expect("firewall tool path")
+            .display(),
+        std::env::var("PATH").expect("host command path")
+    );
+    let config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": "lxc-ipv6-firewall-unavailable",
+        "containment": "lxc",
+        "process": { "commandLine": "echo WORKLOAD_RAN" },
+        "lifecycle": { "destroyOnExit": true },
+        "lxc": { "distribution": "alpine", "release": "3.23" },
+        "network": { "egress": { "default": "allow" } }
+    });
+
+    let result = run_platform_config_value(
+        "unavailable IPv6 firewall",
+        &config,
+        &[("PATH", &path)],
+        None,
+    );
+
+    assert!(
+        result.code != Some(0)
+            && !result.combined_output().contains("WORKLOAD_RAN")
+            && result
+                .combined_output()
+                .contains("Cannot start a networked container without a working IPv6 firewall",),
+        "network startup did not reject the unavailable IPv6 firewall\n{}",
+        result.combined_output()
+    );
+}
+
 #[tokio::test]
 async fn workload_cannot_allow_a_denied_address() {
     if !ready() {
@@ -369,5 +529,80 @@ fn ubuntu_without_network_can_ping_loopback() {
         Some(0),
         "Ubuntu could not ping loopback with no network section after the capability drop\n{}",
         result.combined_output()
+    );
+}
+
+#[test]
+fn retained_container_keeps_an_ipv4_address_with_no_local_expiry() {
+    use std::process::Command;
+
+    if !ready() {
+        return;
+    }
+
+    let name = format!("lxc-ipv4-no-expiry-{}", std::process::id());
+    let mut config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": name,
+        "containment": "lxc",
+        "process": { "commandLine": "true" },
+        "lifecycle": { "destroyOnExit": false },
+        "lxc": { "distribution": "alpine", "release": "3.23" },
+        "network": { "egress": { "default": "allow" } }
+    });
+    let outcome = std::panic::catch_unwind(|| {
+        let result = run_platform_config_value("retain LXC IPv4 address", &config, &[], None);
+        if result.code != Some(0) {
+            panic!(
+                "MXC could not run the retained container ({:?})\n{}",
+                result.code,
+                result.combined_output()
+            );
+        }
+        let init = Command::new("lxc-info")
+            .args(["-n", &name, "-pH"])
+            .output()
+            .expect("read retained container init PID");
+        if !init.status.success() {
+            panic!("lxc-info could not read the retained container init PID: {init:?}");
+        }
+        let pid = String::from_utf8_lossy(&init.stdout);
+        let addresses = Command::new("nsenter")
+            .args(["-t", pid.trim(), "-n", "--"])
+            .args(["ip", "-j", "-4", "address", "show", "dev", "eth0"])
+            .output()
+            .expect("read retained container IPv4 lifetimes");
+        if !addresses.status.success() {
+            panic!("could not read retained container IPv4 lifetimes: {addresses:?}");
+        }
+        addresses
+    });
+
+    config["lifecycle"]["destroyOnExit"] = json!(true);
+    let cleanup = run_platform_config_value("destroy LXC IPv4 fixture", &config, &[], None);
+    if cleanup.code != Some(0) {
+        panic!(
+            "MXC could not destroy the retained container ({:?})\n{}",
+            cleanup.code,
+            cleanup.combined_output()
+        );
+    }
+    let addresses = outcome.expect("inspect retained container IPv4 lifetimes");
+    let addresses: serde_json::Value =
+        serde_json::from_slice(&addresses.stdout).unwrap_or_else(|error| {
+            panic!("could not parse retained container IPv4 lifetimes: {error}; {addresses:?}")
+        });
+
+    assert!(
+        addresses[0]["addr_info"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no IPv4 address entries in {addresses}"))
+            .iter()
+            .any(|address| {
+                address["scope"] == "global"
+                    && address["valid_life_time"] == json!(u32::MAX)
+                    && address["preferred_life_time"] == json!(u32::MAX)
+            }),
+        "the retained container must keep a global IPv4 address with no local expiry\n{addresses}"
     );
 }

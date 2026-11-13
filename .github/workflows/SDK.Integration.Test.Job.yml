@@ -110,7 +110,7 @@ jobs:
           # installs a similar but narrower set and sets the same skip
           # env var for the same reason (compounded by 1ES Hosted Pool
           # egress filtering).
-          packages: bubblewrap lxc lxc-utils uidmap dnsmasq-base iptables bridge-utils
+          packages: bubblewrap lxc busybox-static uidmap dnsmasq-base iptables bridge-utils
           version: 1.5
 
       - name: Verify or repair Linux containment dependencies
@@ -122,7 +122,7 @@ jobs:
           packages=(
             bubblewrap
             lxc
-            lxc-utils
+            busybox-static
             dnsmasq-base
             iptables
             bridge-utils
@@ -135,6 +135,7 @@ jobs:
             dnsmasq
             iptables
             brctl
+            busybox
           )
 
           missing_commands=()
@@ -143,6 +144,10 @@ jobs:
               missing_commands+=("$command")
             fi
           done
+
+          if ! busybox --list 2>/dev/null | grep -Fxq udhcpc; then
+            missing_commands+=("busybox udhcpc")
+          fi
 
           if [ "${#missing_commands[@]}" -ne 0 ]; then
             echo "::warning::Cached dependency installation was incomplete; missing commands: ${missing_commands[*]}"
@@ -173,6 +178,7 @@ jobs:
           for command in "${required_commands[@]}"; do
             command -v "$command"
           done
+          busybox --list | grep -Fx udhcpc
 
       - name: Start LXC services (cache restore skips postinst hooks)
         if: matrix.os_label == 'linux'

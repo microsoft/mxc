@@ -11,7 +11,6 @@ pub mod lxc_runner;
 pub(crate) mod network_address;
 pub mod network_ingress;
 pub mod network_iptables;
-#[cfg(target_os = "linux")]
-mod network_resolver;
+pub(crate) mod network_resolver;
 pub(crate) mod network_startup;
 pub mod signal_cleanup;

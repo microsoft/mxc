@@ -561,11 +561,9 @@ impl LxcScriptRunner {
             StartNetwork::FromContainerConfig
         };
 
-        let resolver = match crate::lxc_common::network_startup::configure(
-            &container,
-            &request.policy,
-            logger,
-        ) {
+        let resolver = match signal_cleanup::with_container_startup(&container, || {
+            crate::lxc_common::network_startup::configure(&container, &request.policy, logger)
+        }) {
             Ok(resolver) => resolver,
             Err(error) => {
                 self.release_after_failure(&container, container_created, logger);
@@ -590,7 +588,7 @@ impl LxcScriptRunner {
 
         if let Some(resolver) = resolver {
             if let Err(error) =
-                crate::lxc_common::network_startup::configure_resolver(&container, &resolver)
+                crate::lxc_common::network_resolver::configure(&container, &resolver)
             {
                 self.release_after_failure(&container, container_created, logger);
                 return Err(ScriptResponse::failed(

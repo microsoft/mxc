@@ -23,7 +23,8 @@ Creates an LXC container to provide:
 ## Prerequisites
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
-- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
+- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc` for runtime)
+- BusyBox with the `udhcpc` applet for networked runs
 - Root privileges, or [unprivileged LXC](#running-without-root) for a policy
   that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
@@ -33,12 +34,12 @@ Creates an LXC container to provide:
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install lxc lxc-utils liblxc-dev
+sudo apt install lxc liblxc-dev busybox-static
 ```
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install lxc lxc-templates dnsmasq lxc-devel
+sudo dnf install lxc lxc-templates dnsmasq lxc-devel busybox
 ```
 RHEL needs EPEL enabled first — see
 [Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup).
@@ -61,15 +62,24 @@ for unprivileged LXC.  Everything else needs root.
 
 ### Container networking
 
-Refer to your distribution's manual to configure networking for LXC
-containers.  A config with a `network` section fails without it.
+Networked runs require a local `lxc-net` bridge with dnsmasq serving its DHCP
+pool.  Refer to your distribution's manual to configure it.  A config with
+a `network` section fails without it.
 
 When a run needs networking, MXC reuses the container's reservation or
 reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
-MXC assigns the address from the host and releases the reservation when it
+MXC writes the reserved address and gateway into the LXC configuration before
+startup, without leaving a renewing DHCP client running.  The reservation
+remains after the container stops or MXC exits.  MXC removes it when it
 destroys the container.  A container first run without networking can obtain
-a reservation on a later networked run.  Creating a reservation restarts the
-shared `lxc-net` service.
+a reservation on a later networked run.
+
+If reservation support is not enabled, MXC enables it and restarts the shared
+`lxc-net` service.  Later reservations reload dnsmasq without restarting
+the bridge.
+
+**Warning:** Restarting `lxc-net` temporarily interrupts networking for containers
+already connected to the bridge.  The containers remain running.
 
 MXC requests DNS servers and search settings from the host DHCP server.
 A configured mount supplying `/etc/resolv.conf` or an ancestor directory

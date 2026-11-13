@@ -123,7 +123,8 @@ load_conntrack_module() {
 }
 
 install_lxc() {
-    if command -v lxc-start >/dev/null 2>&1; then
+    if command -v lxc-start >/dev/null 2>&1 &&
+        busybox --list 2>/dev/null | grep -Fxq udhcpc; then
         return
     fi
 
@@ -135,14 +136,10 @@ install_lxc() {
     local packages
     if [[ "$package_manager" == "apt-get" ]]; then
         apt_update
-        packages=(lxc dnsmasq-base iptables bridge-utils)
-        # Debian dropped lxc-utils; Ubuntu still ships it.
-        if apt-cache show lxc-utils >/dev/null 2>&1; then
-            packages+=(lxc-utils)
-        fi
+        packages=(lxc dnsmasq-base iptables bridge-utils busybox-static)
     else
         install_epel
-        packages=(lxc lxc-templates dnsmasq iptables)
+        packages=(lxc lxc-templates dnsmasq iptables busybox)
     fi
     install_packages "${packages[@]}"
 }
@@ -302,6 +299,7 @@ case "$backend" in
     lxc)
         install_lxc
         command -v lxc-start
+        busybox --list | grep -Fx udhcpc
         sudo -n true
         # Package installs may not activate the AppArmor profile, which
         # lxc-start needs.

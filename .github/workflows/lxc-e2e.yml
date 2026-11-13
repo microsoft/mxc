@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates busybox-static iptables debootstrap uidmap bridge-utils
 
       - name: Configure unprivileged LXC
         run: |
