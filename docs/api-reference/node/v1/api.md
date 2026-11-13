@@ -159,6 +159,8 @@ export async function provisionContainer<C extends LifecycleContainmentKind>(req
 ## `@microsoft/mxc-sdk/v1::getTelemetryConsentStatus`
 
 Read persisted/effective consent and policy without blocking the event loop.
+This state and consent-management operations do not control Required collection
+for supported contracts. See [Telemetry](../../../telemetry.md).
 
 ```typescript
 export async function getTelemetryConsentStatus(): Promise<TelemetryConsentStatus>;

@@ -287,14 +287,17 @@ when the backend produces them.
 
 Creation telemetry is supplied through `telemetry: { enabled: true }` on
 `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`.
-Omission leaves telemetry disabled; `enabled: false` explicitly disables it.
-Opt-in remains subject to MXC's persisted user consent and administrative policy. Telemetry consent
+These preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `enabled: false`, consent, or policy.
+See [Telemetry](../../docs/telemetry.md). Telemetry consent
 APIs and `getPlatformSupport` are exported from `@microsoft/mxc-sdk/v1`.
 
 `getTelemetryConsentStatus` reads stored/effective consent and policy,
 `requestTelemetryConsent` accepts an application-owned presenter, and
 `withdrawTelemetryConsent` withdraws consent. Each returns a Promise. These
 operations are Windows-only and report `not-applicable` on other platforms.
+Their stored-state behavior is unchanged; they do not disable Required collection.
 
 `getAvailableBackends()` reads native host availability, isolation tiers,
 capabilities, and warnings through in-process `mxc_ffi`. It returns

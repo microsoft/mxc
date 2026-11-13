@@ -12,11 +12,11 @@ $WxcExec = (Resolve-Path -LiteralPath $WxcExePath).Path
 $providerGuid = [guid]'11111111-2222-4333-8444-555555555555'
 $nextProcessId = 100
 $invocations = @(
-    foreach ($lifecycle in 1, 2) {
+    foreach ($lifecycle in 1, 2, 3) {
         foreach ($phase in @('provision', 'start', 'exec', 'exec', 'stop', 'deprovision')) {
             [pscustomobject]@{
                 Lifecycle = $lifecycle; Phase = $phase; ProcessId = $nextProcessId; ExitCode = 0
-                ContractVersion = $(if ($lifecycle -eq 2) { '1.1.0-alpha' } else { '1.0.0' })
+                ContractVersion = @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')[$lifecycle - 1]
                 RequireProcessExit = $phase -eq 'exec'
                 RequireError = $phase -eq 'provision'
             }
@@ -30,7 +30,7 @@ function New-TestTrace {
             $fields = [ordered]@{
                 'PartA_PrivacyProduct' = '0'
                 'PartA_PrivacyDataCategory' = '0'
-                'PartA_PrivTags' = $(if ($invocation.ContractVersion -eq '1.1.0-alpha') { '131072' } else { '65536' })
+                'PartA_PrivTags' = '131072'
                 'mxc.session_id' = "00000000-0000-4000-8000-00000000000$($invocation.Lifecycle)"
                 'mxc.capture_denials' = 'not_applicable'
                 'mxc.sandbox_kind' = 'isolation_session'
@@ -43,21 +43,18 @@ function New-TestTrace {
                 '__TlgCV__' = "lifecycle$($invocation.Lifecycle).$($invocation.ProcessId).0"
             }
             $eventData = foreach ($field in $fields.Keys) { "<Data Name='$field'>$($fields[$field])</Data>" }
-            $keyword = if ($invocation.ContractVersion -eq '1.1.0-alpha') { '0x200000000000' } else { '0x100000000000' }
+            $keyword = '0x200000000000'
             "<Event><System><Provider Guid='{$providerGuid}'/><Task>0</Task><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData>$($eventData -join '')</EventData><RenderingInfo Culture='en-US'><Task>$task</Task></RenderingInfo></Event>"
         }
     }
     $eventXml += @(
         foreach ($invocation in $invocations) {
             foreach ($task in @(
-                if ($invocation.ContractVersion -ne '1.1.0-alpha') { 'MXC.PolicyHash' }
                 if ($invocation.RequireProcessExit) { 'MXC.ProcessExited' }
                 if ($invocation.RequireError) { 'MXC.Error' }
             )) {
-                $keyword = if ($invocation.ContractVersion -eq '1.1.0-alpha' -and $task -ne 'MXC.PolicyHash') {
-                    '0x200000000000'
-                } else { '0x100000000000' }
-                $privacyTag = if ($keyword -eq '0x200000000000') { '131072' } else { '65536' }
+                $keyword = '0x200000000000'
+                $privacyTag = '131072'
                 "<Event><System><Provider Guid='{$providerGuid}'/><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData><Data Name='PartA_PrivTags'>$privacyTag</Data><Data Name='mxc.session_id'>00000000-0000-4000-8000-00000000000$($invocation.Lifecycle)</Data></EventData><RenderingInfo><Task>$task</Task></RenderingInfo></Event>"
             }
         }
@@ -73,7 +70,7 @@ function Set-TestField {
 }
 
 $cases = @(
-    @{ Name = 'two complete cross-process lifecycles'; Mutate = {}; Fails = $false },
+    @{ Name = 'three complete cross-process lifecycles'; Mutate = {}; Fails = $false },
     @{ Name = 'missing terminal event'; Mutate = { $null = $trace.DocumentElement.RemoveChild($trace.DocumentElement.ChildNodes[23]) }; Fails = $true },
     @{ Name = 'duplicate start'; Mutate = { $null = $trace.DocumentElement.AppendChild($trace.DocumentElement.FirstChild.CloneNode($true)) }; Fails = $true },
     @{ Name = 'wrong emitter'; Mutate = { $trace.DocumentElement.ChildNodes[23].System.Execution.SetAttribute('ProcessID', '9999') }; Fails = $true },
@@ -110,8 +107,9 @@ $cases = @(
         $field = $trace.DocumentElement.FirstChild.SelectSingleNode("*[local-name()='EventData']/*[@Name='mxc.session_id']")
         $null = $field.ParentNode.RemoveChild($field)
     }; Fails = $true },
-    @{ Name = 'development event still Measures'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0x100000000000' }; Fails = $true },
-    @{ Name = 'published event changed to Critical'; Mutate = { $trace.DocumentElement.FirstChild.System.Keywords = '0x200000000000' }; Fails = $true },
+    @{ Name = '1.0.0 event still Measures'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0x100000000000' }; Fails = $true },
+    @{ Name = '0.9.0-alpha event still Measures'; Mutate = { $trace.DocumentElement.FirstChild.System.Keywords = '0x100000000000' }; Fails = $true },
+    @{ Name = '1.1.0-alpha event still Measures'; Mutate = { $trace.DocumentElement.ChildNodes[24].System.Keywords = '0x100000000000' }; Fails = $true },
     @{ Name = 'combined telemetry categories'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0xC00000000000' }; Fails = $true },
     @{ Name = 'missing descriptor keywords'; Mutate = {
         $system = $trace.DocumentElement.FirstChild.System
@@ -119,7 +117,7 @@ $cases = @(
     }; Fails = $true },
     @{ Name = 'Core start still tagged Usage'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '65536' }; Fails = $true },
     @{ Name = 'Core end still tagged Usage'; Mutate = { Set-TestField $trace 13 'PartA_PrivTags' '65536' }; Fails = $true },
-    @{ Name = 'published event changed to Performance'; Mutate = { Set-TestField $trace 0 'PartA_PrivTags' '131072' }; Fails = $true },
+    @{ Name = '0.9.0-alpha event still Usage'; Mutate = { Set-TestField $trace 0 'PartA_PrivTags' '65536' }; Fails = $true },
     @{ Name = 'Core error still tagged Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x200000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.Error']")
         $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '65536'
@@ -127,10 +125,6 @@ $cases = @(
     @{ Name = 'Core exit still tagged Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x200000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
         $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '65536'
-    }; Fails = $true },
-    @{ Name = 'other events retain Usage'; Mutate = {
-        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '131072'
     }; Fails = $true },
     @{ Name = 'missing privacy tag'; Mutate = {
         $event = $trace.DocumentElement.FirstChild
@@ -140,12 +134,8 @@ $cases = @(
     @{ Name = 'invalid privacy tag'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' 'invalid' }; Fails = $true },
     @{ Name = 'combined privacy categories'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '196608' }; Fails = $true },
     @{ Name = 'hexadecimal privacy tag'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '0x00020000' }; Fails = $false },
-    @{ Name = 'other events must retain Measures'; Mutate = {
-        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-        $event.System.Keywords = '0x200000000000'
-    }; Fails = $true },
     @{ Name = 'backend event with another session ID'; Mutate = {
-        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
+        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
         $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='mxc.session_id']").InnerText = '00000000-0000-4000-8000-000000000009'
     }; Fails = $true; ErrorPattern = 'not the ExecutionStart session' },
     @{ Name = 'backend event without a session ID'; Mutate = {
@@ -163,21 +153,48 @@ $cases = @(
         }
     }; Fails = $true }
 )
-$cases += foreach ($excludedTask in @(
-    'MXC.VerboseDenials', 'MXC.ProcessTimedOut', 'MXC.ProcessKillFailed',
-    'MXC.PolicyHash', 'MXC.SandboxNetworkPolicyApplied', 'MXC.SandboxTornDown', 'MXC.ConfigRejected'
-)) {
-    @{
-        Name = "development inventory excludes $excludedTask"
-        EventName = $excludedTask
-        Fails = $true
-        ErrorPattern = 'is excluded for development contract'
-        Mutate = {
-            $source = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-            $extra = $source.CloneNode($true)
-            $extra.RenderingInfo.Task = $case.EventName
-            $extra.System.Execution.SetAttribute('ProcessID', [string]$invocations[6].ProcessId)
-            $null = $trace.DocumentElement.AppendChild($extra)
+$cases += foreach ($field in @('mxc.session_id', '__TlgCV__')) {
+    foreach ($previousLifecycle in 1, 2) {
+        @{
+            Name = "third lifecycle reuses $field from lifecycle $previousLifecycle"
+            Field = $field
+            PreviousLifecycle = $previousLifecycle
+            Fails = $true
+            ErrorPattern = 'new lifecycle reused attribution'
+            Mutate = {
+                $thirdProcessIds = @($invocations | Where-Object Lifecycle -EQ 3 | ForEach-Object ProcessId)
+                foreach ($event in $trace.SelectNodes("//*[local-name()='Event']")) {
+                    if ([int]$event.System.Execution.ProcessID -notin $thirdProcessIds) { continue }
+                    $field = $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='$($case.Field)']")
+                    if ($null -eq $field) { continue }
+                    $field.InnerText = if ($case.Field -ceq 'mxc.session_id') {
+                        "00000000-0000-4000-8000-00000000000$($case.PreviousLifecycle)"
+                    } else {
+                        "lifecycle$($case.PreviousLifecycle).$($event.System.Execution.ProcessID).0"
+                    }
+                }
+            }
+        }
+    }
+}
+$cases += foreach ($lifecycle in 1, 2, 3) {
+    foreach ($excludedTask in @(
+        'MXC.VerboseDenials', 'MXC.ProcessTimedOut', 'MXC.ProcessKillFailed',
+        'MXC.PolicyHash', 'MXC.SandboxNetworkPolicyApplied', 'MXC.SandboxTornDown', 'MXC.ConfigRejected'
+    )) {
+        @{
+            Name = "lifecycle $lifecycle inventory excludes $excludedTask"
+            EventName = $excludedTask
+            ProcessId = $invocations[($lifecycle - 1) * 6].ProcessId
+            Fails = $true
+            ErrorPattern = 'is excluded for contract'
+            Mutate = {
+                $source = $trace.DocumentElement.FirstChild
+                $extra = $source.CloneNode($true)
+                $extra.RenderingInfo.Task = $case.EventName
+                $extra.System.Execution.SetAttribute('ProcessID', [string]$case.ProcessId)
+                $null = $trace.DocumentElement.AppendChild($extra)
+            }
         }
     }
 }
@@ -307,7 +324,7 @@ function Invoke-StateAware {
 
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("mxc-lifecycle-requests-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
-# Development requests collect even with telemetry disabled, so keep the
+# Supported requests collect even with telemetry disabled, so keep the
 # correlation records the dry runs write out of the real user's profile.
 $overrideNames = @('MXC_TEST_LOCALAPPDATA_OVERRIDE', 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
 $previousOverrides = $overrideNames | ForEach-Object { [Environment]::GetEnvironmentVariable($_) }
@@ -320,19 +337,19 @@ try {
     $TelemetryKeywords = $true
     & $runScenario
     $manifest = @(Get-Content -LiteralPath $TelemetryResultsPath -Raw | ConvertFrom-Json)
-    if ($manifest.Count -ne 12 -or $script:validatedRequests.Count -ne 12) {
-        throw 'The lifecycle scenario did not validate all twelve executor requests.'
+    if ($manifest.Count -ne 18 -or $script:validatedRequests.Count -ne 18) {
+        throw 'The lifecycle scenario did not validate all eighteen executor requests.'
     }
     foreach ($request in $script:validatedRequests) {
-        if ($request.telemetry.enabled -ne $true -or
+        if ($request.telemetry.enabled -ne $false -or
             ($request.phase -ne 'provision' -and $request.ContainsKey('network'))) {
-            throw 'Lifecycle opt-in or provision-only network placement was lost.'
+            throw 'Lifecycle opt-out or provision-only network placement was lost.'
         }
-        if (@($manifest | Where-Object ContractVersion -CEQ '1.0.0').Count -ne 6 -or
-            @($manifest | Where-Object ContractVersion -CEQ '1.1.0-alpha').Count -ne 6 -or
-            @($script:validatedRequests | Where-Object version -CEQ '1.0.0').Count -ne 6 -or
-            @($script:validatedRequests | Where-Object version -CEQ '1.1.0-alpha').Count -ne 6) {
-            throw 'Lifecycle keyword validation must exercise both published and development contracts.'
+        foreach ($version in @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
+            if (@($manifest | Where-Object ContractVersion -CEQ $version).Count -ne 6 -or
+                @($script:validatedRequests | Where-Object version -CEQ $version).Count -ne 6) {
+                throw "Lifecycle keyword validation must exercise $version."
+            }
         }
     }
     $missingNetwork = $script:validatedRequests[0].Clone()
@@ -345,7 +362,7 @@ try {
         throw 'The missing-network counterfactual must be rejected by the real contract parser.'
     }
     Write-Host 'PASS: actual lifecycle requests pass real CLI/backend dry-run validation; missing-network control fails'
-    foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+    foreach ($version in @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
         $failureRequest = @{
             version = $version
             containment = 'bubblewrap'
@@ -363,7 +380,7 @@ try {
     # The expected-failure runs above leave a nonzero exit code that a
     # dot-sourcing caller (CI) would otherwise report as the script's result.
     $global:LASTEXITCODE = 0
-    Write-Host 'PASS: paired keyword failure scenarios reach real CLI/backend rejection without enabling telemetry'
+    Write-Host 'PASS: all contract failure scenarios reach real CLI/backend rejection with request opt-in disabled'
 } finally {
     for ($i = 0; $i -lt $overrideNames.Count; $i++) {
         [Environment]::SetEnvironmentVariable($overrideNames[$i], $previousOverrides[$i])

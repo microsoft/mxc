@@ -296,7 +296,9 @@ options: SpawnWithPtyOptions,
 
 ## `mxc_sdk::v1::telemetry::get_consent`
 
-Return the consent state currently effective for telemetry authorization.
+Return effective optional-telemetry consent. This state and consent-management
+operations do not control Required collection for supported contracts.
+See [Telemetry](../../../telemetry.md).
 
 ```rust
 pub fn get_consent() -> ConsentState;

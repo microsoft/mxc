@@ -111,7 +111,7 @@ See [`docs/development/build-and-test/schema-codegen.md`](../docs/development/bu
 - Preserve panic containment across `mxc_ffi`; no panic may unwind through the C ABI.
 - Preserve exact resource ownership and cleanup contracts, especially for processes, jobs, traces, sessions, and native handles.
 - Do not weaken validation or convert failures into success-shaped fallbacks.
-- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry.md`](../docs/telemetry.md).
+- Telemetry is Windows-only and fails closed on build/provider unavailability. Supported contracts emit only the four Required events regardless of request opt-in, consent, or administrative policy. Unattributed internal requests retain consent and policy gates; administrative policy may never grant consent. See [`docs/telemetry.md`](../docs/telemetry.md).
 
 ## Documentation
 
