@@ -2,3 +2,11 @@
 */nvx-e2e-tests.exe
 */mxc-filesystem-probe-tests
 */mxc-filesystem-probe-tests.exe
+*/wxc-test-driver.exe
+*/wxc-ui-probe.exe
+*/wxc-test-proxy.exe
+*/unix-test-proxy
+*/mxc-diagnostic-console.exe
+*/symbols/
+**/*.pdb
+**/*.dwp

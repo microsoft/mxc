@@ -32,6 +32,11 @@ parameters:
 variables:
   # Variable group managed in Dart — see the pipeline's variable group list.
   - group: MXC-ESRP-Signing
+  # Telemetry routing is read from the bundled signed component, not variables.
+  - name: MXC_TELEMETRY_PROVIDER_GROUP_GUID
+    value: ''
+  - name: MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID
+    value: ''
   - name: NEXTEST_NO_TESTS
     value: pass
 

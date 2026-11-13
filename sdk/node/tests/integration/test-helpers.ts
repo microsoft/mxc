@@ -115,22 +115,18 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'mxc_ffi.dll',
   'wxc-exec.exe',
-  'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
-  'mxc-diagnostic-console.exe',
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
   'libmxc_ffi.so',
   'lxc-exec',
-  'unix-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
   'libmxc_ffi.dylib',
   'mxc-exec-mac',
-  'unix-test-proxy',
 ];
 
 // Binaries that are optional (feature-gated or only present in certain builds)
@@ -141,14 +137,6 @@ const OPTIONAL_BINARIES = [
   'nanvixd.exe',           // Only built with --with-microvm
   'nanvix_rootfs.img',     // Only built with --with-microvm
   'python3.initrd',        // Only built with --with-microvm
-  // Test-only binaries. The GitHub build artifact carries them so the
-  // validation matrix can run the Windows suites from a downloaded artifact,
-  // and the npm packager copies that whole artifact into bin/ — so they show
-  // up here. They are not required: no SDK consumer needs them, and the ADO
-  // package producer filters its artifact through signPattern, which
-  // deliberately ships only product binaries.
-  'wxc-ui-probe.exe',     // Windows UI-policy validation
-  'wxc-test-driver.exe',  // run_test_configs.ps1
 ];
 
 // Combined list of all known binaries across platforms. The npm package
@@ -469,14 +457,14 @@ export function withToolPaths(
 
 // Windows-only: proxy helpers
 
-/** Locate wxc-test-proxy.exein the SDK package bin directory (package only, no local fallback). */
+/** Locate the test proxy staged separately from the published SDK. */
 function findTestProxyBinary(): string {
-  const binDir = getSdkBinDir();
+  const binDir = process.env.MXC_TEST_PROXY_DIR ?? getSdkBinDir();
   const proxyPath = path.join(binDir, 'wxc-test-proxy.exe');
   if (fs.existsSync(proxyPath)) {
     return proxyPath;
   }
-  throw new Error(`wxc-test-proxy.exe not found at expected SDK package location: ${proxyPath}`);
+  throw new Error(`wxc-test-proxy.exe not found at expected test helper location: ${proxyPath}`);
 }
 
 /**
@@ -518,14 +506,14 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
 
 // unix-test-proxy helpers (currently only exercised by the Linux Bubblewrap test)
 
-/** Locate unix-test-proxy in the SDK package bin directory. */
+/** Locate the Unix test proxy staged separately from the published SDK. */
 function findUnixTestProxyBinary(): string {
-  const binDir = getSdkBinDir();
+  const binDir = process.env.MXC_TEST_PROXY_DIR ?? getSdkBinDir();
   const proxyPath = path.join(binDir, 'unix-test-proxy');
   if (fs.existsSync(proxyPath)) {
     return proxyPath;
   }
-  throw new Error(`unix-test-proxy not found at expected SDK package location: ${proxyPath}`);
+  throw new Error(`unix-test-proxy not found at expected test helper location: ${proxyPath}`);
 }
 
 /**
