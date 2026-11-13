@@ -405,6 +405,78 @@ test("Azure release artifact recursively copies the NVX bundle unchanged", () =>
   assert.deepEqual(fileDigests(join(extracted, "x64", "aci-edge-sandboxes")), expected);
 });
 
+test("ADO integration installation preserves lockfile settings and stops on npm failures", () => {
+  const pipeline = readFileSync(
+    join(root, ".azure-pipelines", "templates", "SDK.Integration.Test.Job.yml"),
+    "utf8"
+  );
+  const match = pipeline.match(
+    /      - pwsh: \|\r?\n((?:          .*\r?\n)+)        workingDirectory: .*?\r?\n        displayName: Install dependencies and SDK from artifact/
+  );
+  assert.ok(match, "the packed SDK installation step must be present");
+  const directory = mkdtempSync(join(scratch, "azure-npm-"));
+  writeFileSync(join(directory, "sdk.tgz"), "fixture");
+  const script = join(directory, "install.ps1");
+  const mock = `
+function npm {
+    if ($args[0] -eq 'ci') {
+        if ($args -notcontains '--install-links') { throw 'npm ci must match the packed file dependency lockfile' }
+        $global:LASTEXITCODE = [int]$env:MXC_CI_NPM_EXIT
+    } elseif ($args[0] -eq 'install') {
+        Write-Output SDK_INSTALLED
+        $global:LASTEXITCODE = [int]$env:MXC_CI_NPM_INSTALL_EXIT
+    } else { throw 'Unexpected npm command' }
+}
+`;
+  writeFileSync(script, mock + match[1].replace(/^          /gm, "")
+    .replaceAll("$(sdkPkgDirectory)", directory.replaceAll("'", "''")));
+  for (const [ciExit, installExit] of [[0, 0], [17, 0], [0, 19]]) {
+    const result = runScript(script, [], {
+      MXC_CI_NPM_EXIT: String(ciExit),
+      MXC_CI_NPM_INSTALL_EXIT: String(installExit),
+    });
+    assert.equal(result.status, ciExit || installExit, result.output);
+    assert.equal(result.output.includes("SDK_INSTALLED"), ciExit === 0, result.output);
+  }
+});
+
+test("ADO Linux integration keeps the selected Node toolchain through sudo", () => {
+  const pipeline = readFileSync(
+    join(root, ".azure-pipelines", "templates", "SDK.Integration.Test.Job.yml"),
+    "utf8"
+  );
+  const match = pipeline.match(
+    /        - script: (.*(?:\r?\n            .*)*)\r?\n          workingDirectory: .*?\r?\n          displayName: npm test \(sudo, with LXC\)/
+  );
+  assert.ok(match, "the Linux integration step must be present");
+  const script = match[1].replace(/^\|\r?\n/, "").replace(/^            /gm, "")
+    .replaceAll("$(MXC_TEST_BIN_DIR)", "/test-tools")
+    .replaceAll("${{ parameters.debug }}", "false");
+  const mock = `
+set -euo pipefail
+selected="$(mktemp -d)"
+trap 'rm -f "$selected/npm"; rmdir "$selected"' EXIT
+printf '%s\\n' '#!/bin/sh' 'test "$1" = test && test "$MXC_TEST_BIN_DIR" = /test-tools && test "$MXC_SKIP_LXC_NETWORK_TESTS" = 1 && test "$MXC_DEBUG" = false && echo SELECTED_NODE_TOOLCHAIN' > "$selected/npm"
+chmod +x "$selected/npm"
+export PATH="$selected:$PATH"
+sudo() {
+  [[ "$1" == env ]] || { echo 'sudo must explicitly preserve the selected PATH' >&2; return 91; }
+  /usr/bin/env PATH=/usr/bin:/bin "$@"
+}
+`;
+  const bash = process.platform === "win32"
+    ? join(process.env.ProgramFiles, "Git", "bin", "bash.exe")
+    : "bash";
+  const result = spawnSync(bash, ["-s"], {
+    input: mock + script + "\n",
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /SELECTED_NODE_TOOLCHAIN/);
+});
+
 test("ADO ARM64 dependency setup respects network isolation and propagates update failures", () => {
   const pipeline = readFileSync(
     join(root, ".azure-pipelines", "templates", "Rust.Build.Job.yml"),
