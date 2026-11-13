@@ -6,6 +6,7 @@ import { MxcError } from '../v1/errors.js';
 import { loadMxcFfi } from '../native-library.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   type AbiErrorDetail,
@@ -103,7 +104,7 @@ export function readProbeJsonWithNative(
   decode: (pointer: Pointer) => string | undefined = decodeString,
 ): string {
   const output: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.probeRequest(requestJson ?? null, output, error);
   if (status !== 0) {
     try {

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { spawn, ChildProcess, execSync } from 'child_process';
+import { spawn, ChildProcess, execSync, execFileSync } from 'child_process';
 import assert from 'node:assert';
 import type { TestContext } from 'node:test';
 import path from 'path';
@@ -407,6 +407,31 @@ export function createTempDir(prefix: string = 'mxc-test', parentDirectory: stri
   const dir = path.join(tmpBase, `${prefix}-${Date.now()}`);
   fs.mkdirSync(dir);
   return dir;
+}
+
+/** Keep Windows fixtures private even when their parent grants AppContainer access. */
+export function createPrivateWindowsTempDir(prefix: string, parentDirectory: string): string {
+  const directory = createTempDir(prefix, parentDirectory);
+  try {
+    const systemDirectory = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+    execFileSync(path.join(systemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; " +
+      '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; ' +
+      '$acl = [Security.AccessControl.DirectorySecurity]::new(); ' +
+      '$acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;$sid)", ' +
+      '[Security.AccessControl.AccessControlSections]::Access); ' +
+      '[IO.Directory]::SetAccessControl($env:MXC_PRIVATE_FIXTURE, $acl)',
+    ], {
+      env: { ...process.env, MXC_PRIVATE_FIXTURE: directory },
+      windowsHide: true,
+      timeout: 30000,
+    });
+    return directory;
+  } catch (error) {
+    fs.rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 // Python helpers

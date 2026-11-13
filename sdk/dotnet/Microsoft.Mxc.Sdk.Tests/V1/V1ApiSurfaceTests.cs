@@ -30,8 +30,25 @@ public sealed class V1ApiSurfaceTests
         {
             typeof(Dev.JsonOptions),
             typeof(Dev.PtyJsonOptions),
+            typeof(Dev.PolicyPreparationOptions),
+            typeof(Dev.PreparedPolicyRequest),
+            typeof(Dev.PolicyChange),
+            typeof(Dev.PolicyChangeOperation),
             typeof(Dev.MxcContainer),
             typeof(Dev.MxcLifecycle),
+            typeof(Dev.PolicyFailures),
+            typeof(Dev.PolicyFailureResult),
+            typeof(Dev.PolicyFailureDetail),
+            typeof(Dev.PolicyFailureNativeCodes),
+            typeof(Dev.PolicyFailureOutcomes),
+            typeof(Dev.PolicyFailureClasses),
+            typeof(Dev.PolicyFailureReasons),
+            typeof(Dev.PolicyFailureActions),
+            typeof(Dev.PolicyFailureResourceKinds),
+            typeof(Dev.PolicyFailureValueKinds),
+            typeof(Dev.PolicyFailureAccessValues),
+            typeof(Dev.PolicyFailureFlags),
+            typeof(Dev.PolicyFailureVersions),
         };
         Assert.All(
             exportedTypes,
@@ -76,5 +93,36 @@ public sealed class V1ApiSurfaceTests
         };
 
         Assert.All(optionTypes, type => Assert.Null(type.GetProperty("Experimental")));
+    }
+
+    [Fact]
+    public void DevPreparationIsSeparateFromCreationOptionsAndKeepsCancellationLast()
+    {
+        Assert.Equal(new[] { "Experimental" },
+            typeof(Dev.JsonOptions).GetProperties().Select(property => property.Name));
+        Assert.Equal(new[] { "Experimental" },
+            typeof(Dev.PolicyPreparationOptions).GetProperties().Select(property => property.Name));
+        Assert.All(new[]
+        {
+            typeof(Dev.JsonOptions), typeof(Dev.PolicyPreparationOptions),
+            typeof(Dev.PolicyChange), typeof(Dev.PreparedPolicyRequest),
+        }, type => Assert.True(type.IsSealed));
+        Assert.Equal(typeof(System.Text.Json.JsonElement),
+            typeof(Dev.PolicyChange).GetProperty(nameof(Dev.PolicyChange.Before))!.PropertyType);
+        Assert.Equal(typeof(System.Text.Json.JsonElement),
+            typeof(Dev.PolicyChange).GetProperty(nameof(Dev.PolicyChange.After))!.PropertyType);
+
+        var sync = typeof(Dev.MxcContainer).GetMethod(nameof(Dev.MxcContainer.PreparePolicyJson))!;
+        Assert.Equal(typeof(Dev.PreparedPolicyRequest), sync.ReturnType);
+        Assert.Equal(new[] { typeof(string), typeof(Dev.PolicyFailures), typeof(Dev.PolicyPreparationOptions) },
+            sync.GetParameters().Select(parameter => parameter.ParameterType));
+        Assert.True(sync.GetParameters()[^1].IsOptional);
+        var async = typeof(Dev.MxcContainer).GetMethod(nameof(Dev.MxcContainer.PreparePolicyJsonAsync))!;
+        Assert.Equal(typeof(Task<Dev.PreparedPolicyRequest>), async.ReturnType);
+        Assert.Equal(new[]
+        {
+            typeof(string), typeof(Dev.PolicyFailures), typeof(Dev.PolicyPreparationOptions), typeof(CancellationToken),
+        }, async.GetParameters().Select(parameter => parameter.ParameterType));
+        Assert.True(async.GetParameters()[^1].IsOptional);
     }
 }

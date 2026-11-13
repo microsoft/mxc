@@ -342,6 +342,7 @@ fn extern_spawn_json_clears_error_and_rejects_null_handle_before_parsing() {
         operation_utf8: ptr::dangling_mut(),
         native_code_utf8: ptr::dangling_mut(),
         remediation_utf8: ptr::dangling_mut(),
+        details_json_utf8: ptr::dangling_mut(),
     };
     let invalid_utf8 = [0xff_u8, 0];
     // SAFETY: the error storage is writable and holds no live detail; the null
@@ -354,6 +355,7 @@ fn extern_spawn_json_clears_error_and_rejects_null_handle_before_parsing() {
     assert!(error.operation_utf8.is_null());
     assert!(error.native_code_utf8.is_null());
     assert!(error.remediation_utf8.is_null());
+    assert!(error.details_json_utf8.is_null());
 }
 
 #[test]

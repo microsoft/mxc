@@ -189,6 +189,12 @@ script and then to the dispatcher, which has one `switch`/`case` per id. The
 `process` case requires `wxc-exec --probe` to report an enabled native PSEC
 contract, then runs a filesystem smoke test, public SDK streaming tests, and
 the native network and policy suites against the downloaded artifacts.
+The SDK suite requires the Dev policy-preparation test to be discovered
+and executed. It checks preparation without workload writes, explicit caller
+acceptance, strict creation with read-only enforcement, an unrelated writable
+control, and changed-request reuse with the original inferred working directory.
+The test supplies its own observations; injected native outcomes in the backend
+tests cover refusal capture and native-attempt counts.
 The network and policy suites delegate their focused loopback and enumeration
 checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement
@@ -395,15 +401,38 @@ test bundle. The bundle contains native test executables, self-contained .NET
 tests, and the Node SDK with its Node 24.21.0 runtime; validation hosts do not
 compile or restore SDK dependencies.
 
-The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
-enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
-Node public `run`, `spawn`, and tool-discovery filesystem integration cases.
+The dispatcher explicitly runs the ignored Rust bidirectional-stdio and
+V1.Dev creation/preparation tests. The preparation case
+`dev_json_processcontainer_policy_feedback_restricts_current_request`
+must pass and emit `MXC_POLICY_PREPARATION_STRICT_CREATE_OK:<version>` for
+`0.9.0-alpha`, `1.0.0` and `1.1.0-alpha`. `--show-output` exposes those captured
+success markers without changing the named-test pass gate. Missing markers,
+empty selections and skipped required cases fail validation. The bundle
+builder requires discovery of the same case and runs
+`scripts/ci/test-policy-preparation-test-results.ps1` to check the result gate
+offline; this check invokes no backend or workload.
+
+The dispatcher enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET
+`MxcProcessTests` and `DevEntryPointTests` and runs the Node public `run`,
+`spawn`, and tool-discovery filesystem integration cases.
+The .NET prepared-filesystem scenario creates an owner-only workspace beneath
+a parent with inheritable AppContainer write access, so ambient grants cannot
+bypass its read-only assertions during strict `run` and `spawn`.
+The managed preparation tests verify owned candidate requests without
+launching and lossless storage of native results. They launch no workload, so
+they do not depend on this host opt-in and also run on every OS in the .NET SDK
+job. Bundle discovery requires the native preparation fact and both native
+storage theory rows, and scheduled validation rejects skipped tests in either
+class.
+Scheduled validation also requires the passing `nativePreparation: True`
+result row for each storage theory; its pure-storage `False` row cannot satisfy
+the native execution gate.
 The tool-discovery case uses a private fixture alongside the packaged Node
 tests rather than under the host temporary directory. It uses a fake
 `pwsh.exe`, applies the discovered policy through public `run`, and checks that
 tool files are readable while a sibling private sentinel remains denied. It
-also checks host readability and denial without a grant. The .NET suite checks stdin,
-stdout, stderr, large output, cancellation, kill, and timeout behavior.
+also checks host readability and denial without a grant. The .NET suite checks
+stdin, stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
 required cases fail the job even when the runner exits successfully.
 

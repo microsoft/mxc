@@ -15,11 +15,24 @@ by the FlatBuffers compiler (`flatc`).
 ## Provenance
 
 The vendored schema originates from the Microsoft Windows OS repository.
-Authoritative provenance — the validated Windows build, schema SHA-256, and
-exact `flatc` version used — is recorded in
+Authoritative provenance — the source pull request, validated Windows build,
+schema SHA-256, and exact `flatc` version used — is recorded in
 [`external/windows-sdk/ProcessSecurityEnvironment.provenance.toml`](../../../../../external/windows-sdk/ProcessSecurityEnvironment.provenance.toml).
 That file is the single source of truth consumed by both the regeneration
 script and the CI drift gate.
+
+The same provenance file also pins the separate experimental policy-result
+schema, `ExperimentalProcessSecurityEnvironmentPolicyResult.fbs` (`PSEP`).
+Each schema records its source pull request and content hash; neither requires
+an OS checkout path.
+Its bindings are generated into the private
+`src/mxc-sdk/src/core/process_security_environment_policy_result/` module.
+PSEC describes the request passed to Windows; PSEP describes returned
+creation-policy refusal details. Neither schema defines the public MXC request
+JSON contract.
+PSEP also defines the canonical result versions, limits and flags used by its
+decoder. Refresh that schema and regenerate rather than copying its numeric
+definitions from a native header.
 
 ## Regenerating
 
@@ -31,8 +44,9 @@ pwsh -File scripts/versioning/regenerate-psec.ps1
 ```
 
 Pass `-Flatc <path>` when `flatc.exe` is not on `PATH`. The script validates the
-schema SHA-256 against the provenance file and refuses any `flatc` version other
-than the pinned one, so output is byte-reproducible. Older `flatc` releases emit
+schema hashes against the provenance file, regenerates both modules, and
+refuses any `flatc` version other than the pinned one, so output is
+byte-reproducible. Older `flatc` releases emit
 elided lifetimes that trip the `mismatched_lifetime_syntaxes` lint (Rust 1.89+);
 `25.12.19` is the first release with the upstream fix (flatbuffers PR #8709).
 

@@ -48,6 +48,13 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(SpawnWithPtyOptions))]
 [JsonSerializable(typeof(JsonOptions))]
 [JsonSerializable(typeof(PtyJsonOptions))]
+[JsonSerializable(typeof(PolicyPreparationOptions))]
+[JsonSerializable(typeof(PreparedPolicyRequest))]
+[JsonSerializable(typeof(PolicyChange))]
+[JsonSerializable(typeof(PolicyChangeOperation))]
+[JsonSerializable(typeof(PolicyFailures))]
+[JsonSerializable(typeof(PolicyFailureResult))]
+[JsonSerializable(typeof(PolicyFailureDetail))]
 [JsonSerializable(typeof(ProvisionOptions))]
 [JsonSerializable(typeof(StartOptions))]
 [JsonSerializable(typeof(StopOptions))]
@@ -101,6 +108,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(bool?))]
+[JsonSerializable(typeof(JsonElement))]
 internal sealed partial class MxcJsonContext : JsonSerializerContext
 {
 }
@@ -195,4 +203,27 @@ internal static class MxcJson
         JsonSerializer.Deserialize(json, TypeInfo<T>(options));
 
     internal static T? Deserialize<T>(string json) => Deserialize<T>(json, Options);
+
+    internal static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new JsonException("duplicate JSON property");
+                }
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                RejectDuplicateProperties(item);
+            }
+        }
+    }
 }

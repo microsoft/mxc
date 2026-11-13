@@ -268,7 +268,13 @@ foreach ($test in 'dev_json_one_shot_pty_supports_interactive_input', 'dev_json_
 Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-helpers-tests.exe') --list
 }
-foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+& (Join-Path $PSScriptRoot 'test-policy-preparation-test-results.ps1')
+$requiredProcessContainerTests = @(
+    'streaming_processcontainer_bidirectional_stdio'
+    'dev_json_processcontainer_capture_and_pipes'
+    'dev_json_processcontainer_policy_feedback_restricts_current_request'
+)
+foreach ($test in $requiredProcessContainerTests) {
     Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
         & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
     }
@@ -281,6 +287,18 @@ Assert-Discovery '.NET streaming tests' 'MxcProcessTests\.Streaming_WritesStdin_
 }
 Assert-Discovery '.NET exact-JSON creation tests' 'MxcProcessTests\.DevJson_CapturesOutputAndStreamsInput' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcProcessTests'
+}
+Assert-Discovery '.NET prepared exact-JSON creation test' 'MxcProcessTests\.DevJson_CapturesOutputAndStreamsInput\(version: \\"1\.1\.0-alpha\\", preparePolicy: True\)' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -preEnumerateTheories -class '*.MxcProcessTests'
+}
+Assert-Discovery '.NET non-executing preparation test' 'DevEntryPointTests\.PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.DevEntryPointTests'
+}
+foreach ($test in 'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
+    'PolicyPreparationStoragePreservesDuplicateCommentMembers') {
+    Assert-Discovery ".NET native preparation storage $test" "DevEntryPointTests\.$test\(nativePreparation: True\)" {
+        & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -preEnumerateTheories -class '*.DevEntryPointTests'
+    }
 }
 Assert-Discovery '.NET exact-JSON PTY tests' 'MxcContainerIsolationSessionE2ETests\.DevJson_PtySupportsInteractiveInputAndExitStatus' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerIsolationSessionE2ETests'
@@ -307,6 +325,9 @@ try {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/windows-process-container.test.js
     }
     Assert-Discovery 'Node exact-JSON creation suite' 'V1.Dev spawnWithPtyJson supports an interactive terminal' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/dev.test.js
+    }
+    Assert-Discovery 'Node prepared exact-JSON creation test' 'V1.Dev prepares filesystem ceilings for caller-accepted strict creation' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/dev.test.js
     }
     Assert-Discovery 'Node WSLC lifecycle suite' 'WSLC state-aware lifecycle E2E' {

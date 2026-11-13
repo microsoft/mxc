@@ -81,6 +81,25 @@ jobs:
             Write-Host "$framework`: $($Matches[1]) tests passed"
           }
 
+      # Policy preparation with no observations must succeed and return the
+      # request unchanged on every OS and backend, so these tests carry no host
+      # gate. Pin their count with no skips, because the broad run above passes
+      # even if they are later gated or renamed and stop running here.
+      - name: Test policy preparation without observations
+        shell: pwsh
+        run: |
+          foreach ($framework in @('net8.0', 'net10.0')) {
+            $log = Join-Path $env:RUNNER_TEMP "dotnet-test-policy-preparation-$framework.log"
+            dotnet test --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --framework $framework --no-build --no-restore -- --filter-method '*PolicyPreparation*' 2>&1 | Tee-Object -FilePath $log
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { throw "$framework policy preparation tests exited $code" }
+            $out = Get-Content -LiteralPath $log -Raw
+            if ($out -notmatch 'succeeded:\s+6\b' -or $out -notmatch 'skipped:\s+0\b') {
+              throw "$framework must run and pass all six policy preparation tests with none skipped."
+            }
+            Write-Host "$framework policy preparation verified on this OS."
+          }
+
       # LXC creates, starts, and attaches to a system container, so the suite
       # above can only skip it. This installs the substrate and reruns just
       # those tests as root.

@@ -3,7 +3,7 @@
 
 import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { ChildProcess, execFileSync } from 'child_process';
+import { ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -13,6 +13,7 @@ import {
   supportedVersions,
   sandboxSkipReason,
   createTempDir,
+  createPrivateWindowsTempDir,
   withToolPaths,
   startTestProxy,
   pythonCommand,
@@ -186,22 +187,8 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('public tool discovery allows tool reads but denies sibling private files', { skip: sandboxSkipReason }, async () => {
-    tempDir = createTempDir('mxc-tool-discovery', import.meta.dirname);
+    tempDir = createPrivateWindowsTempDir('mxc-tool-discovery', import.meta.dirname);
     const systemDirectory = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
-    // Keep the new fixture private even when the host temp directory grants AppContainer access.
-    execFileSync(path.join(systemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-      '-NoProfile', '-NonInteractive', '-Command',
-      "$ErrorActionPreference = 'Stop'; " +
-      '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; ' +
-      '$acl = [Security.AccessControl.DirectorySecurity]::new(); ' +
-      '$acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;$sid)", ' +
-      '[Security.AccessControl.AccessControlSections]::Access); ' +
-      '[IO.Directory]::SetAccessControl($env:MXC_TOOL_DISCOVERY_FIXTURE, $acl)',
-    ], {
-      env: { ...process.env, MXC_TOOL_DISCOVERY_FIXTURE: tempDir },
-      windowsHide: true,
-      timeout: 30000,
-    });
 
     const toolDirectory = path.join(tempDir, 'tools');
     const privateDirectory = path.join(tempDir, 'private');

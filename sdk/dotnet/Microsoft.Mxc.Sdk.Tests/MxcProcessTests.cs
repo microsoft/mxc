@@ -1,7 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
@@ -19,16 +23,23 @@ public class MxcProcessTests
         Environment.GetEnvironmentVariable("MXC_E2E_PSEC_CAPABLE_HOST") == "1";
 
     [Theory]
-    [InlineData("1.0.0")]
-    [InlineData("1.1.0-alpha")]
-    public async Task DevJson_CapturesOutputAndStreamsInput(string version)
+    [InlineData("1.0.0", false)]
+    [InlineData("1.1.0-alpha", false)]
+    [InlineData("1.1.0-alpha", true)]
+    public async Task DevJson_CapturesOutputAndStreamsInput(string version, bool preparePolicy)
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        if (preparePolicy)
+        {
+            await RunPreparedFilesystemScenarioAsync(version);
+            return;
+        }
+        var options = new Dev.JsonOptions();
         var creation = OperatingSystem.IsWindows()
             ? $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"cmd.exe /c \"echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7\"","timeout":30000}}"""
             : $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"printf 'DEV_CAPTURE_OK\\n'; printf 'DEV_CAPTURE_ERR\\n' >&2; exit 7","timeout":30000}}""";
         var result = await Dev.MxcContainer.RunJsonAsync(
-            creation, cancellationToken: TestContext.Current.CancellationToken);
+            creation, options, TestContext.Current.CancellationToken);
         Assert.False(result.TimedOut);
         Assert.Equal(7, result.ExitCode);
         Assert.Contains("DEV_CAPTURE_OK", result.Stdout);
@@ -50,6 +61,178 @@ public class MxcProcessTests
         Assert.False(outcome.TimedOut);
         Assert.Equal(9, outcome.ExitCode);
         Assert.Contains("DEV_PIPE:ping-pong", Encoding.UTF8.GetString(stdout));
+    }
+
+    private static async Task RunPreparedFilesystemScenarioAsync(string version)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("policy observations are currently produced only by Windows ProcessContainer");
+            return;
+        }
+        var fixture = Path.Combine(AppContext.BaseDirectory, $"policy-preparation-{Guid.NewGuid():N}");
+        var workspace = new DirectoryInfo(Path.Combine(fixture, "workspace"));
+        var restricted = Path.Combine(workspace.FullName, "restricted");
+        var permitted = Path.Combine(workspace.FullName, "permitted");
+        try
+        {
+            var parent = Directory.CreateDirectory(fixture);
+            var inheritedAccess = parent.GetAccessControl();
+            inheritedAccess.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WinBuiltinAnyPackageSid, null),
+                FileSystemRights.Modify,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            parent.SetAccessControl(inheritedAccess);
+
+            // Inherited AppContainer grants must not bypass the policy under test.
+            using var caller = WindowsIdentity.GetCurrent();
+            var owner = caller.User ?? throw new InvalidOperationException("The caller has no Windows user SID.");
+            var privateAccess = new DirectorySecurity();
+            privateAccess.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            privateAccess.AddAccessRule(new FileSystemAccessRule(
+                owner, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            workspace.Create(privateAccess);
+            Directory.CreateDirectory(restricted);
+            Directory.CreateDirectory(permitted);
+            var seed = Path.Combine(restricted, "seed.txt");
+            var capturedSentinel = Path.Combine(permitted, "captured.txt");
+            var pipedSentinel = Path.Combine(permitted, "piped.txt");
+            File.WriteAllText(seed, "seed");
+            File.WriteAllText(Path.Combine(restricted, "relative.txt"), "ORIGINAL_CWD");
+            File.WriteAllText(Path.Combine(permitted, "relative.txt"), "WRONG_CWD");
+            var failures = Dev.PolicyFailures.FromJson(new Dev.PolicyFailures
+            {
+                Results =
+                [
+                    new()
+                    {
+                        Outcome = Dev.PolicyFailureOutcomes.Blocked,
+                        Details =
+                        [
+                            new()
+                            {
+                                FailureClass = Dev.PolicyFailureClasses.Filesystem,
+                                FailureReason = Dev.PolicyFailureReasons.AccessExceedsCeiling,
+                                RequiredAction = Dev.PolicyFailureActions.RestrictFilesystemAccess,
+                                ResourceKind = Dev.PolicyFailureResourceKinds.Path,
+                                ValueKind = Dev.PolicyFailureValueKinds.Access,
+                                Flags = Dev.PolicyFailureFlags.HasActionableDetails | Dev.PolicyFailureFlags.ResourceComplete,
+                                RequestedValue = Dev.PolicyFailureAccessValues.ReadWrite,
+                                RequiredValue = Dev.PolicyFailureAccessValues.ReadOnly,
+                                Resource = restricted,
+                            },
+                        ],
+                    },
+                ],
+            }.ToJson());
+            var storedFailures = failures.ToJson();
+            JsonObject Request(string command) => new()
+            {
+                ["version"] = version,
+                ["containerId"] = $"dotnet-{Path.GetFileName(fixture)}",
+                ["containment"] = "processcontainer",
+                ["filesystem"] = new JsonObject { ["readwritePaths"] = new JsonArray(restricted, permitted) },
+                ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
+            };
+            string Accept(Dev.PreparedPolicyRequest prepared, JsonObject original)
+            {
+                var expected = (JsonObject)original.DeepClone();
+                expected["filesystem"]!["readwritePaths"] = new JsonArray(permitted);
+                expected["filesystem"]!["readonlyPaths"] = new JsonArray(restricted);
+                expected["process"]!["cwd"] = restricted;
+                Assert.True(JsonNode.DeepEquals(expected, JsonNode.Parse(prepared.RequestJson)));
+                Assert.Equal(3, prepared.Changes.Length);
+                var changes = prepared.Changes.ToDictionary(change => change.Path, StringComparer.Ordinal);
+                var readwrite = changes["/filesystem/readwritePaths"];
+                Assert.Equal(Dev.PolicyChangeOperation.Replace, readwrite.Operation);
+                Assert.True(JsonNode.DeepEquals(new JsonArray(restricted, permitted),
+                    JsonNode.Parse(readwrite.Before.GetRawText())));
+                Assert.True(JsonNode.DeepEquals(new JsonArray(permitted),
+                    JsonNode.Parse(readwrite.After.GetRawText())));
+                var readOnly = changes["/filesystem/readonlyPaths"];
+                Assert.Equal(Dev.PolicyChangeOperation.Add, readOnly.Operation);
+                Assert.Equal(JsonValueKind.Null, readOnly.Before.ValueKind);
+                Assert.True(JsonNode.DeepEquals(new JsonArray(restricted),
+                    JsonNode.Parse(readOnly.After.GetRawText())));
+                var cwd = changes["/process/cwd"];
+                Assert.Equal(Dev.PolicyChangeOperation.Add, cwd.Operation);
+                Assert.Equal(JsonValueKind.Null, cwd.Before.ValueKind);
+                Assert.Equal(restricted, cwd.After.GetString());
+                TestContext.Current.TestOutputHelper?.WriteLine($"MXC_PREPARED_FILESYSTEM_ACCEPTED:{prepared.ToJson()}");
+                return prepared.RequestJson;
+            }
+
+            var creation = Request(
+                $"cmd.exe /d /c echo CHANGED>>\"{seed}\" & echo CONTROL>>\"{capturedSentinel}\""
+                + " & type relative.txt & echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7");
+            var originalJson = creation.ToJsonString();
+            var baseline = await Dev.MxcContainer.RunJsonAsync(
+                originalJson, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(7, baseline.ExitCode);
+            Assert.Contains("CHANGED", File.ReadAllText(seed));
+            Assert.Contains("CONTROL", File.ReadAllText(capturedSentinel));
+            TestContext.Current.TestOutputHelper?.WriteLine("MXC_PREPARED_FILESYSTEM_BASELINE_RW_OK");
+            File.WriteAllText(seed, "seed");
+            File.Delete(capturedSentinel);
+
+            var prepared = await Dev.MxcContainer.PreparePolicyJsonAsync(
+                originalJson, failures, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal("seed", File.ReadAllText(seed));
+            Assert.False(File.Exists(capturedSentinel));
+            Assert.Equal(originalJson, creation.ToJsonString());
+            var accepted = Accept(prepared, creation);
+            var result = await Dev.MxcContainer.RunJsonAsync(
+                accepted, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.False(result.TimedOut);
+            Assert.Equal(7, result.ExitCode);
+            Assert.Contains("DEV_CAPTURE_OK", result.Stdout);
+            Assert.Contains("ORIGINAL_CWD", result.Stdout);
+            Assert.DoesNotContain("WRONG_CWD", result.Stdout);
+            Assert.Contains("DEV_CAPTURE_ERR", result.Stderr);
+            Assert.Empty(result.Warnings);
+            Assert.Equal("seed", File.ReadAllText(seed));
+            Assert.Contains("CONTROL", File.ReadAllText(capturedSentinel));
+
+            var piped = Request(
+                $"cmd.exe /d /v:on /c set /p L= & echo CHANGED>>\"{seed}\" & echo PIPE_CONTROL>>\"{pipedSentinel}\""
+                + " & type relative.txt & echo DEV_PIPE:!L! & echo DEV_PIPE_ERR 1>&2 & exit /b 9");
+            var originalPipedJson = piped.ToJsonString();
+            prepared = Dev.MxcContainer.PreparePolicyJson(originalPipedJson, failures);
+            Assert.False(File.Exists(pipedSentinel));
+            Assert.Equal(originalPipedJson, piped.ToJsonString());
+            accepted = Accept(prepared, piped);
+            using var process = await Dev.MxcContainer.SpawnJsonAsync(
+                accepted, cancellationToken: TestContext.Current.CancellationToken);
+            using var stdin = process.StandardInput;
+            Assert.NotNull(stdin);
+            var output = process.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+            await stdin.WriteAsync(Encoding.UTF8.GetBytes("ping-pong\r\n"),
+                TestContext.Current.CancellationToken);
+            stdin.Dispose();
+            var (outcome, stdout, stderr) = await output;
+            Assert.False(outcome.TimedOut);
+            Assert.Equal(9, outcome.ExitCode);
+            Assert.Contains("DEV_PIPE:ping-pong", Encoding.UTF8.GetString(stdout));
+            Assert.Contains("ORIGINAL_CWD", Encoding.UTF8.GetString(stdout));
+            Assert.DoesNotContain("WRONG_CWD", Encoding.UTF8.GetString(stdout));
+            Assert.Contains("DEV_PIPE_ERR", Encoding.UTF8.GetString(stderr));
+            Assert.Empty(process.Warnings);
+            Assert.Equal("seed", File.ReadAllText(seed));
+            Assert.Contains("PIPE_CONTROL", File.ReadAllText(pipedSentinel));
+            Assert.Equal(storedFailures, failures.ToJson());
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"MXC_PREPARED_FILESYSTEM_STRICT_RUN_SPAWN_OK:{version}:seed=unchanged:permitted=written:cwd=ORIGINAL_CWD");
+        }
+        finally
+        {
+            if (Directory.Exists(fixture))
+            {
+                Directory.Delete(fixture, recursive: true);
+            }
+        }
     }
 
     [Theory]

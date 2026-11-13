@@ -27,6 +27,7 @@ import {
 } from './native-stdio.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -556,7 +557,7 @@ export async function createStreamingDriverFromJson(
   stdin = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const spawn = stdin ? native.spawnWithStdin.bind(native) : native.spawn.bind(native);
   const status = await new Promise<number>((resolve, reject) => {
     spawn(
@@ -585,7 +586,7 @@ export function createStreamingDriverSync(
   experimental = false,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.spawnSync(
     JSON.stringify(request),
     experimental ? 1 : 0,
@@ -714,7 +715,7 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.stateAwareExec(
     requestJson,
     experimental ? 1 : 0,
@@ -784,7 +785,7 @@ export async function createStateAwareStreamingDriverAsync(
   stdin = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const exec = stdin
     ? native.stateAwareExecWithStdinAsync.bind(native)
     : native.stateAwareExecAsync.bind(native);

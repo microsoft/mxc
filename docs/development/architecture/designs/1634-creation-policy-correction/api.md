@@ -57,7 +57,7 @@ candidate/change data separately with `PreparedPolicyRequest::to_json`.
 Approval decisions, original companion diagnostics and retry budgets are
 application state, not part of either storage value.
 
-The [complete prototype example](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/src/mxc-sdk/examples/policy_feedback.rs)
+The [complete example](../../../../../src/mxc-sdk/examples/policy_feedback.rs)
 shows bounded caller-controlled retries, storage, exact reviewed-candidate
 acceptance and output/exit handling. It accepts an unchanged candidate without
 an approval file; changed candidates require the exact reviewed result.
@@ -200,11 +200,7 @@ pub struct PolicyFailureDetail {
     pub flags: u32,
     pub requested_value: u64,
     pub required_value: u64,
-    pub resource: Option<Vec<u16>>,
-}
-
-impl PolicyFailureDetail {
-    pub fn resource_text(&self) -> Result<Option<String>, std::string::FromUtf16Error>;
+    pub resource: Option<String>,
 }
 ```
 
@@ -213,8 +209,9 @@ These are declaration shapes, not implementation bodies. Existing
 valid. Construct the new non-exhaustive `PolicyPreparationOptions` with
 `Default` and set fields. Preparation borrows observations for the call and
 returns owned candidate/change data. Defaults are experimental authorization
-off, observation format/native versions 1, unknown outcome 0 and empty
-results/details. There is no cancellation token addition.
+off, the supported observation format and native versions
+(`FORMAT_VERSION`, `VERSION` and `MINIMUM_READER_VERSION`), `OUTCOME_UNKNOWN`
+and empty results/details. There is no cancellation token addition.
 
 ### .NET
 
@@ -267,7 +264,7 @@ public sealed class PreparedPolicyRequest
 
 public sealed class PolicyFailures
 {
-    public uint FormatVersion { get; init; } = 1;
+    public uint FormatVersion { get; init; } = PolicyFailureVersions.Format;
     public PolicyFailureResult[] Results { get; init; } = [];
     public string ToJson();
     public static PolicyFailures FromJson(string json);
@@ -277,8 +274,8 @@ public sealed class PolicyFailures
 
 public sealed class PolicyFailureResult
 {
-    public uint Version { get; init; } = 1;
-    public uint MinimumReaderVersion { get; init; } = 1;
+    public uint Version { get; init; } = PolicyFailureVersions.Result;
+    public uint MinimumReaderVersion { get; init; } = PolicyFailureVersions.MinimumReader;
     public uint Outcome { get; init; }
     public PolicyFailureDetail[] Details { get; init; } = [];
 }
@@ -293,8 +290,7 @@ public sealed class PolicyFailureDetail
     public uint Flags { get; init; }
     public ulong RequestedValue { get; init; }
     public ulong RequiredValue { get; init; }
-    public ushort[]? Resource { get; init; }
-    public string? GetResourceText();
+    public string? Resource { get; init; }
 }
 ```
 
@@ -365,14 +361,13 @@ export interface PolicyFailureDetail {
   flags: number;
   requestedValue: string;
   requiredValue: string;
-  resource?: number[];
+  resource?: string;
 }
 
 export declare function policyFailuresFromError(error: unknown): PolicyFailures | undefined;
 export declare function parsePolicyFailures(json: string): PolicyFailures;
 export declare function serializePolicyFailures(value: PolicyFailures): string;
 export declare function mergePolicyFailures(older: PolicyFailures, newer: PolicyFailures): PolicyFailures;
-export declare function policyFailureResourceText(detail: PolicyFailureDetail): string | undefined;
 ```
 
 ### Named values, not closed numeric types
@@ -383,6 +378,7 @@ remain primitive so unknown values/bits survive inspection and storage.
 
 | Meaning | Rust owner and prefix | .NET/Node group and known members |
 | --- | --- | --- |
+| Supported versions | `PolicyFailures::FORMAT_VERSION`, `PolicyFailureResult::VERSION`, `PolicyFailureResult::MINIMUM_READER_VERSION` | `PolicyFailureVersions`: `Format=1`, `Result=1`, `MinimumReader=1` |
 | Outcome | `PolicyFailureResult::OUTCOME_` | `PolicyFailureOutcomes`: `Unknown=0`, `Blocked=1`, `EvaluationFailed=2` |
 | Class | `PolicyFailureDetail::CLASS_` | `PolicyFailureClasses`: `None=0`, `Network=1`, `Filesystem=2`, `EnforcementMode=3` |
 | Reason | `PolicyFailureDetail::REASON_` | `PolicyFailureReasons`: `None=0`, `CapabilityNotAllowed=1`, `AccessExceedsCeiling=2`, `DenyRequired=3`, `RequestPathLimit=4` |
@@ -420,7 +416,7 @@ stream for an automated controller.
 | Input | Meaning, omission and rejection |
 | --- | --- |
 | Request JSON | Required complete create-and-run request in a registered contract, bounded to 8 MiB UTF-8. Empty, malformed or unsupported input fails without a candidate or creation. The original string remains unchanged. |
-| `failures` | Required owned observation value, borrowed for the Rust call. A valid empty result collection still requires the supported preparation path; it is not an omitted input or authorization to create. Missing/malformed data is rejected, not silently ignored. |
+| `failures` | Required owned observation value, borrowed for the Rust call. A valid empty result collection returns the request unchanged on every backend and OS; it is not an omitted input or authorization to create. Missing/malformed data is rejected, not silently ignored. |
 | `PolicyPreparationOptions` | Separate extensible type. Rust requires a value, normally `Default`; .NET accepts null/omitted options and Node accepts omitted options. Experimental authorization defaults off. |
 | `experimental` / `Experimental` | Existing experimental-backend authorization; it neither selects a request version nor grants administrative approval. Supply it separately to subsequent strict creation when required. |
 
@@ -504,7 +500,7 @@ This is an illustrative complete `details` object, not the value to store:
         "flags": 3,
         "requestedValue": "2",
         "requiredValue": "1",
-        "resource": [67, 58, 92, 119, 111, 114, 107]
+        "resource": "C:\\work"
       }]
     }]
   }
@@ -512,25 +508,45 @@ This is an illustrative complete `details` object, not the value to store:
 ```
 
 The detail observes read-write access to `C:\work` exceeding a read-only
-ceiling. It does not enumerate the complete administrative policy.
+ceiling. It does not enumerate the complete administrative policy. JSON
+carries the numeric encodings; compare them with the named values above:
+
+| Field | JSON value | Named value |
+| --- | --- | --- |
+| `formatVersion` | `1` | `FORMAT_VERSION` / `PolicyFailureVersions.Format` |
+| `version` | `1` | `VERSION` / `PolicyFailureVersions.Result` |
+| `minimumReaderVersion` | `1` | `MINIMUM_READER_VERSION` / `PolicyFailureVersions.MinimumReader` |
+| `outcome` | `1` | Outcome `Blocked` |
+| `failureClass` | `2` | Class `Filesystem` |
+| `failureReason` | `2` | Reason `AccessExceedsCeiling` |
+| `requiredAction` | `2` | Action `RestrictFilesystemAccess` |
+| `resourceKind` | `1` | Resource `Path` |
+| `valueKind` | `1` | Value `Access` |
+| `flags` | `3` | Flags `HasActionableDetails \| ResourceComplete` |
+| `requestedValue` | `"2"` | Access value `ReadWrite` |
+| `requiredValue` | `"1"` | Access value `ReadOnly` |
+| `resource` | `"C:\\work"` | Path `C:\work` |
 
 - Store the inner `policyFailures` value beginning `{ formatVersion, results }`,
   not the whole error extension. Supply restored observations to preparation,
   never creation. Observation format, native batch versions and request JSON
   version are independent.
 - Field names are camelCase. All fields are required except `resource`.
-  Format version 1 is supported; unknown object fields are rejected.
+  Only the supported format version named above is accepted; unknown object
+  fields are rejected.
   Versions/codes/flags are unsigned 32-bit JSON numbers. Unknown numeric values
   remain inspectable but do not authorize an unknown remedy.
 - `requestedValue` / `requiredValue` are unsigned 64-bit decimal JSON strings, up to
   `"18446744073709551615"`. Rust/.NET expose integers; Node keeps strings.
   Do not convert through JavaScript `Number`. Requested values describe the
   native batch's evaluated request, not a subsequent invocation.
-- `resource` holds unsigned 16-bit UTF-16 units without a terminator. Omitted/null
-  resources normalize to absence and serialize as omitted; empty arrays remain
-  present. Malformed UTF-16 remains inspectable. Text helpers decode strictly:
-  Rust returns `FromUtf16Error`, .NET throws `DecoderFallbackException`, Node
-  throws `MxcError(malformed_request)`. Decoded text alone is not actionable.
+- `resource` holds the native resource text without a terminator; an empty
+  string remains distinct from absence. A native resource that is not valid
+  UTF-16, such as one with an unpaired surrogate, is omitted:
+  `ResourceUnavailable` is set and `ResourceComplete` is cleared, so that detail
+  is never actionable. Storage helpers reject an unpaired surrogate in
+  `resource`. Null fields normalize to absence and serialize as
+  omitted. Resource text alone is not actionable.
 - Optional companion `policyFeedbackError` is always an object with string
   `code` and `reason`; current codes are `unsafeReplay` and
   `feedbackLimitExceeded`. Stop automatic retries on its presence, including
@@ -557,7 +573,8 @@ and application stop/budget state are not retained by observation serialization.
 | Native policy refusal | Ordinary error plus fresh structured failures where available, preserving high-level policy guidance/native operation/status. |
 | Preparation succeeds | Owned candidate request and exact changes, no container/process handle. The caller can inspect, accept, edit, reject or store it. |
 | Unsafe/unsupported preparation or exceeded input/result limit | Existing validation/unsupported error; structured terminal context where applicable. No guessed edit, partial candidate, fallback or workload. |
-| Wrong backend | Rust `UnsupportedContainment`; Node/.NET corresponding existing unsupported-containment category. |
+| Non-empty observations for a backend that cannot apply them | Rust `UnsupportedContainment`; Node/.NET corresponding existing unsupported-containment category. |
+| Experimental backend without the experimental opt-in | Existing `BackendUnavailable` category, for empty and non-empty observations alike. |
 | Invalid request phase | Existing request parsing/phase error; preparation produces no candidate or creation. |
 | Native environment succeeds | Existing `ExecutionResult` or process handle and ordinary warnings; no policy-correction report/text. |
 | Launch/wait/read/cancellation/cleanup failure | Existing error and ownership semantics; stored observations do not make a workload retry safe. |
@@ -618,14 +635,14 @@ SDK-specific coverage must include:
   serialized DTOs and require no reflection path.
 - Cross-SDK fixed JSON encodings, exact required before/after values,
   null/absence operations, JSON Pointers, unknown code/flag retention, full
-  unsigned64 observation values, UTF-16 distinctions, all-or-nothing limits
+  unsigned64 observation values, resource text and omission of invalid native
+  UTF-16 with unavailable-resource flags, all-or-nothing limits
   and companion-state handling. Compare named values with the native schema.
 
-No runtime tests are claimed for this documentation PR. Prototype references
-for review are the [Rust](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/rust/v1/dev.md),
-[.NET](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/dotnet/v1/dev.md)
-and [Node](https://github.com/microsoft/mxc/blob/90ce226f6b0e779abc8dfb541fe5dfb71d5697ae/docs/api-reference/node/v1/dev.md)
-Dev contracts. They illustrate the accepted API; implementation delivery remains separate.
+The [Rust](../../../../api-reference/rust/v1/dev.md),
+[.NET](../../../../api-reference/dotnet/v1/dev.md)
+and [Node](../../../../api-reference/node/v1/dev.md) V1.Dev references
+document the implemented API.
 
 Consumer updates belong in all three SDK READMEs and versioned V1.Dev
 signature/type references, the API index, and caller-owned storage/resubmission

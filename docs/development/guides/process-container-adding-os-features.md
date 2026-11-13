@@ -37,7 +37,113 @@ MXC request JSON
 
 The PSEC FlatBuffer is the contract between MXC and the OS process security
 environment. New features must flow from the versioned config contract into the
-runtime model and then into that FlatBuffer.
+runtime model and then into that FlatBuffer. Policy preparation accepts
+creation-policy observations separately from request JSON.
+
+## Structured creation-policy failures and separate preparation
+
+Strict creation performs one native creation attempt and executes only the
+supplied request. A policy refusal can return owned `PolicyFailures` from that
+attempt. Applications merge observations explicitly, then use V1.Dev
+`prepare_policy_json` to obtain a candidate request and structured changes.
+Preparation never calls `CreateProcessSecurityEnvironment` (CPSE), starts a
+trace or executes a workload. The application inspects and accepts, edits or
+rejects the candidate before submitting ordinary request JSON through strict
+creation. The [Rust Dev reference](../../api-reference/rust/v1/dev.md#separate-policy-preparation)
+documents the API, limits and candidate shape, and the
+[compiled caller example](../../../src/mxc-sdk/examples/policy_feedback.rs)
+shows consumption. The [.NET](../../api-reference/dotnet/v1/dev.md) and
+[Node](../../api-reference/node/v1/dev.md) V1.Dev references document the
+corresponding preparation APIs.
+
+When the optional allocation-returning
+`Experimental_GetLastProcessSecurityEnvironmentPolicyResult` getter is present
+and support flags include `EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT` (`0x10`), MXC
+adds `EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT`
+(`0x2`) to
+`CreateProcessSecurityEnvironment` (CPSE).
+This enables diagnostic capture only. It does not change the request. Only a
+CPSE policy refusal (`HRESULT_FROM_WIN32(ERROR_ACCESS_DISABLED_BY_POLICY)`,
+`0x800704EC`)
+queries the getter; retrieval occurs synchronously on the failing native thread
+before cleanup, callbacks or another creation can replace its snapshot.
+Successful creation and unrelated failures do not query it.
+
+The copied `PSEP` contract is in
+`external/windows-sdk/ExperimentalProcessSecurityEnvironmentPolicyResult.fbs`.
+Its Rust bindings and the PSEC bindings use the same regeneration gate
+(`scripts/versioning/check-psec-codegen.js`).
+The native decoder validates the identifier, requested V1/minimum reader
+versions, FlatBuffer structure, and 128 KiB/64-detail/32,768-resource-unit
+limits.
+Resource arrays contain UTF-16 units without terminators, with one additional
+accounting unit per resource. Allocations are independently owned and freed with
+`CoTaskMemFree`, including unexpected non-null getter failure outputs.
+
+Native observations retain their numeric codes, flags, resources and observed
+values. Backend-specific data travels through `MxcError.details`, the public
+SDK error, owned C error JSON, and the language adapters. Specific failures
+never become error or warning text. The generic native operation/status remain
+authoritative; missing or invalid diagnostics never imply approval.
+
+On another policy refusal, the error contains the fresh batch; the caller
+uses `PolicyFailures::merged_with` to retain distinct whole batches.
+Batches are non-exhaustive: merged observations are not
+the entire administrative policy. A later observation describes the reduced
+request Windows evaluated, so preparation derives current restrictive
+constraints without rewriting the stored observed values. Unknown, incomplete,
+contradictory or unsafe instructions fail explicitly. Already-satisfied known
+restrictions are harmless; compatible strengthening is applied conservatively.
+
+Maintainer rules for preparation:
+
+- Reuse the conservative backend reduction path. Supported edits
+  remove capabilities and their network/capture producers, lower only matching
+  existing writable path spellings to read-only, add safe deny exceptions, and
+  remove exact duplicates to meet path budgets. Preserve restrictive exceptions
+  and enumeration-only paths.
+
+- Proxy removal must not activate direct-network permissions that were
+  ineffective in proxy mode.
+
+- Filesystem probes use the bounded existing probe facility and the current
+  creator's context; do not guess at aliases, ambiguous spellings or
+  unsupported root cases.
+
+- Treat observations as untrusted data that can be reused across requests or
+  creators. Every edit must remain restrictive relative to this call's request,
+  and the selected native tier must enforce it.
+
+- Project only required authoring edits into the original JSON so it keeps its
+  contract version, metadata, optional-field presence, unrelated grants and
+  current runtime proxy, certificate and capture settings. Capture changes use
+  the dedicated `learningMode`/`captureDenials` fields; never insert reserved
+  capability names into the authored capability array.
+
+- Reparse the candidate through the original contract and check it against the
+  prospective PSEC and effective policy. Return no partial candidate or
+  truncated changes. Preparation owns no live environment, process or trace
+  handles.
+
+The application owns retries, persistence and acceptance. Neither preparation
+nor acceptance is approval by Windows, which reevaluates every strict creation.
+Successful creation uses the ordinary launch/capture and cleanup path and
+returns normal results or handles. Each creation call makes one native creation
+attempt and executes only the supplied request. MXC keeps no observations
+between calls.
+
+The Windows CLI uses strict creation and emits the current native observations
+in its error envelope. A caller can save an accepted candidate's `requestJson`
+as a normal MXC configuration and submit it through the usual CLI invocation.
+The CLI does not prepare, merge or persist observations.
+Its diagnostic records share stderr with workload output;
+JSON shape is not authentication. Prefer direct SDK errors for an automated
+retry controller.
+
+The scheduled ProcessContainer SDK test
+`dev_json_processcontainer_policy_feedback_restricts_current_request` and the
+injected native/backend tests are described in the
+[CI validation runbook](../build-and-test/ci-validation-infrastructure.md).
 
 ## Step-by-step
 

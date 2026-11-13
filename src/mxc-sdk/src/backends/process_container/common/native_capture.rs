@@ -66,6 +66,12 @@ impl CaptureSession {
     ///   so it is not leaked.
     pub fn begin(sandbox_specification: &[u8], flags: u32) -> Result<Self, LearningModeError> {
         let environment = secenv::create(sandbox_specification, flags)?;
+        Self::begin_with_environment(environment)
+    }
+
+    pub(crate) fn begin_with_environment(
+        environment: ProcessSecurityEnvironment,
+    ) -> Result<Self, LearningModeError> {
         // SAFETY: `environment` was just created and remains live until this
         // session closes it.
         let trace = unsafe { start_trace(environment.raw()) };

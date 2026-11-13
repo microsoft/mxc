@@ -1,14 +1,14 @@
-# Provenance for the vendored ProcessSecurityEnvironment FlatBuffers schema.
+# Provenance for the vendored ProcessSecurityEnvironment FlatBuffers schemas.
 #
 # This file is the single source of truth for the pinned regeneration toolchain
-# and the authoritative hash of the vendored `ProcessSecurityEnvironment.fbs`.
+# and the authoritative hashes of the vendored PSEC and PSEP schemas.
 # It is consumed by:
 #   * scripts/versioning/regenerate-psec.ps1
 #     (validates the schema hash + pins the exact flatc version before generating)
 #   * scripts/versioning/check-psec-codegen.js
 #     (CI drift gate — verifies the committed schema + generated SDK module)
 #
-# Update this file whenever the vendored schema is refreshed from the OS source,
+# Update this file whenever either schema is refreshed from the OS source,
 # then regenerate the bindings (see the module README).
 
 [source]
@@ -29,6 +29,12 @@ related_trace_abi_pull_request = 16307987
 # the LF-normalized (git-blob) content so it is checkout-independent regardless
 # of autocrlf. Verified by regenerate.ps1 and the CI drift gate.
 sha256 = "736cacef37a6c97a0cb97c7132da462a3b51811fca8f1e4076cac51085dfa516"
+
+[policy_result]
+# ExperimentalProcessSecurityEnvironmentPolicyResult.fbs uses the same pinned
+# compiler below, but is a separate OS-owned result contract (PSEP, not PSEC).
+source_pull_request = 17270577
+sha256 = "faa6a4e83fb334ffef27e3869139a3736a1859a5659840ba6f8b4b1e0242fa7d"
 
 [tool]
 # Exact flatc version used to generate the committed bindings. Regeneration

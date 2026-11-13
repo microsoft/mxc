@@ -8,6 +8,7 @@ import {
   createStateAwareStreamingDriver,
   createStateAwareStreamingDriverAsync,
   createStreamingDriver,
+  createStreamingDriverFromJson,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
@@ -16,6 +17,11 @@ import {
   type NodeStreamDependencies,
   type NativeStreamFactory,
 } from '../../src/bindings/native-stdio.js';
+import {
+  createAbiErrorDetail,
+  type AbiErrorDetail,
+} from '../../src/bindings/native-error.js';
+import { PolicyFailureVersions } from '../../src/v1/dev/policy-failures.js';
 
 class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
@@ -25,6 +31,7 @@ class FakeNative implements StreamingNativeFacade {
   spawnStatus = 0;
   spawnRequest: string | undefined;
   spawnExperimental: number | undefined;
+  spawnError: Partial<AbiErrorDetail> | undefined;
   spawnCount = 0;
   deferSpawn = false;
   spawnFailure: Error | undefined;
@@ -38,6 +45,7 @@ class FakeNative implements StreamingNativeFacade {
   waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
+  readonly freedErrors: AbiErrorDetail[] = [];
   warningsStatus = 0;
   outputMetadataStatus = 0;
   deferWait = false;
@@ -70,11 +78,12 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnRequest = request;
     this.spawnExperimental = experimental;
+    Object.assign(error, this.spawnError);
     this.spawnCount += 1;
     if (this.spawnFailure !== undefined) {
       const failure = this.spawnFailure;
@@ -104,7 +113,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnWithStdinCount += 1;
@@ -115,7 +124,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareRequest = request;
@@ -139,7 +148,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareWithStdin = true;
@@ -232,8 +241,10 @@ class FakeNative implements StreamingNativeFacade {
     queueMicrotask(() => completion(null));
   }
 
-  freeError(): void {
+  freeError(error: AbiErrorDetail): void {
     this.freeErrorCount += 1;
+    this.freedErrors.push({ ...error });
+    Object.assign(error, createAbiErrorDetail());
   }
 
   freeString(value: unknown): void {
@@ -272,6 +283,32 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('preserves structured creation errors and frees their JSON only with the out-error', async () => {
+    const request = ' { "version":"1.1.0-alpha","process":{"commandLine":"echo"} } ';
+    for (const json of [
+      `{"policyFailures":{"formatVersion":${PolicyFailureVersions.Format},"results":[]},"backendDetail":"retained"}`,
+      '{',
+    ]) {
+      const native = new FakeNative();
+      native.spawnStatus = 11;
+      native.spawnError = { detailsJson: Buffer.from(json + '\0') };
+      await assert.rejects(
+        createStreamingDriverFromJson(request, native, new FakeStreams(), true),
+        json === '{'
+          ? { code: 'backend_error', message: 'native runtime returned malformed error details' }
+          : { code: 'policy_validation', details: { ffiStatus: 11, ...JSON.parse(json) } },
+      );
+      assert.strictEqual(native.spawnRequest, request);
+      assert.strictEqual(native.spawnExperimental, 1);
+      assert.strictEqual(native.spawnCount, 1);
+      assert.strictEqual(native.spawnWithStdinCount, 0);
+      assert.strictEqual(native.freeErrorCount, 1);
+      assert.strictEqual(native.freeCount, 0);
+      assert.deepStrictEqual(native.freedStrings, []);
+      assert.strictEqual(native.freedErrors[0].detailsJson, native.spawnError.detailsJson);
+    }
+  });
+
   it('awaits native state-aware spawn without using synchronous dispatch', async () => {
     const native = new FakeNative();
     native.deferSpawn = true;

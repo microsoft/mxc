@@ -36,6 +36,9 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use crate::mxc_common::api_set::is_api_set_implemented;
+use crate::mxc_common::models::{FailurePhase, ScriptResponse};
+use crate::mxc_common::mxc_error::{ApiFailure, MxcError};
+use crate::mxc_common::policy_failures::{PolicyFailureResult, PolicyFailures};
 use crate::mxc_common::string_util;
 use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
 use windows::Win32::System::LibraryLoader::{
@@ -48,6 +51,9 @@ use windows::Win32::System::Threading::{
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 use crate::learning_mode_windows::LearningModeError;
+use crate::process_container_common::secenv_policy::{
+    PolicyResult, MAX_RESULT_BYTES, POLICY_RESULT_VERSION,
+};
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
@@ -93,6 +99,8 @@ impl SecurityEnvironmentSupport {
 /// declared here: explicit [`ProcessSecurityEnvironment::close`] after the child
 /// has exited already provides deterministic teardown.
 pub const PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE: u32 = 0;
+const EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT: u32 = 0x2;
+const EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT: u64 = 0x10;
 
 /// `HRESULT CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
 /// DWORD sandboxSpecificationSize, PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
@@ -106,9 +114,119 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     process_security_environment: *mut HANDLE,
 ) -> HRESULT;
 
+type PfnGetLastProcessSecurityEnvironmentPolicyResult = unsafe extern "system" fn(
+    requested_version: u32,
+    policy_result_size_bytes: *mut u32,
+    policy_result: *mut *mut u8,
+) -> HRESULT;
+
 /// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
 type PfnQueryProcessSecurityEnvironmentSupport =
     unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
+
+pub(crate) struct CreationError {
+    cause: LearningModeError,
+    diagnostic: Option<String>,
+    policy_result: Option<Box<PolicyFailureResult>>,
+}
+
+/// Debug output omits the policy result, which can hold policy resource names.
+impl std::fmt::Debug for CreationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreationError")
+            .field("cause", &self.cause)
+            .field("diagnostic", &self.diagnostic)
+            .field(
+                "policy_result",
+                &self.policy_result.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl From<LearningModeError> for CreationError {
+    fn from(cause: LearningModeError) -> Self {
+        Self {
+            cause,
+            diagnostic: None,
+            policy_result: None,
+        }
+    }
+}
+
+impl CreationError {
+    pub(crate) fn is_api_unavailable(&self) -> bool {
+        self.cause.is_api_unavailable()
+    }
+
+    pub(crate) fn message(&self, capture: bool) -> String {
+        crate::process_container_common::launch_diagnostics::security_environment_failure_message(
+            &self.cause,
+            capture,
+        )
+    }
+
+    pub(crate) fn response(&self, capture: bool) -> ScriptResponse {
+        let phase = if self.is_api_unavailable() {
+            FailurePhase::BackendUnavailable
+        } else {
+            FailurePhase::LaunchFailed
+        };
+        let mut error = MxcError::new(phase.error_code(), self.message(capture));
+        if let LearningModeError::HResultCall { function, code } = &self.cause {
+            error = error.with_api_failure(
+                ApiFailure::new(*function).with_native_code(format!("0x{:08X}", *code as u32)),
+            );
+            if *function == "CreateProcessSecurityEnvironment"
+                && *code
+                    == windows::Win32::Foundation::ERROR_ACCESS_DISABLED_BY_POLICY
+                        .to_hresult()
+                        .0
+            {
+                let mut failures = PolicyFailures::default();
+                if let Some(result) = &self.policy_result {
+                    failures.append((**result).clone());
+                }
+                let mut details = serde_json::Map::new();
+                if !failures.results.is_empty() {
+                    if let Err(reason) = failures.validate() {
+                        details.insert(
+                            "policyFeedbackError".into(),
+                            serde_json::json!({
+                                "code": "feedbackLimitExceeded",
+                                "reason": reason,
+                            }),
+                        );
+                    }
+                    details.insert("policyFailures".into(), serde_json::json!(failures));
+                }
+                if let Some(diagnostic) = &self.diagnostic {
+                    details.insert(
+                        "policyResultUnavailable".into(),
+                        serde_json::Value::String(diagnostic.clone()),
+                    );
+                }
+                if !details.is_empty() {
+                    error = error.with_details(serde_json::Value::Object(details));
+                }
+            }
+        }
+        ScriptResponse::failed(phase, &error.message).with_error(error)
+    }
+}
+
+impl std::fmt::Display for CreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+
+impl std::error::Error for CreationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
 
 /// `HRESULT IsProcessSecurityEnvironmentVersionSupported(
 /// DWORD major, BOOLEAN* available, DWORD* minor)`.
@@ -226,21 +344,27 @@ impl SecurityEnvironmentStartupInfo {
         })?;
 
         let environment_value = Box::new(environment);
-        // SAFETY: the attribute list is initialized, and the boxed HANDLE has
-        // a stable address that outlives every use of the list.
-        if unsafe {
-            UpdateProcThreadAttribute(
-                attribute_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
-                Some((&raw const *environment_value).cast()),
-                std::mem::size_of::<HANDLE>(),
-                None,
-                None,
-            )
-        }
-        .is_err()
-        {
+        let update_environment = || {
+            #[cfg(test)]
+            if policy_diagnostics_tests::injected_api().is_some() {
+                // The injected launcher consumes the fake PSEC handle, not Windows.
+                return Ok(());
+            }
+            // SAFETY: the attribute list is initialized, and the boxed HANDLE has
+            // a stable address that outlives every use of the list.
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
+                    Some((&raw const *environment_value).cast()),
+                    std::mem::size_of::<HANDLE>(),
+                    None,
+                    None,
+                )
+            }
+        };
+        if update_environment().is_err() {
             let code = last_error();
             // SAFETY: balances the successful initialization above.
             unsafe { DeleteProcThreadAttributeList(attribute_list) };
@@ -299,6 +423,11 @@ impl SecurityEnvironmentStartupInfo {
     pub fn startup_info(&self) -> &STARTUPINFOEXW {
         &self.startup_info
     }
+
+    #[cfg(test)]
+    pub(crate) fn environment_for_test(&self) -> HANDLE {
+        *self.environment_value
+    }
 }
 
 impl std::fmt::Debug for SecurityEnvironmentStartupInfo {
@@ -345,6 +474,8 @@ impl SecurityEnvironmentExportReport {
 }
 
 const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
+const POLICY_RESULT_NAME: &core::ffi::CStr =
+    c"Experimental_GetLastProcessSecurityEnvironmentPolicyResult";
 const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
 const VERSION_SUPPORT_NAMES: &[&core::ffi::CStr] =
     &[c"IsProcessSecurityEnvironmentVersionSupported"];
@@ -360,6 +491,7 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
+    get_last_policy_result: Option<PfnGetLastProcessSecurityEnvironmentPolicyResult>,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
     version_support: Option<PfnIsProcessSecurityEnvironmentVersionSupported>,
     close: PfnCloseProcessSecurityEnvironment,
@@ -397,6 +529,10 @@ impl SecurityEnvironmentApi {
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
     /// - [`LearningModeError::ExportMissing`] if any required export is absent.
     pub fn load() -> Result<Self, LearningModeError> {
+        #[cfg(test)]
+        if let Some(api) = policy_diagnostics_tests::injected_api() {
+            return Ok(api);
+        }
         static CACHE: OnceLock<Result<SecurityEnvironmentApi, LearningModeError>> = OnceLock::new();
         CACHE.get_or_init(Self::load_uncached).clone()
     }
@@ -441,6 +577,16 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnCreateProcessSecurityEnvironment,
                 >(create_proc),
+                get_last_policy_result: GetProcAddress(
+                    hmodule,
+                    PCSTR(POLICY_RESULT_NAME.as_ptr().cast()),
+                )
+                .map(|function| {
+                    std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        PfnGetLastProcessSecurityEnvironmentPolicyResult,
+                    >(function)
+                }),
                 query_support: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnQueryProcessSecurityEnvironmentSupport,
@@ -466,6 +612,7 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            get_last_policy_result: None,
             query_support,
             version_support: None,
             close,
@@ -483,6 +630,7 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            get_last_policy_result: None,
             query_support,
             version_support: None,
             close,
@@ -552,6 +700,25 @@ impl SecurityEnvironmentApi {
         Ok(support_flags)
     }
 
+    pub(crate) fn create_with_diagnostics(
+        &self,
+        specification: &[u8],
+        flags: u32,
+    ) -> Result<ProcessSecurityEnvironment, CreationError> {
+        let get_last_policy_result = match self.get_last_policy_result {
+            Some(get_result) => self.support_flags().map(|support| {
+                (support & EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT != 0).then_some(get_result)
+            }),
+            None => Ok(None),
+        };
+        let flags = if matches!(&get_last_policy_result, Ok(Some(_))) {
+            flags | EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT
+        } else {
+            flags
+        };
+        self.create_internal(specification, flags, get_last_policy_result)
+    }
+
     /// Create a process security environment from a PSEC FlatBuffer
     /// blob. `flags` is currently always [`PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
@@ -562,6 +729,19 @@ impl SecurityEnvironmentApi {
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
+        self.create_internal(sandbox_specification, flags, Ok(None))
+            .map_err(|error| error.cause)
+    }
+
+    fn create_internal(
+        &self,
+        sandbox_specification: &[u8],
+        flags: u32,
+        get_last_policy_result: Result<
+            Option<PfnGetLastProcessSecurityEnvironmentPolicyResult>,
+            LearningModeError,
+        >,
+    ) -> Result<ProcessSecurityEnvironment, CreationError> {
         let mut env = HANDLE(ptr::null_mut());
         let spec_len = u32::try_from(sandbox_specification.len()).map_err(|_| {
             LearningModeError::HResultCall {
@@ -582,22 +762,104 @@ impl SecurityEnvironmentApi {
                 &mut env,
             )
         };
+        let environment = (!env.0.is_null()).then_some(ProcessSecurityEnvironment {
+            handle: env,
+            close: self.close,
+        });
         if result.is_err() {
-            return Err(LearningModeError::HResultCall {
+            let mut error = CreationError::from(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: result.0,
             });
+            if result == windows::Win32::Foundation::ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
+                match get_last_policy_result {
+                    Ok(Some(get_result)) => {
+                        // The snapshot belongs to this native thread. Retrieve it before
+                        // logging, callbacks, another CPSE call, or environment cleanup.
+                        let (result, diagnostic) = policy_failure_diagnostic(get_result);
+                        error.policy_result = result.map(Box::new);
+                        error.diagnostic = diagnostic;
+                    }
+                    Err(capture_error) => {
+                        error.diagnostic = Some(format!(
+                            "Creation-policy diagnostics unavailable: {capture_error}."
+                        ));
+                    }
+                    Ok(None) => {
+                        error.diagnostic = Some(
+                            "Creation-policy result reporting is unavailable on this host.".into(),
+                        );
+                    }
+                }
+            }
+            return Err(error);
         }
-        if env.0.is_null() {
-            return Err(LearningModeError::HResultCall {
+        environment.ok_or_else(|| {
+            CreationError::from(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: windows::Win32::Foundation::E_UNEXPECTED.0,
-            });
-        }
-        Ok(ProcessSecurityEnvironment {
-            handle: env,
-            close: self.close,
+            })
         })
+    }
+}
+
+fn policy_failure_diagnostic(
+    get_result: PfnGetLastProcessSecurityEnvironmentPolicyResult,
+) -> (Option<PolicyFailureResult>, Option<String>) {
+    let mut buffer = PolicyResultBuffer(ptr::null_mut());
+    let mut size = 0u32;
+    // SAFETY: the current getter writes a byte count and CoTaskMem-owned pointer
+    // into valid output locations on the failed creation's native thread.
+    let status = unsafe { get_result(POLICY_RESULT_VERSION, &mut size, &mut buffer.0) };
+    if status.is_err() {
+        let error = LearningModeError::HResultCall {
+            function: "Experimental_GetLastProcessSecurityEnvironmentPolicyResult",
+            code: status.0,
+        };
+        let reason = if status == windows::Win32::Foundation::ERROR_NOT_FOUND.to_hresult() {
+            "Windows retained no policy result for this creation attempt. "
+        } else {
+            ""
+        };
+        return (
+            None,
+            Some(format!(
+                "Creation-policy diagnostics unavailable: {reason}{error}."
+            )),
+        );
+    }
+    let decoded = buffer.bytes(size as usize).and_then(PolicyResult::decode);
+    match decoded {
+        Ok(result) => (Some(result.into()), None),
+        Err(error) => (
+            None,
+            Some(format!("Creation-policy diagnostics unavailable: {error}.")),
+        ),
+    }
+}
+
+struct PolicyResultBuffer(*mut u8);
+
+impl PolicyResultBuffer {
+    fn bytes(&self, size: usize) -> Result<&[u8], &'static str> {
+        if self.0.is_null() || size == 0 || size > MAX_RESULT_BYTES {
+            return Err("native result has a null buffer or invalid byte count");
+        }
+        // SAFETY: the getter returns a readable allocation of its reported size.
+        // The size is bounded and this owner remains live through decoding.
+        Ok(unsafe { std::slice::from_raw_parts(self.0, size) })
+    }
+}
+
+impl Drop for PolicyResultBuffer {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: ownership transfers from the getter exactly once, including
+            // unexpected non-null outputs on failure or invalid serialized data.
+            unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(self.0.cast())) };
+            #[cfg(test)]
+            policy_diagnostics_tests::policy_buffer_freed(self.0);
+        }
     }
 }
 
@@ -633,6 +895,13 @@ pub(crate) fn create(
     flags: u32,
 ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
     SecurityEnvironmentApi::load()?.create(sandbox_specification, flags)
+}
+
+pub(crate) fn create_with_diagnostics(
+    specification: &[u8],
+    flags: u32,
+) -> Result<ProcessSecurityEnvironment, CreationError> {
+    SecurityEnvironmentApi::load()?.create_with_diagnostics(specification, flags)
 }
 
 fn query_supported_minor_version_with(
@@ -739,6 +1008,16 @@ unsafe fn first_present(
 #[must_use]
 pub fn is_security_environment_api_available() -> bool {
     probe_security_environment_exports().is_complete()
+}
+
+#[cfg(test)]
+#[path = "secenv_policy_tests.rs"]
+mod policy_diagnostics_tests;
+
+#[cfg(test)]
+pub(super) fn injected_capture_trace_sources(
+) -> Option<crate::learning_mode_windows::LearningModeTraceSources> {
+    policy_diagnostics_tests::injected_capture_trace_sources()
 }
 
 #[cfg(test)]

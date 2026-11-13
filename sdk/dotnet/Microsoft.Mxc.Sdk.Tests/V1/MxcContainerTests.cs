@@ -166,6 +166,7 @@ public class MxcContainerTests
             ErrorOperation = "ProcessModel.Probe",
             ErrorNativeCode = "0x80070005",
             ErrorRemediation = "check policy",
+            ErrorDetailsJson = $$$"""{"backend":{"retained":true},"policyFailures":{"formatVersion":{{{Microsoft.Mxc.Sdk.V1.Dev.PolicyFailureVersions.Format}}},"results":[]}}""",
         };
         var previous = MxcContainer.RequestProbeInterop;
         MxcContainer.RequestProbeInterop = native;
@@ -179,6 +180,8 @@ public class MxcContainerTests
             Assert.Equal("ProcessModel.Probe", error.Operation);
             Assert.Equal("0x80070005", error.NativeCode);
             Assert.Equal("check policy", error.Remediation);
+            Assert.True(error.Details!.Value.GetProperty("backend").GetProperty("retained").GetBoolean());
+            Assert.Empty(Microsoft.Mxc.Sdk.V1.Dev.PolicyFailures.FromException(error)!.Results);
             Assert.True(native.ErrorFreed);
         }
         finally
@@ -657,6 +660,7 @@ public class MxcContainerTests
         internal string? ErrorOperation { get; init; }
         internal string? ErrorNativeCode { get; init; }
         internal string? ErrorRemediation { get; init; }
+        internal string? ErrorDetailsJson { get; init; }
         internal string? RequestJson { get; private set; }
         internal bool OutputFreed { get; private set; }
         internal bool ErrorFreed { get; private set; }
@@ -679,6 +683,7 @@ public class MxcContainerTests
             error->operation_utf8 = Allocate(ErrorOperation);
             error->native_code_utf8 = Allocate(ErrorNativeCode);
             error->remediation_utf8 = Allocate(ErrorRemediation);
+            error->details_json_utf8 = Allocate(ErrorDetailsJson);
             return Status;
         }
 
@@ -694,6 +699,7 @@ public class MxcContainerTests
             Free(error->operation_utf8);
             Free(error->native_code_utf8);
             Free(error->remediation_utf8);
+            Free(error->details_json_utf8);
             *error = default;
             ErrorFreed = true;
         }

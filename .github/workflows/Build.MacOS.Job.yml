@@ -62,6 +62,36 @@ jobs:
           cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk --test state_aware
 
+      # Preparation without observations is a no-op on every OS; Seatbelt
+      # rejects observations it cannot apply. A filter that matches nothing
+      # also exits 0, so require a passing count with nothing ignored.
+      - name: Test policy preparation without observations
+        shell: bash
+        run: |
+          set -uo pipefail
+          run_pinned() {
+            local label="$1"; shift
+            local log status
+            log="$(mktemp)"
+            cargo test --locked --release --target aarch64-apple-darwin "$@" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$label failed (cargo exited $status)."
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"; then
+              echo "::error::$label must run at least one test and ignore none."
+              exit 1
+            fi
+          }
+          run_pinned "Policy preparation" -p mxc-sdk --lib mxc_engine::policy_preparation
+          run_pinned "Policy preparation FFI" -p mxc_ffi --lib policy_preparation
+          # The module selections stay green if the no-op tests are renamed.
+          run_pinned "Policy preparation no-op" -p mxc-sdk --lib \
+            preparation_returns_empty_observation_requests_unchanged_on_every_backend
+          run_pinned "Policy preparation FFI no-op" -p mxc_ffi --lib \
+            preparation_ffi_returns_empty_observation_requests_unchanged_on_every_backend
+
       - name: Test W365 checkout and release with trusted TLS fixtures
         shell: bash
         run: |
