@@ -1078,6 +1078,10 @@ export interface WslcProvisionRequest {
    */
   phase: ProvisionPhase;
   /**
+   * Optional runtime settings fixed at provision time.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
    * Optional telemetry configuration.
    */
   telemetry?: Telemetry;

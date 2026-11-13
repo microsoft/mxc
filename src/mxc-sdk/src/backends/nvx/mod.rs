@@ -5,7 +5,6 @@ mod policy;
 pub mod runner;
 #[path = "crate_runtime.rs"]
 mod runtime;
-mod signature_verification;
 pub(crate) mod state_aware;
 
 pub(crate) fn is_available() -> bool {

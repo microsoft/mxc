@@ -612,7 +612,7 @@ impl ExecutionRequest {
 
 ## `mxc_sdk::v1::TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```rust
 pub struct TelemetryConfig {

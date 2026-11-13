@@ -20,7 +20,7 @@ Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
-The WSLc SDK (`wslcsdk.dll`, 3.0.3) has **no cross-process session re-attach**: every operation
+The WSLc SDK (`wslcsdk.dll`, 3.0.5) has **no cross-process session re-attach**: every operation
 (`WslcCreateContainer`, `WslcStartContainer`, `WslcCreateContainerProcess`, image pull, stop /
 delete) requires a live in-process `WslcSession` / `WslcContainer` handle, and there is no
 `WslcOpenSession`. Each lifecycle phase runs as a **separate**
@@ -649,7 +649,7 @@ acknowledges that WSLC cannot independently restrict those directions.
 | Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
 | `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
 | Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
-| `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| `runtimeConfig.networkProxy` | structurally rejected in published contracts; rejected by WSLc in `1.1.0-alpha` | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 | `ui` | rejected | rejected | rejected |
 | `process.env` / `process.inheritDefaultEnv` | n/a | n/a | honored → see [Environment](wsl-container-getting-started.md#environment) |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
@@ -703,6 +703,10 @@ reported, so a phase failure reaches the SDK with the same code that
 create-and-run execution returns for the same host condition. A caller branches on the code
 without matching the message.
 
+When a WSLc SDK call fails, including in an exec that has already started, the
+error envelope also carries the SDK function name in `operation`, and its HRESULT
+in `nativeCode` when the call returned one.
+
 `ErrKind` is additive: a kind a client does not recognize decodes to
 `ErrKind::Unknown` and maps to `backend_error`, so a daemon from a newer
 install degrades to the previous behavior instead of failing the decode. Adding
@@ -727,8 +731,9 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **9** as of the addition of exec stdin
-(the `stdin` flag on `exec` and the `exec_stdin` request).
+old one first. `PROTOCOL_VERSION` is **11** as of the addition of
+`network_proxy` to `provision` and `exec`, which moved applying the cooperative
+proxy from the client to the daemon.
 
 ## Daemon idle-timeout env overrides
 

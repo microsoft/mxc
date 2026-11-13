@@ -341,15 +341,12 @@ export interface PortMapping {
 }
 
 /**
- * Telemetry configuration for TraceLogging ETW support.
+ * Compatibility preference; does not control Required telemetry.
  */
 export interface TelemetryConfig {
   /**
-   * Per-invocation telemetry opt-in.
-   *
-   * `true` requests telemetry for this invocation; emission is still gated by
-   * persisted user consent and administrative policy. `false` (or `undefined`)
-   * disables telemetry for this invocation.
+   * Preserved in the request; Required collection ignores this value,
+   * including `false` or omission.
    */
   enabled?: boolean;
 }

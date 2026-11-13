@@ -567,8 +567,8 @@ mod tests {
         );
         assert_eq!(
             typed.request().source_contract,
-            None,
-            "typed SDK input has no external contract source"
+            exact.request().source_contract,
+            "typed SDK input must retain its selected contract"
         );
         assert_eq!(request_intent(&typed), request_intent(&exact));
     }

@@ -328,6 +328,20 @@ left unchanged so the release contract stays auditable; newer schemas
 document the corrected default. Consumers that need the legacy behavior
 must set the field explicitly.
 
+### Approved telemetry behavior change
+
+The four Required events described in [Telemetry](../../telemetry.md) apply
+to `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha`, including V1 SDK callers.
+This intentionally replaces published contracts' optional-collection behavior:
+request telemetry settings, consent withdrawal, and administrative policy no
+longer suppress these events. Other telemetry events are excluded for these
+contracts. Existing consent-management APIs and stored decisions are preserved.
+
+This approved behavior change does not alter accepted JSON, published schemas,
+SDK signatures, or SDK contract targets. It is not a general exception to
+published-API versioning; unrelated breaking changes still require a new
+versioned surface.
+
 ### Security-servicing exception: PowerShell tool discovery
 
 On Windows, the Rust V1

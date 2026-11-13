@@ -5,12 +5,12 @@ using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk.V1;
 
-/// <summary>Per-invocation telemetry preference, subject to consent and policy.</summary>
+/// <summary>Compatibility preference; does not control Required telemetry.</summary>
 public sealed class TelemetryConfig
 {
     /// <summary>
-    /// Opt this invocation into telemetry, subject to persisted user consent
-    /// and administrative policy.
+    /// Preserved in the request; Required collection ignores this value,
+    /// including false or omission.
     /// </summary>
     [JsonPropertyName("enabled")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

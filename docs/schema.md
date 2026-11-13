@@ -28,6 +28,15 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
 
+The development contract accepts experimental W365 provision settings
+`w365Agents.provision.poolId`, optional `userType` (`"Local"`, `"HumanUser"`, or `"Agentic"`) and
+optional `userObjectId`. Service configuration is environment-only; later
+lifecycle phases reject `w365Agents`. The
+[W365 backend guide](backends/w365agents/w365agents-backend.md) describes
+Phase 2 checkout/release, unavailable execution modes, cleanup identities
+and experimental Dev SDK JSON access. Acceptance by the development
+schema alone does not authorize execution or establish live-service compatibility.
+
 ### "MXC request JSON"
 
 "MXC request JSON" is a versioned request object defined by the
@@ -192,6 +201,8 @@ that can be executed independently.
     "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Optional externally assigned container ID.
                                            //  Omit it to use backend-defined internal naming.
+                                           //  Must not contain an embedded NUL (`\u0000`);
+                                           //  the executor rejects it rather than truncating.
     "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {
@@ -290,8 +301,8 @@ that can be executed independently.
     },
 
     "telemetry": {                         // Telemetry (Windows only)
-        "enabled": true                    // Request emission for this run; MXC-owned user consent
-                                           // and a permitting administrative policy are also required
+        "enabled": true                    // Accepted for compatibility; does not control
+                                           // the four Required events on supported Windows builds
     },
 
     "wslc": {                              // WSL Container settings (v0.9+)

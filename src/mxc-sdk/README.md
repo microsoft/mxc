@@ -173,10 +173,12 @@ features. See the backend documentation under
 host prerequisites and enforcement details.
 
 Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
-leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
-explicitly disables it. Opt-in remains
-subject to MXC's persisted user consent and administrative policy.
+`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. These
+preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `enabled: Some(false)`, consent, or policy.
+Consent-management APIs retain their stored-state behavior; they do not
+disable Required collection. See [Telemetry](../../docs/telemetry.md).
 
 Filesystem discovery helpers and their result/options types live under
 `mxc_sdk::v1::policy::filesystem`. They take `environment: Option<&[(String, String)]>`;
@@ -197,6 +199,15 @@ For PowerShell startup failures, see
 [troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).
 
 ## Internal modules and executor binaries
+
+### Experimental W365 checkout and release
+
+Use the existing `v1::dev` JSON lifecycle APIs with `1.1.0-alpha` requests and
+`JsonOptions { experimental: true }` to provision, stop or deprovision a W365
+session. No backend Cargo feature is required. Start and exec remain unsupported.
+Failed Provision messages include a valid returned cleanup ID when available.
+See the [W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md#dev-sdk-checkout-and-release)
+for caller-environment configuration, request examples and explicit release.
 
 ### Experimental MicroVM support
 

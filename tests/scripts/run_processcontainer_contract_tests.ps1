@@ -68,6 +68,42 @@ function Invoke-ContractCase {
     Write-Host "PASSED: $Name"
 }
 
+# ConvertTo-Json cannot represent this case: a raw NUL is unsafe, and the
+# six-character JSON escape is the input the parser must refuse.
+function Invoke-EmbeddedNulContractCase {
+    param([Parameter(Mandatory)][string]$Version)
+    $name = "containerid-embedded-nul-$Version"
+    $request = New-ContractRequest -Name $name -Version $Version
+    $request.containerId = 'MXC_NUL_ID_TOKEN'
+    $json = ($request | ConvertTo-Json -Depth 10).Replace('MXC_NUL_ID_TOKEN', 'alpha\u0000evil')
+    if ($json.Contains('MXC_NUL_ID_TOKEN') -or $json -notmatch 'alpha\\u0000evil') {
+        throw "$name did not keep the six-character JSON NUL escape"
+    }
+    $path = Join-Path $scratch "$name.json"
+    [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+    if ([System.Array]::IndexOf([System.IO.File]::ReadAllBytes($path), [byte]0) -ge 0) {
+        throw "$name config file contains a raw NUL"
+    }
+    $security = Get-NativeFixtureSecuritySnapshot -Paths @($scratch)
+    try {
+        $result = Invoke-NativeProcessContainer -WxcExec $wxc -ScratchRoot $scratch `
+            -Name $name -Arguments @($path)
+        $executed = Test-Path -LiteralPath (Join-Path $scratch "$name.executed")
+        if ($result.ExitCode -ne 1 -or
+            $result.Stderr -notmatch 'containerId must not contain null bytes' -or
+            $result.Log -match '"event":"mxc.ProcessExited"' -or
+            $executed -or
+            $result.Stderr.Contains([char]0) -or
+            $result.Log.Contains([char]0)) {
+            throw "$name was not rejected before execution: exit=$($result.ExitCode); stderr=$($result.Stderr)"
+        }
+    } finally {
+        Assert-NativeFixtureSecurity -Name $name -Snapshot $security
+    }
+    $script:passed++
+    Write-Host "PASSED: $name"
+}
+
 foreach ($version in $versions) {
     foreach ($case in @(
         @{ Name = 'omitted' },
@@ -151,6 +187,13 @@ foreach ($version in $versions) {
     }
     Invoke-ContractCase -Name $name -Request $request
 }
+
+foreach ($version in $versions) {
+    Invoke-EmbeddedNulContractCase -Version $version
+}
+$ordinary = New-ContractRequest -Name 'containerid-ordinary-control' -Version $registry.stableLatest
+$ordinary.containerId = 'containerid-ordinary-control'
+Invoke-ContractCase -Name 'containerid-ordinary-control' -Request $ordinary
 
 $product = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name ProductName
 if ([string]::IsNullOrWhiteSpace($product)) { throw 'The host registry-read control returned no ProductName.' }
