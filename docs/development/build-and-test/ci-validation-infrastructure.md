@@ -10,6 +10,12 @@ This document describes the GitHub Actions validation matrix only. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
+Offline TLS fixture coverage in GitHub Actions and Azure build/SDK jobs is
+also noted below.
+
+Linux CI covers Ubuntu 24.04 and 26.04: x64/ARM64 builds and x64 .NET, Node SDK,
+and LXC E2E tests. Shared binaries are published only from Ubuntu 24.04 to
+preserve compatibility with the older supported host.
 
 ## At a glance
 
@@ -28,6 +34,25 @@ the individual local test scripts are documented in
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
+
+### Offline TLS fixtures
+
+W365 checkout/release fixtures use local HTTPS services with test-only
+certificate trust, not a production TLS verification bypass. The
+`mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
+isolated Cargo target directory so its artifacts cannot replace shipping builds.
+Its engine fixtures
+run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
+Windows also runs checkout/release through fresh executor processes.
+The .NET SDK test suite and Node SDK integration jobs exercise the public
+Dev JSON APIs.
+
+Test-support native libraries and executors are kept separate from shipping
+artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build
+and select an isolated fixture library; ordinary packaged-artifact tests
+continue to use shipping libraries. These fixtures do not establish live-service
+compatibility. See the [W365 backend guide](../../backends/w365agents/w365agents-backend.md)
+for local commands and platform prerequisites.
 
 ## Moving parts
 
@@ -78,6 +103,12 @@ test jobs only ever `download-artifact`.
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
+
+Bubblewrap startup coverage injects network-rule installation failure in both
+proxy-only and firewall-enforced modes. The scheduled CLI suite requires that
+the workload never starts and the supervisor is reaped. The Linux build's
+`streaming_bubblewrap` suite checks the setup diagnostic and absence of workload
+file writes through SDK `run`, `spawn`, and `spawn_with_pty`.
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
@@ -275,12 +306,61 @@ get fixed or wired.
 ### MicroVM validation
 
 The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
-They check executor configurations, JSON requests that collect output, image
-selection, file access rules, and network address and port rules. They also
-check that traffic through a proxy works while direct connections are blocked,
-and that interrupting startup or execution removes the VM and its temporary files.
-The executor and captured JSON execution scenarios also check that the guest
-uses the host CPU profile.
+They check executor configurations, captured and live JSON execution, lifecycle
+operations, image selection, file access rules, and network address and port
+rules. They also check that traffic through a proxy works while direct
+connections are blocked.
+
+Platform snapshot scenarios require parsed native `StartResult` diagnostics,
+not just template files. MXC configures the native snapshot host for one virtual
+processor and 256 MiB of memory; the crate and bundled native agent own template
+creation and selection. Eligible CLI starts must report clone boot mode and a
+stable template key and generation across fresh executor processes for each
+tested configuration. Repeated public `v1::dev::run_json` and `spawn_json`
+calls in one process check the guest's `/proc/cmdline` for the native template
+parameter, `nvx_snapshot_tier=platform`. Guest output, the host CPU profile,
+distinct CLI VM identities, and private guest-file sentinels check that each
+request really runs in its own VM. Native capture diagnostics must show initial
+capture followed by reuse without recapture in later processes. Concurrent first
+requests exercise both template capture and image registration; later concurrent
+requests must still clone the same template with the registry unreachable.
+
+Explicit 256-MiB and 512-MiB requests exercise create-and-run execution and
+lifecycle starts. Native diagnostics must report a clone for 256 MiB and a cold
+boot with a memory-capacity reason for 512 MiB, without an initialization-fallback
+warning. Guest kernel parameters prove the selected path, and guest-visible
+memory must increase consistently with the requested capacity.
+
+Lifecycle scenarios require provision and dry-run validation to leave templates
+uncaptured, followed by a clone start and live and captured execs that preserve
+guest state. The live VM's native `clone.json` lease must match the logged
+template key and generation and remain unchanged across execs and adoption;
+stop must release it and deprovision must remove the sandbox state.
+Separate CLI processes provision, start, execute twice, stop,
+and deprovision. A separate SDK helper stays alive after its handles close:
+another process must fail to execute in that running clone while the helper
+lives, then successfully adopt it and read the same guest state after the
+helper exits. Different VM IDs can run concurrently; this does not imply
+multiple processes can control one running cloned VM. The rejection assertion
+uses failure and owner liveness, not withheld native error text.
+
+An isolated SDK helper also stops and deprovisions a clone, checks release of its
+lease and sandbox state, then starts and cleans up another clone from the same
+template without exiting the owning SDK process.
+
+An intentionally blocked template store must cold boot successfully and return
+warnings to captured and streaming SDK callers. Lifecycle `start` must record a
+redacted fallback diagnostic through the caller's configured logging without
+adding a backend warning to its response envelope. These checks retain workload
+exit codes, validation errors, cleanup, and credential redaction. Removing the
+obstruction must allow the same process to capture templates and clone a later
+request. Child helpers receive private `LOCALAPPDATA` directories without
+changing the suite process's environment.
+
+The isolated-console scenario interrupts first capture, startup, and execution.
+Its helper clears inherited Ctrl-C ignoring before spawning the executor.
+Each interruption must terminate the OpenVMM processes owned by that executor
+and leave the state directory usable; it never relies on a whole-host VM count.
 
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
@@ -288,8 +368,25 @@ unavailable server cannot be mistaken for a blocked connection. The host needs
 an IPv4 route through a non-loopback interface to an address outside the guest
 network, `10.0.0.0/24`.
 
-Regular Windows x64 PR builds run checks that do not need a VM. They also
-unpack the Rust crate package and check that its tests compile.
+Network and filesystem enforcement scenarios run through both captured SDK
+execution and the executor. Every workload requires the guest platform-snapshot
+parameter and rejects initialization fallback; executor cases also require native
+clone diagnostics. Read/write/deny, TCP/UDP delivery, host-loopback, and proxy
+assertions therefore cannot pass solely on a cold boot.
+
+Regular Windows x64 PR builds remain host-only: they verify the signed bundle,
+require staged test-name discovery (including snapshot and lifecycle tests),
+and unpack the Rust crate package to check that its tests compile. Actual VM
+scenarios run only in the scheduled Windows x64 job. Its dispatcher requires
+completion markers for CLI and SDK snapshots, lifecycle adoption, fallback
+warnings and lifecycle diagnostics, concurrent image reuse, and all three
+interruption phases, as well as the existing execution and policy scenarios.
+Missing markers, empty suites, skips, ignored tests, and filtered tests fail
+the job.
+
+`node --test scripts/tests/microvm-validation.test.js` runs host fixtures for
+these gates, including negative cases that omit required discovered tests or
+execution markers. The fixtures do not start VMs.
 
 ### ProcessContainer SDK streaming
 

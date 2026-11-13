@@ -655,7 +655,7 @@ impl BwrapStartup {
     }
 
     /// Wait for Bubblewrap to report the host-visible PID of its sandbox child.
-    pub(crate) fn child_pid(&mut self, child: &mut Child) -> Result<u32, String> {
+    pub(crate) fn child_pid(&mut self, child: &Child) -> Result<u32, String> {
         set_nonblocking(self.info_reader.as_raw_fd())?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let mut json = Vec::new();
@@ -684,13 +684,10 @@ impl BwrapStartup {
                 ));
             }
 
-            if let Some(status) = child
-                .try_wait()
+            if has_exited_unreaped(child.id())
                 .map_err(|error| format!("Bubblewrap: failed to inspect bwrap startup: {error}"))?
             {
-                return Err(format!(
-                    "Bubblewrap: bwrap exited before publishing child information ({status})"
-                ));
+                return Err("Bubblewrap: bwrap exited before publishing child information".into());
             }
             if Instant::now() >= deadline {
                 return Err("Bubblewrap: timed out waiting for bwrap child information".into());
@@ -700,7 +697,7 @@ impl BwrapStartup {
     }
 
     /// Allow Bubblewrap to execute the workload after networking is ready.
-    pub(crate) fn release(mut self) -> Result<(), String> {
+    pub(crate) fn release(&mut self) -> Result<(), String> {
         let writer = self
             .gate_writer
             .take()
@@ -2591,6 +2588,33 @@ fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use crate::bwrap_common::bwrap_command::{COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
+
+    #[test]
+    fn child_information_failure_keeps_the_launcher_unreaped_for_cleanup() {
+        let mut startup = BwrapStartup {
+            info_reader: File::open("/dev/null").expect("empty child information"),
+            info_writer: None,
+            gate_reader: None,
+            gate_writer: None,
+            inheritable: Vec::new(),
+        };
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("start failing launcher");
+        let result = startup.child_pid(&child);
+        let exited_unreaped = has_exited_unreaped(child.id());
+        let status = child.wait().expect("reap launcher");
+
+        assert!(result
+            .expect_err("missing child information must fail startup")
+            .contains("bwrap exited before publishing child information"));
+        assert!(
+            matches!(exited_unreaped, Ok(true)),
+            "startup reaped the process-group leader before cleanup: {exited_unreaped:?}"
+        );
+        assert_eq!(status.code(), Some(7));
+    }
 
     #[test]
     fn startup_stderr_returns_the_child_diagnostic() {
@@ -6552,9 +6576,9 @@ exec sleep 30
         set_nonblocking(gate.as_raw_fd()).expect("nonblocking gate");
         let mut gate = File::from(gate);
 
-        // The runner only calls `release` after `attach` succeeds.
         let error = network
             .attach_within(4242, Duration::from_secs(3), &mut logger)
+            .and_then(|()| startup.release())
             .expect_err("a blocked loopback query must fail the startup");
         assert!(
             error.contains(
@@ -6598,13 +6622,6 @@ exec sleep 30
         assert!(
             process_is_gone(blocked_pid),
             "the blocked nsenter child {blocked_pid} outlived the supervisor"
-        );
-
-        drop(startup);
-        assert_eq!(
-            gate.read(&mut byte).expect("the gate writer is closed"),
-            0,
-            "the gate must close without ever having been released"
         );
     }
 

@@ -155,10 +155,11 @@ unchanged.
   - .NET: `ArgumentException`.
   - Node: `MxcError` with code `malformed_request`.
 - **Results:** use the existing `CaptureDenialsResult`. For Seatbelt,
-  `etlPath` holds the `.seatbelt.log` path when retained, and
-  `captureDenialsError` is never set. Capture failures come back as run or
-  wait errors. When the run also times out, the capture failure is in the
-  process warnings.
+  `etlPath` holds the `.seatbelt.log` path when retained. Capture failures
+  come back as run or wait errors and are also added to the process warnings.
+  When a trace was retained, `captureDenialsError` holds the message and
+  `etlPath`, including after a timeout. When the run also times out, `wait`
+  returns the timeout rather than the capture error.
 - **Caller cleanup:** yes. Delete `outputPath`, its `.verbose.json` sibling,
   and any `etlPath` file when done.
 - **Discovery:** `v1::available_backends()` / `MxcPlatform.GetAvailableBackends` /

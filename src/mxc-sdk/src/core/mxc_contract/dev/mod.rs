@@ -246,7 +246,8 @@ pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, Lifecycle, Lxc, Process,
     ProcessContainer, ProcessContainerCapability, ProcessContainerFilesystem,
     ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation,
-    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, Telemetry, Ui, UiClipboard,
+    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, SeatbeltCaptureDenials, Telemetry,
+    Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};
@@ -264,6 +265,10 @@ pub use state_aware::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
 };
 pub use state_aware::{StartPhase, StartRequest};
+pub use state_aware::{
+    StateAwareW365AgentsProvision, W365AgentsContainment, W365AgentsGuid, W365AgentsProvision,
+    W365AgentsProvisionRequest, W365AgentsUserType,
+};
 pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use state_aware::{StopPhase, StopRequest};
 pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

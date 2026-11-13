@@ -4,7 +4,7 @@
 
 **Package:** `Microsoft.WSL.Containers`
 **Version:** pinned in `src/mxc-sdk/build/build_wslc_common.rs`
-(`WSLC_SDK_VERSION`, currently **3.0.3**)
+(`WSLC_SDK_VERSION`, currently **3.0.5**)
 **Source:** the [`MxcDependencies`](https://dev.azure.com/shine-oss/mxc/_artifacts/feed/MxcDependencies)
 Azure Artifacts feed — a public, anonymous-read mirror of nuget.org.
 
@@ -42,7 +42,7 @@ environment variable.
 
 ## Contents
 
-- `Microsoft.WSL.Containers.3.0.3.nupkg` — vendored fallback copy of the SDK
+- `Microsoft.WSL.Containers.<version>.nupkg` — vendored fallback copy of the SDK
   (header `wslcsdk.h`, import libs `wslcsdk.lib`, and runtime `wslcsdk.dll` for
   x64 and ARM64). Must match `WSLC_SDK_VERSION` in `build.rs`.
 

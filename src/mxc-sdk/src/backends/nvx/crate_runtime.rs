@@ -11,11 +11,12 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::script_runner::RunCancellation;
 use aci_edge_sandboxes::agent::{
-    AgentBackend, BundledAgent, CpuProfile, ImageDigest, SandboxDiagnostics, SetupConfig,
+    AgentBackend, AgentConfig, BundledAgent, CpuProfile, ImageDigest, PlatformSnapshots,
+    SandboxDiagnostics, SetupConfig,
 };
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Backend, Capabilities, Error, ErrorCode, ExecIo, ExecOutcome, ExecRequest,
-    ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec,
+    ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec, StartResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,9 +84,12 @@ pub(super) trait SandboxClient {
     fn capabilities(&self) -> Result<Capabilities, MxcError>;
     fn validate_provision(&self, input: &PreparedProvision) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
+    /// Opens the process-owned execution host, returning a cold-boot fallback reason if template
+    /// initialization is unavailable. Invalid setup and handle-close failures remain errors.
+    fn open_execution_host(&mut self) -> Result<Option<MxcError>, MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
     fn provision(&self, input: &PreparedProvision) -> Result<ProvisionOutput, MxcError>;
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
+    fn start(&self, sandbox_id: &SandboxId) -> Result<StartResult, MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
         &self,
@@ -168,20 +172,28 @@ pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
 struct ClientInner {
     backend: Arc<AgentBackend>,
     client: AciEdgeSandbox,
-    _signatures: super::signature_verification::VerifiedBundle,
     _state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 }
 
 pub(super) struct NvxClient(Option<ClientInner>);
 
+// Sandboxes have the agent's default resources, one virtual processor and 256 MiB of memory,
+// unless a request sets their memory, so the smallest templates fit them.
+const PLATFORM_SNAPSHOT_MAX_VCPUS: u32 = 1;
+const PLATFORM_SNAPSHOT_MAX_MEMORY_MIB: u32 = 256;
+
 fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
     bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
 }
 
-pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
-    create_client_with_guard(state_root, None)
+fn platform_snapshots() -> PlatformSnapshots {
+    PlatformSnapshots::new(
+        PLATFORM_SNAPSHOT_MAX_VCPUS,
+        PLATFORM_SNAPSHOT_MAX_MEMORY_MIB,
+    )
 }
 
+/// Opens the agent without platform snapshots, so opening it never boots a VM.
 pub(super) fn create_persistent_client(
     guard: crate::mxc_common::filesystem_security::LockedDirectoryPath,
 ) -> Result<NvxClient, MxcError> {
@@ -198,8 +210,6 @@ fn create_client_with_guard(
         MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
     })?;
     let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
-    let signatures = super::signature_verification::verify_bundle(bundle.directory())
-        .map_err(|error| MxcError::backend_unavailable(error.to_string()))?;
     // The crate's output pump can outlive an unknown execution outcome and client teardown.
     crate::mxc_common::module_lifetime::pin_current_module()
         .map_err(MxcError::backend_unavailable)?;
@@ -209,7 +219,6 @@ fn create_client_with_guard(
     Ok(NvxClient(Some(ClientInner {
         backend,
         client,
-        _signatures: signatures,
         _state_root_guard: guard,
     })))
 }
@@ -238,6 +247,61 @@ pub(super) fn require_agent_bundle_present() -> Result<(), MxcError> {
     }
 }
 
+pub(super) fn state_root(
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(|profile| std::path::PathBuf::from(profile).join("AppData").join("Local"))
+        })
+        .ok_or_else(|| {
+            MxcError::backend_unavailable(
+                "NVX signed bundled agent: cannot resolve LOCALAPPDATA for the agent state directory",
+            )
+        })?;
+    let bundle = BundledAgent::discover().map_err(map_error)?;
+    state_root_in(&local_app_data, bundle.manifest_sha256())
+}
+
+fn state_root_in(
+    local_app_data: &Path,
+    manifest_sha256: [u8; 32],
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = std::path::absolute(local_app_data).map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot resolve the agent state directory: {error}"
+        ))
+    })?;
+    let parent = lock_lifecycle_state_root_in(&local_app_data)?;
+    let bundle_key: String = manifest_sha256[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let root = crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        parent.path(),
+        &[std::ffi::OsStr::new(&bundle_key)],
+        0,
+    )
+    .map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: cannot create the bundle state directory below '{}': {error}",
+            parent.path().display()
+        ))
+    })?;
+    crate::mxc_common::filesystem_security::set_current_user_owner(root.path()).map_err(
+        |error| {
+            MxcError::backend_unavailable(format!(
+                "NVX signed bundled agent: cannot secure the bundle state directory {}: {error}",
+                root.path().display()
+            ))
+        },
+    )?;
+    Ok(root)
+}
+
 pub(super) fn lifecycle_state_root(
 ) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
@@ -246,8 +310,14 @@ pub(super) fn lifecycle_state_root(
         )
     })?;
     let local_app_data = std::path::PathBuf::from(local_app_data);
-    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
-        &local_app_data,
+    lock_lifecycle_state_root_in(&local_app_data)
+}
+
+fn lock_lifecycle_state_root_in(
+    local_app_data: &Path,
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let root = crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        local_app_data,
         [
             std::ffi::OsStr::new("Microsoft"),
             std::ffi::OsStr::new("MXC"),
@@ -258,10 +328,19 @@ pub(super) fn lifecycle_state_root(
     )
     .map_err(|error| {
         MxcError::backend_unavailable(format!(
-            "cannot admit persistent NVX lifecycle state below '{}': {error}",
+            "cannot admit persistent NVX state below '{}': {error}",
             local_app_data.display()
         ))
-    })
+    })?;
+    crate::mxc_common::filesystem_security::set_current_user_owner(root.path()).map_err(
+        |error| {
+            MxcError::backend_unavailable(format!(
+                "cannot make the current user the owner of persistent NVX state '{}': {error}",
+                root.path().display()
+            ))
+        },
+    )?;
+    Ok(root)
 }
 
 pub(super) enum Event {
@@ -684,6 +763,47 @@ impl SandboxClient for NvxClient {
             .validate_exec(request)
             .map_err(map_error)
     }
+    fn open_execution_host(&mut self) -> Result<Option<MxcError>, MxcError> {
+        let inner = self
+            .0
+            .as_mut()
+            .ok_or_else(|| MxcError::backend_error("NVX client is closed"))?;
+        let cold = inner.backend.config();
+        let setup = cold
+            .setup
+            .clone()
+            .with_platform_snapshots(platform_snapshots());
+        setup.validate().map_err(map_error)?;
+        let config = AgentConfig::new(setup, cold.library.clone(), cold.library_sha256);
+        // The native library retains hosts by setup for the process lifetime, including after this
+        // operation's handle closes. Keep this setup stable rather than adding another cache.
+        let backend = match AgentBackend::new(config) {
+            Ok(backend) => Arc::new(backend),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ErrorCode::BackendUnavailable
+                        | ErrorCode::BackendError
+                        | ErrorCode::Unsupported
+                ) =>
+            {
+                return Ok(Some(map_error(error)));
+            }
+            Err(error) => return Err(map_error(error)),
+        };
+        inner.client = AciEdgeSandbox::from_shared(backend.clone());
+        let cold = std::mem::replace(&mut inner.backend, backend);
+        Arc::try_unwrap(cold)
+            .map_err(|_| {
+                MxcError::backend_error(
+                    "cannot close the NVX agent opened without platform snapshots: backend \
+                     still has other owners",
+                )
+            })?
+            .close()
+            .map_err(map_error)?;
+        Ok(None)
+    }
     fn probe(&self) -> Result<(), MxcError> {
         self.inner()?.client.probe().map_err(map_error)
     }
@@ -704,12 +824,8 @@ impl SandboxClient for NvxClient {
             })
             .map_err(map_error)
     }
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
-        self.inner()?
-            .client
-            .start(&sandbox_id.0)
-            .map(|_| ())
-            .map_err(map_error)
+    fn start(&self, sandbox_id: &SandboxId) -> Result<StartResult, MxcError> {
+        self.inner()?.client.start(&sandbox_id.0).map_err(map_error)
     }
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError> {
         self.inner()?
@@ -785,7 +901,6 @@ impl SandboxClient for NvxClient {
         let Some(ClientInner {
             backend,
             client,
-            _signatures,
             _state_root_guard,
         }) = self.0.take()
         else {
@@ -930,11 +1045,49 @@ mod tests {
     }
 
     #[test]
-    fn agent_setup_selects_host_cpu_profile() {
+    fn agent_setup_selects_host_cpu_profile_and_platform_snapshots_fit_its_defaults() {
         let bundle = BundledAgent::from_dir(r"C:\bundle").unwrap();
         let setup = agent_setup(&bundle, Path::new(r"C:\state"));
         assert_eq!(setup.cpu_profile, CpuProfile::Host);
-        assert_eq!(serde_json::to_value(&setup).unwrap()["cpuProfile"], "host");
+        let json = serde_json::to_value(&setup).unwrap();
+        assert_eq!(json["cpuProfile"], "host");
+        assert!(json.get("platformSnapshots").is_none(), "{json}");
+
+        let setup = setup.with_platform_snapshots(platform_snapshots());
+        assert_eq!(
+            serde_json::to_value(&setup).unwrap()["platformSnapshots"],
+            serde_json::json!({"enabled": true, "maxVcpus": 1, "maxMemoryMib": 256})
+        );
+        // The templates must fit the sandboxes that keep the agent's default resources.
+        setup.validate().unwrap();
+        let defaults = setup.defaults.resources;
+        assert_eq!(defaults.vcpus, Some(PLATFORM_SNAPSHOT_MAX_VCPUS));
+        assert_eq!(defaults.memory_mib, Some(PLATFORM_SNAPSHOT_MAX_MEMORY_MIB));
+    }
+
+    #[test]
+    fn state_root_is_keyed_by_bundle_owned_by_the_user_and_reused() {
+        let local_app_data = tempfile::tempdir().unwrap();
+        let root = state_root_in(local_app_data.path(), [0xab; 32]).unwrap();
+        assert_eq!(
+            root.path(),
+            local_app_data
+                .path()
+                .join(r"Microsoft\MXC\nvx\abababababababab")
+        );
+        assert!(
+            crate::mxc_common::filesystem_security::owner_is_current_user(root.path()).unwrap()
+        );
+        std::fs::write(root.path().join("registered-image"), b"cached").unwrap();
+        let reused = state_root_in(local_app_data.path(), [0xab; 32]).unwrap();
+        assert_eq!(reused.path(), root.path());
+        assert_eq!(
+            std::fs::read(reused.path().join("registered-image")).unwrap(),
+            b"cached"
+        );
+        let other_bundle = state_root_in(local_app_data.path(), [0xcd; 32]).unwrap();
+        assert_ne!(other_bundle.path(), root.path());
+        assert!(!other_bundle.path().join("registered-image").exists());
     }
 
     struct FakeControl {
