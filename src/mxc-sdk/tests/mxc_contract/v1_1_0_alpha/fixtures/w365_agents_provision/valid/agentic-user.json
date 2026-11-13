@@ -1,0 +1,11 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "w365Agents": {
+    "provision": {
+      "poolId": "11111111-1111-1111-1111-111111111111",
+      "userType": "Agentic"
+    }
+  }
+}

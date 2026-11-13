@@ -30,9 +30,9 @@ From the repository root, build the executor:
 build.bat --with-microvm
 ```
 
-The `aci_edge_sandboxes` crate, pinned to `0.1.1` with `agent-bundled`,
+The `aci_edge_sandboxes` crate, pinned to `0.1.2` with `agent-bundled`,
 downloads and stages its own signed agent bundle. This version pins release
-`v0.1.0-build188642429` (sandbox ABI 3, guest runtime ABI
+`v0.2.0-build189870623` (sandbox ABI 3, guest runtime ABI
 `microvm-abi-v2-edge-ramfs-v7`). Distribute the complete `aci-edge-sandboxes`
 directory beside the executable, including its manifests, runtime binaries,
 guest images, and provenance files. Do not substitute a standalone OpenVMM
@@ -108,9 +108,11 @@ numeric port, followed by `/` and the image repository. For example, use
 characters are rejected. The signed runtime validates the remaining reference
 syntax and pulls the selected image on the host. Host-side image
 acquisition does not grant the guest network access. MXC has no separate
-registry-credentials input. The runtime caches references by text within its
-state root, so a tag can retain previously pulled content; use a digest when
-immutable content identity is required.
+registry-credentials input. The runtime registers each reference once and keeps
+it by its text in the [agent state directory](#agent-state-directory), so later
+requests boot it without contacting the registry, and a moving tag such as
+`latest` keeps naming the content first pulled. Use a version tag or a digest
+(`repository@sha256:…`) to control what a sandbox boots.
 
 ## Supported operations and policy
 
@@ -125,7 +127,7 @@ The table describes this MXC integration, not every capability of NVX. The
 signed agent limits workloads to one hour and constrains their working
 directories and environments as described below. Refusal of UI, writable
 stdin, and PTY operations are restrictions of this MXC integration.
-The [signed-agent documentation](https://docs.rs/aci_edge_sandboxes/0.1.1/aci_edge_sandboxes/agent/)
+The [signed-agent documentation](https://docs.rs/aci_edge_sandboxes/0.1.2/aci_edge_sandboxes/agent/)
 describes its contract; the direct OpenVMM backend uses a different guest and
 does not define the limits of this integration.
 
@@ -245,26 +247,35 @@ diagnostics to avoid exposing them; the error code and failed operation are
 still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
-VM shutdown, deprovisioning, and temporary-directory cleanup before exit code
-130 is returned. A request received during startup is observed when the native
-startup call returns. Closing the console or forcibly terminating the process
-does not provide this cooperative-cleanup guarantee. Embedding the SDK does not
-install a process-wide console handler.
+VM shutdown and deprovisioning before exit code 130 is returned. A request
+received during startup is observed when the native startup call returns.
+Closing the console or forcibly terminating the process does not provide this
+cooperative-cleanup guarantee. Embedding the SDK does not install a
+process-wide console handler.
 
-### Temporary agent workspace
+### Agent state directory
 
-MXC allocates a private temporary directory for each create-and-run operation.
-The signed agent owns the sandbox records, VM control data, diagnostics, and
-image registry/cache stored there. MXC coordinates the agent's stop and
-deprovision operations, closes the client, and removes the directory after
-successful deprovisioning; it does not maintain a persistent container database.
+The signed agent keeps its sandbox records, VM control data, diagnostics, and
+registered images in a per-user state directory,
+`%LOCALAPPDATA%\Microsoft\MXC\nvx\<bundle>`, where `<bundle>` is the first 16
+hexadecimal digits of the approved bundle manifest's SHA-256, so each pinned
+runtime keeps its own state. MXC obtains that digest from the pinned
+`aci_edge_sandboxes` crate rather than maintaining a second runtime pin.
+MXC makes the current user the directory's owner
+and gives it an access list for only that user and Local SYSTEM, so the user's
+elevated and non-elevated requests can share it. Every create-and-run request
+reuses it, so an image is pulled once rather than for every request, and
+concurrent requests share it. MXC coordinates the agent's stop and deprovision
+operations and closes the client after each request; it does not maintain a
+persistent container database.
 
-If deprovisioning fails, MXC reports the failure and retains the directory,
-including its location in the error. This preserves the agent's resource
-records rather than deleting them while a VM might remain. Retention does not
-provide automatic recovery. Retained runtime files can contain sensitive data;
-protect them and confirm that the operation's VM has stopped before manually
-removing retained storage.
+To pull a reference again or reclaim disk space, delete the directory while no
+MicroVM request is running; the next request creates it again.
+
+If deprovisioning fails, MXC reports the failure and the directory's location.
+The agent's records for that sandbox remain there rather than being deleted
+while a VM might remain. Runtime files in the directory can contain sensitive
+data; confirm that no VM is running before you remove the directory.
 
 ## Validation
 
@@ -285,8 +296,10 @@ timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 The SDK JSON scenario also covers live output larger than pipe capacity,
 container provision/start, live and captured exec, reuse, stop and deprovision.
 An isolated-console scenario interrupts both startup and running execution,
-then verifies that the owned OpenVMM process has terminated and run storage
-has been removed.
+then verifies that the owned OpenVMM process has terminated and that a later
+request succeeds with the same agent state directory. Another scenario checks
+that concurrent first requests for an unregistered image all succeed, and that
+later concurrent requests boot it while its registry is unreachable.
 Missing prerequisites, skipped scenarios, and empty test runs fail validation.
 See the [CI validation runbook](../../development/build-and-test/ci-validation-infrastructure.md).
 

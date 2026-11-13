@@ -1,0 +1,286 @@
+# Windows 365 for Agents: checkout and release
+
+> **Audience:** MXC consumers and developers
+
+This experimental backend implements **Phase 2 only**: checkout through
+`provision`, and terminal release through `stop` or `deprovision`. It is
+included in normal Windows, Linux and macOS builds. Checkout and release are
+available through the Rust, .NET and Node V1.Dev JSON APIs with experimental
+authorization, and the Windows executor with `--experimental`. The Linux and macOS executors do not
+expose lifecycle operations; adding that CLI support is outside this slice.
+Local probes do not report W365
+availability and never authenticate, discover a pool or check out a Cloud PC.
+
+Start/readiness, captured or streaming exec, PTY, create-and-run execution
+and placement sessions are unavailable. They fail explicitly without service
+work. Typed W365 SDK authoring APIs do not exist.
+Native executor responses retain structured errors and cleanup identities.
+
+At the native engine boundary, create-and-run execution resolves the W365
+runner and is refused by the backend with `policy_validation`, including
+run-to-completion dry runs. It does not read service credentials or make a
+service request. Development MXC request JSON still does not accept W365
+create-and-run requests.
+
+## Configuration and contract
+
+Use the `1.1.0-alpha` development contract. Provision accepts only these
+settings under `w365Agents.provision`:
+
+| Field | Meaning |
+| --- | --- |
+| `poolId` | Required hyphenated ASCII GUID of the authorized pool. |
+| `userType` | Optional, `Local`, `HumanUser`, or `Agentic`; omission sends no `user-type` header. |
+| `userObjectId` | Optional hyphenated ASCII GUID; omission sends no `user-object-id` header. |
+
+Omission of either identity field does not infer a user or silently select
+`Local`. Omitted `w365Agents`, an empty wrapper or missing provision settings
+fail before checkout. Unknown fields, nulls and per-call endpoint, token or
+timeout overrides are rejected. Non-provision operations reject `w365Agents`,
+even `{}`. Unsupported filesystem, network, UI, clipboard and proxy policy
+fails before service work; MXC cannot enforce local policy on this remote resource.
+
+Supply configuration in the **caller environment**:
+
+| Variable | Requirement |
+| --- | --- |
+| `W365A_CONTROLPLANE_URL` | Bare ASCII DNS hostname, without scheme, port, path, query, credentials or whitespace. HTTPS uses port 443. |
+| `W365A_CP_TOKEN` | Nonempty resource-specific bearer token, without whitespace or control characters. |
+
+For example, configure the North Europe control-plane hostname below.
+With a resource-specific token already obtained through your approved
+credential mechanism in `$controlPlaneToken`, configure the caller in PowerShell:
+
+```powershell
+$env:W365A_CONTROLPLANE_URL = 'northeurope.sessionmanagement.regional.cloudinferenceplatform.azure.com'
+$env:W365A_CP_TOKEN = $controlPlaneToken
+```
+
+Set these variables before launching the SDK application or executor from that
+PowerShell process. This endpoint is an example, not a production default;
+use the endpoint authorized for your pool. Do not paste token values into shell
+history or logs.
+
+Missing, invalid or non-Unicode values fail locally. Each call reads the
+environment again. MXC does not acquire, cache or renew tokens. The caller
+renews credentials before a later cleanup call. Checkout uses the design's
+45-second client budget; release uses its separate 30-second budget. These
+are transport budgets, not promises about service reset or resource lifetime.
+Production uses `native-tls` with the platform's certificate trust store:
+SChannel on Windows, Secure Transport on macOS and OpenSSL on Linux.
+Certificate and hostname validation remain enabled, with no redirects or
+ambient HTTP proxy. Linux builds require OpenSSL development headers and
+`pkg-config` (`libssl-dev pkg-config` on Debian/Ubuntu, `openssl-devel pkgconf-pkg-config`
+on Fedora); deployed Linux hosts require the matching OpenSSL shared libraries
+and CA certificates. ARM64 cross-builds need target-architecture OpenSSL headers
+and libraries, not just the host development package.
+
+## Service contract and identity
+
+Checkout sends **one** bodyless POST to
+`/api/pools/{poolId}/sessions?api-version=2.0`, forwarding only supplied
+user-type and user-object-id headers. Release sends DELETE to
+`/api/sessions/{sessionId}?api-version=2.0`, with `x-ms-sessionId`.
+Every request has an independent `x-ms-client-request-id`; safe returned
+`x-ms-request-id` values are retained on errors. There is no allocation
+retry, hidden cleanup, replacement checkout or durable local registry.
+All SDKs and executors send
+`User-Agent: mxc/<native SDK version> (w365_agents)`, using the native SDK package
+version. This identifies the client for diagnostics, not authentication.
+
+Successful checkout requires HTTP 200, `status: "Succeeded"` and a valid
+`sessionId`. An omitted `computerId` uses the session ID; a supplied computer
+ID must be a valid, equal GUID. IDs are compared case-insensitively and
+returned with lowercase GUIDs as `w365:{poolId}:{sessionId}`.
+Metadata includes the pool, session and computer IDs, not response URLs,
+tokens or ticket-bearing metadata.
+
+Rejected successful checkout retains a valid cleanup identity as
+`error.details.sandboxId`, `poolId` and `sessionId`, with
+`possiblySucceeded: true`. HTTP error replies also retain a valid session ID
+from a parseable response body within the 1 MiB limit, preserving the HTTP
+error code and uncertainty classification even when the body cannot be read
+or parsed. No ID is fabricated for an absent or invalid session ID.
+Unparseable, dropped and ambiguous checkout replies report
+uncertainty and request context. Never automatically repeat that POST.
+HTTP authorization, missing-pool, throttling and server failures have
+operation-specific `details.code` values.
+Checkout error messages include `clientRequestId`, `possiblySucceeded` and,
+when returned and validated, the service's `requestId`. These remain available
+through existing SDK error messages when no valid session ID was returned.
+Retain them for service-side reconciliation rather than repeating checkout.
+When checkout returns a valid session ID but fails, its error message also
+includes the complete cleanup `sandboxId`. This makes the ID available through
+existing SDK error messages, including .NET's `MxcException.Message`; no new
+.NET error property is required. Retain the ID for explicit release.
+No cleanup ID is included in the message when the returned session ID is
+absent or invalid. Later operations already receive the ID from the caller.
+
+Release validates the complete ID before DELETE and always targets its
+session, never a rejected computer ID. HTTP 200, 202, 204 and 404 mean accepted
+or already absent; they do **not** prove guest reset, sanitization or reusable
+capacity. Both release alternatives return
+`result.metadata.releaseRequested: true` and `restartable: false`.
+Failed or uncertain release retains the ID in error details for an explicit
+retry against the same session. A later checkout B does not replace or clean
+up checkout A.
+
+### Dev SDK checkout and release
+
+Supply the documented environment variables before invoking an SDK. Use a
+complete development-contract request, including `phase`:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "w365Agents": {
+    "provision": {
+      "poolId": "11111111-1111-1111-1111-111111111111",
+      "userType": "HumanUser",
+      "userObjectId": "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}
+```
+
+Replace the synthetic GUIDs with authorized values. Pass this JSON string to
+the existing Dev API; each returns the complete response JSON:
+
+| SDK | Provision call |
+| --- | --- |
+| Rust | `dev::provision_container_json(provision_json, dev::JsonOptions { experimental: true })` through `mxc_sdk::v1::dev`. |
+| .NET | `Dev.MxcLifecycle.ProvisionContainerJson(provisionJson, new Dev.JsonOptions { Experimental = true })` with `using Dev = Microsoft.Mxc.Sdk.V1.Dev;`. |
+| Node | `await provisionContainerJson(provisionJson, { experimental: true })` from `@microsoft/mxc-sdk/v1/dev`. |
+
+Retain `result.sandboxId` immediately. To release without start or exec,
+pass `{"version":"1.1.0-alpha","phase":"deprovision","sandboxId":"<retained-id>"}`
+to the corresponding `deprovision_container_json`, `DeprovisionContainerJson`
+or `deprovisionContainerJson` API with experimental authorization.
+The stop APIs are terminal release alternatives. Validation APIs perform
+local checks without allocating or releasing a session.
+
+On failed Provision, retain the error message and any returned cleanup ID for
+explicit release. Messages are diagnostic text, not a structured parsing API.
+If no valid ID was returned, use the service reconciliation procedure below;
+do not repeat checkout automatically. No SDK call acquires or renews tokens.
+
+## Optional live validation: explicit invocation only
+
+**Live validation requires explicit authorization.** Do not use another
+caller's active checkout or token. Obtain authorization for a compatible API 2.0
+pool and user identity and confirm the release contract before allocating.
+Use a normal executor, not a `test-support` build. Supply the two required
+environment variables through the caller's approved credential mechanism;
+never put bearer tokens in JSON, command-line arguments, shell history or logs.
+
+Save the following credential-free provision body as `provision.json`,
+replacing the synthetic pool and user GUIDs with approved values:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "containment": "w365_agents",
+  "w365Agents": {
+    "provision": {
+      "poolId": "11111111-1111-1111-1111-111111111111",
+      "userType": "HumanUser",
+      "userObjectId": "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}
+```
+
+Run **once**, capturing stdout and the exit status:
+
+```text
+wxc-exec.exe --config provision.json --operation provision --experimental
+```
+
+Immediately retain the returned `result.sandboxId`, or a rejected checkout's
+`error.details.sandboxId`, together with deployment/account context.
+Do not call start or exec in this slice.
+Without a valid ID, report the client/server request IDs from the error details
+or SDK error message to the authorized service operator for reconciliation;
+do not fabricate an ID or replay checkout.
+
+Save `{"version":"1.1.0-alpha"}` as `release.json`. In a fresh process with
+valid, caller-renewed credentials, pass the retained ID unchanged:
+
+```text
+wxc-exec.exe --config release.json --operation deprovision --container-id <retained-id> --experimental
+```
+
+`stop` is the alternative terminal release, not suspension.
+Check the release exit status and complete response. On failed or uncertain
+release, retain the ID and report primary/cleanup failures separately.
+An explicit retry may use renewed credentials and the same ID; do not check
+out a replacement as cleanup. Record unresolved IDs for service reconciliation.
+Report release acceptance separately from service-confirmed reset completion.
+
+## Offline functional fixtures
+
+`src/mxc-sdk/tests/w365_lifecycle.rs` contains
+`lifecycle_contract_and_recovery_fixture`, which
+uses a controlled TLS service through the normal development parser,
+experimental authorization, checked binding and backend dispatch.
+This fixture runs on Windows, Linux and macOS.
+It also exercises the public Rust V1.Dev checkout/release APIs and Provision
+error messages. `.NET`'s `MxcLifecycleW365Tests` runs against its existing isolated
+test-support native library in the SDK test suite.
+The Node integration fixture `w365-fixture.ts` runs separately against an
+isolated test-support library using
+`scripts\ci\run-w365-node-fixture.ps1`, after building the Node SDK integration
+tests. GitHub Actions and Azure SDK integration jobs require this fixture;
+the normal packaged-artifact tests continue to use shipping libraries.
+
+The engine's `transport_deadlines_fixture` holds TLS responses open, including
+incomplete headers and bodies, to verify client deadline expiration, uncertain
+failures, retained release IDs and no automatic retries. Short timeout overrides
+are internal to `test-support` builds; production checkout and release budgets are
+unchanged.
+
+The Node fixture first makes an asynchronous call through another Koffi library
+before importing MXC and checks that the SDK leaves Koffi's stack setting unchanged.
+W365 HTTPS calls use a joined native thread with a 1 MiB stack rather than
+depending on the caller's native stack size.
+On Windows, `lifecycle_fresh_executor_fixture` additionally launches independent
+`wxc-exec` processes for checkout and release with renewed synthetic credentials.
+The latter is ignored by default because it requires a separately built
+fixture executor; Windows CI explicitly requires and runs it.
+
+From `src\` on Windows:
+
+```powershell
+# Requires openssl on PATH, or MXC_W365_TEST_OPENSSL set to its executable path.
+cargo build --locked -p wxc --features test-support --target-dir target\w365-fixture
+$env:MXC_W365_TEST_EXECUTOR = (Resolve-Path target\w365-fixture\debug\wxc-exec.exe).Path
+cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target-dir target\w365-fixture -- --include-ignored
+```
+
+GitHub Actions and Azure Windows CI use a separate target directory so fixture
+executors cannot replace shipping artifacts. Both CI systems run the engine
+fixture on Linux and macOS without a fixture executor. Azure runs fixtures
+only on native hosts: Windows/Linux x64 and macOS arm64; cross-compiled arm64
+Windows/Linux jobs do not execute them.
+The integration target requires `test-support`. Only builds with that feature
+honor `MXC_W365_TEST_CA`, `MXC_W365_TEST_PORT` and `MXC_W365_TEST_TIMEOUT_MS`.
+The fixtures supply a trusted certificate and short deadlines without disabling
+certificate or hostname validation. Shipping builds ignore these variables.
+Fixtures use only loopback services,
+synthetic credentials and generated certificates; no live tenant is needed.
+`rcgen` generates fixture certificates. The loopback server uses SChannel on
+Windows and `native-tls` elsewhere; the production client uses `native-tls`
+on all platforms. Windows and macOS fixtures require
+the OpenSSL command-line tool to package generated EC keys as PKCS#12; their
+native PEM identity importers do not support this key format. The archive uses
+SHA-1/3DES for macOS import compatibility only, not for TLS connections or
+production cryptography. The imported Windows test key is explicitly deleted
+after the fixture server stops; `native-tls` owns a temporary macOS keychain
+removed at process exit. Windows CI selects the OpenSSL executable
+included with Git for Windows using `MXC_W365_TEST_OPENSSL`, without changing
+`PATH` or replacing other Windows tools. Otherwise fixtures find `openssl` on
+`PATH`. These certificate
+and key files exist only in a temporary directory, removed after identity
+loading; no certificates or private keys are checked in.

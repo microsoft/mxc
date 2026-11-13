@@ -212,7 +212,22 @@
             "else": {
               "else": {
                 "else": {
-                  "else": false,
+                  "else": {
+                    "else": false,
+                    "if": {
+                      "properties": {
+                        "containment": {
+                          "const": "w365_agents"
+                        }
+                      },
+                      "required": [
+                        "containment"
+                      ]
+                    },
+                    "then": {
+                      "$ref": "#/definitions/W365AgentsProvisionRequest"
+                    }
+                  },
                   "if": {
                     "properties": {
                       "containment": {
@@ -1552,6 +1567,17 @@
       ],
       "type": "object"
     },
+    "StateAwareW365AgentsProvision": {
+      "additionalProperties": false,
+      "description": "A closed W365 settings object containing only checkout settings.",
+      "properties": {
+        "provision": {
+          "$ref": "#/definitions/W365AgentsProvision",
+          "description": "Optional provision settings; an empty wrapper remains distinct from omission."
+        }
+      },
+      "type": "object"
+    },
     "StateAwareWslc": {
       "additionalProperties": false,
       "description": "State-aware WSLC settings.",
@@ -1709,6 +1735,104 @@
         }
       ]
     },
+    "W365AgentsContainment": {
+      "enum": [
+        "w365_agents"
+      ],
+      "type": "string"
+    },
+    "W365AgentsGuid": {
+      "maxLength": 36,
+      "minLength": 36,
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+      "type": "string"
+    },
+    "W365AgentsProvision": {
+      "additionalProperties": false,
+      "description": "W365 checkout settings. Defaults and resolved service validation belong to the backend.",
+      "properties": {
+        "poolId": {
+          "$ref": "#/definitions/W365AgentsGuid",
+          "description": "Required pool identifier; no automatic pool selection."
+        },
+        "userObjectId": {
+          "$ref": "#/definitions/W365AgentsGuid",
+          "description": "Optional user object identifier."
+        },
+        "userType": {
+          "$ref": "#/definitions/W365AgentsUserType",
+          "description": "Optional user type."
+        }
+      },
+      "required": [
+        "poolId"
+      ],
+      "type": "object"
+    },
+    "W365AgentsProvisionRequest": {
+      "additionalProperties": false,
+      "description": "The complete development W365 provision request, excluding unenforceable local policy.",
+      "properties": {
+        "$schema": {
+          "description": "Optional editor schema reference.",
+          "type": "string"
+        },
+        "_comment": {
+          "description": "Optional annotation."
+        },
+        "containment": {
+          "$ref": "#/definitions/W365AgentsContainment",
+          "description": "W365 containment marker."
+        },
+        "phase": {
+          "$ref": "#/definitions/ProvisionPhase",
+          "description": "Provision phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry settings."
+        },
+        "version": {
+          "$ref": "#/definitions/Version",
+          "description": "Development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsProvision",
+          "description": "Optional provision settings; missing configuration is not defaulted by parsing."
+        }
+      },
+      "required": [
+        "containment",
+        "phase",
+        "version"
+      ],
+      "type": "object"
+    },
+    "W365AgentsUserType": {
+      "oneOf": [
+        {
+          "description": "Local",
+          "enum": [
+            "Local"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "HumanUser",
+          "enum": [
+            "HumanUser"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Agentic",
+          "enum": [
+            "Agentic"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "WindowsSandboxContainment": {
       "enum": [
         "windows_sandbox"
@@ -1848,6 +1972,10 @@
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
           "description": "Exact `provision` phase marker."
+        },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional runtime settings fixed at provision time."
         },
         "telemetry": {
           "$ref": "#/definitions/Telemetry",

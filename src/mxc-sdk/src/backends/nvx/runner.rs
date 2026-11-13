@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -77,9 +78,8 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let (state_root, mut client) = open_client(&mut logger)?;
-        validate_with_client(&mut client, state_root, request)
+        let (_, mut client) = open_client()?;
+        validate_with_client(&mut client, request)
     }
 
     fn run_captured_inner(
@@ -89,10 +89,10 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
-        let (state_root, mut client) = open_client(logger)?;
+        let (state_root, mut client) = open_client()?;
         run_with_client(
             &mut client,
-            state_root,
+            &state_root,
             request,
             logger,
             Some(&self.cancellation),
@@ -100,27 +100,11 @@ impl NvxRunner {
     }
 }
 
-fn open_client(logger: &mut Logger) -> Result<(tempfile::TempDir, NvxClient), MxcError> {
-    let state_root = tempfile::Builder::new()
-        .prefix(&format!("mxc-nvx-{}-", std::process::id()))
-        .tempdir()
-        .map_err(|error| {
-            MxcError::backend_unavailable(format!(
-                "cannot create a private NVX state directory: {error}"
-            ))
-        })?;
-    match super::runtime::create_client(state_root.path()) {
-        Ok(client) => Ok((state_root, client)),
-        Err(error) => {
-            let cleanup = state_root
-                .close()
-                .err()
-                .map(|error| MxcError::backend_error(format!("cannot remove NVX state: {error}")))
-                .into_iter()
-                .collect();
-            finish_run(Err(error), cleanup, logger)
-        }
-    }
+fn open_client() -> Result<(PathBuf, NvxClient), MxcError> {
+    let state_root = super::runtime::state_root()?;
+    let path = state_root.path().to_path_buf();
+    let client = super::runtime::create_persistent_client(state_root)?;
+    Ok((path, client))
 }
 
 pub(super) fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
@@ -158,20 +142,16 @@ fn prepare_request(
 
 fn validate_with_client(
     client: &mut impl SandboxClient,
-    state_root: tempfile::TempDir,
     request: &ExecutionRequest,
 ) -> Result<(), MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let result = prepare_request(client, request).map(|_| ());
-    let mut cleanup = Vec::new();
-    if let Err(error) = client.close() {
-        cleanup.push(protect_native_error(error, "close", sensitive_proxy));
-    }
-    if let Err(error) = state_root.close() {
-        cleanup.push(MxcError::backend_error(format!(
-            "cannot remove NVX state directory: {error}"
-        )));
-    }
+    let cleanup = client
+        .close()
+        .err()
+        .map(|error| protect_native_error(error, "close", sensitive_proxy))
+        .into_iter()
+        .collect();
     finish_run(
         result,
         cleanup,
@@ -181,7 +161,7 @@ fn validate_with_client(
 
 fn run_with_client(
     client: &mut impl SandboxClient,
-    state_root: tempfile::TempDir,
+    state_root: &Path,
     request: &ExecutionRequest,
     logger: &mut Logger,
     cancellation: Option<&RunCancellation>,
@@ -192,15 +172,12 @@ fn run_with_client(
     let (sandbox_id, exec) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
-            let mut cleanup = Vec::new();
-            if let Err(close_error) = client.close() {
-                cleanup.push(protect("close", close_error));
-            }
-            if let Err(remove_error) = state_root.close() {
-                cleanup.push(MxcError::backend_error(format!(
-                    "cannot remove NVX state: {remove_error}"
-                )));
-            }
+            let cleanup = client
+                .close()
+                .err()
+                .map(|close_error| protect("close", close_error))
+                .into_iter()
+                .collect();
             return finish_run(Err(error), cleanup, logger);
         }
     };
@@ -295,15 +272,7 @@ fn prepare_and_provision(
 struct StreamingSandbox {
     client: NvxClient,
     sandbox_id: super::runtime::SandboxId,
-    state_root: Option<tempfile::TempDir>,
-}
-
-impl Drop for StreamingSandbox {
-    fn drop(&mut self) {
-        if let Some(state_root) = self.state_root.take() {
-            let _retained_path = state_root.keep();
-        }
-    }
+    state_root: PathBuf,
 }
 
 struct StreamingPipes {
@@ -426,18 +395,13 @@ pub(crate) fn spawn_streaming(
     super::policy::validate_request(request)?;
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
-    let (state_root, mut client) = open_client(logger)?;
+    let (state_root, mut client) = open_client()?;
     let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
         Ok(prepared) => prepared,
         Err(error) => {
             let mut cleanup = Vec::new();
             if let Err(close) = client.close() {
                 cleanup.push(protect_native_error(close, "close", sensitive_proxy));
-            }
-            if let Err(remove) = state_root.close() {
-                cleanup.push(MxcError::backend_error(format!(
-                    "cannot remove NVX state: {remove}"
-                )));
             }
             return finish_run(Err(error), cleanup, logger);
         }
@@ -464,7 +428,7 @@ pub(crate) fn spawn_streaming(
             let cleanup = cleanup_sandbox(
                 &mut client,
                 &sandbox_id,
-                state_root,
+                &state_root,
                 true,
                 sensitive_proxy,
                 logger,
@@ -476,11 +440,11 @@ pub(crate) fn spawn_streaming(
         .process
         .timeout
         .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX));
-    let state_path = state_root.path().to_owned();
+    let state_path = state_root.clone();
     let mut sandbox = StreamingSandbox {
         client,
         sandbox_id,
-        state_root: Some(state_root),
+        state_root: state_root.clone(),
     };
     let handle = pipes.into_handle(
         execution,
@@ -490,14 +454,10 @@ pub(crate) fn spawn_streaming(
         sensitive_proxy,
         move |primary| {
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-            let state_root = sandbox
-                .state_root
-                .take()
-                .expect("streaming sandbox owns its state directory");
             let cleanup = cleanup_sandbox(
                 &mut sandbox.client,
                 &sandbox.sandbox_id,
-                state_root,
+                &sandbox.state_root,
                 primary.is_err(),
                 sensitive_proxy,
                 &mut logger,
@@ -510,7 +470,7 @@ pub(crate) fn spawn_streaming(
         .map_err(|mut error| {
             if state_path.exists() {
                 error.message.push_str(&format!(
-                    "; NVX state retained for recovery at {}",
+                    "; NVX agent state directory: {}",
                     state_path.display()
                 ));
             }
@@ -765,7 +725,7 @@ fn write_stream(writer: &mut impl Write, bytes: &[u8]) -> Result<(), MxcError> {
 fn cleanup_sandbox(
     client: &mut impl SandboxClient,
     sandbox_id: &super::runtime::SandboxId,
-    state_root: tempfile::TempDir,
+    state_root: &Path,
     primary_failed: bool,
     sensitive_proxy: bool,
     logger: &mut Logger,
@@ -786,14 +746,9 @@ fn cleanup_sandbox(
         .flatten()
         .collect();
     if retain_state {
-        let retained = state_root.keep();
         cleanup_errors.push(MxcError::backend_error(format!(
-            "NVX state retained for recovery after deprovision failure: {}",
-            retained.display()
-        )));
-    } else if let Err(error) = state_root.close() {
-        cleanup_errors.push(MxcError::backend_error(format!(
-            "cannot remove NVX state directory: {error}"
+            "NVX sandbox records remain in the agent state directory after deprovision failure: {}",
+            state_root.display()
         )));
     }
     logger.log_audit_event(
@@ -1333,13 +1288,12 @@ mod tests {
                         client.close_res = Err(MxcError::backend_error("close failed"));
                     }
                     let state_root = tempfile::tempdir().unwrap();
-                    let path = state_root.path().to_path_buf();
                     let error = if dry_run {
-                        validate_with_client(&mut client, state_root, &test_request()).unwrap_err()
+                        validate_with_client(&mut client, &test_request()).unwrap_err()
                     } else {
                         run_with_client(
                             &mut client,
-                            state_root,
+                            state_root.path(),
                             &test_request(),
                             &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
                             None,
@@ -1365,7 +1319,6 @@ mod tests {
                         &["capabilities", "validate_provision", "validate", "close"]
                     };
                     assert_eq!(*client.calls.borrow(), expected);
-                    assert!(!path.exists());
                     responses.push(response);
                 }
                 assert_eq!(responses[0].error_message, responses[1].error_message);
@@ -1392,9 +1345,7 @@ mod tests {
                 "close" => client.close_res = Err(MxcError::backend_error("close failed")),
                 _ => {}
             }
-            let state_root = tempfile::tempdir().unwrap();
-            let path = state_root.path().to_path_buf();
-            let result = validate_with_client(&mut client, state_root, &test_request());
+            let result = validate_with_client(&mut client, &test_request());
             assert_eq!(result.is_ok(), failure == "none", "{failure}: {result:?}");
             if failure == "capabilities" {
                 let error = result.unwrap_err();
@@ -1420,7 +1371,6 @@ mod tests {
                 &["capabilities", "validate_provision", "validate", "close"]
             };
             assert_eq!(*client.calls.borrow(), expected, "{failure}");
-            assert!(!path.exists(), "{failure}");
         }
     }
 
@@ -1433,13 +1383,10 @@ mod tests {
             default: crate::mxc_common::models::NetworkAction::Allow,
             ..Default::default()
         });
-        let state_root = tempfile::tempdir().unwrap();
-        let path = state_root.path().to_path_buf();
-        let error = validate_with_client(&mut client, state_root, &request).unwrap_err();
+        let error = validate_with_client(&mut client, &request).unwrap_err();
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);
         assert!(error.message.contains("network.ingress.default=allow"));
         assert_eq!(*client.calls.borrow(), ["capabilities", "close"]);
-        assert!(!path.exists());
     }
 
     #[test]
@@ -1452,11 +1399,8 @@ mod tests {
             .network
             .network_proxy = true;
         client.validate_provision_res = Err(MxcError::policy_validation("native synthetic secret"));
-        let state_root = tempfile::tempdir().unwrap();
-        let path = state_root.path().to_path_buf();
         let error = validate_with_client(
             &mut client,
-            state_root,
             &request_with_proxy("http://synthetic:secret@localhost:3128"),
         )
         .unwrap_err();
@@ -1464,7 +1408,6 @@ mod tests {
         assert!(error.message.contains("validate_provision"));
         assert!(error.message.contains("withheld"));
         assert!(!format!("{error:?}").contains("synthetic"));
-        assert!(!path.exists());
         assert_eq!(
             *client.calls.borrow(),
             ["capabilities", "validate_provision", "close"]
@@ -1519,7 +1462,7 @@ mod tests {
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let error = run_with_client(
                 &mut client,
-                tempfile::tempdir().unwrap(),
+                Path::new("state"),
                 &request_with_proxy(proxy),
                 &mut logger,
                 None,
@@ -1583,7 +1526,7 @@ mod tests {
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let error = run_with_client(
             &mut client,
-            tempfile::tempdir().unwrap(),
+            Path::new("state"),
             &request_with_proxy("http://user:synthetic-secret@localhost:3128"),
             &mut logger,
             None,
@@ -1625,7 +1568,7 @@ mod tests {
                 client.exec_res = Err(MxcError::backend_error(detail));
                 let error = run_with_client(
                     &mut client,
-                    tempfile::tempdir().unwrap(),
+                    Path::new("state"),
                     &request_with_proxy("http://user:synthetic-secret@localhost:3128"),
                     &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
                     None,
@@ -1654,7 +1597,7 @@ mod tests {
         client.start_res = Err(MxcError::backend_error("native start detail"));
         let error = run_with_client(
             &mut client,
-            tempfile::tempdir().unwrap(),
+            Path::new("state"),
             &request_with_proxy("http://localhost:3128"),
             &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
             None,
@@ -1678,7 +1621,7 @@ mod tests {
             .network_proxy = true;
         let result = run_with_client(
             &mut client,
-            tempfile::tempdir().unwrap(),
+            Path::new("state"),
             &request_with_proxy(proxy),
             &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
             None,
@@ -1706,7 +1649,6 @@ mod tests {
     #[test]
     fn credential_proxy_withholds_retained_state_cleanup_error() {
         let state_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().to_path_buf();
         let mut client = MockClient::ok();
         client
             .capabilities_res
@@ -1717,7 +1659,7 @@ mod tests {
         client.deprovision_res = Err(MxcError::backend_error("synthetic secret"));
         let error = run_with_client(
             &mut client,
-            state_root,
+            state_root.path(),
             &request_with_proxy("http://user:synthetic-secret@localhost:3128"),
             &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
             None,
@@ -1725,10 +1667,11 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("deprovision"));
         assert!(error.message.contains("withheld"));
-        assert!(error.message.contains("state retained"));
+        assert!(error.message.contains(&format!(
+            "records remain in the agent state directory after deprovision failure: {}",
+            state_root.path().display()
+        )));
         assert!(!error.message.contains("synthetic"));
-        assert!(state_path.exists());
-        std::fs::remove_dir_all(state_path).unwrap();
     }
 
     #[test]
@@ -1742,10 +1685,9 @@ mod tests {
                     client.close_res = Err(MxcError::backend_error("host_close failed"));
                 }
                 let state_root = tempfile::tempdir().unwrap();
-                let path = state_root.path().to_path_buf();
                 let error = run_with_client(
                     &mut client,
-                    state_root,
+                    state_root.path(),
                     &test_request(),
                     &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
                     Some(&cancellation),
@@ -1754,7 +1696,6 @@ mod tests {
                 assert_eq!(error.code, MxcErrorCode::BackendError);
                 assert!(error.message.starts_with("execution cancelled"));
                 assert!(cancellation.was_cancelled());
-                assert!(!path.exists());
                 let expected: &[&str] = match phase {
                     "validate" => &["validate", "close"],
                     "probe" => &["validate", "probe", "close"],
@@ -1808,10 +1749,9 @@ mod tests {
         client.cancel_at = Some(("start", cancellation.clone()));
         client.start_res = Err(MxcError::backend_unavailable("primary start failure"));
         let state_root = tempfile::tempdir().unwrap();
-        let path = state_root.path().to_path_buf();
         let error = run_with_client(
             &mut client,
-            state_root,
+            state_root.path(),
             &test_request(),
             &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
             Some(&cancellation),
@@ -1825,7 +1765,6 @@ mod tests {
             !cancellation.was_cancelled(),
             "the primary failure must keep its category"
         );
-        assert!(!path.exists());
         assert_eq!(
             client.calls.borrow().as_slice(),
             [
@@ -1866,16 +1805,12 @@ mod tests {
             }
             let error = run_with_client(
                 &mut client,
-                state_root,
+                state_root.path(),
                 &test_request(),
                 &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
                 None,
             )
             .unwrap_err();
-            assert!(
-                !state_path.exists(),
-                "diagnostics must not retain run state"
-            );
             assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
             assert_eq!(error.details, Some(serde_json::json!({"phase": "boot"})));
             assert!(error
@@ -1918,12 +1853,11 @@ mod tests {
 
         // 1. Probe failure still closes host and surfaces close failure.
         let state_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().to_path_buf();
         let mut client = MockClient::ok();
         client.probe_res = Err(MxcError::backend_unavailable("probe failed"));
         client.close_res = Err(MxcError::backend_error("host_close failed"));
-        let err =
-            run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap_err();
+        let err = run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+            .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
         assert!(err.message.contains("probe failed"));
         assert!(err.message.contains("host_close failed"));
@@ -1937,19 +1871,17 @@ mod tests {
                 "close"
             ]
         );
-        assert!(!state_path.exists());
 
         // 2. Start failure suppresses AlreadyStopped on stop, deprovisions, closes host, removes state.
         let state_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().to_path_buf();
         let mut client = MockClient::ok();
         client.start_res = Err(MxcError::backend_error("start failed"));
         client.stop_res = Err(MxcError::new(
             MxcErrorCode::AlreadyStopped,
             "already stopped",
         ));
-        let err =
-            run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap_err();
+        let err = run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+            .unwrap_err();
         assert!(err
             .message
             .starts_with("start failed; startup diagnostics unavailable: "));
@@ -1968,34 +1900,29 @@ mod tests {
                 "close"
             ]
         );
-        assert!(!state_path.exists());
 
         // 3. Host close failure after workload success fails the run.
         let state_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().to_path_buf();
         let mut client = MockClient::ok();
         client.close_res = Err(MxcError::backend_error("host_close failed"));
-        let err =
-            run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap_err();
+        let err = run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+            .unwrap_err();
         assert!(err
             .message
             .contains("NVX cleanup failed after workload completion"));
         assert!(err.message.contains("host_close failed"));
-        assert!(!state_path.exists());
 
-        // 4. Deprovision failure retains state directory and fails the run.
+        // 4. Deprovision failure fails the run and names the directory that keeps its records.
         let state_root = tempfile::tempdir().unwrap();
-        let state_path = state_root.path().to_path_buf();
         let mut client = MockClient::ok();
         client.deprovision_res = Err(MxcError::backend_error("deprovision failed"));
-        let err =
-            run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap_err();
+        let err = run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+            .unwrap_err();
         assert!(err.message.contains("deprovision failed"));
-        assert!(err
-            .message
-            .contains("NVX state retained for recovery after deprovision failure"));
-        assert!(state_path.exists());
-        std::fs::remove_dir_all(&state_path).unwrap();
+        assert!(err.message.contains(&format!(
+            "NVX sandbox records remain in the agent state directory after deprovision failure: {}",
+            state_root.path().display()
+        )));
     }
 
     #[test]
@@ -2003,15 +1930,19 @@ mod tests {
         for cleanup_fails in [false, true] {
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let state_root = tempfile::tempdir().unwrap();
-            let state_path = state_root.path().to_path_buf();
             let mut client = MockClient::ok();
             client.validate_res = Err(MxcError::policy_validation("native validation rejected"));
             if cleanup_fails {
                 client.close_res = Err(MxcError::backend_error("close failed"));
             }
-            let error =
-                run_with_client(&mut client, state_root, &test_request(), &mut logger, None)
-                    .unwrap_err();
+            let error = run_with_client(
+                &mut client,
+                state_root.path(),
+                &test_request(),
+                &mut logger,
+                None,
+            )
+            .unwrap_err();
             assert_eq!(error.code, MxcErrorCode::PolicyValidation);
             if cleanup_fails {
                 assert!(error
@@ -2025,7 +1956,6 @@ mod tests {
                 *client.calls.borrow(),
                 ["capabilities", "validate_provision", "validate", "close"]
             );
-            assert!(!state_path.exists());
         }
     }
 
@@ -2042,10 +1972,10 @@ mod tests {
                 ..test_request()
             };
             let state_root = tempfile::tempdir().unwrap();
-            let state_path = state_root.path().to_path_buf();
             let mut client = MockClient::ok();
             let result =
-                run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap();
+                run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+                    .unwrap();
             assert_eq!(result.outcome, CapturedOutcome::Exited(0));
             assert_eq!(
                 *client.validated_request.borrow(),
@@ -2070,7 +2000,6 @@ mod tests {
                     "close"
                 ]
             );
-            assert!(!state_path.exists());
         }
     }
 
@@ -2080,16 +2009,20 @@ mod tests {
         for cleanup_fails in [false, true] {
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let state_root = tempfile::tempdir().unwrap();
-            let state_path = state_root.path().to_path_buf();
             let mut client = MockClient::ok();
             client.exec_res = Err(MxcError::backend_error(primary));
             if cleanup_fails {
                 client.stop_res = Err(MxcError::backend_error("stop failed"));
                 client.close_res = Err(MxcError::backend_error("close failed"));
             }
-            let error =
-                run_with_client(&mut client, state_root, &test_request(), &mut logger, None)
-                    .unwrap_err();
+            let error = run_with_client(
+                &mut client,
+                state_root.path(),
+                &test_request(),
+                &mut logger,
+                None,
+            )
+            .unwrap_err();
             assert_eq!(error.code, MxcErrorCode::BackendError);
             if cleanup_fails {
                 assert!(error.message.starts_with(primary));
@@ -2114,7 +2047,6 @@ mod tests {
                     "close"
                 ]
             );
-            assert!(!state_path.exists());
         }
     }
 
@@ -2142,14 +2074,7 @@ mod tests {
         };
         let mut client = MockClient::ok();
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        run_with_client(
-            &mut client,
-            tempfile::tempdir().unwrap(),
-            &request,
-            &mut logger,
-            None,
-        )
-        .unwrap();
+        run_with_client(&mut client, Path::new("state"), &request, &mut logger, None).unwrap();
         let input = client.provisioned_input.borrow();
         assert_eq!(*input, *client.validated_provision.borrow());
         assert_eq!(
@@ -2229,15 +2154,14 @@ mod tests {
                 }
             };
             let state_root = tempfile::tempdir().unwrap();
-            let path = state_root.path().to_owned();
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let error =
-                run_with_client(&mut client, state_root, &request, &mut logger, None).unwrap_err();
+                run_with_client(&mut client, state_root.path(), &request, &mut logger, None)
+                    .unwrap_err();
             assert_eq!(error.code, expected_code);
             assert_eq!(error.message, expected_message);
             assert_eq!(*client.calls.borrow(), expected_calls);
             assert!(client.provisioned_input.borrow().is_none());
-            assert!(!path.exists());
         }
     }
 }

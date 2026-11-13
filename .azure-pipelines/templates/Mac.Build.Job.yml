@@ -96,6 +96,17 @@ jobs:
       displayName: Test state-aware SDK boundaries
       workingDirectory: $(workingDirectory)
 
+    - script: |
+        set -euo pipefail
+        fixture_target="$(Agent.TempDirectory)/w365-fixture"
+        tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --list)"
+        for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture; do
+          grep -Fxq "${name}: test" <<< "$tests"
+        done
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --include-ignored
+      displayName: Test W365 checkout and release fixtures
+      workingDirectory: $(workingDirectory)
+
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.
