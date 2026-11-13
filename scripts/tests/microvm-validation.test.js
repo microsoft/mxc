@@ -405,6 +405,68 @@ test("Azure release artifact recursively copies the NVX bundle unchanged", () =>
   assert.deepEqual(fileDigests(join(extracted, "x64", "aci-edge-sandboxes")), expected);
 });
 
+test("ADO ARM64 dependency setup respects network isolation and propagates update failures", () => {
+  const pipeline = readFileSync(
+    join(root, ".azure-pipelines", "templates", "Rust.Build.Job.yml"),
+    "utf8"
+  );
+  const match = pipeline.match(
+    /      - script: \|\r?\n((?:          .*\r?\n)+)        displayName: Install ARM64 toolchain and target OpenSSL/
+  );
+  assert.ok(match, "the ARM64 setup step must be present");
+  const script = match[1].replace(/^          /gm, "");
+  const bash = process.platform === "win32"
+    ? join(process.env.ProgramFiles, "Git", "bin", "bash.exe")
+    : "bash";
+  const mock = `
+function . {
+  [[ "$1" == /etc/os-release ]] || return 91
+  VERSION_CODENAME=jammy
+}
+sudo() {
+  case "$*" in
+    "apt-get install -y gcc-aarch64-linux-gnu") return 0 ;;
+    "dpkg --add-architecture arm64") return 0 ;;
+  esac
+  [[ "$1" == apt-get ]] || return 92
+  shift
+  local sources=
+  for arg in "$@"; do
+    case "$arg" in Dir::Etc::sourcelist=*) sources="\${arg#*=}" ;; esac
+  done
+  [[ -f "$sources" && " $* " == *" Dir::Etc::sourceparts=- "* ]] || return 93
+  if [[ "\${!#}" == update ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://azure.archive.ubuntu.com/ubuntu "*) ;;
+        "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports "*) ;;
+        *) echo "Network isolation or signature policy rejected: $line" >&2; return 100 ;;
+      esac
+      echo "SOURCE $line"
+    done < "$sources"
+    [[ "$FIXTURE_FAIL_UPDATE" != 1 ]] || return 100
+  elif [[ " $* " == *" install -y --no-install-recommends libssl-dev:arm64 " ]]; then
+    echo ARM64_OPENSSL_INSTALLED
+  else
+    return 94
+  fi
+}
+`;
+  for (const failUpdate of ["0", "1"]) {
+    const result = spawnSync(bash, ["-s"], {
+      input: mock + script,
+      env: { ...process.env, FIXTURE_FAIL_UPDATE: failUpdate },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.ifError(result.error);
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, failUpdate === "1" ? 100 : 0, output);
+    assert.equal(result.stdout.includes("ARM64_OPENSSL_INSTALLED"), failUpdate === "0", output);
+    assert.equal((result.stdout.match(/^SOURCE /gm) ?? []).length, 6, output);
+  }
+});
+
 test("npm pack excludes test, diagnostic, and symbol payloads without removing supported SDK binaries", () => {
   const result = azureBundleFixture();
   assert.equal(result.status, 0, result.output);
