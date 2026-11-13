@@ -95,8 +95,11 @@ MXC command deadline. For positive values, MXC allows another 30 seconds for
 transport/output drain. Expiry returns `exec_client_timeout` with unknown remote
 outcome, not a synthetic exit or partial success.
 
-.NET and Node use this native deadline rather than a local kill at the runtime
-limit. Service exit codes are preserved, including 124 with .NET
+.NET and Node pass `process.timeout` unchanged to the service but do not start a
+separate SDK timeout timer for W365. Such a timer would disconnect at the runtime
+limit, before the native backend's output-drain allowance finishes. The timeout
+is therefore enforced by the service, not ignored. Service exit codes are
+preserved, including 124 with .NET
 `TimedOut == false` or Node `timedOut: false`: code 124 alone cannot distinguish
 a timeout from a program's own result.
 
