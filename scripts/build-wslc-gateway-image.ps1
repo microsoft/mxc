@@ -39,8 +39,14 @@ $srcDir = Join-Path $repoRoot 'src'
 $assetsDir = Join-Path $srcDir 'mxc-sdk\assets'
 $profileName = 'wslc-gateway'
 # Exact compiler for the committed images, so a new patch release of the
-# workspace channel can't change their bytes. Keep it on that channel.
+# workspace channel can't change their bytes.
 $gatewayToolchain = '1.93.1'
+$channelMatch = Select-String -Path (Join-Path $srcDir 'rust-toolchain.toml') -Pattern '^channel\s*=\s*"([^"]+)"'
+if (-not $channelMatch) { throw 'No channel in src/rust-toolchain.toml.' }
+$channel = $channelMatch.Matches[0].Groups[1].Value
+if ($gatewayToolchain -notlike "$channel.*") {
+    throw "`$gatewayToolchain '$gatewayToolchain' isn't on the workspace channel '$channel'. Update it in $PSCommandPath and regenerate the images."
+}
 $targets = [ordered]@{
     'x86_64'  = @{ Triple = 'x86_64-unknown-linux-musl'; ImageArch = 'amd64' }
     'aarch64' = @{ Triple = 'aarch64-unknown-linux-musl'; ImageArch = 'arm64' }

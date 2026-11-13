@@ -154,7 +154,12 @@ fn parse_head(head: &[u8]) -> Option<Request> {
     let mut lines = head
         .split(|&b| b == b'\n')
         .map(|l| l.strip_suffix(b"\r").unwrap_or(l));
-    let mut parts = std::str::from_utf8(lines.next()?).ok()?.split(' ');
+    let request_line = lines.next()?;
+    let headers: Vec<&[u8]> = lines.filter(|l| !l.is_empty()).collect();
+    if request_line.iter().any(|&b| is_ctl(b)) || !headers.iter().all(|h| valid_header(h)) {
+        return None;
+    }
+    let mut parts = std::str::from_utf8(request_line).ok()?.split(' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
 
     if method.eq_ignore_ascii_case("CONNECT") {
@@ -187,7 +192,7 @@ fn parse_head(head: &[u8]) -> Option<Request> {
     // One request per connection, so a reused connection can't reach a host
     // that wasn't checked.
     let mut out = format!("{method} {path} {version}\r\nHost: {host_header}\r\n").into_bytes();
-    for line in lines.filter(|l| !l.is_empty()) {
+    for line in headers {
         let name = line
             .split(|&b| b == b':')
             .next()
@@ -210,6 +215,18 @@ fn parse_head(head: &[u8]) -> Option<Request> {
         port,
         head: out,
     })
+}
+
+fn is_ctl(b: u8) -> bool {
+    b < 0x20 || b == 0x7F
+}
+
+/// Rejects folded lines, embedded CRs and other bytes that a lenient upstream
+/// could read as extra header lines.
+fn valid_header(line: &[u8]) -> bool {
+    !matches!(line.first(), Some(b' ' | b'\t'))
+        && line.contains(&b':')
+        && !line.iter().any(|&b| b != b'\t' && is_ctl(b))
 }
 
 /// IPv6 literals and userinfo are rejected. A trailing root dot is dropped.
@@ -449,7 +466,7 @@ mod tests {
     fn http_requests_are_rewritten_for_one_request_per_connection() {
         let r = parse_head(
             b"GET http://10.1.2.3:8080/a?b HTTP/1.1\r\nHost: 10.1.2.3\r\nProxy-Authorization: x\r\n\
-              Connection: keep-alive\r\nKeep-Alive: 5\r\nX-Label: caf\xE9\r\nAccept: */*\r\n\r\n",
+              Connection: keep-alive\r\nKeep-Alive: 5\r\nX-Label: caf\xE9\tx\r\nAccept: */*\r\n\r\n",
         )
         .unwrap();
         assert_eq!(
@@ -458,7 +475,7 @@ mod tests {
         );
         assert_eq!(
             r.head,
-            b"GET /a?b HTTP/1.1\r\nHost: 10.1.2.3:8080\r\nX-Label: caf\xE9\r\nAccept: */*\r\n\
+            b"GET /a?b HTTP/1.1\r\nHost: 10.1.2.3:8080\r\nX-Label: caf\xE9\tx\r\nAccept: */*\r\n\
               Connection: close\r\n\r\n"
         );
         // A bare LF ends the line, so it can't smuggle a Host header upstream.
@@ -501,5 +518,22 @@ mod tests {
             parse_head(b"GET http://caf\xE9.com/ HTTP/1.1\r\n\r\n"),
             None
         );
+    }
+
+    #[test]
+    fn requests_with_folded_lines_or_control_bytes_are_rejected() {
+        for head in [
+            &b"GET http://a.example/ HTTP/1.1\r\nHost: evil\r\n  folded\r\n\r\n"[..],
+            b"GET http://a.example/ HTTP/1.1\r\nX: y\r\n\tfolded\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nX: y\rConnection: keep-alive\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nX: \x00\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nX: \x7F\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\r\nno-colon\r\n\r\n",
+            b"GET http://a.example/x\rHost: evil HTTP/1.1\r\n\r\n",
+            b"GET http://a.example/ HTTP/1.1\rHost: evil\r\n\r\n",
+            b"CONNECT a.example:443 HTTP/1.1\r\nX: y\rZ: w\r\n\r\n",
+        ] {
+            assert_eq!(parse_head(head), None, "{}", head.escape_ascii());
+        }
     }
 }

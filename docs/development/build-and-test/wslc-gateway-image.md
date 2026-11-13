@@ -51,7 +51,7 @@ stable, the script:
   paths differ.
 
 - **Pins the exact compiler.** A new patch release of the workspace channel
-  would change the binary.
+  would change the binary. The script fails if the pin isn't on the channel.
 
 - **Uses the x64 host toolchain, even on ARM64.** Cargo hashes the host into
   build script units and so into dependent crates' symbols. ARM64 Windows runs
