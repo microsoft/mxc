@@ -178,7 +178,7 @@ impl Client {
         let pool = config.pool_id.to_ascii_lowercase();
         let request_id = uuid::Uuid::new_v4().to_string();
         let (agent, base) = self.agent(CHECKOUT_TIMEOUT)?;
-        let url = format!("{base}/api/pools/{pool}/sessions?api-version=2.0");
+        let url = format!("{base}/api/pools/{pool}/sessions?api-version=3.0");
         let mut request = agent
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))

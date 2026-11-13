@@ -216,7 +216,7 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       assert.equal(requests.length, 6, 'checkout must not replay or release automatically');
       assert.equal(replies.length, 0);
       assert.equal(requests[0].method, 'POST');
-      assert.equal(requests[0].url, `/api/pools/${pool}/sessions?api-version=2.0`);
+      assert.equal(requests[0].url, `/api/pools/${pool}/sessions?api-version=3.0`);
       assert.equal(requests[0].userType, undefined);
       assert.equal(requests[5].method, 'DELETE');
       assert.equal(requests[5].url, `/api/sessions/${session}?api-version=2.0`);

@@ -91,7 +91,7 @@ public class MxcLifecycleW365Tests
         Dev.MxcLifecycle.DeprovisionContainerJson(Request("deprovision"), options);
         Assert.Equal(6, fixture.Requests.Count);
         var requests = fixture.Requests.ToArray();
-        Assert.StartsWith($"POST /api/pools/{Pool}/sessions?api-version=2.0 ", requests[0]);
+        Assert.StartsWith($"POST /api/pools/{Pool}/sessions?api-version=3.0 ", requests[0]);
         Assert.DoesNotContain("user-type:", requests[0], StringComparison.OrdinalIgnoreCase);
         Assert.StartsWith($"DELETE /api/sessions/{Session}?api-version=2.0 ", requests[^1]);
         Assert.Contains("Bearer renewed-fixture-token", requests[^1]);

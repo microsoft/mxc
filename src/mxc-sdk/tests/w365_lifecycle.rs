@@ -849,7 +849,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         );
     }
     let first = fixture.request(first_checkout).to_ascii_lowercase();
-    assert!(first.starts_with(&format!("post /api/pools/{POOL}/sessions?api-version=2.0 ")));
+    assert!(first.starts_with(&format!("post /api/pools/{POOL}/sessions?api-version=3.0 ")));
     assert!(!first.contains("user-type:"));
     assert!(!first.contains("user-object-id:"));
     assert!(first.contains("x-ms-client-request-id:"));
@@ -867,7 +867,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     assert_eq!(
         sent.split_once("\r\n\r\n").unwrap().1,
         "",
-        "API 2.0 checkout is bodyless"
+        "API 3.0 checkout is bodyless"
     );
 
     for (kind, oid) in [(true, false), (false, true)] {
@@ -1170,6 +1170,9 @@ fn lifecycle_fresh_executor_fixture() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = value["result"]["sandboxId"].as_str().unwrap();
     assert_eq!(id, format!("w365:{POOL}:{A}"));
+    assert!(fixture
+        .request(0)
+        .starts_with(&format!("POST /api/pools/{POOL}/sessions?api-version=3.0 ")));
     std::env::remove_var("W365A_DP_SUFFIX");
     std::env::remove_var("W365A_DP_TOKEN");
     assert!(!run(request("start", A), true).status.success());
@@ -1190,7 +1193,7 @@ fn lifecycle_fresh_executor_fixture() {
     assert_eq!(fixture.count(), 3);
     assert!(fixture
         .request(2)
-        .starts_with(&format!("DELETE /api/sessions/{A}?")));
+        .starts_with(&format!("DELETE /api/sessions/{A}?api-version=2.0 ")));
     fixture.reply(
         200,
         &json!({"sessionId":A,"computerId":B,"status":"Succeeded"}).to_string(),

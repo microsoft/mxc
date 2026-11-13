@@ -169,7 +169,7 @@ infer remote termination from disconnect or automatically replay a command.
 ## Service contract and identity
 
 Checkout sends **one** bodyless POST to
-`/api/pools/{poolId}/sessions?api-version=2.0`, forwarding only supplied
+`/api/pools/{poolId}/sessions?api-version=3.0`, forwarding only supplied
 user-type and user-object-id headers. Release sends DELETE to
 `/api/sessions/{sessionId}?api-version=2.0`, with `x-ms-sessionId`.
 Checkout, readiness and release requests have independent
@@ -289,7 +289,7 @@ The CLI commands below use Windows `wxc-exec`. On Linux/macOS, use the
 Dev SDK lifecycle flow above instead.
 
 **Live validation requires explicit authorization.** Do not use another
-caller's active checkout or token. Obtain authorization for a compatible API 2.0
+caller's active checkout or token. Obtain authorization for a compatible API 3.0
 pool and user identity and confirm the release contract before allocating.
 Use a normal executor, not a `test-support` build. Supply the required
 control-plane and data-plane environment variables through the caller's approved credential mechanism;
