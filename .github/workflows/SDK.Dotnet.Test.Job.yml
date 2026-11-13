@@ -5,16 +5,22 @@ on:
 
 jobs:
   sdk-dotnet-tests:
-    name: SDK .NET Tests (${{ matrix.os_label }})
+    name: SDK .NET Tests (${{ matrix.name_label }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os_label: windows
+            name_label: windows
             runner: windows-latest
           - os_label: linux
-            runner: ubuntu-latest
+            name_label: linux-ubuntu24.04
+            runner: ubuntu-24.04
+          - os_label: linux
+            name_label: linux-ubuntu26.04
+            runner: ubuntu-26.04
           - os_label: macos
+            name_label: macos
             runner: macos-26
     runs-on: ${{ matrix.runner }}
     defaults:

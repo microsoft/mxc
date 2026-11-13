@@ -12,8 +12,12 @@ permissions:
 
 jobs:
   lxc-e2e:
-    name: LXC-Exec Container and Network Policy
-    runs-on: ubuntu-latest
+    name: LXC-Exec Container and Network Policy (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
 
     steps:
@@ -29,6 +33,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src
+          key: ${{ matrix.runner }}
 
       - name: Install LXC and firewall tooling
         run: |
@@ -167,7 +172,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lxc-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          name: lxc-e2e-logs-${{ matrix.runner }}-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 7
           path: |
             logs/

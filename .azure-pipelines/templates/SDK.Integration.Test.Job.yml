@@ -104,6 +104,28 @@ jobs:
 
       - ${{ if eq(target.os, 'linux') }}:
         - script: |
+            set -euo pipefail
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+          displayName: Install W365 native TLS build dependencies
+
+      - template: Rust.Toolchain.Public.yml@self
+        parameters:
+          ${{ if eq(target.os, 'windows') }}:
+            targetTriple: x86_64-pc-windows-msvc
+          ${{ if eq(target.os, 'linux') }}:
+            targetTriple: x86_64-unknown-linux-gnu
+          ${{ if eq(target.os, 'macos') }}:
+            targetTriple: aarch64-apple-darwin
+
+      - template: Cargo.Setup.Public.yml@self
+
+      - pwsh: ./scripts/ci/run-w365-node-fixture.ps1
+        workingDirectory: $(Build.SourcesDirectory)
+        displayName: Test W365 Dev JSON with an isolated native TLS fixture
+
+      - ${{ if eq(target.os, 'linux') }}:
+        - script: |
             sudo apt-get update -qq
             sudo apt-get install -y -qq lxc busybox-static dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns

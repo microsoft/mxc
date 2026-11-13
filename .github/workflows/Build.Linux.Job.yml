@@ -5,19 +5,31 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.arch }}
+    name: ${{ matrix.arch }} (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             features: hyperlight
+            upload_artifacts: true
+          - arch: x64
+            runner: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+            features: hyperlight
+            upload_artifacts: false
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ''
+            upload_artifacts: true
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ''
+            upload_artifacts: false
     runs-on: ${{ matrix.runner }}
     # A wedged PTY child would otherwise hold the runner for the 6-hour cap.
     timeout-minutes: 45
@@ -50,8 +62,11 @@ jobs:
           workspaces: |
             src -> target
             src/tools/lxc -> target
-          key: ${{ matrix.target }}-v2
+          key: ${{ matrix.runner }}-${{ matrix.target }}-v2
           cache-on-failure: false
+
+      - name: Install Linux TLS build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - name: Install ARM64 cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -172,6 +187,17 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
+      - name: Test W365 checkout and release with trusted TLS fixtures
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          names="$(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --list)"
+          for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture; do
+            grep -Fxq "${name}: test" <<< "$names"
+          done
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --include-ignored
+
       - name: Test native module lifetime
         working-directory: src
         run: |
@@ -288,6 +314,7 @@ jobs:
         run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
       - name: Upload binaries
+        if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lxc-binaries-${{ matrix.target }}

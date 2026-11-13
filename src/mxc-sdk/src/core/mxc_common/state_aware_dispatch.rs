@@ -260,6 +260,7 @@ pub(crate) fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, Mx
         "microvm" => Ok(ContainmentBackend::MicroVm),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         "wslc" => Ok(ContainmentBackend::Wslc),
+        "w365" => Ok(ContainmentBackend::W365Agents),
         // Future state-aware backends extend this list.
         other => Err(MxcError::unsupported_containment(format!(
             "no state-aware backend registered for prefix {:?}",
