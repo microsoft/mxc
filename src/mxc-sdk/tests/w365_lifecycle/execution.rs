@@ -231,6 +231,10 @@ fn drain(mut reader: Box<dyn Read + Send>) -> std::thread::JoinHandle<Vec<u8>> {
 
 #[test]
 fn native_execution_streams_fixture() {
+    if let Ok(mode) = std::env::var("MXC_W365_INPUT_CHILD") {
+        repeated_attached_child(&mode);
+        return;
+    }
     let _lock = ENV.lock().unwrap();
     let env = Environment::new();
     let fixture = ExecFixture::new(&env);
@@ -312,6 +316,325 @@ fn native_execution_streams_fixture() {
         )));
         assert!(!header.contains("WebSocket"));
         assert!(!header.contains("websocket"));
+    }
+    repeated_attached_input(&fixture, "pipe");
+    #[cfg(unix)]
+    repeated_attached_input(&fixture, "shared");
+    #[cfg(windows)]
+    for mode in ["console", "console-eof"] {
+        repeated_attached_input(&fixture, mode);
+    }
+}
+
+fn attached_input_text() -> String {
+    format!("next-command {}\u{1f980}\u{e9}", "x".repeat(2034))
+}
+
+fn repeated_attached_input(fixture: &ExecFixture, mode: &str) {
+    let ready = tempfile::NamedTempFile::new().unwrap();
+    let (release_first, first) = mpsc::channel();
+    let (release_second, second) = mpsc::channel();
+    let (received_input, input_result) = mpsc::channel();
+    let expect_eof = mode == "console-eof";
+    fixture.script(move |stream| {
+        started(stream);
+        exit(stream, 0);
+        first.recv_timeout(Duration::from_secs(15)).unwrap();
+    });
+    fixture.script(move |stream| {
+        started(stream);
+        let mut input = Vec::new();
+        while expect_eof || !input.ends_with(b"\n") {
+            let (kind, bytes) = match read_frame(stream) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    received_input
+                        .send(Err(std::io::Error::other(format!(
+                            "{error}; received bytes: {input:?}"
+                        ))))
+                        .unwrap();
+                    return;
+                }
+            };
+            if expect_eof && kind == 3 {
+                assert!(bytes.is_empty());
+                break;
+            }
+            assert_eq!(kind, 2);
+            input.extend(bytes);
+        }
+        received_input.send(Ok(input)).unwrap();
+        exit(stream, 7);
+        second.recv_timeout(Duration::from_secs(15)).unwrap();
+    });
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution::native_execution_streams_fixture",
+            "--nocapture",
+        ])
+        .env("MXC_W365_INPUT_CHILD", mode)
+        .env("MXC_W365_INPUT_READY", ready.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::fs::read(ready.path()).unwrap() != b"ready" {
+        if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= deadline {
+            if child.try_wait().unwrap().is_none() {
+                child.kill().unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            release_first.send(()).unwrap();
+            let _ = release_second.send(());
+            panic!("first attached exec did not return with idle stdin: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    release_first.send(()).unwrap();
+    // Keep the host writer open across both calls; EOF must not rescue a stale reader.
+    let mut input = child.stdin.take().unwrap();
+    if !mode.starts_with("console") {
+        input
+            .write_all(format!("{}\n", attached_input_text()).as_bytes())
+            .unwrap();
+    }
+    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let _ = release_second.send(());
+    let received = input_result.recv_timeout(Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "same-process {mode} attached execution retained stdin or stole later input: {output:?}; received: {received:?}"
+    );
+    assert_eq!(
+        String::from_utf8(received.unwrap().unwrap())
+            .unwrap()
+            .trim_end(),
+        attached_input_text()
+    );
+    let count = fixture.fixture.count();
+    assert_eq!(
+        fixture.fixture.request(count - 1).split("\r\n").next(),
+        fixture.fixture.request(count - 2).split("\r\n").next(),
+        "both commands must use the same reservation"
+    );
+}
+
+fn repeated_attached_child(mode: &str) {
+    #[cfg(windows)]
+    if mode.starts_with("console") {
+        use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+        // SAFETY: preserve the subprocess diagnostic pipe before allocating its console.
+        let diagnostics = std::fs::File::from(
+            unsafe { BorrowedHandle::borrow_raw(std::io::stderr().as_raw_handle()) }
+                .try_clone_to_owned()
+                .unwrap(),
+        );
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = writeln!(&diagnostics, "{info}");
+        }));
+    }
+    #[cfg(windows)]
+    let _console = mode.starts_with("console").then(TestConsole::new);
+    #[cfg(unix)]
+    let _alias = (mode == "shared").then(SharedHostStdio::new);
+    #[cfg(unix)]
+    // SAFETY: stdin remains open throughout this isolated helper's two executions.
+    let original_flags = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL) };
+    #[cfg(unix)]
+    assert!(original_flags >= 0);
+    let execute = || {
+        if mode.starts_with("console") {
+            let outcome =
+                mxc_sdk::mxc_engine::exec_state_aware_attached(&exec_request().to_string(), true)
+                    .unwrap();
+            let mxc_sdk::mxc_common::state_aware_backend::ExecOutcome::Exited(code) = outcome
+            else {
+                panic!("confirmed Exit expected")
+            };
+            code
+        } else {
+            let MxcRequest::StateAware(mut parsed) = load_mxc_request_from_json(
+                &exec_request().to_string(),
+                &mut Logger::new(Mode::Buffer),
+            )
+            .unwrap() else {
+                panic!("exec request")
+            };
+            parsed.set_experimental_enabled(true);
+            let DispatchOutcome::ExecCompleted { exit_code } =
+                mxc_sdk::mxc_engine::run_state_aware(parsed, false).unwrap()
+            else {
+                panic!("confirmed Exit expected")
+            };
+            exit_code
+        }
+    };
+    assert_eq!(execute(), 0);
+    #[cfg(unix)]
+    assert_eq!(
+        unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL) },
+        original_flags,
+        "attached exec must restore host stdin flags before returning"
+    );
+    std::fs::write(std::env::var_os("MXC_W365_INPUT_READY").unwrap(), b"ready").unwrap();
+    #[cfg(windows)]
+    if mode.starts_with("console") {
+        let end = if mode == "console-eof" {
+            "\r\u{1a}"
+        } else {
+            "\r"
+        };
+        TestConsole::input(&format!("{}{end}", attached_input_text()));
+    }
+    assert_eq!(execute(), 7);
+    #[cfg(unix)]
+    assert_eq!(
+        unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL) },
+        original_flags,
+        "the second execution must also restore host stdin flags"
+    );
+}
+
+#[cfg(unix)]
+struct SharedHostStdio(std::os::fd::OwnedFd);
+
+#[cfg(unix)]
+impl SharedHostStdio {
+    fn new() -> Self {
+        use std::os::fd::BorrowedFd;
+        // SAFETY: stdout is live and retained for restoration after both calls.
+        let original = unsafe { BorrowedFd::borrow_raw(libc::STDOUT_FILENO) }
+            .try_clone_to_owned()
+            .unwrap();
+        // No guest output is sent: exercise shared descriptor flags without writing to a read end.
+        // SAFETY: only the isolated helper replaces its standard handle.
+        assert_eq!(
+            unsafe { libc::dup2(libc::STDIN_FILENO, libc::STDOUT_FILENO) },
+            libc::STDOUT_FILENO
+        );
+        Self(original)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SharedHostStdio {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: both relays have stopped, and the original stdout is still owned.
+        assert_eq!(
+            unsafe { libc::dup2(self.0.as_raw_fd(), libc::STDOUT_FILENO) },
+            libc::STDOUT_FILENO
+        );
+    }
+}
+
+#[cfg(windows)]
+struct TestConsole {
+    original: [windows::Win32::Foundation::HANDLE; 3],
+    _files: [std::fs::File; 2],
+}
+
+#[cfg(windows)]
+impl TestConsole {
+    fn new() -> Self {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Console::*;
+        // SAFETY: only this isolated subprocess changes its console and standard handles.
+        unsafe {
+            let original = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                .map(|kind| GetStdHandle(kind).unwrap());
+            let _ = FreeConsole();
+            AllocConsole().unwrap();
+            let input = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("CONIN$")
+                .unwrap();
+            let output = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("CONOUT$")
+                .unwrap();
+            SetStdHandle(STD_INPUT_HANDLE, HANDLE(input.as_raw_handle())).unwrap();
+            SetStdHandle(STD_OUTPUT_HANDLE, HANDLE(output.as_raw_handle())).unwrap();
+            SetStdHandle(STD_ERROR_HANDLE, HANDLE(output.as_raw_handle())).unwrap();
+            Self {
+                original,
+                _files: [input, output],
+            }
+        }
+    }
+
+    fn input(text: &str) {
+        use windows::Win32::System::Console::*;
+        let records: Vec<_> = text
+            .encode_utf16()
+            .map(|character| INPUT_RECORD {
+                EventType: KEY_EVENT as u16,
+                Event: INPUT_RECORD_0 {
+                    KeyEvent: KEY_EVENT_RECORD {
+                        bKeyDown: true.into(),
+                        wRepeatCount: 1,
+                        wVirtualKeyCode: match character {
+                            13 | 32 => character,
+                            26 => 0x5a,
+                            45 => 0xbd,
+                            48..=57 | 65..=90 | 97..=122 => {
+                                (character as u8).to_ascii_uppercase() as u16
+                            }
+                            _ => 0,
+                        },
+                        wVirtualScanCode: if character == 13 { 0x1c } else { 0 },
+                        uChar: KEY_EVENT_RECORD_0 {
+                            UnicodeChar: character,
+                        },
+                        dwControlKeyState: if character == 26 {
+                            LEFT_CTRL_PRESSED
+                        } else {
+                            0
+                        },
+                    },
+                },
+            })
+            .collect();
+        let mut written = 0;
+        // SAFETY: the allocated console owns the input handle; records remain live.
+        unsafe {
+            WriteConsoleInputW(
+                GetStdHandle(STD_INPUT_HANDLE).unwrap(),
+                &records,
+                &mut written,
+            )
+            .unwrap();
+        }
+        assert_eq!(written as usize, records.len());
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TestConsole {
+    fn drop(&mut self) {
+        use windows::Win32::System::Console::*;
+        // SAFETY: restore the subprocess's still-owned inherited handles for its test harness.
+        unsafe {
+            FreeConsole().unwrap();
+            for (kind, handle) in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                .into_iter()
+                .zip(self.original)
+            {
+                SetStdHandle(kind, handle).unwrap();
+            }
+        }
     }
 }
 
@@ -802,77 +1125,10 @@ fn execution_fresh_executor_fixture() {
     );
     assert_eq!(fixture.fixture.count(), 2);
     for (example_mode, code) in [(false, 0), (false, 7), (true, 0), (true, 7)] {
-        let (release, released) = mpsc::channel();
-        fixture.script(move |stream| {
-            started(stream);
-            let (kind, input) = read_frame(stream).unwrap();
-            assert_eq!(kind, 2);
-            assert!(!input.is_empty());
-            // Exit while most host input is still pending, but keep TLS open
-            // until the executor finishes so a reset cannot mask pipe teardown.
-            exit(stream, code);
-            released.recv_timeout(Duration::from_secs(20)).unwrap();
-        });
-        let mut child = command(example_mode)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        let writer = std::thread::spawn(move || input.write_all(&vec![0x42; 8 * 1024 * 1024]));
-        let began = Instant::now();
-        while child.try_wait().unwrap().is_none() {
-            if began.elapsed() > Duration::from_secs(15) {
-                child.kill().unwrap();
-                release.send(()).unwrap();
-                writer.join().unwrap().unwrap_err();
-                panic!("execution must not wait for remaining stdin after Exit");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let output = child.wait_with_output().unwrap();
-        release.send(()).unwrap();
-        writer.join().unwrap().unwrap_err();
-        assert_eq!(
-            output.status.code(),
-            Some(code),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stdout.is_empty());
-        let stderr = output
-            .stderr
-            .strip_prefix(b"telemetry: Required diagnostics are not collected by this build\n")
-            .unwrap_or(&output.stderr);
-        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(stderr));
+        pending_host_input(&fixture, command(example_mode), code);
     }
     for example_mode in [false, true] {
-        fixture.script(|stream| {
-            started(stream);
-            assert!(eof(stream).is_empty());
-            exit(stream, 0);
-        });
-        let host_input = tempfile::NamedTempFile::new().unwrap();
-        let unreadable = std::fs::OpenOptions::new()
-            .write(true)
-            .open(host_input.path())
-            .unwrap();
-        let output = command(example_mode)
-            .stdin(std::process::Stdio::from(unreadable))
-            .output()
-            .unwrap();
-        assert!(
-            !output.status.success(),
-            "host stdin read errors must survive Exit"
-        );
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let envelope: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
-        assert!(envelope["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("read host stdin"));
+        unreadable_host_input(&fixture, command(example_mode));
     }
     let (sent, prompt_sent) = mpsc::channel();
     let (received, guest_input) = mpsc::channel();
@@ -1053,11 +1309,16 @@ fn execution_host_output_fixture() {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(exec_request().to_string().as_bytes())
         .unwrap();
-    unread_host_output(&fixture, || {
+    let command = || {
         let mut command = std::process::Command::new(&example);
         command.args(["--experimental", "live"]).arg(file.path());
         command
-    });
+    };
+    for code in [0, 7] {
+        pending_host_input(&fixture, command(), code);
+    }
+    unreadable_host_input(&fixture, command());
+    unread_host_output(&fixture, command);
     let (release, released) = mpsc::channel();
     fixture.script(move |stream| {
         started(stream);
@@ -1097,7 +1358,81 @@ fn execution_host_output_fixture() {
     reader.read_to_end(&mut prefix).unwrap();
     assert!(!prefix.is_empty());
     assert!(prefix.len() < 8 * 65536);
-    assert_eq!(fixture.fixture.count(), 7);
+    assert_eq!(fixture.fixture.count(), 10);
+}
+
+fn pending_host_input(fixture: &ExecFixture, mut command: std::process::Command, code: i32) {
+    let (release, released) = mpsc::channel();
+    fixture.script(move |stream| {
+        started(stream);
+        let (kind, input) = read_frame(stream).unwrap();
+        assert_eq!(kind, 2);
+        assert!(!input.is_empty());
+        // Hold TLS open after Exit so a reset cannot mask cancellation of pending host input.
+        exit(stream, code);
+        released.recv_timeout(Duration::from_secs(20)).unwrap();
+    });
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || input.write_all(&vec![0x42; 8 * 1024 * 1024]));
+    let began = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if began.elapsed() > Duration::from_secs(15) {
+            child.kill().unwrap();
+            release.send(()).unwrap();
+            writer.join().unwrap().unwrap_err();
+            panic!("execution must not wait for remaining stdin after Exit");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    release.send(()).unwrap();
+    writer.join().unwrap().unwrap_err();
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = output
+        .stderr
+        .strip_prefix(b"telemetry: Required diagnostics are not collected by this build\n")
+        .unwrap_or(&output.stderr);
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(stderr));
+}
+
+fn unreadable_host_input(fixture: &ExecFixture, mut command: std::process::Command) {
+    fixture.script(|stream| {
+        started(stream);
+        assert!(eof(stream).is_empty());
+        exit(stream, 0);
+    });
+    let host_input = tempfile::NamedTempFile::new().unwrap();
+    let unreadable = std::fs::OpenOptions::new()
+        .write(true)
+        .open(host_input.path())
+        .unwrap();
+    let output = command
+        .stdin(std::process::Stdio::from(unreadable))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "host stdin read errors must survive Exit"
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("read host stdin"));
 }
 
 fn unread_host_output(fixture: &ExecFixture, command: impl Fn() -> std::process::Command) {

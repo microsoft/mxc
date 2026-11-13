@@ -45,6 +45,10 @@ Its engine fixtures
 run in GitHub Actions and Azure build jobs on Windows, Linux and macOS.
 Windows additionally runs checkout/release and exec through fresh executor
 processes, plus the execution example's early-exit, input-error and capture cases.
+All three platforms exercise repeated relayed commands in one host process with
+stdin held open; Windows also runs the terminal-only attached API, including
+Unicode input and Ctrl-Z EOF. The example's pending-input teardown and host-read
+errors run on all three platforms.
 All three platforms run the example with open, unread host-output pipes to
 check bounded final draining and unsuccessful completion for undelivered output.
 Linux and macOS retain SDK/native-engine coverage and build the isolated execution

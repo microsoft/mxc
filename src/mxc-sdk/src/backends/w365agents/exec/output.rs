@@ -21,6 +21,20 @@ pub(crate) struct OutputResult {
 }
 
 impl OutputRelays {
+    pub(crate) fn start_native(
+        stdout: crate::mxc_common::sandbox_process::OwnedPipe,
+        stderr: crate::mxc_common::sandbox_process::OwnedPipe,
+    ) -> io::Result<Self> {
+        let (stdout, close_stdout) = native_reader(stdout)?;
+        let (stderr, close_stderr) = native_reader(stderr)?;
+        Self::start(
+            stdout,
+            stderr,
+            move || close_stdout.close(),
+            move || close_stderr.close(),
+        )
+    }
+
     pub(crate) fn start(
         stdout: Box<dyn Read + Send>,
         stderr: Box<dyn Read + Send>,
@@ -82,6 +96,26 @@ impl OutputRelays {
             undelivered,
         }
     }
+}
+
+fn native_reader(
+    pipe: crate::mxc_common::sandbox_process::OwnedPipe,
+) -> io::Result<(
+    Box<dyn Read + Send>,
+    Box<dyn crate::mxc_common::sandbox_process::StreamCloser>,
+)> {
+    #[cfg(unix)]
+    let reader = crate::mxc_common::interruptible_reader::InterruptibleReader::new(pipe)?;
+    #[cfg(windows)]
+    let reader = {
+        use crate::mxc_common::process_util::{InterruptiblePipeReader, OwnedHandle};
+        use std::os::windows::io::IntoRawHandle;
+        InterruptiblePipeReader::new(OwnedHandle::new(windows::Win32::Foundation::HANDLE(
+            pipe.into_raw_handle(),
+        )))
+    };
+    let closer = reader.canceller();
+    Ok((Box::new(reader), Box::new(closer)))
 }
 
 struct OutputWorker {

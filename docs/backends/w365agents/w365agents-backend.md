@@ -164,10 +164,15 @@ Active process disposal cancels local pipes, transport and managed workers.
 The executor and live execution example preserve a confirmed guest exit when
 input-pipe closure interrupts pending stdin forwarding. Host stdin read errors
 and other write errors remain failures.
+Host input forwarding is cancelled and joined before completion returns, even
+when stdin remains open and idle or forwarding is blocked on guest stdin.
+Windows console forwarding owns a separate input handle, preserves UTF-8 text
+and Ctrl-Z EOF, and leaves later input available for the next execution.
+Unix standard-input flags are restored after all forwarding workers stop,
+including when standard handles share an open file description.
 After completion, output pumps remain supervised until caller-owned output
 pipes drain or close; dropping the process alone does not discard their queued
-bytes. Executor console stdin can remain blocked until input/EOF or executor
-exit. No local teardown releases the reservation or proves remote termination.
+bytes. No local teardown releases the reservation or proves remote termination.
 
 The supplied released protocol defines Cancel (`0x04`) and process-tree cleanup.
 This staged native adapter deliberately **does not expose remote kill**:
@@ -446,13 +451,18 @@ forwarded; ordinary executor diagnostics remain on stderr. Repeated execs
 retain one ID without checkout/release.
 The same fixture runs the actual execution example for early zero/nonzero exits,
 host stdin read failures, binary capture and remote errors.
+The native stream fixture also runs repeated relayed executions in one host
+process with stdin held open, checking that later input reaches the second
+command and that both retain the same reservation ID. Windows additionally
+exercises the terminal-only attached API with Unicode input and Ctrl-Z EOF.
 It also keeps host stdout/stderr pipes open without reading them and checks
 bounded failure after both Exit and remote Error, preserving the forwarded prefix.
 Windows build jobs require discovery of all nine functional fixtures.
 Linux/macOS jobs require eight fixtures, including the execution example's
 unread host-output scenario and shared stdout/stderr pipe cleanup, without the
 two Windows-only fresh-executor fixtures. They build the test-support example
-in the same isolated target directory.
+in the same isolated target directory and exercise its pending host-input
+teardown and host-read failures.
 The scheduled/nightly workflow invokes those same build jobs, so these are
 also scheduled native backend scenarios, not orphan test files.
 
