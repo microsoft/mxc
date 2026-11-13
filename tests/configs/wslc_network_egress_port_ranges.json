@@ -18,7 +18,7 @@
           "to": [{ "cidr": "8.8.8.8/32" }],
           "ports": [{ "port": 443, "protocol": "tcp" }, { "port": 853, "protocol": "tcp" }]
         },
-        { "to": [{ "cidr": "9.9.9.9/32" }] }
+        { "to": [{ "cidr": "9.9.9.9/32" }], "ports": [{ "protocol": "tcp" }] }
       ]
     },
     "ingress": { "default": "deny", "hostLoopback": "deny" }

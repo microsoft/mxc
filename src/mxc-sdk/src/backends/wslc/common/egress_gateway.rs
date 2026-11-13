@@ -839,7 +839,7 @@ fn host_error(message: String) -> ScriptResponse {
     WslcError::Host(message).into_response()
 }
 
-unsafe fn open_container(
+pub(crate) unsafe fn open_container(
     sdk: &WslcSdk,
     session: WslcSession,
     name: &CStr,

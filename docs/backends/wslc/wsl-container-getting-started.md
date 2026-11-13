@@ -547,6 +547,7 @@ MXC doesn't modify the workload image. It configures the workload container
 as follows:
 
 - It joins only the internal network.
+- `NET_RAW` is dropped, so the workload can't send raw frames to the proxy container.
 - `HTTP_PROXY`/`HTTPS_PROXY` (and the lower-case forms) point at
   `http://10.231.1.254:3128`, `NO_PROXY` is empty
 - `/etc/resolv.conf` is a read-only mount of a host temporary file naming
@@ -574,7 +575,9 @@ as follows:
   exists, a workload can send data out through DNS queries to any name, even
   when every TCP destination it reaches is filtered.
 
-- Rejected with the proxy: `allow` entries for any protocol except `tcp`, IPv6
+- Rejected with the proxy: `allow` entries for any protocol except `tcp`
+  (including entries without `ports`, which cover every protocol; use
+  `"ports": [{ "protocol": "tcp" }]` for every TCP port), IPv6
   CIDRs, targets inside `10.231.0.0/16`, `wslc.portMappings`,
   `hostLoopback: "allow"`, and `runtimeConfig.networkProxy`. `deny` entries
   for `udp` or `icmp` have no effect, because only TCP leaves through the

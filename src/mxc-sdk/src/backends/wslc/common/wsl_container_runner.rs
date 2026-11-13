@@ -16,7 +16,7 @@
 //! [`crate::wslc_common::sandbox`]. They differ only in where the SDK's I/O callbacks send
 //! their bytes — see `IoSink`.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr, CString};
 use std::fmt::Write;
 use std::io::Read;
 use std::ptr;
@@ -1275,6 +1275,8 @@ impl WSLContainerRunner {
 
         // Read by WslcCreateContainer below.
         let workload_networks = gateway.as_ref().map(|g| g.workload_networks());
+        // Raw sockets could hand frames to the gateway outside the proxy.
+        let workload_capability_drops: [PCSTR; 1] = [c"NET_RAW".as_ptr()];
         if let (Some(gateway), Some(workload_networks)) = (&gateway, &workload_networks) {
             let hr = sdk.WslcSetContainerSettingsName(
                 &mut container_settings,
@@ -1290,6 +1292,18 @@ impl WSLContainerRunner {
             );
             if hr != S_OK {
                 return Err(sdk_error("WslcSetContainerSettingsNetworks failed", hr, ""));
+            }
+            let hr = sdk.WslcSetContainerSettingsCapabilityDrops(
+                &mut container_settings,
+                workload_capability_drops.as_ptr(),
+                workload_capability_drops.len() as u32,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsCapabilityDrops failed",
+                    hr,
+                    "",
+                ));
             }
             let _ = writeln!(logger, "[WSLC] Networking: built-in proxy");
         } else {
@@ -1362,9 +1376,10 @@ impl WSLContainerRunner {
         // `io_ctx_guard`) *before* the session is terminated and the DLL
         // unloaded — so a late callback could dereference freed memory. Every
         // failure past this point therefore quiesces the container first.
-        let post_start = Self::attach_init_process(sdk, &container_guard);
-        let process_guard = match post_start {
-            Ok(guard) => guard,
+        let post_start = Self::container_id(sdk, &container_guard)
+            .and_then(|id| Ok((id, Self::attach_init_process(sdk, &container_guard)?)));
+        let (container_id, process_guard) = match post_start {
+            Ok(started) => started,
             Err(e) => {
                 Self::quiesce_started_container(
                     sdk,
@@ -1399,6 +1414,7 @@ impl WSLContainerRunner {
         Ok(StartedContainer {
             process_guard,
             container_guard,
+            container_id,
             gateway,
             session_guard,
             io_ctx_guard,
@@ -1440,6 +1456,22 @@ impl WSLContainerRunner {
         }
         // SAFETY: the SDK transfers ownership of the returned handle to the caller.
         Ok(std::fs::File::from_raw_handle(handle))
+    }
+
+    /// # Safety
+    /// `sdk` must hold valid function pointers and `container` a live handle.
+    unsafe fn container_id(
+        sdk: &'static WslcSdk,
+        container: &WslcContainerGuard,
+    ) -> Result<CString, ScriptResponse> {
+        let mut id = [0u8; WSLC_CONTAINER_ID_BUFFER_SIZE as usize];
+        let hr = sdk.WslcGetContainerID(container.as_raw(), id.as_mut_ptr().cast());
+        if hr != S_OK {
+            return Err(sdk_error("WslcGetContainerID failed", hr, ""));
+        }
+        CStr::from_bytes_until_nul(&id)
+            .map(CStr::to_owned)
+            .map_err(|_| sdk_error("WslcGetContainerID returned no terminator", hr, ""))
     }
 
     /// Take the container's init process handle. Split out so every failure
@@ -1853,12 +1885,6 @@ fn manual_reset_event() -> std::io::Result<std::os::windows::io::OwnedHandle> {
     Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event.0) })
 }
 
-/// Whether a stop or delete failed only because the service already removed
-/// an auto-remove container.
-fn auto_removed(hr: HRESULT) -> bool {
-    hr == RPC_E_DISCONNECTED || hr == WSLC_E_CONTAINER_NOT_FOUND
-}
-
 /// Signal a container's processes; `timeout_secs` is how long the SDK waits for
 /// a graceful stop.
 ///
@@ -1937,10 +1963,11 @@ impl StreamCloser for SharedStdinClosers {
 pub(crate) struct StartedContainer {
     process_guard: WslcProcessGuard,
     container_guard: WslcContainerGuard,
+    /// Looks the container up in the session after its handle disconnects.
+    container_id: CString,
     /// The built-in proxy, removed before the session ends.
     gateway: Option<egress_gateway::Gateway>,
-    /// Held for its `Drop`, which terminates and releases the WSLC session.
-    #[allow(dead_code, reason = "RAII guard: terminates the session on drop")]
+    /// Terminates and releases the WSLC session on drop.
     session_guard: WslcSessionGuard,
     /// Held for its `Drop`, which reclaims the `Arc<IoContext>` reference handed
     /// to the SDK by raw pointer.
@@ -1999,6 +2026,41 @@ impl Drop for StartedContainer {
 }
 
 impl StartedContainer {
+    /// Check a stop or delete result; `Ok(true)` means the service already
+    /// removed the auto-remove container. The service disconnects the handle
+    /// when it does, but so does a crashed service, so the session must
+    /// confirm the container is gone.
+    ///
+    /// # Safety
+    /// The caller must be in a COM apartment.
+    unsafe fn teardown_step(
+        &self,
+        call: &str,
+        hr: HRESULT,
+        err_msg: &CoTaskMemPWSTR,
+    ) -> Result<bool, String> {
+        if hr == S_OK {
+            return Ok(false);
+        }
+        let failed = format!(
+            "{call} failed: {} (HRESULT 0x{:08X})",
+            err_msg.to_string_lossy(),
+            hr as u32
+        );
+        if hr != RPC_E_DISCONNECTED && hr != WSLC_E_CONTAINER_NOT_FOUND {
+            return Err(failed);
+        }
+        match egress_gateway::open_container(
+            self.sdk,
+            self.session_guard.as_raw(),
+            &self.container_id,
+        ) {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) => Err(format!("{failed}; the container still exists")),
+            Err(e) => Err(format!("{failed}; {e}")),
+        }
+    }
+
     /// Wait for the init process to exit, enforcing the request's timeout
     /// (stopping the container when it fires). Returns `(exit_code, timed_out)`.
     pub(crate) fn wait_for_exit(
@@ -2207,17 +2269,15 @@ impl StartedContainer {
                     10,
                     err_msg.as_mut_ptr(),
                 );
-                // `destroy_on_exit` containers are auto-removed, and the service
-                // disconnects their handle once it deletes them.
-                let removed = auto_removed(hr);
-                if hr != S_OK && !removed {
-                    let msg = err_msg.to_string_lossy();
-                    failure = Some(format!(
-                        "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
-                        hr as u32
-                    ));
-                }
+                let stopped = self.teardown_step("WslcStopContainer", hr, &err_msg);
                 drop(err_msg);
+                let removed = matches!(stopped, Ok(true));
+                if removed {
+                    let _ = writeln!(logger, "[WSLC] Container already removed by the service");
+                }
+                if let Err(e) = stopped {
+                    failure = Some(e);
+                }
 
                 // Attempted even after a failed stop: the delete is forced, so
                 // it is the better chance of not leaking the container.
@@ -2228,12 +2288,8 @@ impl StartedContainer {
                         WslcDeleteContainerFlags::WSLC_DELETE_CONTAINER_FLAG_FORCE,
                         err_msg.as_mut_ptr(),
                     );
-                    if hr != S_OK && !auto_removed(hr) && failure.is_none() {
-                        let msg = err_msg.to_string_lossy();
-                        failure = Some(format!(
-                            "WslcDeleteContainer failed: {msg} (HRESULT 0x{:08X})",
-                            hr as u32
-                        ));
+                    if let Err(e) = self.teardown_step("WslcDeleteContainer", hr, &err_msg) {
+                        failure.get_or_insert(e);
                     }
                     drop(err_msg);
                 }
@@ -2539,11 +2595,19 @@ mod tests {
 
     #[test]
     fn only_create_and_run_accepts_egress_rules() {
+        use crate::mxc_common::models::{NetworkPort, NetworkProtocol, NetworkRule};
         let request = ExecutionRequest {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             policy: crate::mxc_common::models::ContainerPolicy {
                 network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
-                    allow: vec![Default::default()],
+                    allow: vec![NetworkRule {
+                        to: Vec::new(),
+                        ports: vec![NetworkPort {
+                            protocol: NetworkProtocol::Tcp,
+                            port: None,
+                            end_port: None,
+                        }],
+                    }],
                     ..Default::default()
                 }),
                 ..Default::default()

@@ -170,6 +170,13 @@ pub(crate) fn create_and_run_network_mode(
 fn proxied_egress(egress: &NetworkEgressPolicy) -> Result<ProxiedEgress, MxcError> {
     let mut allow = Vec::with_capacity(egress.allow.len());
     for rule in &egress.allow {
+        if rule.ports.is_empty() {
+            return Err(MxcError::policy_validation(
+                "WSLc: network.egress.allow supports only protocol 'tcp', and an entry without \
+                 ports allows every protocol; the built-in proxy carries TCP only. Use \"ports\": \
+                 [{\"protocol\": \"tcp\"}] to allow every TCP port",
+            ));
+        }
         if let Some(port) = rule
             .ports
             .iter()
@@ -1202,7 +1209,11 @@ mod tests {
                 "(got 'any')",
             ),
             (
-                r#"{"egress":{"allow":[{"to":[{"cidr":"2001:db8::/32"}]}]}}"#,
+                r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}]}]}}"#,
+                "an entry without ports allows every protocol",
+            ),
+            (
+                r#"{"egress":{"allow":[{"to":[{"cidr":"2001:db8::/32"}],"ports":[{"protocol":"tcp"}]}]}}"#,
                 "is IPv6",
             ),
             (
@@ -1210,7 +1221,7 @@ mod tests {
                 "is IPv6",
             ),
             (
-                r#"{"egress":{"allow":[{"to":[{"cidr":"10.231.1.0/24"}]}]}}"#,
+                r#"{"egress":{"allow":[{"to":[{"cidr":"10.231.1.0/24"}],"ports":[{"protocol":"tcp"}]}]}}"#,
                 "reserves for its own networks",
             ),
         ] {

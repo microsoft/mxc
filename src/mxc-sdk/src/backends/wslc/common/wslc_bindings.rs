@@ -198,8 +198,10 @@ impl WslcSdk {
             WslcCreateSessionNetwork,
             WslcDeleteSessionNetwork,
             WslcSetContainerSettingsNetworks,
+            WslcSetContainerSettingsCapabilityDrops,
             WslcSetContainerSettingsName,
             WslcOpenContainer,
+            WslcGetContainerID,
             WslcGetContainerState,
         );
         if missing.is_empty() {

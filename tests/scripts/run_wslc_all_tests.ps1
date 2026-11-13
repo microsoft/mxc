@@ -558,12 +558,16 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_real_client.json" -Force
         TLS_BYPASS = "ERROR .*"; RESOLVED = "1\.[01]\.[01]\.1"; UDP_DIRECT = "BLOCKED"
         NODE_PROXY = "1"
     })))
+# A raw frame handed to the gateway's MAC can't skip the proxy.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_raw_frame.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{ RAW_SOCKET = "DENIED"; RAW_REPLY = "NONE" })))
 
 # Rejected before any container is created.
 $egressRejections = [ordered]@{
     "allow_udp"           = "network.egress.allow supports only protocol 'tcp' (got 'udp')"
     "allow_icmp"          = "network.egress.allow supports only protocol 'tcp' (got 'icmp')"
     "allow_any_protocol"  = "network.egress.allow supports only protocol 'tcp' (got 'any')"
+    "allow_no_ports"      = "an entry without ports allows every protocol"
     "allow_ipv6"          = "network.egress CIDR 2606:4700::/32 is IPv6"
     "deny_ipv6"           = "network.egress CIDR 2001:db8::/32 is IPv6"
     "reserved_subnet"     = "which the built-in proxy reserves for its own networks"
