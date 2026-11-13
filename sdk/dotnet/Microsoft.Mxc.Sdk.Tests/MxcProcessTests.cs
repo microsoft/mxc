@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -27,8 +29,6 @@ public class MxcProcessTests
     public async Task DevJson_CapturesOutputAndStreamsInput(string version, bool preparePolicy)
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        Assert.SkipUnless(!preparePolicy || OperatingSystem.IsWindows(),
-            "policy observations are currently produced only by Windows ProcessContainer");
         if (preparePolicy)
         {
             await RunPreparedFilesystemScenarioAsync(version);
@@ -65,11 +65,36 @@ public class MxcProcessTests
 
     private static async Task RunPreparedFilesystemScenarioAsync(string version)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("policy observations are currently produced only by Windows ProcessContainer");
+            return;
+        }
         var fixture = Path.Combine(AppContext.BaseDirectory, $"policy-preparation-{Guid.NewGuid():N}");
-        var restricted = Path.Combine(fixture, "restricted");
-        var permitted = Path.Combine(fixture, "permitted");
+        var workspace = new DirectoryInfo(Path.Combine(fixture, "workspace"));
+        var restricted = Path.Combine(workspace.FullName, "restricted");
+        var permitted = Path.Combine(workspace.FullName, "permitted");
         try
         {
+            var parent = Directory.CreateDirectory(fixture);
+            var inheritedAccess = parent.GetAccessControl();
+            inheritedAccess.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WinBuiltinAnyPackageSid, null),
+                FileSystemRights.Modify,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            parent.SetAccessControl(inheritedAccess);
+
+            // Inherited AppContainer grants must not bypass the policy under test.
+            using var caller = WindowsIdentity.GetCurrent();
+            var owner = caller.User ?? throw new InvalidOperationException("The caller has no Windows user SID.");
+            var privateAccess = new DirectorySecurity();
+            privateAccess.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            privateAccess.AddAccessRule(new FileSystemAccessRule(
+                owner, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            workspace.Create(privateAccess);
             Directory.CreateDirectory(restricted);
             Directory.CreateDirectory(permitted);
             var seed = Path.Combine(restricted, "seed.txt");

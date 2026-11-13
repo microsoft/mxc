@@ -346,6 +346,9 @@ offline; this check invokes no backend or workload.
 The dispatcher enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET
 `MxcProcessTests` and `DevEntryPointTests` and runs the Node public `run`,
 `spawn`, and tool-discovery filesystem integration cases.
+The .NET prepared-filesystem scenario creates an owner-only workspace beneath
+a parent with inheritable AppContainer write access, so ambient grants cannot
+bypass its read-only assertions during strict `run` and `spawn`.
 The managed preparation tests verify owned candidate requests without
 launching and lossless storage of native results. They launch no workload, so
 they do not depend on this host opt-in and also run on every OS in the .NET SDK
