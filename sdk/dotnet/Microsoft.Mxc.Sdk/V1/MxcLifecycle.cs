@@ -183,38 +183,25 @@ public static class MxcLifecycle
 
     /// <summary>
     /// Run a command in a started container and return live stdio streams.
-    /// IsolationSession and WSLC support this streaming form. A WSLC command
-    /// reads end-of-file on stdin; use <see cref="SpawnInContainerWithStdin"/>
-    /// to give it input. Windows Sandbox lifecycle requests are available only
-    /// through raw exact 1.1.0-alpha requests.
+    /// IsolationSession and WSLC support this streaming form. Windows Sandbox
+    /// lifecycle requests are available only through raw exact 1.1.0-alpha requests.
     /// </summary>
     public static MxcProcess SpawnInContainer(
         ContainerId id,
         ExecutionRequest request,
         SpawnInContainerOptions? options = null) =>
-        SpawnInContainerCore(id, request, options, stdin: false);
-
-    /// <summary>
-    /// Run a command in a started container and return live stdio streams,
-    /// including a writable <see cref="MxcProcess.StandardInput"/> whose
-    /// disposal, or a wait that starts before it is taken, gives the command
-    /// end-of-file.
-    /// </summary>
-    public static MxcProcess SpawnInContainerWithStdin(
-        ContainerId id,
-        ExecutionRequest request,
-        SpawnInContainerOptions? options = null) =>
-        SpawnInContainerCore(id, request, options, stdin: true);
+        SpawnInContainerCore(id, request, options?.Telemetry, capture: false);
 
     private static MxcProcess SpawnInContainerCore(
         ContainerId id,
         ExecutionRequest request,
-        SpawnInContainerOptions? options,
-        bool stdin)
+        TelemetryConfig? telemetry,
+        bool capture)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var requestJson = BuildExecEnvelope(id, request, options?.Telemetry).ToJsonString();
+        var requestJson = BuildExecEnvelope(id, request, telemetry).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
+        var waitClosesUntakenStdin = ContainmentForId(id) == LifecycleContainmentKind.Wslc;
 
         unsafe
         {
@@ -222,8 +209,8 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = stdin
-                    ? NativeMethods.mxc_exec_state_aware_with_stdin_json(
+                var status = capture
+                    ? NativeMethods.mxc_exec_state_aware_for_run_json(
                         requestPtr, NoExperimentalOptIn, &handle, &error)
                     : NativeMethods.mxc_exec_state_aware_json(
                         requestPtr, NoExperimentalOptIn, &handle, &error);
@@ -241,7 +228,7 @@ public static class MxcLifecycle
                 return new MxcProcess(
                     MxcSandboxHandle.FromRaw(handle),
                     MxcProcess.NormalizeTimeout(request.TimeoutMs),
-                    waitClosesUntakenStdin: stdin);
+                    waitClosesUntakenStdin);
             }
         }
     }
@@ -254,19 +241,6 @@ public static class MxcLifecycle
         CancellationToken cancellationToken = default) =>
         RunBlockingOperationAsync(
             () => SpawnInContainer(id, request, options),
-            lateProc => lateProc.Dispose(),
-            cancellationToken);
-
-    /// <summary>
-    /// Asynchronous form of <see cref="SpawnInContainerWithStdin"/>.
-    /// </summary>
-    public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
-        ContainerId id,
-        ExecutionRequest request,
-        SpawnInContainerOptions? options = null,
-        CancellationToken cancellationToken = default) =>
-        RunBlockingOperationAsync(
-            () => SpawnInContainerWithStdin(id, request, options),
             lateProc => lateProc.Dispose(),
             cancellationToken);
 
@@ -369,7 +343,10 @@ public static class MxcLifecycle
         return envelope;
     }
 
-    /// <summary>Run an execution request to completion and capture its output.</summary>
+    /// <summary>
+    /// Run an execution request to completion and capture its output. The
+    /// command reads end-of-file on stdin.
+    /// </summary>
     public static async Task<ExecutionResult> RunInContainerAsync(
         ContainerId id,
         ExecutionRequest request,
@@ -377,13 +354,9 @@ public static class MxcLifecycle
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var proc = await SpawnInContainerAsync(
-            id,
-            request,
-            new SpawnInContainerOptions
-            {
-                Telemetry = options?.Telemetry,
-            },
+        var proc = await RunBlockingOperationAsync(
+            () => SpawnInContainerCore(id, request, options?.Telemetry, capture: true),
+            lateProc => lateProc.Dispose(),
             cancellationToken)
             .ConfigureAwait(false);
         try

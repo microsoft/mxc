@@ -66,3 +66,10 @@ Captured output is lossy UTF-8 text. Callers own and dispose live handles;
 existing-container execution leaves the container caller-owned.
 A descendant holding an output pipe open can delay captured execution
 completion after a workload timeout.
+
+On WSLC, `SpawnJson` and `SpawnInContainerJson` return a process whose
+`StandardInput` is writable. Disposing it, or waiting before taking it, gives
+the command end-of-file; `RunJson` and `RunInContainerJson` give the command
+end-of-file. Killing a `SpawnInContainerJson` command that is still running,
+or reaching its timeout, deletes its container about a minute later, because
+MXC does not signal a WSLC process that has stdin.

@@ -258,23 +258,11 @@ public static class MxcContainer
             cancellationToken);
     }
 
-    /// <summary>
-    /// Spawn a container request and return its live process handle. A WSLC
-    /// command reads end-of-file on stdin; use <see cref="SpawnWithStdin"/> to
-    /// give it input.
-    /// </summary>
+    /// <summary>Spawn a container request and return its live process handle.</summary>
     public static MxcProcess Spawn(ContainerRequest request, SpawnOptions? options = null) =>
-        SpawnCore(request, options, stdin: false);
+        SpawnCore(request, options);
 
-    /// <summary>
-    /// Spawn a container request and return its live process handle, including
-    /// a writable <see cref="MxcProcess.StandardInput"/> whose disposal, or a
-    /// wait that starts before it is taken, gives the command end-of-file.
-    /// </summary>
-    public static MxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null) =>
-        SpawnCore(request, options, stdin: true);
-
-    private static MxcProcess SpawnCore(ContainerRequest request, SpawnOptions? options, bool stdin)
+    private static MxcProcess SpawnCore(ContainerRequest request, SpawnOptions? options)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -286,9 +274,7 @@ public static class MxcContainer
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = stdin
-                    ? NativeMethods.mxc_spawn_with_stdin_json(requestPtr, 0, &handle, &error)
-                    : NativeMethods.mxc_spawn_json(requestPtr, 0, &handle, &error);
+                var status = NativeMethods.mxc_spawn_json(requestPtr, 0, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     // `finally`, not a straight-line free: marshalling the strings or
@@ -307,7 +293,7 @@ public static class MxcContainer
                 return new MxcProcess(
                     MxcSandboxHandle.FromRaw(handle),
                     request.TimeoutMs,
-                    waitClosesUntakenStdin: stdin);
+                    waitClosesUntakenStdin: request.Containment is Containment.Wslc);
             }
         }
     }
@@ -319,18 +305,6 @@ public static class MxcContainer
         CancellationToken cancellationToken = default) =>
         MxcLifecycle.RunBlockingOperationAsync(
             () => Spawn(request, options),
-            lateProc => lateProc.Dispose(),
-            cancellationToken);
-
-    /// <summary>
-    /// Asynchronous form of <see cref="SpawnWithStdin"/>.
-    /// </summary>
-    public static Task<MxcProcess> SpawnWithStdinAsync(
-        ContainerRequest request,
-        SpawnOptions? options = null,
-        CancellationToken cancellationToken = default) =>
-        MxcLifecycle.RunBlockingOperationAsync(
-            () => SpawnWithStdin(request, options),
             lateProc => lateProc.Dispose(),
             cancellationToken);
 

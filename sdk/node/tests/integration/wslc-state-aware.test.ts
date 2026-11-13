@@ -22,7 +22,6 @@ import {
 import {
   deprovisionContainer,
   spawnInContainer,
-  spawnInContainerWithStdin,
   runInContainer,
   provisionContainer,
   startContainer,
@@ -105,21 +104,23 @@ describe('WSLC state-aware lifecycle E2E', {
       started = true;
       assert.deepEqual(reply(await dev.validateProcessJson(exec('touch /tmp/dev-must-not-run'))), {});
       const captured = await dev.runInContainerJson(exec(
-        "test ! -e /tmp/dev-must-not-run || exit 99; cat; printf 'DEV_WSLC_OUT\\n'; printf 'DEV_WSLC_ERR\\n' >&2; exit 7"));
+        "test ! -e /tmp/dev-must-not-run || exit 99; readlink /proc/self/fd/0; cat; printf 'DEV_WSLC_OUT\\n'; printf 'DEV_WSLC_ERR\\n' >&2; exit 7"));
       assert.equal(captured.exitCode, 7);
       assert.equal(captured.timedOut, false);
-      assert.match(captured.stdout, /DEV_WSLC_OUT/);
+      assert.match(captured.stdout, /^\/dev\/null\nDEV_WSLC_OUT/, 'a captured run starts without a stdin pipe');
       assert.match(captured.stderr, /DEV_WSLC_ERR/);
 
       const proc = await dev.spawnInContainerJson(exec("cat; echo DEV_WSLC_PIPE; exit 9"));
       try {
-        assert.equal(proc.standardInput, null);
+        const stdin = proc.standardInput;
+        assert.ok(stdin !== null, 'spawnInContainerJson exposes stdin');
         const stdout = collect(proc.standardOutput);
         const stderr = collect(proc.standardError);
+        stdin.end('DEV_WSLC_INPUT\n');
         const result = await proc.wait();
         assert.equal(result.exitCode, 9);
         assert.equal(result.timedOut, false);
-        assert.match(await stdout, /DEV_WSLC_PIPE/);
+        assert.match(await stdout, /DEV_WSLC_INPUT[\s\S]*DEV_WSLC_PIPE/);
         assert.equal(await stderr, '');
       } finally {
         proc.dispose();
@@ -173,11 +174,9 @@ describe('WSLC state-aware lifecycle E2E', {
         const streamed = await spawnInContainer(containerId, { command: 'echo NODE_WSLC_STREAM_FIRST; sleep 2; ' +
               'echo NODE_WSLC_STREAM_LAST; echo NODE_WSLC_STREAM_ERR >&2' });
         try {
-          assert.equal(
-            streamed.standardInput,
-            null,
-            'spawnInContainer gives a WSLC command no stdin',
-          );
+          const stdin = streamed.standardInput;
+          assert.ok(stdin !== null, 'spawnInContainer exposes stdin');
+          stdin.end();
           const stdoutPromise = collect(streamed.standardOutput, (chunk) => {
             if (
               firstChunkAt === undefined &&
@@ -210,10 +209,10 @@ describe('WSLC state-aware lifecycle E2E', {
 
         const payload = Buffer.alloc(64 * 1024);
         for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
-        const echoed = await spawnInContainerWithStdin(containerId, { command: 'cat', timeoutMs: 60_000 });
+        const echoed = await spawnInContainer(containerId, { command: 'cat', timeoutMs: 60_000 });
         try {
           const stdin = echoed.standardInput;
-          assert.ok(stdin !== null, 'spawnInContainerWithStdin exposes stdin');
+          assert.ok(stdin !== null, 'spawnInContainer exposes stdin');
           const stdoutPromise = collectBytes(echoed.standardOutput);
           stdin.end(payload);
           const [result, stdout] = await Promise.all([echoed.wait(), stdoutPromise]);
@@ -224,11 +223,17 @@ describe('WSLC state-aware lifecycle E2E', {
           echoed.dispose();
         }
 
-        const readsStdin = await runInContainer(containerId, { command: "sh -c 'cat; echo RUN_SAW_EOF'",
-          timeoutMs: 60_000 });
+        const readsStdin = await runInContainer(containerId, {
+          command: "sh -c 'readlink /proc/self/fd/0; cat; echo RUN_SAW_EOF'",
+          timeoutMs: 60_000,
+        });
         assert.equal(readsStdin.timedOut, false, 'a captured run has no input to wait for');
         assert.equal(readsStdin.exitCode, 0);
-        assert.equal(readsStdin.stdout.trim(), 'RUN_SAW_EOF');
+        assert.equal(
+          readsStdin.stdout.trim(),
+          '/dev/null\nRUN_SAW_EOF',
+          'a captured run starts without a stdin pipe',
+        );
 
         const timeoutStart = performance.now();
         const timed = await spawnInContainer(containerId, { command: 'sleep 10',

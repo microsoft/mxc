@@ -80,10 +80,10 @@ try {
 ```
 
 `spawn` returns a `Promise<MxcProcess>` with standard pipes, wait, termination,
-and disposal operations. A WSLC command started by `spawn` reads end-of-file on
-stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
-streams before awaiting completion; any untaken streams are drained internally
-to avoid pipe-buffer deadlocks.
+and disposal operations. On WSLC, `standardInput` is writable; end it to give
+the command end-of-file. Waiting ends an untaken stdin. Access output streams
+before awaiting completion; any untaken streams are drained internally to
+avoid pipe-buffer deadlocks. `run` gives the command end-of-file.
 Each operation accepts its own optional options type: `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`.
 Execution options do not support `dryRun`.
@@ -177,8 +177,8 @@ try {
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
 On timeout, it returns partial captured text without waiting for a
 descendant-held output stream to close.
-A WSLC command started by `spawnInContainer` reads end-of-file on stdin;
-`spawnInContainerWithStdin` gives it a writable `standardInput`.
+On WSLC, `spawnInContainer` exposes a writable `standardInput`; ending it gives
+the command end-of-file. `runInContainer` gives the command end-of-file.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults

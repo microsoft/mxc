@@ -65,12 +65,13 @@ Console.WriteLine($"exit={result.ExitCode}");
 ```
 
 `Spawn` / `SpawnAsync` return a live `MxcProcess` with separate stdin, stdout,
-and stderr streams, plus wait, termination, and disposal operations. A WSLC
-command started this way reads end-of-file on stdin; use `SpawnWithStdin` or
-`SpawnWithStdinAsync` to give it a writable `StandardInput`. Shared filesystem,
-network, and UI restrictions are authored directly on `ContainerRequest`,
-alongside the selected backend configuration. The SDK selects the contract
-version; `ContainerRequest` does not accept a caller-selected schema version.
+and stderr streams, plus wait, termination, and disposal operations. On WSLC,
+`StandardInput` is writable; dispose it to give the command end-of-file.
+Waiting before taking it also gives the command end-of-file. `Run` / `RunAsync`
+give the command end-of-file. Shared filesystem, network, and UI restrictions
+are authored directly on `ContainerRequest`, alongside the selected backend
+configuration. The SDK selects the contract version; `ContainerRequest` does
+not accept a caller-selected schema version.
 
 `UiPolicy.Disable` defaults to `true`; clipboard and input-injection
 permissions are authored separately.
@@ -174,14 +175,12 @@ finally
 }
 ```
 
-Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. A
-WSLC command started this way reads end-of-file on stdin; use
-`SpawnInContainerWithStdin` or `SpawnInContainerWithStdinAsync` to give it a
-writable `StandardInput`; waiting on such a process before taking
-`StandardInput` gives the command end-of-file. The
-asynchronous methods are convenience wrappers over native operations and
-support cancellation. Backend and phase-specific policy requirements are
-described in the
+Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. On
+WSLC, `StandardInput` is writable; dispose it to give the command end-of-file.
+Waiting before taking it also gives the command end-of-file.
+`RunInContainer` / `RunInContainerAsync` give the command end-of-file. The
+asynchronous methods are convenience wrappers over native operations and support
+cancellation. Backend and phase-specific policy requirements are described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
 

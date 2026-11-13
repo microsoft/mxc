@@ -171,7 +171,7 @@ export async function runInContainerJson(
   checkOptions('runInContainerJson', options);
   const { timeoutMs } = requestInfo(json, 'runInContainerJson', 'exec');
   const proc = await spawnStateAwareBindingSandboxProcessAsync(
-    json, options.experimental === true, timeoutMs,
+    json, options.experimental === true, timeoutMs, true,
   );
   let failed = false;
   try {

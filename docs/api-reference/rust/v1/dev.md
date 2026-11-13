@@ -58,3 +58,10 @@ for the 64 MiB capture limit, caller-owned streams, and sensitive
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail
 rather than switching to another I/O mode.
+
+On WSLC, a process from `spawn_json` or `spawn_in_container_json` has a
+writable stdin. Dropping it, or waiting without taking it, gives the process
+end-of-file; `run_json` and `run_in_container_json` give the process
+end-of-file. Killing a `spawn_in_container_json` process that is still
+running, or reaching its timeout, deletes its container about a minute later,
+because MXC does not signal a WSLC process that has stdin.

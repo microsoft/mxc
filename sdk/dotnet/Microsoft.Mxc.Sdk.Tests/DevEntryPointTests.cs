@@ -72,6 +72,18 @@ public class DevEntryPointTests
         Assert.Equal(json, Encoding.UTF8.GetString(request.AsSpan(0, request.Length - 1)));
     }
 
+    [Theory]
+    [InlineData("""{"version":"1.0.0","containment":"wslc","process":{"commandLine":"cat"}}""", null, true)]
+    [InlineData("""{"version":"1.0.0","containment":"process","process":{"commandLine":"cat"}}""", null, false)]
+    [InlineData("""{"version":"1.0.0","phase":"exec","sandboxId":"wslc:a","process":{"commandLine":"cat"}}""", "exec", true)]
+    [InlineData("""{"version":"1.0.0","phase":"exec","sandboxId":"iso:a","process":{"commandLine":"cat"}}""", "exec", false)]
+    public void OnlyWslcRequestsAreRecognizedAsWslc(string json, string? phase, bool expected)
+    {
+        var (request, _) = Dev.DevJsonRequest.Prepare(
+            json, nameof(OnlyWslcRequestsAreRecognizedAsWslc), phase);
+        Assert.Equal(expected, Dev.DevJsonRequest.TargetsWslc(request));
+    }
+
     [Fact]
     public void ExactContractErrorsReachPublicDevFacade()
     {

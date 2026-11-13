@@ -90,8 +90,7 @@ pub(crate) enum OneShotExecution {
 /// Selects the containment backend for the host, spawns the sandboxed process
 /// with piped stdio, and returns the handle. No pty is allocated. Backends
 /// without a streaming implementation return an [`Error`] with
-/// [`ErrorCode::UnsupportedContainment`]. `stdin` is as for
-/// [`spawn_one_shot_json`].
+/// [`ErrorCode::UnsupportedContainment`].
 ///
 /// # Safety / lifetime contract for library-context callers
 ///
@@ -110,25 +109,23 @@ pub(crate) enum OneShotExecution {
 /// spawns from the same load are safe as long as the library outlives them.
 pub fn spawn_execution_request(
     request: &ExecutionRequest,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer), stdin)
+    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer), wslc_stdin)
 }
 
 /// Spawn a raw exact-version one-shot JSON request as a streaming process.
 ///
 /// `experimental` is the caller's runtime opt-in. It is a parameter rather than
 /// a JSON field so that a configuration cannot grant itself experimental access.
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file. The
-/// same library-lifetime contract as [`spawn_execution_request`] applies.
+/// The same library-lifetime contract as [`spawn_execution_request`] applies.
 pub fn spawn_one_shot_json(
     request_json: &str,
     experimental: bool,
-    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
-    spawn_execution_request_with_logger(&request, logger, stdin)
+    spawn_execution_request_with_logger(&request, logger, true)
 }
 
 #[doc(hidden)]
@@ -197,10 +194,10 @@ fn parse_one_shot_json(
 fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
     logger: Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     spawn_execution_request_with_logger_and(request, logger, |request, logger| {
-        dispatch::spawn_runner(request, logger, stdin)
+        dispatch::spawn_runner(request, logger, wslc_stdin)
     })
 }
 

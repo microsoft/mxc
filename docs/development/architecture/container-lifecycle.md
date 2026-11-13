@@ -308,7 +308,6 @@ Backend and phase semantics are validated by the native engine.
 | `provisionContainer` | `ProvisionRequest`, `ProvisionOptions?` | `Promise<ProvisionResult>` |
 | `startContainer` | `ContainerId`, `StartOptions?` | `Promise<LifecycleResult>` |
 | `spawnInContainer` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |
-| `spawnInContainerWithStdin` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |
 | `runInContainer` | `ContainerId`, `ExecutionRequest`, `RunInContainerOptions?` | `Promise<ExecutionResult>` |
 | `spawnInContainerWithPty` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerWithPtyOptions?` (includes `size`) | `Promise<MxcPtyProcess>` |
 | `stopContainer` | `ContainerId`, `StopOptions?` | `Promise<LifecycleResult>` |
@@ -324,9 +323,8 @@ and `validateProcess` use native dry-run validation and return no execution
 result. There is no `dryRun` execution option or public attached-exec API.
 Captured and streaming execution are asynchronous. Live processes own wait,
 kill, and disposal.
-IsolationSession provides stdin, stdout, and stderr. WSLC provides stdout and
-stderr; only `spawnInContainerWithStdin` also gives it a writable stdin, as
-`spawnWithStdin` does for create-and-run execution.
+IsolationSession and WSLC provide stdin, stdout, and stderr for live piped
+execution. Captured execution gives the workload end-of-file on stdin.
 
 ### 6.3 Example
 

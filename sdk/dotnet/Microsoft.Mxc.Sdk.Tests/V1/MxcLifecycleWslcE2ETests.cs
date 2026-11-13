@@ -49,19 +49,26 @@ public class MxcLifecycleWslcE2ETests
             started = true;
             AssertEmptyResult(Dev.MxcLifecycle.ValidateProcessJson(Exec("touch /tmp/dev-must-not-run")));
             var captured = await Dev.MxcLifecycle.RunInContainerJsonAsync(
-                Exec("test ! -e /tmp/dev-must-not-run || exit 99; cat; echo DEV_WSLC_OUT; echo DEV_WSLC_ERR >&2; exit 7"),
+                Exec("test ! -e /tmp/dev-must-not-run || exit 99; readlink /proc/self/fd/0; cat; echo DEV_WSLC_OUT; echo DEV_WSLC_ERR >&2; exit 7"),
                 cancellationToken: TestContext.Current.CancellationToken);
             Assert.False(captured.TimedOut);
             Assert.Equal(7, captured.ExitCode);
-            Assert.Contains("DEV_WSLC_OUT", captured.Stdout);
+            Assert.StartsWith("/dev/null\nDEV_WSLC_OUT", captured.Stdout);
             Assert.Contains("DEV_WSLC_ERR", captured.Stderr);
             using (var pipe = Dev.MxcLifecycle.SpawnInContainerJson(Exec("cat; echo DEV_WSLC_PIPE; exit 9")))
             {
-                Assert.Null(pipe.StandardInput);
-                var (outcome, stdout, _) = await pipe.WaitForExitWithOutputAsync(
+                var stdin = pipe.StandardInput;
+                Assert.NotNull(stdin);
+                var output = pipe.WaitForExitWithOutputAsync(
                     TestContext.Current.CancellationToken);
+                await stdin.WriteAsync(
+                    Encoding.UTF8.GetBytes("DEV_WSLC_INPUT\n"),
+                    TestContext.Current.CancellationToken);
+                stdin.Dispose();
+                var (outcome, stdout, _) = await output;
                 Assert.False(outcome.TimedOut);
                 Assert.Equal(9, outcome.ExitCode);
+                Assert.Contains("DEV_WSLC_INPUT", Encoding.UTF8.GetString(stdout));
                 Assert.Contains("DEV_WSLC_PIPE", Encoding.UTF8.GetString(stdout));
             }
             AssertEmptyResult(Dev.MxcLifecycle.ValidateStopJson(Phase("stop")));
@@ -142,7 +149,7 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public async Task SpawnInContainerWithStdin_ForwardsEveryByteAndClosingStdinEndsInput()
+    public async Task SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput()
     {
         RequireWslc();
         using var container = new StartedContainer();
@@ -152,7 +159,7 @@ public class MxcLifecycleWslcE2ETests
             payload[i] = (byte)(i % 256);
         }
 
-        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
+        using var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
             new ExecutionRequest("cat") { TimeoutMs = 60_000 });
         var stdin = proc.StandardInput;
@@ -175,21 +182,21 @@ public class MxcLifecycleWslcE2ETests
 
         var run = await MxcLifecycle.RunInContainerAsync(
             container.Id,
-            new ExecutionRequest("sh -c 'cat; echo RUN-SAW-EOF'") { TimeoutMs = 60_000 },
+            new ExecutionRequest("sh -c 'readlink /proc/self/fd/0; cat; echo RUN-SAW-EOF'") { TimeoutMs = 60_000 },
             cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.False(run.TimedOut, "a captured run has no input to wait for");
         Assert.Equal(0, run.ExitCode);
-        Assert.Equal("RUN-SAW-EOF", run.Stdout.Trim());
+        Assert.Equal("/dev/null\nRUN-SAW-EOF", run.Stdout.Trim());
     }
 
     [Fact]
-    public void SpawnInContainerWithStdin_ACommandThatIgnoresStdinFinishesWhileItIsOpen()
+    public void SpawnInContainer_ACommandThatIgnoresStdinFinishesWhileItIsOpen()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
-        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
+        using var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
             new ExecutionRequest("echo IGNORES-STDIN") { TimeoutMs = 60_000 });
         var stdin = proc.StandardInput;
@@ -205,12 +212,12 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public void SpawnInContainerWithStdin_WaitGivesEndOfFileToStdinNobodyTook()
+    public void SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
-        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
+        using var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
             new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
         var result = proc.Wait();
@@ -221,12 +228,12 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public async Task SpawnInContainerWithStdin_WaitAsyncGivesEndOfFileToStdinNobodyTook()
+    public async Task SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
-        using var proc = await MxcLifecycle.SpawnInContainerWithStdinAsync(
+        using var proc = await MxcLifecycle.SpawnInContainerAsync(
             container.Id,
             new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 },
             cancellationToken: TestContext.Current.CancellationToken);
@@ -237,13 +244,13 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public async Task SpawnInContainerWithStdin_AKilledCommandNeverActsOnInputClosedAfterTheKill()
+    public async Task SpawnInContainer_AKilledCommandNeverActsOnInputClosedAfterTheKill()
     {
         RequireWslc();
         using var container = new StartedContainer();
         var ct = TestContext.Current.CancellationToken;
 
-        using (var proc = MxcLifecycle.SpawnInContainerWithStdin(
+        using (var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
             new ExecutionRequest("sh -c 'cat > /tmp/staged && mv /tmp/staged /tmp/published'")))
         {
@@ -282,22 +289,4 @@ public class MxcLifecycleWslcE2ETests
         }
     }
 
-    [Fact]
-    public void SpawnInContainer_GivesACommandThatReadsStdinEndOfFile()
-    {
-        RequireWslc();
-        using var container = new StartedContainer();
-
-        using var proc = MxcLifecycle.SpawnInContainer(
-            container.Id,
-            new ExecutionRequest("sh -c 'cat; echo SPAWN-SAW-EOF'") { TimeoutMs = 60_000 });
-        Assert.Null(proc.StandardInput);
-        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
-        var stdout = reader.ReadToEnd();
-        var result = proc.Wait();
-
-        Assert.False(result.TimedOut, "without stdin the command reads end-of-file at once");
-        Assert.Equal(0, result.ExitCode);
-        Assert.Equal("SPAWN-SAW-EOF", stdout.Trim());
-    }
 }

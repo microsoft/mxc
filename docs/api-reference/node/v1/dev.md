@@ -42,6 +42,13 @@ On timeout, in-container capture returns partial text without waiting for
 output streams to close. Read failures reject promptly, and cleanup
 preserves the original read or wait error.
 
+On WSLC, `spawnJson` and `spawnInContainerJson` return a process whose
+`standardInput` is writable. Ending it, or waiting without taking it, gives
+the command end-of-file; `runJson` and `runInContainerJson` give the command
+end-of-file. Killing a `spawnInContainerJson` command that is still running,
+or reaching its timeout, deletes its container about a minute later, because
+MXC does not signal a WSLC process that has stdin.
+
 On Windows, ProcessContainer `spawnWithPtyJson` uses `wxc-exec`;
 `0.9.0-alpha` requests support the `appcontainer` alias. Its Promise resolves
 at executor startup, before policy validation. Later failures appear in

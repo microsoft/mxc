@@ -143,7 +143,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions,
   apiName: string,
-  stdin = false,
+  capture = false,
 ): Promise<MxcProcess> {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
@@ -151,7 +151,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
     false,
     request.timeoutMs,
-    stdin,
+    capture,
   );
 }
 
@@ -225,8 +225,7 @@ export async function startContainer<C extends LifecycleContainmentKind>(
 /**
  * Streams a script execution inside a started IsolationSession or WSLC container over Node
  * pipes, returning an owning `MxcProcess` for waiting, termination,
- * stream access, and disposal. A WSLC command reads end-of-file on stdin; use
- * {@link spawnInContainerWithStdin} to give it input.
+ * stream access, and disposal.
  */
 export async function spawnInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -239,25 +238,6 @@ export async function spawnInContainer<C extends PipedExecuteBackend>(
     request,
     options,
     'spawnInContainer',
-  );
-}
-
-/**
- * {@link spawnInContainer} with a writable `standardInput` whose end gives the
- * command end-of-file.
- */
-export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(
-  containerId: ContainerId<C>,
-  request: ExecutionRequest<C>,
-  options: SpawnInContainerOptions = {},
-): Promise<MxcProcess> {
-  assertStateAwareStreamingOptions('spawnInContainerWithStdin', options);
-  return spawnStateAwareExecProcess(
-    containerId,
-    request,
-    options,
-    'spawnInContainerWithStdin',
-    true,
   );
 }
 
@@ -293,8 +273,9 @@ export async function spawnInContainerWithPty<C extends LifecycleContainmentKind
 
 /**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
- * on script completion. Native dispatch failures reject with `MxcError`;
- * workload failures are returned through the process exit code and streams.
+ * on script completion; the command reads end-of-file on stdin. Native
+ * dispatch failures reject with `MxcError`; workload failures are returned
+ * through the process exit code and streams.
  */
 export async function runInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -308,7 +289,13 @@ export async function runInContainer<C extends PipedExecuteBackend>(
 ): Promise<ExecutionResult> {
   assertStateAwareStreamingOptions('runInContainer', options);
   assertPipedExecBackend('runInContainer', containerId);
-  const proc = await spawnInContainer(containerId, request, options);
+  const proc = await spawnStateAwareExecProcess(
+    containerId,
+    request,
+    options,
+    'runInContainer',
+    true,
+  );
   const waitPromise = captureProcessOutput(proc);
   let failed = false;
   try {

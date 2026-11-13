@@ -53,12 +53,12 @@ fn ensure_host_supported() -> Result<(), MxcError> {
 /// caller can write to, read from, wait on, and kill. Backends without a
 /// streaming implementation return [`MxcError::unsupported_containment`].
 ///
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file; the
-/// other backends always provide one.
+/// `wslc_stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// the other supported backends keep their normal streaming behavior.
 pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     crate::mxc_engine::experimental::require_experimental_optin(
         &request.containment,
@@ -82,9 +82,9 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::Lxc => spawn_lxc(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
-        ContainmentBackend::Wslc => spawn_wslc(request, logger, stdin),
+        ContainmentBackend::Wslc => spawn_wslc(request, logger, wslc_stdin),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
-        ContainmentBackend::MicroVm => spawn_microvm(request, logger, stdin),
+        ContainmentBackend::MicroVm => spawn_microvm(request, logger),
         ContainmentBackend::W365Agents => {
             use crate::mxc_common::sandbox_process::SandboxBackend;
             crate::backend_modules::W365AgentsRunner
@@ -102,16 +102,14 @@ pub fn spawn_runner(
 fn spawn_microvm(
     request: &ExecutionRequest,
     logger: &mut Logger,
-    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    crate::nvx_runner::spawn_streaming(request, logger, stdin)
+    crate::nvx_runner::spawn_streaming(request, logger, false)
 }
 
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
 fn spawn_microvm(
     _request: &ExecutionRequest,
     _logger: &mut Logger,
-    _stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
         "the mxc engine does not yet support streaming for the 'microvm' backend",
