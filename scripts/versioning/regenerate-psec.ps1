@@ -90,7 +90,7 @@ foreach ($contract in $contracts) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $actualSchemaHash = (($sha.ComputeHash($schemaBytes) | ForEach-Object { $_.ToString("x2") }) -join "")
     if ($actualSchemaHash -ne $expectedSchemaHash) {
-        throw "Schema hash mismatch for $fbs.`n  expected (provenance): $expectedSchemaHash`n  actual   (on disk):    $actualSchemaHash`nIf you intentionally refreshed the schema, update $provenanceFile (sha256 + source revision) first."
+        throw "Schema hash mismatch for $fbs.`n  expected (provenance): $expectedSchemaHash`n  actual   (on disk):    $actualSchemaHash`nIf you intentionally refreshed the schema, update $provenanceFile (sha256 + source pull request) first."
     }
     Write-Host "Schema hash OK for $fbs ($expectedSchemaHash)" -ForegroundColor Cyan
 }

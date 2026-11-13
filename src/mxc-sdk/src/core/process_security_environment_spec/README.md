@@ -15,14 +15,16 @@ by the FlatBuffers compiler (`flatc`).
 ## Provenance
 
 The vendored schema originates from the Microsoft Windows OS repository.
-Authoritative provenance — the validated Windows build, schema SHA-256, and
-exact `flatc` version used — is recorded in
+Authoritative provenance — the source pull request, validated Windows build,
+schema SHA-256, and exact `flatc` version used — is recorded in
 [`external/windows-sdk/ProcessSecurityEnvironment.provenance.toml`](../../../../../external/windows-sdk/ProcessSecurityEnvironment.provenance.toml).
 That file is the single source of truth consumed by both the regeneration
 script and the CI drift gate.
 
 The same provenance file also pins the separate experimental policy-result
 schema, `ExperimentalProcessSecurityEnvironmentPolicyResult.fbs` (`PSEP`).
+Each schema records its source pull request and content hash; neither requires
+an OS checkout path.
 Its bindings are generated into the private
 `src/mxc-sdk/src/core/process_security_environment_policy_result/` module.
 PSEC describes the request passed to Windows; PSEP describes returned
