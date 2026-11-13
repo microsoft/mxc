@@ -55,9 +55,12 @@ export function verifyPackagedRuntime(options: PackagedRuntimeTestOptions): void
     const consumer = path.join(fixture, 'consumer');
     fs.mkdirSync(archives);
     fs.mkdirSync(consumer);
+    const localAppData = path.join(fixture, 'local-appdata');
+    fs.mkdirSync(localAppData);
     fs.writeFileSync(path.join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
     const env: NodeJS.ProcessEnv = { ...process.env, MXC_FFI_DIR: '',
-      ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR: '', npm_config_cache: path.join(fixture, 'npm-cache') };
+      ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR: '', LOCALAPPDATA: localAppData,
+      npm_config_cache: path.join(fixture, 'npm-cache') };
     delete env.MXC_NVX_TEST_DLL;
     delete env.NODE_PATH;
     const runNpm = (args: string[], cwd: string) => {
@@ -190,11 +193,11 @@ export function verifyPackagedRuntime(options: PackagedRuntimeTestOptions): void
         assert.ok(error instanceof MxcError);
         assert.equal(error.code, 'backend_unavailable');
         if (process.argv[1] === 'synthetic') {
-          assert.match(error.message, /signature rejected/i);
-          assert.ok(error.message.toLowerCase().includes(path.resolve('node_modules/@microsoft/mxc-sdk-nvx-runtime-win32-x64/aci-edge-sandboxes').toLowerCase()));
+          assert.match(error.message, /does not match the approved SHA-256/i);
+          assert.ok(error.message.toLowerCase().includes(path.resolve('node_modules/@microsoft/mxc-sdk-nvx-runtime-win32-x64/aci-edge-sandboxes/bin/aci_edge_agent.dll').toLowerCase()));
         } else {
           assert.match(error.message, /hypervisor|capabilit|whp/i);
-          assert.doesNotMatch(error.message, /no agent bundle|bundle is missing|signature rejected/i);
+          assert.doesNotMatch(error.message, /no agent bundle|bundle is missing|signature rejected|does not match the approved SHA-256/i);
         }
       }
       const native = koffi.load(path.resolve('node_modules/@microsoft/mxc-sdk/bin/x64/mxc_ffi.dll'));

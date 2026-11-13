@@ -335,7 +335,6 @@ fn build_rejects_each_unsigned_binary() {
     }
 
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
-    let local_app_data = tempfile::tempdir().expect("private binary-rejection state");
     for rejected in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
         let state = tempfile::tempdir().expect("isolated invalid runtime");
         let local_app_data = tempfile::tempdir().expect("isolated NVX state");

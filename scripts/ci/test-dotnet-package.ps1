@@ -274,9 +274,9 @@ if (mode == "absent")
 else if (mode == "synthetic")
 {
     if (failure is null || failure.Code != ErrorCode.BackendUnavailable ||
-        !failure.Message.Contains("signature rejected", StringComparison.OrdinalIgnoreCase) ||
+        !failure.Message.Contains("does not match the approved SHA-256", StringComparison.OrdinalIgnoreCase) ||
         !failure.Message.Contains(Path.Combine(bundle, "bin", "aci_edge_agent.dll"), StringComparison.OrdinalIgnoreCase))
-        throw new Exception($"Synthetic validation did not reach signature verification of the packaged bundle: {failure}");
+        throw new Exception($"Synthetic validation did not reject the packaged agent library's digest: {failure}");
 }
 else if (failure is not null)
 {
@@ -284,6 +284,7 @@ else if (failure is not null)
         failure.Message.Contains("no agent bundle", StringComparison.OrdinalIgnoreCase) ||
         failure.Message.Contains("bundle is missing", StringComparison.OrdinalIgnoreCase) ||
         failure.Message.Contains("signature rejected", StringComparison.OrdinalIgnoreCase) ||
+        failure.Message.Contains("does not match the approved SHA-256", StringComparison.OrdinalIgnoreCase) ||
         !(failure.Message.Contains("hypervisor", StringComparison.OrdinalIgnoreCase) ||
           failure.Message.Contains("capabilit", StringComparison.OrdinalIgnoreCase) ||
           failure.Message.Contains("WHP", StringComparison.OrdinalIgnoreCase)))

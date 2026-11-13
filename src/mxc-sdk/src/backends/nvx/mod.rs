@@ -6,7 +6,6 @@ pub mod runner;
 #[path = "crate_runtime.rs"]
 mod runtime;
 pub(crate) use runtime::register_runtime_directory;
-mod signature_verification;
 pub(crate) mod state_aware;
 
 fn run_with_sufficient_stack<T: Send>(
