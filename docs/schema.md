@@ -432,6 +432,14 @@ On Windows, `deniedPaths` is enforced natively when PSEC advertises
 `PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
 rejected before execution.
 
+ProcessContainer requires fully qualified Windows paths in `readwritePaths`,
+`readonlyPaths`, `deniedPaths`, and `processContainer.filesystem.enumeratePaths`.
+Use an absolute drive path such as `C:\workspace\secret.txt` or a fully
+qualified UNC path. Relative paths such as `secret.txt`, `C:secret.txt`, and
+`\secret.txt` are rejected before execution, including during dry-run
+validation. Policy paths are not resolved against `process.cwd` or the
+launcher's working directory.
+
 Windows BaseContainer can also receive access through Windows permissions granted
 to `ALL_APPLICATION_PACKAGES`. An applicable explicit `deniedPaths` rule takes
 precedence over access supplied by that group. See

@@ -82,6 +82,13 @@ If PSEC cannot represent or enforce the request, reject it before creating a
 container and return an actionable error. Do not fall back to AppContainer,
 filesystem brokering, or host-DACL mutation, or silently omit a restriction.
 
+ProcessContainer validates that filesystem policy paths are fully qualified
+before checking host capabilities or creating a PSEC environment. The direct
+backend validation path applies the same check, including dry runs. Do not
+resolve relative policy paths against the launcher or workload directory.
+See [filesystem policy](../../schema.md#filesystem-policy) for the caller-facing
+requirements.
+
 ### 5. Test end-to-end
 
 Use a Windows build containing the processmodel change.

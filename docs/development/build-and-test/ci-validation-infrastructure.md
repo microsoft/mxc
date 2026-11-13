@@ -194,6 +194,12 @@ checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement
 and fixture security on supported and unsupported hosts.
 
+The policy suite checks a readable file beneath a broad directory grant, an
+absolute deny that blocks that file, and rejection of relative paths in every
+ProcessContainer filesystem policy list before workload execution. Rejection
+cases vary whether `process.cwd` is supplied and use a separate launcher
+directory.
+
 The policy suite also runs the native CLI contract boundary cases, including
 the six network-policy rejection shapes and a launched valid control for each
 minimum/stable/development contract, and issue #694's DOS/NT final-path
