@@ -500,7 +500,10 @@ pub(crate) fn run(target: UpgradeTarget, start: ExecStartPayload) -> Result<Exec
                 .map_err(|_| failure("exec_worker", "W365 relay ended without an outcome"))?
         }),
         terminator: Box::new(move || {
-            control.stop();
+            // Terminal errors still leave a queued prefix for caller-owned readers.
+            if !control.terminal.load(Ordering::Acquire) {
+                control.stop();
+            }
             Err(failure(
                 "remote_termination_unsupported",
                 "W365 relay closed locally; remote process termination is not confirmed. Release the reservation explicitly.",

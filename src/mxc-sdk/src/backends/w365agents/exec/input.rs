@@ -161,6 +161,7 @@ struct ConsoleInput {
     file: File,
     pending: std::collections::VecDeque<u8>,
     high_surrogate: Option<u16>,
+    eof: bool,
 }
 
 #[cfg(windows)]
@@ -170,6 +171,7 @@ impl ConsoleInput {
             file,
             pending: Default::default(),
             high_surrogate: None,
+            eof: false,
         }
     }
 }
@@ -186,6 +188,16 @@ impl Read for ConsoleInput {
             return Ok(0);
         }
         while self.pending.is_empty() {
+            if self.eof {
+                return if self.high_surrogate.is_none() {
+                    Ok(0)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "host console ended within a UTF-16 surrogate pair",
+                    ))
+                };
+            }
             let mut wide = [0u16; 2048];
             let prefix = usize::from(self.high_surrogate.is_some());
             if let Some(high) = self.high_surrogate.take() {
@@ -220,6 +232,7 @@ impl Read for ConsoleInput {
                 }
             }
             if read == 0 {
+                self.eof = true;
                 return if prefix == 0 {
                     Ok(0)
                 } else {
@@ -231,6 +244,7 @@ impl Read for ConsoleInput {
             }
             let mut count = read as usize + prefix;
             if wide[count - 1] == 26 {
+                self.eof = true;
                 count -= 1;
             }
             if count == 0 {

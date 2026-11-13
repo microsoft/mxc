@@ -504,7 +504,7 @@ fn repeated_attached_child(mode: &str) {
     #[cfg(windows)]
     if mode.starts_with("console") {
         let end = if mode == "console-eof" {
-            "\r\u{1a}"
+            "\u{1a}"
         } else {
             "\r"
         };
@@ -835,13 +835,18 @@ fn native_execution_backpressure_fixture() {
             began.elapsed() < Duration::from_secs(10),
             "terminal frames must bypass slow outputs"
         );
+        assert_eq!(process.wait().unwrap_err().to_string(), error);
+        drop(process);
         // Drain the retained prefix after completion; overflow never replaces it.
         let prefix = drain(unread).join().unwrap();
-        assert!(!prefix.is_empty());
+        assert!(
+            prefix.len() >= 8 * 1024 * 1024,
+            "disposing the failed process lost queued output: {} bytes",
+            prefix.len()
+        );
         assert!(prefix.len() <= 8 * 1024 * 1024 + 65536 + 65536);
         assert!(prefix.iter().all(|byte| *byte == 0x42));
         assert!(draining.join().unwrap().is_empty());
-        assert_eq!(process.wait().unwrap_err().to_string(), error);
     }
 }
 

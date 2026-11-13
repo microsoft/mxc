@@ -170,8 +170,9 @@ without attempting another blocking diagnostic write; no envelope can be
 guaranteed on that unavailable stream.
 The frame consumer never blocks on output: overflow preserves the queued
 prefix, discards later bytes and returns `output_truncated`, even after Exit.
-Already queued output drains before EOF. Full capture uses memory proportional
-to output and returns an error, not partial success, on failure.
+Already queued output drains before EOF, including when the caller disposes a
+terminal failed process before draining its retained readers. Full capture uses
+memory proportional to output and returns an error, not partial success, on failure.
 
 Active process disposal cancels local pipes, transport and managed workers.
 The executor and live execution example preserve a confirmed guest exit when
@@ -180,7 +181,8 @@ and other write errors remain failures.
 Host input forwarding is cancelled and joined before completion returns, even
 when stdin remains open and idle or forwarding is blocked on guest stdin.
 Windows console forwarding owns a separate input handle, preserves UTF-8 text
-and Ctrl-Z EOF, and leaves later input available for the next execution.
+and Ctrl-Z EOF, including text followed by Ctrl-Z without Enter, and leaves later
+input available for the next execution.
 Unix standard-input flags are restored after all forwarding workers stop,
 including when standard handles share an open file description.
 After completion, output pumps remain supervised until caller-owned output
