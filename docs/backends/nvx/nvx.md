@@ -230,9 +230,11 @@ change as it evolves.
 The C ABI carries structured `Error.details` as JSON, so callers of the C ABI
 SDKs (Node and .NET) read `details.nvxRecovery` through `MxcError.details` and
 `MxcException.Details`. Keep the container ID out of logs and telemetry:
-Node's default console inspection does not expand `details`, but
-`JSON.stringify`, inspection with `getters` enabled and the .NET property
-expose it.
+Node's `console.log` and `util.inspect` omit `details`, even with `getters`
+enabled. `JSON.stringify`, object copies, `util.inspect` with both
+`customInspect: false` and `getters: true`, Node's uncaught-error printer when
+`util.inspect.defaultOptions.getters` is enabled, and the .NET property expose
+it.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only

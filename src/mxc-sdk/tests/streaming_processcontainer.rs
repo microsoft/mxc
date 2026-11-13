@@ -65,6 +65,9 @@ fn dev_json_processcontainer_policy_feedback_restricts_current_request() {
     };
 
     let directory = tempfile::tempdir().expect("policy preparation workspace");
+    // An inherited temp-directory grant to app packages would bypass the reduced policy.
+    mxc_sdk::mxc_common::filesystem_security::set_owner_only_dacl(directory.path(), true)
+        .expect("protect policy preparation workspace");
     let temporary_root = directory.path().to_str().expect("UTF-8 temporary path");
     let canonical_root =
         match mxc_sdk::mxc_common::filesystem_canonical::canonicalize_path(temporary_root) {

@@ -232,9 +232,11 @@ the SDK does not render them into `message`, `toString()`, `stack`, or warning
 strings. High-level IT-managed-policy guidance, `operation`, and `nativeCode`
 (including HRESULTs) remain available on policy refusals.
 
-`details` can contain policy resource paths. Default console inspection of an
-`MxcError` does not expand `details`, but `JSON.stringify(error)`, object copies
-and inspection with `getters` enabled include it.
+`details` can contain policy resource paths. `console.log` and `util.inspect`
+use the SDK's custom inspector and omit `details`, even with `getters` enabled.
+`JSON.stringify(error)`, object copies, `util.inspect` with both
+`customInspect: false` and `getters: true`, and Node's uncaught-error printer
+when `util.inspect.defaultOptions.getters` is enabled include it.
 Filter `details` before logging or serializing an error.
 
 Store the extracted `policyFailures` value, not the whole `error.details`

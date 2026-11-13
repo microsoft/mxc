@@ -421,10 +421,12 @@ Typed error thrown by the MXC SDK in response to a native JSON error object.
 Native status decoding preserves backend-specific `details` together with
 `details.ffiStatus`. For typed creation-policy observations, use the helpers
 in the [V1.Dev reference](dev.md#models-and-storage-helpers).
-`details` can contain policy resource paths. Default console inspection of an
-`MxcError` does not expand `details`, but `JSON.stringify(error)` and object
-copies include it, as does inspection with `getters` enabled. Filter `details`
-before logging or serializing an error.
+`details` can contain policy resource paths. `console.log` and `util.inspect`
+use the SDK's custom inspector and omit `details`, even with `getters` enabled.
+`JSON.stringify(error)`, object copies, `util.inspect` with both
+`customInspect: false` and `getters: true`, and Node's uncaught-error printer
+when `util.inspect.defaultOptions.getters` is enabled include it. Filter
+`details` before logging or serializing an error.
 ```typescript
 export class MxcError extends Error {
   readonly code: ErrorCode;
