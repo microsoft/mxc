@@ -476,6 +476,10 @@ $Clean = "[WSLC] Cleanup complete"
 $NotClean = @($Leftover, "Cleanup failed")
 $ResolvConfs = { @(Get-ChildItem $env:TEMP -Filter "mxc-wslc-gw-*-resolv.conf" -ErrorAction SilentlyContinue).Count }
 $resolvConfsBefore = & $ResolvConfs
+# A record outlives its run only if cleanup didn't finish.
+$RecordsRoot = Join-Path $env:LOCALAPPDATA "Microsoft\MXC\wslc\stores"
+$Records = { @(Get-ChildItem $RecordsRoot -Recurse -Filter "*.json" -File -ErrorAction SilentlyContinue | ForEach-Object FullName) }
+$recordsBefore = & $Records
 
 function Add-WslcResult([string]$Name, [bool]$Pass, [string]$Reason, [string]$Output = "") {
     Write-Host "  $Name ... " -NoNewline
@@ -537,7 +541,7 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_deny_rules.json" -ForceD
 # Proxied only because hostLoopback differs from the defaults. Reserved ranges
 # stay denied even under an allow default, and the exit code passes through.
 $null = $results.Add((Run-WslcTest "wslc_network_egress_reserved.json" -ExpectedExit 7 -ForceDebug -OutputNotContains $NotClean `
-    -OutputContains "DNS  host.wslc.internal refused (host loopback denied)", $Clean `
+    -OutputContains 'DNS  "host.wslc.internal" refused (host loopback denied)', $Clean `
     -Probes ([ordered]@{
         DEFAULT = "200"; LOOPBACK = "403"; LOCALHOST = "403"; PROXY_SELF = "403"; GATEWAY_NET = "403"
         LINK_LOCAL = "403"; MULTICAST = "403"; UNSPECIFIED = "403"; HOST_LOOPBACK = "403"
@@ -641,6 +645,10 @@ $reason = if ($exitCode -ne 0) { "Expected exit 0, got $exitCode" }
     elseif (-not $output.Contains($Clean)) { "Output missing '$Clean'" }
     else { Test-WslcProbes $output ([ordered]@{ ALLOWED = "200" }) }
 Add-WslcResult "wslc_network_egress_long_run.json (killed, proxy removed)" (-not $reason) $reason $output
+
+$leftRecords = @(& $Records | Where-Object { $_ -notin $recordsBefore })
+$reason = if ($leftRecords) { "Ownership records left: $($leftRecords -join ', ')" } else { "" }
+Add-WslcResult "built-in proxy ownership records removed" (-not $reason) $reason
 
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -ForceDebug `

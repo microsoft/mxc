@@ -401,7 +401,8 @@ public class MxcContainerWslcE2ETests
         }
     }
 
-    // Only succeeds if the previous run released the store and removed its proxy.
+    // Only succeeds if the previous run released the store, and warns if it
+    // had to remove the previous run's proxy.
     private static async Task AssertProxyStillWorksAsync()
     {
         var run = await MxcContainer.RunAsync(
@@ -409,6 +410,7 @@ public class MxcContainerWslcE2ETests
             cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, run.ExitCode);
         AssertProbes(run.Stdout, new Dictionary<string, string> { ["ALLOWED"] = "200" });
+        Assert.DoesNotContain(run.Warnings, w => w.Contains("left by an earlier run"));
     }
 
     [Fact]

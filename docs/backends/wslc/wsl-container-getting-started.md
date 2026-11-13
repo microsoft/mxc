@@ -533,14 +533,15 @@ with a filtering proxy that runs in a second container in the same session.
 The workload's only network is internal and has no route out, so its traffic
 leaves only through the proxy.
 
-Before the workload starts, MXC creates these in the run's session:
+Before the workload starts, MXC creates these in the run's session. `<key>`
+is 16 hex digits derived from the session name.
 
 | Object | Name | Role |
 |---|---|---|
-| Network | `mxc-wslc-gw-0-egress` (`10.231.0.0/24`) | NAT network the proxy reaches out through |
-| Network | `mxc-wslc-gw-0-internal` (`10.231.1.0/24`) | Internal network with no route out |
-| Container | `mxc-wslc-gw-0-gateway` | The proxy and DNS server, at `10.231.1.254` on the internal network |
-| Container | `mxc-wslc-gw-0-workload` | The workload |
+| Network | `mxc-wslc-gw-<key>-egress` (`10.231.0.0/24`) | NAT network the proxy reaches out through |
+| Network | `mxc-wslc-gw-<key>-internal` (`10.231.1.0/24`) | Internal network with no route out |
+| Container | `mxc-wslc-gw-<key>-gateway` | The proxy and DNS server, at `10.231.1.254` on the internal network |
+| Container | `mxc-wslc-gw-<key>-workload` | The workload |
 
 MXC doesn't modify the workload image. It configures the workload container
 as follows:
@@ -595,9 +596,20 @@ as follows:
   and the reason.
 
 - If MXC can't clean up (for example, its process is killed), the next proxied
-  run in the same image store deletes the leftovers before it starts and logs
-  `[WSLC] Removed the built-in proxy left by an earlier run`. The orphaned
-  `mxc-wslc-gw-*-resolv.conf` file stays in `%TEMP%`.
+  run in the same image store deletes the leftovers before it starts and
+  reports the warning `Removed the built-in proxy left by an earlier run`. The
+  orphaned `mxc-wslc-gw-*-resolv.conf` file stays in `%TEMP%`.
+
+- MXC records the containers and networks it creates in
+  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store>\<key>.json` and
+  deletes only those. Before starting, it deletes every proxy recorded for
+  the store. If the store still has a `mxc-wslc-gw-*` network that no record
+  lists, or a container with this proxy's names, MXC can't prove it created
+  it, so the run fails; delete it by hand or set a different
+  `wslc.storagePath`.
+
+- If cleanup fails, the error names the containers, networks, and record file
+  to delete by hand.
 
 - The proxy image stays in the image store, so later runs don't import it
   again.

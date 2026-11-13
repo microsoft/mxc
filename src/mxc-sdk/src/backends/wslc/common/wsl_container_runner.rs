@@ -608,6 +608,15 @@ fn resolve_session_name(container_id: &str) -> String {
 }
 
 impl WSLContainerRunner {
+    fn storage_path(&self) -> String {
+        self.config.storage_path.clone().unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("mxc-wslc-sessions")
+                .to_string_lossy()
+                .to_string()
+        })
+    }
+
     /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
     /// Keeps owned string data alive through session creation.
@@ -619,19 +628,13 @@ impl WSLContainerRunner {
         &self,
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
+        session_name_str: &str,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
         reject_embedded_nul_container_id(&request.container_id)?;
-        let session_name_str = resolve_session_name(&request.container_id);
-        let session_name: Vec<u16> = to_wide(&session_name_str);
-        let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("mxc-wslc-sessions")
-                .to_string_lossy()
-                .to_string()
-        });
-        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
+        let session_name: Vec<u16> = to_wide(session_name_str);
+        let storage_path_wide: Vec<u16> = to_wide(&self.storage_path());
 
         let mut settings = std::mem::zeroed::<WslcSessionSettings>();
         let hr = sdk.WslcInitSessionSettings(
@@ -987,7 +990,8 @@ impl WSLContainerRunner {
         let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
-        let session_guard = self.create_session(sdk, request, logger)?;
+        let session_name = resolve_session_name(&request.container_id);
+        let session_guard = self.create_session(sdk, request, &session_name, logger)?;
 
         // -- Image resolution --
         // An isolated sandbox gets no registry fetch on its behalf; the pull
@@ -1021,9 +1025,18 @@ impl WSLContainerRunner {
                 for warning in &egress.warnings {
                     logger.warning_line(&format!("WARNING: WSLc: {warning}"));
                 }
+                let storage_path = self.storage_path();
+                egress_gateway::sweep_leftovers(
+                    sdk,
+                    session_guard.as_raw(),
+                    &storage_path,
+                    logger,
+                )?;
                 Some(egress_gateway::Gateway::start(
                     sdk,
                     session_guard.as_raw(),
+                    &storage_path,
+                    &session_name,
                     egress,
                     logger,
                 )?)
@@ -1261,11 +1274,11 @@ impl WSLContainerRunner {
         }
 
         // Read by WslcCreateContainer below.
-        let workload_networks = egress_gateway::workload_networks();
-        if gateway.is_some() {
+        let workload_networks = gateway.as_ref().map(|g| g.workload_networks());
+        if let (Some(gateway), Some(workload_networks)) = (&gateway, &workload_networks) {
             let hr = sdk.WslcSetContainerSettingsName(
                 &mut container_settings,
-                egress_gateway::WORKLOAD_CONTAINER.as_ptr(),
+                gateway.workload_name().as_ptr(),
             );
             if hr != S_OK {
                 return Err(sdk_error("WslcSetContainerSettingsName failed", hr, ""));

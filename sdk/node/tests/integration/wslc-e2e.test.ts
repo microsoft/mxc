@@ -413,12 +413,16 @@ function assertProbes(stdout: string, expected: Record<string, string>) {
   assert.deepStrictEqual(subset, expected, `stdout=${stdout}`);
 }
 
-// A proxied run that only succeeds if the previous run released the store
-// and removed its proxy.
+// A proxied run that only succeeds if the previous run released the store,
+// and warns if it had to remove the previous run's proxy.
 async function assertProxyStillWorks() {
   const result = await sdk.run(proxyRequest(['echo ALLOWED=$(p 1.1.1.1:443)'], ALLOW_CLOUDFLARE_443));
   assert.strictEqual(result.exitCode, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`);
   assertProbes(result.stdout, { ALLOWED: '200' });
+  assert.ok(
+    !result.warnings.some((w) => w.includes('left by an earlier run')),
+    `warnings=${JSON.stringify(result.warnings)}`,
+  );
 }
 
 describe('WSLC SDK E2E — built-in proxy', {
