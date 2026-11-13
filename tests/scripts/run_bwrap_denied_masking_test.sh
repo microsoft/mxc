@@ -136,6 +136,7 @@ sudo mkdir -p "$PRIVATE_ALIAS"
 sudo mount --bind "$PRIVATE_TMP" "$PRIVATE_ALIAS"
 PRIVATE_ALIAS_MOUNTED=1
 printf '%s\n' "$PRIVATE_TMP" > "$TOOLS/private-tmp"
+printf '%s\n' "$PRIVATE_ALIAS" > "$TOOLS/private-alias"
 # The overlay root is in both layers; the sandbox must show the host's mode.
 chmod 750 "$BASE"
 mkfifo "$TOOLS/ready" "$TOOLS/continue"
@@ -150,7 +151,6 @@ exec 3<> "$TOOLS/ready" 4<> "$TOOLS/continue"
         fi
         printf 'OVERLAY_SECRET\n' > "$PRIVATE_STORAGE/0/.env.local/secret"
         printf '%s\n' "$PRIVATE_STORAGE" > "$TOOLS/private-storage"
-        printf '%s\n' "$PRIVATE_ALIAS" > "$TOOLS/private-alias"
         printf '%s\n' "$PRIVATE_ALIAS/$(basename "$PRIVATE_STORAGE")" \
             > "$TOOLS/private-storage-alias"
         printf 'LATE_SECRET\n' > "$BASE/.env.local"
