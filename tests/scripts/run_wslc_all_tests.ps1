@@ -507,9 +507,10 @@ function Complete-WslcBackgroundRun($Run) {
     @{ Exit = $Run.Process.ExitCode; Output = "$output" }
 }
 
-$null = $results.Add((Run-WslcTest "wslc_network_egress_allow_rules.json" -ForceDebug -OutputNotContains "Cleanup failed" `
+$null = $results.Add((Run-WslcTest "wslc_network_egress_allow_rules.json" -ForceDebug `
+    -OutputNotContains "Cleanup failed", 'DENY  "1.1.1.1:443"' `
     -OutputContains "Built-in proxy ready at http://10.231.1.254:3128", $Clean `
-    -OutputMatches "(?s)ALLOW 1\.1\.1\.1:443 -> 1\.1\.1\.1 \(allow rule\).*DENY  8\.8\.8\.8:443 -> 8\.8\.8\.8 \(default\)" `
+    -OutputMatches 'DENY  "8\.8\.8\.8:443" -> 8\.8\.8\.8 \(default\)' `
     -Probes ([ordered]@{
         PROXY_ENV = "OK"; RESOLV = "GATEWAY"; ALLOWED = "200"; ADJACENT = "403"
         WRONG_PORT = "403"; OTHER = "403"; HTTP_WRONG_PORT = "403"; DIRECT = "BLOCKED"

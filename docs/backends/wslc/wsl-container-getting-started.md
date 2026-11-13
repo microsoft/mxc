@@ -563,7 +563,8 @@ leaves only through the proxy.
   holds a different image than the MXC build expects, the run fails before any
   container starts; reinstall MXC.
 
-- Proxy decisions appear in the run log as `[WSLC][gateway]` lines.
+- Denied requests and refused lookups appear in the run log as
+  `[WSLC][gateway]` lines.
 
 ### External network proxy (cooperative, unprivileged)
 
