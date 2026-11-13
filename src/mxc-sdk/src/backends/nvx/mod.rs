@@ -8,6 +8,9 @@ mod runtime;
 pub(crate) use runtime::register_runtime_directory;
 pub(crate) mod state_aware;
 
+// Give NVX operations more stack space when the caller's remaining stack is limited.
+const NVX_WORKER_STACK_SIZE_BYTES: usize = 2 * 1024 * 1024;
+
 fn run_with_sufficient_stack<T: Send>(
     run: impl FnOnce() -> Result<T, crate::mxc_common::mxc_error::MxcError> + Send,
 ) -> Result<T, crate::mxc_common::mxc_error::MxcError> {
@@ -28,7 +31,7 @@ fn run_with_sufficient_stack<T: Send>(
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .name("mxc-nvx".to_owned())
-            .stack_size(2 * 1024 * 1024)
+            .stack_size(NVX_WORKER_STACK_SIZE_BYTES)
             .spawn_scoped(scope, move || context.run(run))
             .map_err(|error| {
                 MxcError::backend_error(format!("could not start NVX worker: {error}"))

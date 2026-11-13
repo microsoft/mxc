@@ -874,14 +874,24 @@ mod tests {
         impl Impersonation {
             fn enter(level: i32) -> Self {
                 // SAFETY: impersonation is reverted by Drop on the same thread.
-                assert_ne!(unsafe { ImpersonateSelf(level) }, 0);
+                assert_ne!(
+                    unsafe { ImpersonateSelf(level) },
+                    0,
+                    "ImpersonateSelf({level}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
                 Self
             }
         }
         impl Drop for Impersonation {
             fn drop(&mut self) {
                 // SAFETY: balances the successful call to ImpersonateSelf.
-                assert_ne!(unsafe { RevertToSelf() }, 0);
+                assert_ne!(
+                    unsafe { RevertToSelf() },
+                    0,
+                    "RevertToSelf failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
 
