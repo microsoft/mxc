@@ -1,31 +1,31 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-/// Per-invocation telemetry preference, subject to consent and policy.
+/// Compatibility preference; does not control Required telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TelemetryConfig {
-    /// Omission leaves telemetry disabled; `Some(false)` explicitly disables it.
+    /// Preserved in the request; Required collection ignores this value.
     pub enabled: Option<bool>,
 }
 
 /// Invocation controls for captured container execution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunOptions {
-    /// Per-invocation telemetry opt-in, subject to consent and policy.
+    /// Compatibility preference; does not control Required telemetry.
     pub telemetry: Option<TelemetryConfig>,
 }
 
 /// Invocation controls for spawning a live process.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpawnOptions {
-    /// Per-invocation telemetry opt-in, subject to consent and policy.
+    /// Compatibility preference; does not control Required telemetry.
     pub telemetry: Option<TelemetryConfig>,
 }
 
 /// Invocation controls for spawning a caller-controlled terminal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpawnWithPtyOptions {
-    /// Per-invocation telemetry opt-in, subject to consent and policy.
+    /// Compatibility preference; does not control Required telemetry.
     pub telemetry: Option<TelemetryConfig>,
     pub size: crate::sandbox::MxcPtySize,
 }

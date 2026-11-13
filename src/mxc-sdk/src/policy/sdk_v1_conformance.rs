@@ -439,8 +439,8 @@ fn parse_error_to_mxc(
     }
 }
 
-/// The normalized intent of a request: everything except the external-JSON
-/// provenance, which is diagnostic attribution rather than policy.
+/// The normalized intent of a request: everything except contract attribution,
+/// which is diagnostic metadata rather than policy.
 fn intent(request: &ExecutionRequest) -> serde_json::Value {
     let mut value = serde_json::to_value(request).unwrap();
     value.as_object_mut().unwrap().remove("source_contract");
