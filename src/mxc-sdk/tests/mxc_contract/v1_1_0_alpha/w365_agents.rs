@@ -48,24 +48,30 @@ fn assert_rejected(value: &Value) {
 #[test]
 fn w365_agents_contract_acceptance_never_enables_execution() {
     for phase in PHASES {
-        let mut baseline = request(phase);
-        baseline["telemetry"] = json!({"enabled":false});
-        for wrapper in [None, Some(json!({})), Some(json!({phase: settings(phase)}))] {
-            if phase != "provision" && wrapper.is_some() {
-                continue;
+        for telemetry in [
+            None,
+            Some(json!({})),
+            Some(json!({"enabled": false})),
+            Some(json!({"enabled": true})),
+        ] {
+            let mut baseline = request(phase);
+            if let Some(telemetry) = &telemetry {
+                baseline["telemetry"] = telemetry.clone();
             }
-            let mut value = baseline.clone();
-            if let Some(wrapper) = wrapper {
-                value["w365Agents"] = wrapper;
-            }
-            let source = value.to_string();
-            dev::parse_request(&source)
-                .expect("structural acceptance is independent of availability");
-            {
+            for wrapper in [None, Some(json!({})), Some(json!({phase: settings(phase)}))] {
+                if phase != "provision" && wrapper.is_some() {
+                    continue;
+                }
+                let mut value = baseline.clone();
+                if let Some(wrapper) = wrapper {
+                    value["w365Agents"] = wrapper;
+                }
+                let source = value.to_string();
+                dev::parse_request(&source)
+                    .expect("structural acceptance is independent of availability");
                 let parsed = load_mxc_request_from_json(&source, &mut Logger::new(Mode::Buffer))
                     .expect("normal lifecycle adaptation");
-                let mxc_sdk::mxc_common::state_aware_request::MxcRequest::StateAware(parsed) =
-                    parsed
+                let mxc_sdk::mxc_common::state_aware_request::MxcRequest::StateAware(parsed) = parsed
                 else {
                     panic!("expected lifecycle request");
                 };
@@ -74,15 +80,29 @@ fn w365_agents_contract_acceptance_never_enables_execution() {
                     parsed.request().containment,
                     mxc_sdk::mxc_common::models::ContainmentBackend::W365Agents,
                 );
-                let telemetry = parsed.request().telemetry.as_ref().unwrap();
-                assert_eq!(telemetry.enabled, Some(false));
-                assert_eq!(telemetry.requested_sandbox_kind, Some("w365_agents"));
-                if phase != "provision" { assert_eq!(parsed.sandbox_id(), Some(ID)); }
+                assert_eq!(parsed.request().telemetry.is_some(), telemetry.is_some());
+                assert_eq!(
+                    parsed
+                        .request()
+                        .telemetry
+                        .as_ref()
+                        .and_then(|value| value.enabled),
+                    telemetry
+                        .as_ref()
+                        .and_then(|value| value.get("enabled"))
+                        .and_then(Value::as_bool),
+                );
+                assert_eq!(
+                    parsed.request().requested_sandbox_kind,
+                    Some("w365_agents")
+                );
+                if phase != "provision" {
+                    assert_eq!(parsed.sandbox_id(), Some(ID));
+                }
                 assert_eq!(
                     mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),
                     mxc_sdk::mxc_common::models::ContainmentBackend::W365Agents,
                 );
-                continue;
             }
         }
     }
