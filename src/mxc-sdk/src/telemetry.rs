@@ -6,6 +6,8 @@
 //! A host supplies presentation for the canonical consent resource; the SDK
 //! persists the typed decision. See
 //! `docs/development/architecture/telemetry-consent-design.md`.
+//! Consent state does not enable or disable Required collection for supported
+//! request contracts.
 //!
 //! ```no_run
 //! use std::error::Error;
@@ -18,8 +20,8 @@
 //! })?;
 //!
 //! match telemetry::get_consent() {
-//!     ConsentState::Granted => println!("telemetry on"),
-//!     ConsentState::Denied | ConsentState::Undetermined => println!("telemetry off"),
+//!     ConsentState::Granted => println!("optional telemetry consent granted"),
+//!     ConsentState::Denied | ConsentState::Undetermined => println!("optional telemetry consent not granted"),
 //!     ConsentState::NotApplicable => {}
 //! }
 //! let _ = outcome;
@@ -54,7 +56,7 @@ impl ConsentState {
         Self::to_inner(*self).as_str()
     }
 
-    /// Whether this state permits collection.
+    /// Whether this state permits optional collection, not Required events.
     pub fn allows_collection(&self) -> bool {
         Self::to_inner(*self).allows_collection()
     }
