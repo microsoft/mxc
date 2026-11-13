@@ -105,6 +105,9 @@ HTTP/1.1 `Upgrade: exec` and the released service's binary framing. It does
 not use WebSocket headers, frames or the prototype's `microsoft.mxc-exec`
 endpoint. The complete ExecStart payload is validated before connecting;
 it and every frame are limited to 65,536 payload bytes.
+The server must respond with HTTP/1.1 status 101, a `Connection` token list
+containing `Upgrade`, and a single `Upgrade: exec` selection. Missing,
+conflicting or different protocol selections are rejected before ExecStart.
 
 `process.commandLine` is a nonblank **Windows executable command line**.
 MXC explicitly sends `shell: "raw"` and `mode: "pipe"`; it never selects a
@@ -462,7 +465,9 @@ process with stdin held open, checking that later input reaches the second
 command and that both retain the same reservation ID. Windows additionally
 exercises the terminal-only attached API with Unicode input and Ctrl-Z EOF.
 The upgrade fixture checks stalled DNS capacity, recovery without late service
-calls, and a slowly fragmented TLS handshake. The failure fixture checks
+calls, a slowly fragmented TLS handshake, and rejection of invalid protocol
+selections without sending command bytes. It also accepts valid header-name
+casing and `Connection` token lists. The failure fixture checks
 omitted, zero and positive timeouts across a simulated 331-second elapsed boundary,
 preserving output and genuine Exit values for executions without a local deadline.
 It also keeps host stdout/stderr pipes open without reading them and checks

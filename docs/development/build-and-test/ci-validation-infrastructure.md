@@ -46,6 +46,8 @@ run in GitHub Actions and Azure build jobs on Windows, Linux and macOS.
 The execution fixtures cover bounded DNS worker capacity and recovery, fragmented
 TLS handshakes under the total setup deadline, and zero/omitted versus positive
 execution timeouts across the former local cutoff using a test-only elapsed clock.
+They reject malformed or wrong-protocol upgrade responses before command submission
+and exercise valid header-name casing and `Connection` token lists.
 Windows additionally runs checkout/release and exec through fresh executor
 processes, plus the execution example's early-exit, input-error and capture cases.
 All three platforms exercise repeated relayed commands in one host process with

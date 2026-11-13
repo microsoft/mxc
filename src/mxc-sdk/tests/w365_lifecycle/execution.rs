@@ -36,12 +36,7 @@ impl ExecFixture {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let scripts = Arc::new(Mutex::new(VecDeque::<Script>::new()));
         let starts = Arc::new(Mutex::new(Vec::new()));
-        let (work, seen, recorded, stop_worker) = (
-            scripts.clone(),
-            requests.clone(),
-            starts.clone(),
-            stop.clone(),
-        );
+        let (work, seen, stop_worker) = (scripts.clone(), requests.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
             while !stop_worker.load(std::sync::atomic::Ordering::Relaxed) {
                 let socket = match listener.accept() {
@@ -79,14 +74,6 @@ impl ExecFixture {
                 seen.lock()
                     .unwrap()
                     .push(String::from_utf8(header).unwrap());
-                stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\n\r\n").unwrap();
-                stream.flush().unwrap();
-                let (kind, start) = read_frame(&mut stream).unwrap();
-                assert_eq!(kind, 1);
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_slice(&start).unwrap());
                 work.lock()
                     .unwrap()
                     .pop_front()
@@ -115,7 +102,35 @@ impl ExecFixture {
     }
 
     fn script(&self, work: impl FnOnce(&mut Stream) + Send + 'static) {
-        self.scripts.lock().unwrap().push_back(Box::new(work));
+        self.script_with_upgrade(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\n\r\n",
+            work,
+        );
+    }
+
+    fn script_with_upgrade(&self, reply: &str, work: impl FnOnce(&mut Stream) + Send + 'static) {
+        let recorded = self.starts.clone();
+        self.response(reply, move |stream| {
+            let (kind, start) = read_frame(stream).unwrap();
+            assert_eq!(kind, 1);
+            recorded
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&start).unwrap());
+            work(stream);
+        });
+    }
+
+    fn response(&self, reply: &str, work: impl FnOnce(&mut Stream) + Send + 'static) {
+        let reply = reply.to_owned();
+        self.scripts
+            .lock()
+            .unwrap()
+            .push_back(Box::new(move |stream| {
+                stream.write_all(reply.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                work(stream);
+            }));
     }
 }
 
@@ -826,7 +841,7 @@ fn native_execution_failure_and_disposal_fixture() {
             send(stream, 0x11, br#"{"pid":123}"#);
         }),
     ] {
-        fixture.scripts.lock().unwrap().push_back(script);
+        fixture.script(script);
         let mut process = spawn(&exec_request()).unwrap();
         let error = process.wait().unwrap_err().to_string();
         assert!(
@@ -1180,6 +1195,58 @@ fn execution_upgrade_validation_fixture() {
         0,
         "hostname rejection must precede credentials and command submission"
     );
+    selected_exec_upgrade(&env);
+}
+
+fn selected_exec_upgrade(env: &Environment) {
+    let fixture = ExecFixture::new(env);
+    for reply in [
+        "HTTP/1.1 101 Switching Protocols\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: exec\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: not-upgrade\r\nUpgrade: exec\r\n\r\n",
+        "HTTP/1.0 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec, websocket\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: exec\r\nUpgrade: websocket\r\n\r\n",
+    ] {
+        let (observed, observed_rx) = mpsc::channel();
+        fixture.response(reply, move |stream| {
+            let mut byte = [0];
+            observed.send(stream.read(&mut byte).map_err(|error| error.kind())).unwrap();
+        });
+        let result = spawn(&exec_request());
+        let observed = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let error = result.err().expect("invalid upgrade must fail during setup");
+        assert_eq!(error.details.as_ref().unwrap()["code"], "exec_upgrade_headers");
+        assert_eq!(error.details.as_ref().unwrap()["possiblySucceeded"], false);
+        assert!(matches!(
+            observed,
+            Ok(0) | Err(std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted)
+        ), "command bytes sent after invalid upgrade: {observed:?}");
+    }
+    assert!(fixture.starts.lock().unwrap().is_empty());
+    assert_eq!(
+        fixture.fixture.count(),
+        8,
+        "no retry or replay after refusal"
+    );
+    for reply in [
+        "HTTP/1.1 101 Switching Protocols\r\ncOnNeCtIoN: keep-alive, \tUPGRADE\r\nuPgRaDe: \texec \t\r\n\r\n",
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: keep-alive\r\nconnection: upgrade\r\nUpgrade: exec\r\n\r\n",
+    ] {
+        fixture.script_with_upgrade(reply, |stream| {
+            started(stream);
+            assert!(eof(stream).is_empty());
+            exit(stream, 7);
+        });
+        let mut process = spawn(&exec_request()).unwrap();
+        drop(process.take_stdin());
+        assert_eq!(process.wait().unwrap(), WaitResult::Exited(7));
+    }
+    assert_eq!(fixture.starts.lock().unwrap().len(), 2);
+    assert_eq!(fixture.fixture.count(), 10);
 }
 
 #[test]

@@ -378,6 +378,37 @@ fn connect_exec_inner(
         }
         return Err(error);
     }
+    if version != Some("HTTP/1.1") {
+        return Err(error("exec_upgrade_headers"));
+    }
+    let mut connection_upgrade = false;
+    let mut selected_exec = false;
+    for line in text
+        .split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+    {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| error("exec_upgrade_headers"))?;
+        if name.eq_ignore_ascii_case("Connection") {
+            connection_upgrade |= value.split(',').any(|token| {
+                token
+                    .trim_matches([' ', '\t'])
+                    .eq_ignore_ascii_case("Upgrade")
+            });
+        } else if name.eq_ignore_ascii_case("Upgrade") {
+            // Only the offered exec protocol is supported, not a protocol stack
+            // or conflicting/repeated selections.
+            if selected_exec || value.trim_matches([' ', '\t']) != "exec" {
+                return Err(error("exec_upgrade_headers"));
+            }
+            selected_exec = true;
+        }
+    }
+    if !connection_upgrade || !selected_exec {
+        return Err(error("exec_upgrade_headers"));
+    }
     // No buffered reader: bytes immediately following the header remain in TLS.
     if Instant::now() >= deadline {
         return Err(error("exec_upgrade_timeout"));
