@@ -347,10 +347,11 @@ The dispatcher enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET
 `MxcProcessTests` and `DevEntryPointTests` and runs the Node public `run`,
 `spawn`, and tool-discovery filesystem integration cases.
 The managed preparation tests verify owned candidate requests without
-launching and lossless storage of native results. Their native-success rows
-require Windows and this host opt-in; pure storage rows run without it. Bundle
-discovery requires the native preparation fact and both native storage theory
-rows, and scheduled validation rejects skipped tests in either class.
+launching and lossless storage of native results. They launch no workload, so
+they do not depend on this host opt-in and also run on every OS in the .NET SDK
+job. Bundle discovery requires the native preparation fact and both native
+storage theory rows, and scheduled validation rejects skipped tests in either
+class.
 Scheduled validation also requires the passing `nativePreparation: True`
 result row for each storage theory; its pure-storage `False` row cannot satisfy
 the native execution gate.
