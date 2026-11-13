@@ -479,6 +479,11 @@ mod tests {
             ..Default::default()
         });
         assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "exec phase");
+
+        let req = parsed(
+            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc","runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        );
+        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "exec phase");
     }
 
     // ---- post-provision (start / stop / deprovision) ----

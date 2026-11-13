@@ -10,6 +10,8 @@ This document describes the GitHub Actions validation matrix only. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
+Offline TLS fixture coverage in GitHub Actions and Azure build/SDK jobs is
+also noted below.
 
 Linux CI covers Ubuntu 24.04 and 26.04: x64/ARM64 builds and x64 .NET, Node SDK,
 and LXC E2E tests. Shared binaries are published only from Ubuntu 24.04 to
@@ -32,6 +34,25 @@ preserve compatibility with the older supported host.
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
+
+### Offline TLS fixtures
+
+W365 checkout/release fixtures use local HTTPS services with test-only
+certificate trust, not a production TLS verification bypass. The
+`mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
+isolated Cargo target directory so its artifacts cannot replace shipping builds.
+Its engine fixtures
+run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
+Windows also runs checkout/release through fresh executor processes.
+The .NET SDK test suite and Node SDK integration jobs exercise the public
+Dev JSON APIs.
+
+Test-support native libraries and executors are kept separate from shipping
+artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build
+and select an isolated fixture library; ordinary packaged-artifact tests
+continue to use shipping libraries. These fixtures do not establish live-service
+compatibility. See the [W365 backend guide](../../backends/w365agents/w365agents-backend.md)
+for local commands and platform prerequisites.
 
 ## Moving parts
 
