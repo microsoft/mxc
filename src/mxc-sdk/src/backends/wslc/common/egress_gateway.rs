@@ -22,12 +22,14 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::ScriptResponse;
+use crate::mxc_common::proxy_env;
 use crate::mxc_common::string_util::CoTaskMemPWSTR;
 use crate::wslc_common::container_steps::{self, cstr_bytes, sdk_error, ProcessSettings};
 use crate::wslc_common::error::WslcError;
 use crate::wslc_common::image;
 use crate::wslc_common::policy::ProxiedEgress;
 use crate::wslc_common::policy_mapping::VolumeMount;
+use crate::wslc_common::process_env::EnvScope;
 use crate::wslc_common::wslc_bindings::*;
 use crate::wslc_gateway_policy as gateway;
 
@@ -43,6 +45,7 @@ const SUBNET_PREFIX_LENGTH: u8 = 24;
 const GATEWAY_EGRESS_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 2);
 const GATEWAY_WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 254);
 const PROXY_PORT: u16 = 3128;
+const NODE_USE_ENV_PROXY: &str = "NODE_USE_ENV_PROXY";
 
 // The SDK reads these through pointers when the container is created.
 static GATEWAY_EGRESS_IN_ADDR: IN_ADDR = in_addr_of(GATEWAY_EGRESS_ADDRESS);
@@ -250,6 +253,21 @@ impl Drop for Gateway {
 /// The proxy URL the workload is pointed at.
 pub(crate) fn proxy_url() -> String {
     format!("http://{GATEWAY_WORKLOAD_ADDRESS}:{PROXY_PORT}")
+}
+
+/// The workload's environment: the caller's, pointed at the proxy.
+pub(crate) fn workload_env(caller_env: &[String], scope: EnvScope) -> Vec<String> {
+    let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, &proxy_url());
+    // Node.js ignores HTTP(S)_PROXY unless this is set. It joins the default
+    // environment, so a replacing request doesn't get it.
+    if scope == EnvScope::Merge
+        && !caller_env
+            .iter()
+            .any(|entry| entry.split('=').next() == Some(NODE_USE_ENV_PROXY))
+    {
+        env.push(format!("{NODE_USE_ENV_PROXY}=1"));
+    }
+    env
 }
 
 /// The workload's only network. The SDK reads it when the container is
@@ -551,5 +569,24 @@ mod tests {
         assert_eq!(proxy_url(), "http://10.231.1.254:3128");
         assert!(render_policy(&egress(gateway::Action::Allow, Vec::new())).forward_dns);
         assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new())).forward_dns);
+    }
+
+    #[test]
+    fn workload_env_adds_node_proxy_to_the_default_environment() {
+        let env = workload_env(&["HTTPS_PROXY=http://other:1".to_string()], EnvScope::Merge);
+        assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
+        assert!(env.contains(&"NODE_USE_ENV_PROXY=1".to_string()));
+
+        let env = workload_env(&[], EnvScope::Replace);
+        assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
+        assert!(!env.iter().any(|e| e.starts_with("NODE_USE_ENV_PROXY=")));
+
+        let env = workload_env(&["NODE_USE_ENV_PROXY=0".to_string()], EnvScope::Merge);
+        assert_eq!(
+            env.iter()
+                .filter(|e| e.starts_with("NODE_USE_ENV_PROXY="))
+                .collect::<Vec<_>>(),
+            ["NODE_USE_ENV_PROXY=0"]
+        );
     }
 }

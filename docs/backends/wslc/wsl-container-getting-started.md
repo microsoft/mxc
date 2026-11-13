@@ -516,12 +516,12 @@ no separate `--setup-wslc` step is required.
 
 ### Network configuration
 
-| Exact v0.9 policy | WSLC behavior |
-|---|---|
-| Egress, ingress, and host-loopback defaults all `allow`, no egress rules | Bridged networking without independent directional filtering |
-| All three defaults `deny` (also the omitted defaults), no egress rules | No networking (isolated) |
-| Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
-| Any other combination, container lifecycle operations | Rejected |
+| Type | Exact policy | WSLC behavior |
+|---|---|---|
+| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. |
+| Isolated | All three defaults omitted or `deny`, without egress rules | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
+| Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
+| Built-in proxy | Any other combination, container lifecycle operations | Rejected |
 
 > The removed legacy `allowOutbound` setting and JSON host-list fields are not
 > accepted by any supported contract.
@@ -533,15 +533,36 @@ with a filtering proxy that runs in a second container in the same session.
 The workload's only network is internal and has no route out, so its traffic
 leaves only through the proxy.
 
+Before the workload starts, MXC creates these in the run's session:
+
+| Object | Name | Role |
+|---|---|---|
+| Network | `mxc-wslc-gw-0-egress` (`10.231.0.0/24`) | NAT network the proxy reaches out through |
+| Network | `mxc-wslc-gw-0-internal` (`10.231.1.0/24`) | Internal network with no route out |
+| Container | `mxc-wslc-gw-0-gateway` | The proxy and DNS server, at `10.231.1.254` on the internal network |
+| Container | `mxc-wslc-gw-0-workload` | The workload |
+
+MXC doesn't modify the workload image. It configures the workload container
+as follows:
+
+- It joins only the internal network.
+- `HTTP_PROXY`/`HTTPS_PROXY` (and the lower-case forms) point at
+  `http://10.231.1.254:3128`, `NO_PROXY` is empty
+- `/etc/resolv.conf` is a read-only mount of a host temporary file naming
+  `10.231.1.254`.
+- Node is told to use the proxy: `NODE_USE_ENV_PROXY` is `1` (can be overwritten with `env`)
+
+#### Filtering
+
 - The proxy filters TCP by IPv4 CIDR and port. A `deny` rule wins over an
   `allow` rule; otherwise `network.egress.default` applies. Loopback,
   link-local, multicast, and `10.231.0.0/16` are always denied.
 
-- MXC points `HTTP_PROXY`/`HTTPS_PROXY` (and the lower-case forms) at the
-  proxy and sets `NO_PROXY` empty. Clients must use the proxy, through
-  `CONNECT` or an absolute `http://` request; direct connections fail.
+- Most HTTP clients use the proxy automatically through `HTTPS_PROXY` and
+  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use 
+  the proxy with `CONNECT`.
 
-- The workload's `/etc/resolv.conf` names the proxy. It forwards DNS when
+- The proxy forwards DNS when
   `network.egress.default` is `allow` or any `allow` rule exists; otherwise it
   refuses lookups, including hostnames in proxy requests. The proxy resolves
   hostnames itself and checks the resulting address.
@@ -565,6 +586,21 @@ leaves only through the proxy.
 
 - Denied requests and refused lookups appear in the run log as
   `[WSLC][gateway]` lines.
+
+#### Cleanup
+
+- After the workload exits, times out, or is killed, MXC deletes both
+  containers and both networks, then removes the `resolv.conf` temporary file.
+  The run log ends with `[WSLC] Cleanup complete`, or `[WSLC] Cleanup failed:`
+  and the reason.
+
+- If MXC can't clean up (for example, its process is killed), the next proxied
+  run in the same image store deletes the leftovers before it starts and logs
+  `[WSLC] Removed the built-in proxy left by an earlier run`. The orphaned
+  `mxc-wslc-gw-*-resolv.conf` file stays in `%TEMP%`.
+
+- The proxy image stays in the image store, so later runs don't import it
+  again.
 
 ### External network proxy (cooperative, unprivileged)
 
@@ -721,9 +757,9 @@ than `"FOO=bar"`) is dropped, as it is on every other backend.
 > which hands it to the SDK's environment setter and keeps it off the command
 > line, or supply it to the workload through a mounted file.
 
-`runtimeConfig.networkProxy` is an exception to every row: its variables are
-injected, and any caller-supplied proxy variable is scrubbed, whatever
-`process.env` asks for. Egress policy is enforced cooperatively through those
+`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an 
+exception to every row: its variables are injected, and any caller-supplied 
+proxy variable is scrubbed, whatever `process.env` asks for. Egress policy is enforced cooperatively through those
 variables, so a verbatim environment cannot be used to opt out of it. Because
 MXC injects the proxy URL itself, a replacing row cannot choose to keep it off
 the command line — so a URL holding `user:pass@` credentials is rejected there

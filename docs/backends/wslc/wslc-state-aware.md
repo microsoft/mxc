@@ -626,8 +626,9 @@ while a potentially running workload remains.
 
 ## Supported and rejected policy fields
 
-Container lifecycle networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
-`Bridged`); there is no per-host filtering or independent ingress/host-loopback
+Container lifecycle networking is **all-or-nothing**: isolated or bridged (see
+[Network configuration](wsl-container-getting-started.md#network-configuration)).
+There is no per-host filtering or independent ingress/host-loopback
 restriction primitive. Create-and-run execution filters egress with the
 [built-in proxy](wsl-container-getting-started.md#built-in-proxy) instead.
 Proxy configuration supplies environment variables, not

@@ -552,6 +552,7 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_real_client.json" -Force
     -Probes ([ordered]@{
         TLS_IP = "200"; TLS_NAME = "200"; TLS_DENIED = "ERROR .*Tunnel connection failed: 403.*"
         TLS_BYPASS = "ERROR .*"; RESOLVED = "1\.[01]\.[01]\.1"; UDP_DIRECT = "BLOCKED"
+        NODE_PROXY = "1"
     })))
 
 # Rejected before any container is created.
