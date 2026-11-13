@@ -48,6 +48,9 @@ TLS handshakes under the total setup deadline, and zero/omitted versus positive
 execution timeouts across the former local cutoff using a test-only elapsed clock.
 They reject malformed or wrong-protocol upgrade responses before command submission
 and exercise valid header-name casing and `Connection` token lists.
+The backpressure fixture checks dropped stdout/stderr readers through boxed streams
+and native pipe transfer, preserving the other stream and a genuine Exit after
+more than 8 MiB of intentionally discarded output.
 Windows additionally runs checkout/release and exec through fresh executor
 processes, plus the execution example's early-exit, input-error and capture cases.
 All three platforms exercise repeated relayed commands in one host process with

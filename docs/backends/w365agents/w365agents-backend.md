@@ -147,6 +147,10 @@ Native streams preserve binary stdin/stdout/stderr. Closing every stdin writer,
 including the backend's original, sends StdinClose after Started; it does not
 close the output connection. Drain stdout and stderr concurrently. Each pending
 output queue has an 8 MiB ceiling, excluding one pump chunk and the OS pipe.
+Taking and dropping an output reader intentionally discards that stream's later
+output; abandonment alone is not an execution failure. The other stream remains
+independent, and an overflow already recorded remains a failure.
+An output reader kept open but not drained can still exceed the queue ceiling.
 Unix output pumps wait for pipe writability and resume as soon as callers drain
 space, with bounded waits so local cancellation remains effective.
 Native stdio transfer preserves the caller-facing output pipes' original blocking

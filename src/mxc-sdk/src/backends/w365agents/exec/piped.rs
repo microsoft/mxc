@@ -491,7 +491,10 @@ pub(crate) fn run(target: UpgradeTarget, start: ExecStartPayload) -> Result<Exec
             closer.lock().unwrap_or_else(|e| e.into_inner()).take();
         })),
         waiter: Box::new(move || {
-            let _originals = (stdout_reader, stderr_reader, input, wait_control);
+            // Adapters duplicate the output handles before starting this waiter.
+            // Retaining these originals would hide caller-closed output streams.
+            drop((stdout_reader, stderr_reader));
+            let _owners = (input, wait_control);
             done_rx
                 .recv()
                 .map_err(|_| failure("exec_worker", "W365 relay ended without an outcome"))?

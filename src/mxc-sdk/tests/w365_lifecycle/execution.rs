@@ -659,6 +659,55 @@ fn native_execution_backpressure_fixture() {
     let env = Environment::new();
     let fixture = ExecFixture::new(&env);
     const SIZE: usize = 12 * 1024 * 1024 + 17;
+    for native_transfer in [false, true] {
+        for discarded_kind in [0x12, 0x13] {
+            let kept_kind = if discarded_kind == 0x12 { 0x13 } else { 0x12 };
+            fixture.script(move |stream| {
+                started(stream);
+                assert!(eof(stream).is_empty());
+                send(stream, kept_kind, b"kept\0");
+                for _ in 0..(SIZE / 65536 + 1) {
+                    send(stream, discarded_kind, &[0x42; 65536]);
+                }
+                send(stream, kept_kind, b"final\xff");
+                exit(stream, -1);
+            });
+            let mut process = spawn(&exec_request()).unwrap();
+            let (input, stdout, stderr): (
+                Box<dyn Write + Send>,
+                Box<dyn Read + Send>,
+                Box<dyn Read + Send>,
+            ) = if native_transfer {
+                let mut pipes = process.take_native_stdio().unwrap().unwrap();
+                (
+                    Box::new(std::fs::File::from(pipes.stdin.take().unwrap())),
+                    Box::new(std::fs::File::from(pipes.stdout.take().unwrap())),
+                    Box::new(std::fs::File::from(pipes.stderr.take().unwrap())),
+                )
+            } else {
+                (
+                    process.take_stdin().unwrap(),
+                    process.take_stdout().unwrap(),
+                    process.take_stderr().unwrap(),
+                )
+            };
+            let (discarded, kept) = if discarded_kind == 0x12 {
+                (stdout, stderr)
+            } else {
+                (stderr, stdout)
+            };
+            drop(discarded);
+            let kept = drain(kept);
+            // Guest output begins only after the caller drops its output reader.
+            drop(input);
+            let began = Instant::now();
+            let outcome = process.wait();
+            assert_eq!(kept.join().unwrap(), b"kept\0final\xff");
+            assert_eq!(outcome.unwrap(), WaitResult::Exited(-1));
+            assert_eq!(process.wait().unwrap(), WaitResult::Exited(-1));
+            assert!(began.elapsed() < Duration::from_secs(10));
+        }
+    }
     fixture.script(|stream| {
         started(stream);
         eof(stream);
