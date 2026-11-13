@@ -49,6 +49,7 @@ pub mod validator;
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
 // Public only for the cross-crate Rust SDK adapter; not an external wire API.
 pub(crate) mod wire;
+pub(crate) mod worker_gate;
 
 // Adapters that map specific JSON contracts into the internal config input.
 pub(crate) mod config_contract_adapters;

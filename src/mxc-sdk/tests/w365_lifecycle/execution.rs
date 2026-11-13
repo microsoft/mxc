@@ -934,6 +934,157 @@ fn native_execution_failure_and_disposal_fixture() {
         count,
         "policy/start-size validation precedes dialing"
     );
+    execution_timeout_boundaries(&env, &fixture);
+}
+
+fn execution_timeout_boundaries(env: &Environment, fixture: &ExecFixture) {
+    for timeout in [None, Some(0), Some(1)] {
+        let (running, running_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let (finished, finished_rx) = mpsc::channel();
+        fixture.script(move |stream| {
+            started(stream);
+            assert!(eof(stream).is_empty());
+            running.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if timeout != Some(1) {
+                send(stream, 0x12, b"output after the former 330-second cutoff");
+                exit(stream, 153);
+                finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        });
+        let mut value = exec_request();
+        if let Some(timeout) = timeout {
+            value["process"]["timeout"] = json!(timeout);
+        } else {
+            value["process"].as_object_mut().unwrap().remove("timeout");
+        }
+        let mut process = spawn(&value).unwrap();
+        drop(process.take_stdin());
+        let out = drain(process.take_stdout().unwrap());
+        let err = drain(process.take_stderr().unwrap());
+        running_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        env.set("MXC_W365_TEST_EXEC_ELAPSED_MS", "331000");
+        if timeout == Some(1) {
+            let began = Instant::now();
+            let error = process.wait().unwrap_err();
+            assert!(began.elapsed() < Duration::from_secs(5));
+            assert!(error.to_string().contains("exec_client_timeout"), "{error}");
+            assert_ne!(error.kind(), std::io::ErrorKind::TimedOut);
+            release.send(()).unwrap();
+            assert!(out.join().unwrap().is_empty());
+        } else {
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(process.try_wait().unwrap(), None);
+            release.send(()).unwrap();
+            assert_eq!(process.wait().unwrap(), WaitResult::Exited(153));
+            finished.send(()).unwrap();
+            assert_eq!(
+                out.join().unwrap(),
+                b"output after the former 330-second cutoff"
+            );
+        }
+        assert!(err.join().unwrap().is_empty());
+        assert_eq!(
+            fixture.starts.lock().unwrap().last().unwrap()["timeoutMs"],
+            timeout.unwrap_or(0)
+        );
+        std::env::remove_var("MXC_W365_TEST_EXEC_ELAPSED_MS");
+    }
+}
+
+fn fragmented_tls_deadline(env: &Environment) {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let mut ca = tempfile::NamedTempFile::new().unwrap();
+    ca.write_all(cert.cert.pem().as_bytes()).unwrap();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into();
+    let tls = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.cert.der().clone()], key)
+            .unwrap(),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    env.set("MXC_W365_TEST_CA", ca.path().to_str().unwrap());
+    env.set(
+        "MXC_W365_TEST_PORT",
+        &listener.local_addr().unwrap().port().to_string(),
+    );
+    env.set("MXC_W365_TEST_TIMEOUT_MS", "5000");
+    let (accepted, accepted_rx) = mpsc::channel();
+    let (flight, flight_rx) = mpsc::channel();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        accepted.send(socket.try_clone().unwrap()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut connection = rustls::ServerConnection::new(tls).unwrap();
+        while !connection.wants_write() {
+            if connection.read_tls(&mut socket).unwrap() == 0 {
+                return;
+            }
+            connection.process_new_packets().unwrap();
+        }
+        let mut bytes = Vec::new();
+        while connection.wants_write() {
+            connection.write_tls(&mut bytes).unwrap();
+        }
+        flight.send(()).unwrap();
+        // Frequent valid TLS fragments must not restart the total setup budget.
+        for byte in bytes {
+            if stopped.load(std::sync::atomic::Ordering::Relaxed)
+                || socket.write_all(&[byte]).is_err()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let (result, result_rx) = mpsc::channel();
+    let began = Instant::now();
+    let client = std::thread::spawn(move || {
+        result.send(spawn(&exec_request()).err()).unwrap();
+    });
+    let socket = accepted_rx.recv_timeout(Duration::from_secs(5));
+    let sent_flight = flight_rx.recv_timeout(Duration::from_secs(5));
+    let result = result_rx.recv_timeout(Duration::from_secs(7));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(socket) = socket {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+    server.join().unwrap();
+    client.join().unwrap();
+    assert!(
+        sent_flight.is_ok(),
+        "fixture must reach the real TLS handshake: {sent_flight:?}; client: {result:?}"
+    );
+    let error = result
+        .expect("fragmented TLS exceeded the setup deadline")
+        .unwrap();
+    assert!(began.elapsed() < Duration::from_secs(7));
+    assert_eq!(
+        error.details.as_ref().unwrap()["code"],
+        "exec_upgrade_timeout"
+    );
+    assert_eq!(error.details.as_ref().unwrap()["possiblySucceeded"], false);
 }
 
 #[test]
@@ -944,6 +1095,37 @@ fn execution_upgrade_validation_fixture() {
     fixture.configure(&env);
     env.set("W365A_DP_SUFFIX", "localhost");
     env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
+    env.set("MXC_W365_TEST_TIMEOUT_MS", "200");
+    env.set("MXC_W365_TEST_DNS_DELAY_MS", "6000");
+    for attempt in 0..5 {
+        let began = Instant::now();
+        let error = spawn(&exec_request()).err().unwrap();
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            error.details.as_ref().unwrap()["code"],
+            "exec_upgrade_timeout"
+        );
+        assert_eq!(error.details.as_ref().unwrap()["possiblySucceeded"], false);
+        if attempt == 4 {
+            assert!(error.message.contains("DNS worker capacity (4)"));
+        }
+    }
+    assert_eq!(
+        fixture.count(),
+        0,
+        "late DNS must never initiate service work"
+    );
+    std::env::remove_var("MXC_W365_TEST_DNS_DELAY_MS");
+    std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
+    // Waiting for capacity is charged to setup, and completed workers restore it.
+    fixture.reply(401, "never-send-a-command");
+    assert_eq!(
+        spawn(&exec_request()).err().unwrap().details.unwrap()["httpStatus"],
+        401
+    );
+    fragmented_tls_deadline(&env);
+    fixture.configure(&env);
+    std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
     for status in [401, 403, 404, 410, 429, 500, 302, 200] {
         fixture.reply(status, "never-send-a-command");
         let error = spawn(&exec_request()).err().unwrap();
@@ -954,8 +1136,8 @@ fn execution_upgrade_validation_fixture() {
             format!("w365:{POOL}:{A}")
         );
     }
-    assert_eq!(fixture.count(), 8);
-    for n in 0..8 {
+    assert_eq!(fixture.count(), 9);
+    for n in 0..9 {
         assert_eq!(fixture.request(n).split_once("\r\n\r\n").unwrap().1, "");
     }
     for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN"] {
@@ -973,7 +1155,7 @@ fn execution_upgrade_validation_fixture() {
         spawn(&value).is_err(),
         "unsupported mode must fail before dialing"
     );
-    assert_eq!(fixture.count(), 8);
+    assert_eq!(fixture.count(), 9);
     let mut wrong_ca = tempfile::NamedTempFile::new().unwrap();
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     wrong_ca.write_all(cert.cert.pem().as_bytes()).unwrap();
@@ -984,7 +1166,7 @@ fn execution_upgrade_validation_fixture() {
     );
     assert_eq!(
         fixture.count(),
-        8,
+        9,
         "untrusted TLS must carry neither credentials nor a command"
     );
     let wrong_host = Fixture::with_hostname("wrong-host.example");

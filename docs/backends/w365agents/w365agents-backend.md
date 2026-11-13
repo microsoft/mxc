@@ -119,13 +119,19 @@ before dialing. Entries split at the first `=` (missing `=` means an empty
 value); the last duplicate name wins. Names must be nonempty and names/values
 must contain no NUL. Host environment variables are never forwarded.
 
-`process.timeout` is currently sent unchanged as `timeoutMs`, including zero.
-The current service guide documents an optional value from 1 through 600,000;
-acceptance of explicit zero needs service-owner confirmation. Use an explicit
-positive timeout in that range for live validation. For zero, the client budgets
-300,000 ms, but this does not establish a service default or unlimited execution.
-The client allows that budget or the positive requested timeout plus
-30 seconds for transport/drain. A local deadline returns `exec_client_timeout`
+Execution setup has one 30-second budget covering system DNS, TCP connection,
+TLS handshake and HTTP upgrade. Each underlying TLS read/write uses the remaining
+budget, so fragmented traffic cannot keep extending it. System DNS cannot be
+portably cancelled: at most four lookup workers may remain blocked after callers
+time out. They retain their capacity until they finish; later callers wait for
+capacity within their own setup budget. Late lookup results never initiate a
+connection or send credentials or a command.
+
+`process.timeout` is sent unchanged as `timeoutMs`. Omitted or zero selects the
+service's configured default (normally 300,000 ms) and imposes no local MXC command
+deadline; the service's limits still apply. A positive timeout allows the requested
+duration plus 30 seconds for transport/drain locally. The service supports positive
+values through 600,000 ms. A local deadline returns `exec_client_timeout`
 with unknown remote outcome, not `TimedOut` or a synthetic exit. A real
 Exit code, including -1, 124 or 153, is preserved; code 124 alone does not
 distinguish a timeout from a program that intentionally returned 124.
@@ -455,6 +461,10 @@ The native stream fixture also runs repeated relayed executions in one host
 process with stdin held open, checking that later input reaches the second
 command and that both retain the same reservation ID. Windows additionally
 exercises the terminal-only attached API with Unicode input and Ctrl-Z EOF.
+The upgrade fixture checks stalled DNS capacity, recovery without late service
+calls, and a slowly fragmented TLS handshake. The failure fixture checks
+omitted, zero and positive timeouts across a simulated 331-second elapsed boundary,
+preserving output and genuine Exit values for executions without a local deadline.
 It also keeps host stdout/stderr pipes open without reading them and checks
 bounded failure after both Exit and remote Error, preserving the forwarded prefix.
 Windows build jobs require discovery of all nine functional fixtures.
@@ -482,8 +492,9 @@ SDK/native-engine fixtures without building a test-support executor.
 Azure runs fixtures only on native hosts: Windows/Linux x64 and macOS arm64; cross-compiled arm64
 Windows/Linux jobs do not execute them.
 The integration target requires `test-support`. Only builds with that feature
-honor `MXC_W365_TEST_CA`, `MXC_W365_TEST_PORT`, `MXC_W365_TEST_TIMEOUT_MS`
-and `MXC_W365_TEST_READY_BUDGET_MS`.
+honor `MXC_W365_TEST_CA`, `MXC_W365_TEST_PORT`, `MXC_W365_TEST_TIMEOUT_MS`,
+`MXC_W365_TEST_READY_BUDGET_MS`, `MXC_W365_TEST_DNS_DELAY_MS`
+and `MXC_W365_TEST_EXEC_ELAPSED_MS`.
 The fixtures supply a trusted certificate and short deadlines without disabling
 certificate or hostname validation. Shipping builds ignore these variables.
 Fixtures use only loopback services,

@@ -43,6 +43,9 @@ certificate trust, not a production TLS verification bypass. The
 isolated Cargo target directory so its artifacts cannot replace shipping builds.
 Its engine fixtures
 run in GitHub Actions and Azure build jobs on Windows, Linux and macOS.
+The execution fixtures cover bounded DNS worker capacity and recovery, fragmented
+TLS handshakes under the total setup deadline, and zero/omitted versus positive
+execution timeouts across the former local cutoff using a test-only elapsed clock.
 Windows additionally runs checkout/release and exec through fresh executor
 processes, plus the execution example's early-exit, input-error and capture cases.
 All three platforms exercise repeated relayed commands in one host process with

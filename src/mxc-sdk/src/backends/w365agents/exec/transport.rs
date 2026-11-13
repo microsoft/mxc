@@ -1,14 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::super::service::{with_transport_stack, Client, Identity, USER_AGENT};
-use crate::mxc_common::mxc_error::MxcError;
+use super::super::service::{transport_budget, with_transport_stack, Client, Identity, USER_AGENT};
+use crate::mxc_common::{module_lifetime, mxc_error::MxcError, worker_gate::WorkerGate};
 use native_tls::{TlsConnector, TlsStream};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(30);
+const MAX_DNS_WORKERS: usize = 4;
 // One maximum-sized exec frame, with room for TLS records and control messages.
 const MAX_PENDING_TLS_BYTES: usize = 128 * 1024;
 
@@ -68,9 +70,25 @@ struct PendingTlsOutput {
 struct ExecSocket {
     socket: TcpStream,
     pending: Option<PendingTlsOutput>,
+    deadline: Option<Instant>,
 }
 
 impl ExecSocket {
+    fn prepare_io(&self, read: bool) -> std::io::Result<()> {
+        if let Some(deadline) = self.deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            if read {
+                self.socket.set_read_timeout(Some(remaining))?;
+            } else {
+                self.socket.set_write_timeout(Some(remaining))?;
+            }
+        }
+        Ok(())
+    }
+
     fn flush_outgoing(&mut self) -> std::io::Result<bool> {
         let Some(pending) = &mut self.pending else {
             self.socket.flush()?;
@@ -99,12 +117,14 @@ impl ExecSocket {
 
 impl Read for ExecSocket {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.prepare_io(true)?;
         self.socket.read(bytes)
     }
 }
 
 impl Write for ExecSocket {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.prepare_io(false)?;
         let Some(pending) = &mut self.pending else {
             return self.socket.write(bytes);
         };
@@ -120,6 +140,7 @@ impl Write for ExecSocket {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.prepare_io(false)?;
         self.flush_outgoing()?;
         if self
             .pending
@@ -154,10 +175,78 @@ fn error(code: &str) -> MxcError {
 }
 
 pub(super) fn connect_exec(target: &UpgradeTarget) -> Result<ExecConnection, MxcError> {
-    with_transport_stack(|| connect_exec_inner(target))
+    let deadline = Instant::now()
+        .checked_add(transport_budget(HANDSHAKE_BUDGET)?)
+        .ok_or_else(|| error("fixture_configuration"))?;
+    with_transport_stack(|| connect_exec_inner(target, deadline))
 }
 
-fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError> {
+fn resolve(host: &str, port: u16, deadline: Instant) -> Result<Vec<SocketAddr>, MxcError> {
+    static GATE: OnceLock<Arc<WorkerGate>> = OnceLock::new();
+    let gate = GATE.get_or_init(|| WorkerGate::new(MAX_DNS_WORKERS));
+    let permit = gate.acquire(deadline).map_err(|limit| {
+        let mut failure = error("exec_upgrade_timeout");
+        failure.message.push_str(&format!(
+            "; deadline expired waiting for DNS worker capacity ({limit}); earlier lookups may still be blocked"
+        ));
+        failure
+    })?;
+    module_lifetime::pin_current_module().map_err(|detail| {
+        let mut failure = error("exec_dns_worker");
+        failure.message.push_str(&format!("; {detail}"));
+        failure
+    })?;
+    #[cfg(feature = "test-support")]
+    let delay = match std::env::var_os("MXC_W365_TEST_DNS_DELAY_MS") {
+        None => Duration::ZERO,
+        Some(value) if host == "localhost" => Duration::from_millis(
+            value
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| error("fixture_configuration"))?,
+        ),
+        Some(_) => return Err(error("fixture_configuration")),
+    };
+    let host = host.to_owned();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("mxc-w365-dns".into())
+        .spawn(move || {
+            // OS resolution cannot be portably cancelled. Hold capacity until it
+            // really finishes; the native image is pinned just like filesystem probes.
+            let _permit = permit;
+            #[cfg(feature = "test-support")]
+            std::thread::sleep(delay);
+            let result = if Instant::now() >= deadline {
+                Err(std::io::ErrorKind::TimedOut.into())
+            } else {
+                (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect())
+            };
+            let _ = sender.send(result);
+        })
+        .map_err(|_| error("exec_dns_worker"))?;
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(_) if Instant::now() >= deadline => Err(error("exec_upgrade_timeout")),
+        Ok(result) => result.map_err(|_| error("exec_dns")),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(error("exec_upgrade_timeout")),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(error("exec_dns_worker")),
+    }
+}
+
+fn transport_error(deadline: Instant) -> MxcError {
+    error(if Instant::now() >= deadline {
+        "exec_upgrade_timeout"
+    } else {
+        "exec_upgrade_transport"
+    })
+}
+
+fn connect_exec_inner(
+    target: &UpgradeTarget,
+    deadline: Instant,
+) -> Result<ExecConnection, MxcError> {
     let mut tls = TlsConnector::builder();
     tls.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
     let port = 443;
@@ -181,10 +270,7 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
             _ => return Err(error("fixture_configuration")),
         }
     };
-    let deadline = Instant::now() + HANDSHAKE_BUDGET;
-    let addresses = (target.host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|_| error("exec_dns"))?;
+    let addresses = resolve(&target.host, port, deadline)?;
     let mut connected = None;
     for address in addresses {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -196,7 +282,13 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
             break;
         }
     }
-    let socket = connected.ok_or_else(|| error("exec_connect"))?;
+    let socket = connected.ok_or_else(|| {
+        error(if Instant::now() >= deadline {
+            "exec_upgrade_timeout"
+        } else {
+            "exec_connect"
+        })
+    })?;
     socket.set_nodelay(true).map_err(|_| error("exec_socket"))?;
     let tls = tls.build().map_err(|_| error("exec_tls"))?;
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -215,9 +307,10 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
             ExecSocket {
                 socket,
                 pending: None,
+                deadline: Some(deadline),
             },
         )
-        .map_err(|_| error("exec_upgrade_transport"))?;
+        .map_err(|_| transport_error(deadline))?;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(error("exec_upgrade_timeout"));
@@ -235,7 +328,7 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
     stream
         .write_all(request.as_bytes())
         .and_then(|()| stream.flush())
-        .map_err(|_| error("exec_upgrade_transport"))?;
+        .map_err(|_| transport_error(deadline))?;
     let mut header = Vec::new();
     let mut byte = [0];
     while !header.ends_with(b"\r\n\r\n") {
@@ -243,17 +336,12 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
         if remaining.is_zero() {
             return Err(error("exec_upgrade_timeout"));
         }
-        stream
-            .get_ref()
-            .socket
-            .set_read_timeout(Some(remaining))
-            .map_err(|_| error("exec_socket"))?;
         if header.len() >= 32768 {
             return Err(error("exec_upgrade_headers"));
         }
         stream
             .read_exact(&mut byte)
-            .map_err(|_| error("exec_upgrade_transport"))?;
+            .map_err(|_| transport_error(deadline))?;
         header.push(byte[0]);
     }
     let text = std::str::from_utf8(&header).map_err(|_| error("exec_upgrade_headers"))?;
@@ -291,6 +379,10 @@ fn connect_exec_inner(target: &UpgradeTarget) -> Result<ExecConnection, MxcError
         return Err(error);
     }
     // No buffered reader: bytes immediately following the header remain in TLS.
+    if Instant::now() >= deadline {
+        return Err(error("exec_upgrade_timeout"));
+    }
+    stream.get_mut().deadline = None;
     stream
         .get_ref()
         .socket

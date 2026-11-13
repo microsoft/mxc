@@ -13,6 +13,20 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 pub(super) const USER_AGENT: &str = concat!("mxc/", env!("CARGO_PKG_VERSION"), " (w365_agents)");
 
+pub(super) fn transport_budget(default: Duration) -> Result<Duration, MxcError> {
+    #[cfg(feature = "test-support")]
+    if let Some(value) = std::env::var_os("MXC_W365_TEST_TIMEOUT_MS") {
+        return Ok(Duration::from_millis(
+            value
+                .to_str()
+                .and_then(|value| value.parse::<std::num::NonZeroU64>().ok())
+                .ok_or_else(|| MxcError::policy_validation("invalid W365 fixture timeout"))?
+                .get(),
+        ));
+    }
+    Ok(default)
+}
+
 pub(super) fn with_transport_stack<T: Send>(
     operation: impl FnOnce() -> Result<T, MxcError> + Send,
 ) -> Result<T, MxcError> {
@@ -123,17 +137,7 @@ impl Client {
     }
 
     pub(super) fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
-        #[cfg(feature = "test-support")]
-        let timeout = match std::env::var_os("MXC_W365_TEST_TIMEOUT_MS") {
-            None => timeout,
-            Some(value) => Duration::from_millis(
-                value
-                    .to_str()
-                    .and_then(|value| value.parse::<std::num::NonZeroU64>().ok())
-                    .ok_or_else(|| MxcError::policy_validation("invalid W365 fixture timeout"))?
-                    .get(),
-            ),
-        };
+        let timeout = transport_budget(timeout)?;
         let tls = TlsConfig::builder()
             .provider(TlsProvider::NativeTls)
             .root_certs(RootCerts::PlatformVerifier);

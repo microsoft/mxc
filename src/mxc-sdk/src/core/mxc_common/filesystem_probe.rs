@@ -2,10 +2,11 @@
 // Licensed under the MIT License.
 
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::config_deserialize::escape_diagnostic_text;
+use super::worker_gate::WorkerGate;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROBE_WORKERS: usize = 16;
@@ -67,7 +68,12 @@ impl FilesystemProbe {
             .map_err(|error| format!("could not capture the caller's access token: {error}"))?;
 
         if self.worker.is_none() {
-            let permit = self.gate.acquire(deadline)?;
+            let permit = self.gate.acquire(deadline).map_err(|limit| {
+                format!(
+                    "filesystem probe deadline expired waiting for a worker \
+                 (limit {limit}); earlier probes may still be blocked"
+                )
+            })?;
             super::module_lifetime::pin_current_module()?;
             let (sender, receiver) = mpsc::sync_channel::<ProbeJob>(1);
             std::thread::Builder::new()
@@ -142,70 +148,6 @@ fn wait_for_probe<T>(
 
 fn timeout_message(timeout: Duration) -> String {
     format!("filesystem probe timed out after {}ms", timeout.as_millis())
-}
-
-#[derive(Debug)]
-struct WorkerGate {
-    active: Mutex<usize>,
-    available: Condvar,
-    limit: usize,
-}
-
-impl WorkerGate {
-    fn new(limit: usize) -> Arc<Self> {
-        Arc::new(Self {
-            active: Mutex::new(0),
-            available: Condvar::new(),
-            limit,
-        })
-    }
-
-    fn acquire(self: &Arc<Self>, deadline: Instant) -> Result<WorkerPermit, String> {
-        self.acquire_with_budget(|| deadline.saturating_duration_since(Instant::now()))
-    }
-
-    fn acquire_with_budget(
-        self: &Arc<Self>,
-        mut remaining: impl FnMut() -> Duration,
-    ) -> Result<WorkerPermit, String> {
-        let mut active = self
-            .active
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        loop {
-            let remaining = remaining();
-            if remaining.is_zero() {
-                return Err(format!(
-                    "filesystem probe deadline expired waiting for a worker \
-                     (limit {}); earlier probes may still be blocked",
-                    self.limit
-                ));
-            }
-            if *active < self.limit {
-                *active += 1;
-                return Ok(WorkerPermit(Arc::clone(self)));
-            }
-            let (next, _) = self
-                .available
-                .wait_timeout(active, remaining)
-                .unwrap_or_else(|error| error.into_inner());
-            active = next;
-        }
-    }
-}
-
-struct WorkerPermit(Arc<WorkerGate>);
-
-impl Drop for WorkerPermit {
-    fn drop(&mut self) {
-        let mut active = self
-            .0
-            .active
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *active -= 1;
-        self.0.available.notify_all();
-    }
 }
 
 #[cfg(test)]

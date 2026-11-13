@@ -542,7 +542,7 @@ fn consume(
     err: &StreamWriter,
     cancelled: &AtomicBool,
     output_fault: &Mutex<Option<io::Error>>,
-    budget: Duration,
+    budget: Option<Duration>,
 ) -> Result<i32, MxcError> {
     stream.enable_duplex().map_err(|error| {
         failure(
@@ -555,13 +555,28 @@ fn consume(
     let mut stdin_open = true;
     let mut started = false;
     let mut pending: Option<PendingInput> = None;
-    let deadline = Instant::now() + budget;
+    let clock_start = Instant::now();
     loop {
-        if Instant::now() >= deadline {
-            return Err(failure(
-                "exec_client_timeout",
-                "local execution budget expired without Exit; remote outcome is unknown",
-            ));
+        if let Some(budget) = budget {
+            let elapsed = clock_start.elapsed();
+            #[cfg(feature = "test-support")]
+            let elapsed = match std::env::var_os("MXC_W365_TEST_EXEC_ELAPSED_MS") {
+                None => elapsed,
+                Some(value) => elapsed.saturating_add(Duration::from_millis(
+                    value
+                        .to_str()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .ok_or_else(|| {
+                            failure("fixture_configuration", "invalid W365 fixture elapsed time")
+                        })?,
+                )),
+            };
+            if elapsed >= budget {
+                return Err(failure(
+                    "exec_client_timeout",
+                    "local execution budget expired without Exit; remote outcome is unknown",
+                ));
+            }
         }
         if let Some(error) = output_fault
             .lock()

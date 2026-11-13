@@ -229,6 +229,8 @@ impl Environment {
                 "MXC_W365_TEST_PORT",
                 "MXC_W365_TEST_TIMEOUT_MS",
                 "MXC_W365_TEST_READY_BUDGET_MS",
+                "MXC_W365_TEST_DNS_DELAY_MS",
+                "MXC_W365_TEST_EXEC_ELAPSED_MS",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
@@ -236,6 +238,8 @@ impl Environment {
         );
         std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
         std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
+        std::env::remove_var("MXC_W365_TEST_DNS_DELAY_MS");
+        std::env::remove_var("MXC_W365_TEST_EXEC_ELAPSED_MS");
         environment
     }
     fn set(&self, key: &str, value: &str) {

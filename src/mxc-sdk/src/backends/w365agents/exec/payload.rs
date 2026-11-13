@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 pub(crate) struct ExecStartPayload {
     frame: Vec<u8>,
-    pub(super) client_budget: std::time::Duration,
+    pub(super) client_budget: Option<std::time::Duration>,
 }
 
 impl ExecStartPayload {
@@ -51,15 +51,12 @@ impl ExecStartPayload {
                 "W365 ExecStart exceeds 65536 bytes; nothing was sent",
             ));
         }
-        // Zero selects the released server's default, not unlimited execution.
-        let timeout = if request.script_timeout == 0 {
-            300_000
-        } else {
-            u64::from(request.script_timeout)
-        };
         Ok(Self {
             frame: encode_frame(FrameType::ExecStart, &bytes),
-            client_budget: std::time::Duration::from_millis(timeout + 30_000),
+            // Zero retains service defaults without imposing a local command deadline.
+            client_budget: (request.script_timeout != 0).then(|| {
+                std::time::Duration::from_millis(u64::from(request.script_timeout) + 30_000)
+            }),
         })
     }
 
