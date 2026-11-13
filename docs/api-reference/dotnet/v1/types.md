@@ -1510,7 +1510,7 @@ public enum TelemetryPolicyState
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```csharp
 public sealed class TelemetryConfig

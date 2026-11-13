@@ -874,7 +874,11 @@ shared-host-network behavior.
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
-   rule aborts the supervisor rather than starting an unenforced sandbox.
+   rule aborts startup. The runner terminates Bubblewrap and its blocked
+   sandbox child while the startup barrier is still held, then reaps the
+   launcher, cleans up the network helpers, and returns the setup error.
+   This also applies to create-and-run execution, streaming, and PTY execution
+   in both proxy-only and firewall-enforced modes.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the

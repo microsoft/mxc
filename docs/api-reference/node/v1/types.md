@@ -877,7 +877,7 @@ export interface StopOptions {
 
 ## `@microsoft/mxc-sdk/v1::TelemetryConfig`
 
-Telemetry configuration for TraceLogging ETW support.
+Compatibility preference; does not control Required telemetry.
 
 ```typescript
 export interface TelemetryConfig {

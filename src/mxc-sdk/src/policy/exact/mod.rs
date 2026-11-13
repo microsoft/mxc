@@ -85,12 +85,8 @@ pub(super) fn build_request(
         load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
             MxcError::malformed_request(format!("failed to build request: {error}"))
         })?;
-    inner.source_contract = None;
-    Ok(PreparedContainerRequest {
-        inner,
-        #[cfg(test)]
-        requested_sandbox_kind: containment.telemetry_kind(),
-    })
+    inner.requested_sandbox_kind = Some(containment.telemetry_kind());
+    Ok(PreparedContainerRequest { inner })
 }
 
 #[cfg(test)]

@@ -2,22 +2,23 @@
 
 > **Audience:** MXC developers
 
-This document defines the implemented Windows telemetry-consent contract for
-the published `0.9.0-alpha` and `1.0.0` request contracts. MXC ships the
+This document defines the retained Windows telemetry-consent management APIs
+and the optional collection path for internal requests without source-contract
+attribution. MXC ships the
 canonical consent resource, persistent consent storage, and consent-management
-APIs described below. For those contracts, telemetry remains off by default and
+APIs described below. For unattributed requests, telemetry remains off by default and
 is enabled only when every gate in this contract permits collection.
 
-The development `1.1.0-alpha` contract moves to Required telemetry to keep MXC
-secure, reliable, and up to date. It emits four Required events and is not
-governed by this consent model; only administrative policy can block it. See
+The `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha` contracts use Required telemetry to keep MXC
+secure, reliable, and up to date. They emit four Required events and are not
+governed by this consent model or administrative policy. See
 [Telemetry](../../telemetry.md) for that behavior.
 
 The purpose of the MXC Learning Mode Data Loop is to analyze collected data to
 identify usage patterns, improve Windows security, and inform MXC about
 application compatibility in containers with minimal capabilities.
 
-MXC telemetry is Windows-only and fails closed. For the published contracts,
+MXC telemetry is Windows-only and fails closed. For unattributed optional requests,
 collection requires all four conditions at the time each event is written:
 
 ```text
@@ -29,7 +30,7 @@ per-run telemetry requested
 
 No prompt, no response, the literal string "No", dismissal, withdrawal,
 malformed state, an unknown prompt version, or any read/write failure means no
-telemetry. Administrative policy is a deny-only ceiling: it may block
+optional telemetry. Administrative policy is a deny-only ceiling: it may block
 collection but can never opt a user in.
 
 ## Canonical consent resource
@@ -188,7 +189,7 @@ persist dormant consent. Withdrawal remains available while blocked.
 
 ## Per-run enablement and integration boundary
 
-Consent is not an execution switch. Each run must also request telemetry with
+Consent is not an execution switch. Unattributed optional runs must request telemetry with
 the stable top-level `telemetry.enabled: true` setting. The switch never
 prompts, never persists consent, and never bypasses consent or administrative
 policy.
@@ -205,9 +206,10 @@ including the asynchronous variants that share those options.
 | Node | `telemetry: { enabled: true }` |
 
 SDK adapters preserve this setting in the native top-level `telemetry.enabled`
-field without changing the request. Omission leaves telemetry disabled;
-explicit `false` remains an explicit disable. Existing-container and lifecycle
-telemetry behavior is unchanged.
+field without changing the request. For supported contracts, omission or
+explicit `false` does not disable Required collection, including V1 SDK creation,
+existing-container execution, and container lifecycle operations. For internal
+unattributed requests, omission or explicit `false` still disables collection.
 
 Consent-management surfaces should still support the three behavior classes
 defined here:
@@ -219,7 +221,7 @@ defined here:
 
 ## Live enforcement and event compatibility
 
-Consent and policy are checked immediately before each logical telemetry
+For unattributed optional requests, consent and policy are checked immediately before each logical telemetry
 emission. A terminal failure may emit paired `MXC.Error` and `MXC.ExecutionEnd`
 events under the same authorization decision, without a consent-state reread
 between those writes. This does not guarantee collection or delivery of both
@@ -238,7 +240,7 @@ The execution event identities are now:
 and queries. Start has the same payload schema, using `started`, zero duration
 and exit-code placeholders, and an empty failure reason before dispatch.
 Start and End reauthorize independently; withdrawing consent between them
-suppresses End. Both execution events additionally report a bounded
+suppresses End only for unattributed optional requests. Both execution events additionally report a bounded
 `mxc.capture_denials` enum for the selected access-check configuration; they
 never emit arbitrary capability names or policy contents. These payload changes
 are included in the unreleased version `4` inventory and require

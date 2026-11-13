@@ -867,14 +867,14 @@ mod tests {
                 "validate",
             );
             let events = test_sink::take_requirements();
-            let development = source_contract == Some(ContractVersion::V1_1_0Alpha);
-            assert_eq!(events.len(), if development { 1 } else { 7 });
+            let required = source_contract.is_some();
+            assert_eq!(events.len(), if required { 1 } else { 7 });
             assert!(events.iter().all(|event| event.session_id == session_id));
             assert_eq!(test_sink::take_starts()[0].session_id, session_id);
             assert_eq!(test_sink::take_executions()[0].session_id, session_id);
             assert_eq!(test_sink::take_errors()[0].session_id, session_id);
             let verbose = test_sink::take_verbose();
-            if development {
+            if required {
                 assert_eq!(events[0].name, "MXC.ProcessExited");
                 assert!(verbose.is_empty());
                 super::super::reset_for_test();

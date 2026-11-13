@@ -881,13 +881,9 @@ impl TestFeatureConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
-    /// Explicit telemetry opt-in for this invocation.
-    /// `Some(true)` = opt in (still subject to consent and policy),
-    /// `Some(false)` = force off, `None` = off.
+    /// Compatibility preference ignored by supported-contract Required collection.
+    /// Unattributed requests require `Some(true)`, consent, and permitting policy.
     pub enabled: Option<bool>,
-    /// Caller-requested containment kind, retained for telemetry attribution.
-    #[serde(skip)]
-    pub requested_sandbox_kind: Option<&'static str>,
 }
 
 /// Guest runtime for the Hyperlight backend: what `process.commandLine`
@@ -964,11 +960,14 @@ pub struct HyperlightConfig {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExecutionRequest {
-    /// Exact external contract that produced this request.
+    /// Contract that produced this request, including typed SDK compatibility input.
     ///
-    /// Direct typed SDK construction has no external contract attribution.
+    /// Direct internal construction may omit contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
+    /// Caller-requested containment kind, independent of telemetry preferences.
+    #[serde(skip)]
+    pub requested_sandbox_kind: Option<&'static str>,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
