@@ -52,19 +52,17 @@ Packaged-crate and staged artifact validation retain these full checks without
 starting a VM. These checks require a Windows build host and verifiable
 certificate trust; unsigned, untrusted or non-Microsoft binaries are rejected.
 
-The build embeds fingerprints from the fully verified files. Before opening
-the runtime, MXC checks the exact file inventory, lengths and raw byte samples
-against those fingerprints. It compares the first, middle and last 4 KiB of a
-large file, or the complete contents of a file no larger than 12 KiB. Runtime
-overrides cannot supply their own expected fingerprints.
+At runtime, experimental NVX execution assumes that the approved bundle remains
+unchanged after the build. MXC does not repeat signature, certificate-revocation,
+checksum, inventory or fingerprint checks, and does not retain bundle-file
+verification guards. Deployments must keep the complete approved bundle
+unchanged and supply only trusted runtime overrides. This is an assumption, not
+an immutability guarantee implemented by MXC.
 
-These experimental MXC runtime checks do not verify signatures, certificate
-revocation or full-file checksums, and do not hash the samples. Changes outside
-the sampled regions of large files can pass: a fingerprint is not complete
-integrity or authenticity verification. The native loader and runtime retain
-their own digest and file-seal checks; this change does not remove that work.
-MXC retains read-only file handles for every checked bundle file to prevent
-writing or replacing it while the client holds the guards.
+The native loader and runtime retain their own digest and file-seal checks;
+this change does not remove that work or make the complete execution path
+hash-free. State-directory protection and native-module lifetime handling are
+unchanged.
 
 Use the development `1.1.0-alpha` request contract:
 
@@ -326,9 +324,7 @@ The `aci_edge_sandboxes` dependency owns bundle acquisition, ABI bindings and it
 release pins. MXC separately pins the SHA-256 of the approved release's
 `SHA256SUMS` file in `signature_verification.rs`. Only after checking that pin
 does MXC use the list to verify the exact file inventory and every file hash
-during builds and package validation. The build embeds raw runtime samples
-from those verified file handles; runtime overrides cannot replace the expected
-samples.
+during builds and package validation.
 Update the dependency and MXC's independent pin as a reviewed release change.
 Obtain the new pin from an independently approved archive, never from an
 unchecked override. Review capabilities and cleanup semantics, then run the
@@ -341,9 +337,9 @@ not a ZIP. The crate checks the bundle manifests and
 file checksums; MXC additionally requires its independently approved contents.
 This does not disable build-time certificate checks. A disconnected build or
 package-validation host needs usable certificate-chain and revocation data
-already cached by Windows. Missing, stale or otherwise unverifiable revocation data causes
-verification to fail; provide certificate-server access to refresh it. MXC's
-runtime fingerprint checks do not contact certificate servers.
+already cached by Windows. Missing, stale or otherwise unverifiable revocation
+data causes verification to fail; provide certificate-server access to refresh
+it. MXC does not repeat these checks at runtime.
 
 To use an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP.
 Set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_SHA256` to an independently approved
@@ -352,6 +348,6 @@ compare the overridden archive against its default release hash. The archive's
 own manifests and file checksums establish consistency, not its trusted origin.
 MXC's separate approved-file checks still apply to every extracted file.
 The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
-may relocate the complete approved bundle, not select different contents.
-MXC checks its independent pins before loading the agent, which also checks
-the runtime against the digests compiled into the crate.
+must point to a complete trusted bundle kept unchanged by the deployment.
+MXC does not recheck its independent pins before loading the agent. The native
+loader and runtime retain their existing checks.

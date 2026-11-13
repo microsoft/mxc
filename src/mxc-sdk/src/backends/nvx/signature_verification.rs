@@ -1,10 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
@@ -38,100 +37,29 @@ const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 // Its archive SHA-256 is 35de02f4d7decf840f336111b19dc04d36522629b965615bddf5865ea374f704.
 const APPROVED_CHECKSUMS_SHA256: &str =
     "3df1cd2384764d428902d49c7fa6ad505629298387efae36dab8fe42b954b552";
-const SAMPLE_BYTES: u64 = 4096;
-
-#[derive(Debug)]
-pub(crate) struct BundleFingerprint<'a> {
-    pub(crate) path: &'a str,
-    pub(crate) length: u64,
-    pub(crate) samples: Cow<'a, [u8]>,
-}
 
 /// Keeps the checked files from being overwritten or deleted while the runtime uses them.
 #[derive(Debug)]
-pub(crate) struct BundleGuard {
-    _signed_files: Vec<File>,
-    files: BTreeMap<String, File>,
+pub(crate) struct VerifiedBundle {
+    files: Vec<File>,
     directories: Vec<File>,
 }
 
-impl BundleGuard {
-    pub(crate) fn fingerprints(&mut self) -> io::Result<Vec<BundleFingerprint<'_>>> {
-        self.files
-            .iter_mut()
-            .map(|(path, file)| {
-                let context = |error: io::Error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("cannot fingerprint NVX bundle file {path}: {error}"),
-                    )
-                };
-                let length = file.metadata().map_err(context)?.len();
-                Ok(BundleFingerprint {
-                    path,
-                    length,
-                    samples: Cow::Owned(file_fingerprint(file, length).map_err(context)?),
-                })
-            })
-            .collect()
-    }
-}
-
-/// Embedded samples select runtime fingerprint checks; no samples selects strict build checks.
-pub(crate) fn verify_bundle(
-    directory: &Path,
-    fingerprints: Option<&[BundleFingerprint<'_>]>,
-) -> io::Result<BundleGuard> {
+pub(crate) fn verify_bundle(directory: &Path) -> io::Result<VerifiedBundle> {
     let directory = directory.canonicalize()?;
     let root = lock_directory(&directory)?;
     let bin = lock_directory(&directory.join("bin"))?;
-    let signed_files = if fingerprints.is_none() {
-        let [agent, vmm, images] = BINARIES.map(|name| directory.join("bin").join(name));
-        vec![
+    let [agent, vmm, images] = BINARIES.map(|name| directory.join("bin").join(name));
+    let mut verified = VerifiedBundle {
+        files: vec![
             verify_file(&agent)?,
             verify_file(&vmm)?,
             verify_file(&images)?,
-        ]
-    } else {
-        Vec::new()
-    };
-    let mut verified = BundleGuard {
-        _signed_files: signed_files,
-        files: BTreeMap::new(),
+        ],
         directories: vec![bin, root],
     };
-    match fingerprints {
-        Some(fingerprints) => verify_fingerprints(&directory, &mut verified, fingerprints)?,
-        None => verify_bundle_files(&directory, &mut verified)?,
-    }
+    verify_bundle_files(&directory, &mut verified)?;
     Ok(verified)
-}
-
-pub(crate) fn file_fingerprint(file: &mut (impl Read + Seek), length: u64) -> io::Result<Vec<u8>> {
-    let ranges = if length <= 3 * SAMPLE_BYTES {
-        [(0, length), (0, 0), (0, 0)]
-    } else {
-        [
-            (0, SAMPLE_BYTES),
-            ((length - SAMPLE_BYTES) / 2, SAMPLE_BYTES),
-            (length - SAMPLE_BYTES, SAMPLE_BYTES),
-        ]
-    };
-    let size = length.min(3 * SAMPLE_BYTES) as usize;
-    let mut samples = Vec::new();
-    samples.try_reserve_exact(size).map_err(io::Error::other)?;
-    samples.resize(size, 0);
-    let mut written = 0;
-    for (offset, count) in ranges {
-        if count == 0 {
-            continue;
-        }
-        let count = count as usize;
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut samples[written..written + count])?;
-        written += count;
-    }
-    Ok(samples)
 }
 
 fn file_digest(file: &mut File) -> io::Result<String> {
@@ -177,78 +105,7 @@ fn bundle_inventory(
     Ok(())
 }
 
-fn verify_inventory(
-    directory: &Path,
-    verified: &mut BundleGuard,
-    expected_files: &BTreeSet<String>,
-) -> io::Result<()> {
-    let mut actual_files = BTreeSet::new();
-    bundle_inventory(
-        directory,
-        directory,
-        &mut verified.directories,
-        &mut actual_files,
-    )?;
-    if actual_files != *expected_files {
-        return Err(io::Error::other(format!(
-            "NVX bundle inventory differs from the approved release: missing {:?}, unexpected {:?}",
-            expected_files.difference(&actual_files).collect::<Vec<_>>(),
-            actual_files.difference(expected_files).collect::<Vec<_>>(),
-        )));
-    }
-    Ok(())
-}
-
-fn valid_bundle_name(name: &str) -> bool {
-    !name
-        .split('/')
-        .any(|part| part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':']))
-}
-
-fn verify_fingerprints(
-    directory: &Path,
-    verified: &mut BundleGuard,
-    fingerprints: &[BundleFingerprint<'_>],
-) -> io::Result<()> {
-    let expected: BTreeMap<_, _> = fingerprints
-        .iter()
-        .map(|fingerprint| (fingerprint.path, fingerprint))
-        .collect();
-    if expected.len() != fingerprints.len() || expected.keys().any(|name| !valid_bundle_name(name))
-    {
-        return Err(io::Error::other("invalid compiled NVX bundle fingerprints"));
-    }
-    let expected_files = expected.keys().map(|name| (*name).to_owned()).collect();
-    verify_inventory(directory, verified, &expected_files)?;
-    for name in expected.keys() {
-        let path = name
-            .split('/')
-            .fold(directory.to_path_buf(), |path, part| path.join(part));
-        verified
-            .files
-            .insert((*name).to_owned(), open_bundle_file(&path)?);
-    }
-    for actual in verified.fingerprints()? {
-        let expected = expected
-            .get(actual.path)
-            .ok_or_else(|| io::Error::other("missing compiled NVX bundle fingerprint"))?;
-        if actual.length != expected.length {
-            return Err(io::Error::other(format!(
-                "NVX bundle file {} has a length mismatch: expected {}, got {}",
-                actual.path, expected.length, actual.length
-            )));
-        }
-        if actual.samples != expected.samples {
-            return Err(io::Error::other(format!(
-                "NVX bundle file {} has a sampled fingerprint mismatch",
-                actual.path
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn verify_bundle_files(directory: &Path, verified: &mut BundleGuard) -> io::Result<()> {
+fn verify_bundle_files(directory: &Path, verified: &mut VerifiedBundle) -> io::Result<()> {
     let mut checksums = open_bundle_file(&directory.join("SHA256SUMS"))?;
     let actual = file_digest(&mut checksums)?;
     if actual != APPROVED_CHECKSUMS_SHA256 {
@@ -267,7 +124,9 @@ fn verify_bundle_files(directory: &Path, verified: &mut BundleGuard) -> io::Resu
             .ok_or_else(|| io::Error::other("invalid approved NVX checksum entry"))?;
         if hash.len() != 64
             || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || !valid_bundle_name(name)
+            || name.split('/').any(|part| {
+                part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':'])
+            })
             || expected.insert(name.to_owned(), hash.to_owned()).is_some()
         {
             return Err(io::Error::other("invalid approved NVX checksum entry"));
@@ -275,7 +134,20 @@ fn verify_bundle_files(directory: &Path, verified: &mut BundleGuard) -> io::Resu
     }
     let mut expected_files: BTreeSet<_> = expected.keys().cloned().collect();
     expected_files.insert("SHA256SUMS".to_owned());
-    verify_inventory(directory, verified, &expected_files)?;
+    let mut actual_files = BTreeSet::new();
+    bundle_inventory(
+        directory,
+        directory,
+        &mut verified.directories,
+        &mut actual_files,
+    )?;
+    if actual_files != expected_files {
+        return Err(io::Error::other(format!(
+            "NVX bundle inventory differs from the approved release: missing {:?}, unexpected {:?}",
+            expected_files.difference(&actual_files).collect::<Vec<_>>(),
+            actual_files.difference(&expected_files).collect::<Vec<_>>(),
+        )));
+    }
     for (name, expected_hash) in expected {
         let path = name
             .split('/')
@@ -287,9 +159,9 @@ fn verify_bundle_files(directory: &Path, verified: &mut BundleGuard) -> io::Resu
                 "NVX bundle file {name} has a SHA-256 mismatch: expected {expected_hash}, got {actual}"
             )));
         }
-        verified.files.insert(name, file);
+        verified.files.push(file);
     }
-    verified.files.insert("SHA256SUMS".to_owned(), checksums);
+    verified.files.push(checksums);
     Ok(())
 }
 
