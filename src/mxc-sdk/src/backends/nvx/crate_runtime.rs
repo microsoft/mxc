@@ -168,7 +168,6 @@ pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
 struct ClientInner {
     backend: Arc<AgentBackend>,
     client: AciEdgeSandbox,
-    _signatures: super::signature_verification::VerifiedBundle,
     _state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 }
 
@@ -194,8 +193,6 @@ fn create_client_with_guard(
         MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
     })?;
     let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
-    let signatures = super::signature_verification::verify_bundle(bundle.directory())
-        .map_err(|error| MxcError::backend_unavailable(error.to_string()))?;
     // The crate's output pump can outlive an unknown execution outcome and client teardown.
     crate::mxc_common::module_lifetime::pin_current_module()
         .map_err(MxcError::backend_unavailable)?;
@@ -205,7 +202,6 @@ fn create_client_with_guard(
     Ok(NvxClient(Some(ClientInner {
         backend,
         client,
-        _signatures: signatures,
         _state_root_guard: guard,
     })))
 }
@@ -851,7 +847,6 @@ impl SandboxClient for NvxClient {
         let Some(ClientInner {
             backend,
             client,
-            _signatures,
             _state_root_guard,
         }) = self.0.take()
         else {

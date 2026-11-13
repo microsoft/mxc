@@ -44,23 +44,25 @@ it because typed V1 does not support MicroVM targeting. The bundle retains the
 NVX release's signatures and pinned hashes; MXC's executable-signing step does
 not modify it.
 
-MXC also checks the Authenticode signatures of `aci_edge_agent.dll`,
-`openvmm.exe`, and `direct-images.exe` during Windows x64 MicroVM builds and
-before opening the runtime. Windows must trust the signatures and identify
-Microsoft Corporation as the publisher. Valid signing timestamps are honoured.
-MXC also checks the entire bundle, including the guest kernel, initramfs,
-guest agent and supporting files, against independently approved release hashes.
-Build and runtime overrides cannot replace that approved file set or its hashes.
-Packaged-crate and staged Windows artifact validation rerun the same signature
-and whole-bundle checks without starting a VM.
+During Windows x64 MicroVM builds, MXC verifies the Authenticode signatures of
+`aci_edge_agent.dll`, `openvmm.exe`, and `direct-images.exe`, including Microsoft
+publisher, certificate-chain, revocation and signing-timestamp checks. It also
+checks the entire bundle against independently approved release hashes.
+Packaged-crate and staged artifact validation retain these full checks without
+starting a VM. These checks require a Windows build host and verifiable
+certificate trust; unsigned, untrusted or non-Microsoft binaries are rejected.
 
-Signature validation allows certificate-server access for chain and revocation
-checks. An unsigned, modified, untrusted or non-Microsoft binary is rejected;
-an indeterminate trust result is not accepted. Restore the complete official
-bundle and ensure the build or execution host can establish certificate trust.
-Windows-targeted MicroVM builds require a Windows build host for these checks.
-MXC retains read-only file handles for every verified bundle file to prevent
-writing or replacing it while the client holds the verification guards.
+At runtime, experimental NVX execution assumes that the approved bundle remains
+unchanged after the build. MXC does not repeat signature, certificate-revocation,
+checksum, inventory or fingerprint checks, and does not retain bundle-file
+verification guards. Deployments must keep the complete approved bundle
+unchanged and supply only trusted runtime overrides. This is an assumption, not
+an immutability guarantee implemented by MXC.
+
+The native loader and runtime retain their own digest and file-seal checks;
+this change does not remove that work or make the complete execution path
+hash-free. State-directory protection and native-module lifetime handling are
+unchanged.
 
 Use the development `1.1.0-alpha` request contract:
 
@@ -321,7 +323,8 @@ cargo test --locked -p mxc-sdk --features microvm --test nvx_e2e --target x86_64
 The `aci_edge_sandboxes` dependency owns bundle acquisition, ABI bindings and its
 release pins. MXC separately pins the SHA-256 of the approved release's
 `SHA256SUMS` file in `signature_verification.rs`. Only after checking that pin
-does MXC use the list to verify the exact file inventory and every file hash.
+does MXC use the list to verify the exact file inventory and every file hash
+during builds and package validation.
 Update the dependency and MXC's independent pin as a reviewed release change.
 Obtain the new pin from an independently approved archive, never from an
 unchecked override. Review capabilities and cleanup semantics, then run the
@@ -332,10 +335,11 @@ To avoid downloading the runtime bundle, set
 `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to the complete **extracted directory**,
 not a ZIP. The crate checks the bundle manifests and
 file checksums; MXC additionally requires its independently approved contents.
-This does not disable certificate checks. A disconnected build or execution
-host needs usable certificate-chain and revocation data already cached by
-Windows. Missing, stale or otherwise unverifiable revocation data causes
-verification to fail; provide certificate-server access to refresh it.
+This does not disable build-time certificate checks. A disconnected build or
+package-validation host needs usable certificate-chain and revocation data
+already cached by Windows. Missing, stale or otherwise unverifiable revocation
+data causes verification to fail; provide certificate-server access to refresh
+it. MXC does not repeat these checks at runtime.
 
 To use an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP.
 Set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_SHA256` to an independently approved
@@ -344,6 +348,6 @@ compare the overridden archive against its default release hash. The archive's
 own manifests and file checksums establish consistency, not its trusted origin.
 MXC's separate approved-file checks still apply to every extracted file.
 The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
-may relocate the complete approved bundle, not select different contents.
-MXC checks its independent pins before loading the agent, which also checks
-the runtime against the digests compiled into the crate.
+must point to a complete trusted bundle kept unchanged by the deployment.
+MXC does not recheck its independent pins before loading the agent. The native
+loader and runtime retain their existing checks.
