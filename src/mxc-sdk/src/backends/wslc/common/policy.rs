@@ -22,16 +22,25 @@
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 //!
+//! Create-and-run also accepts egress rules and mixed postures, which
+//! [`create_and_run_network_mode`] routes through the built-in proxy.
+//!
 //! Checks run filesystem → ui → network, so a request that trips several gets a
 //! stable message rather than one that depends on field order (asserted by
 //! tests). [`reject_ui_policy`] applies to both one-shot and state-aware validation.
 
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
+use std::net::IpAddr;
+
+use crate::mxc_common::models::{
+    ExecutionRequest, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPort,
+    NetworkProtocol,
+};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::validator::NetworkPolicySupport;
 
 use crate::wslc_common::policy_mapping::validate_denied_path_overlap;
 use crate::wslc_common::process_env::EnvScope;
+use crate::wslc_gateway_policy as gateway;
 
 const ERR_FILESYSTEM_IMMUTABLE: &str =
     "filesystem policy (readwritePaths / readonlyPaths / deniedPaths and processContainer.filesystem.enumeratePaths) is bound to the provision \
@@ -52,6 +61,9 @@ const ERR_PROXY_MISMATCH: &str =
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: runtimeConfig.networkProxy requires a proxy url reachable from inside the container; \
      a host-loopback proxy is not reachable from the container's own network namespace";
+const ERR_PROXY_WITHOUT_ROUTE: &str =
+    "WSLc runtimeConfig.networkProxy requires bridged networking; a proxy cannot create a route \
+     in an isolated container";
 const ERR_UI_POLICY: &str =
     "WSLc: the ui section is not supported. The backend has no mechanism to enforce UI \
      restrictions on a container, so no ui posture is truthful here. Omitting the ui section is \
@@ -73,6 +85,235 @@ pub(crate) fn network_policy_support() -> NetworkPolicySupport {
         | NetworkPolicySupport::INGRESS_DEFAULT
         | NetworkPolicySupport::HOST_LOOPBACK
         | NetworkPolicySupport::RUNTIME_PROXY
+}
+
+/// Create-and-run also filters egress rules through the built-in proxy.
+pub(crate) fn create_and_run_network_policy_support() -> NetworkPolicySupport {
+    network_policy_support() | NetworkPolicySupport::EGRESS_RULES
+}
+
+/// How a create-and-run container is networked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NetworkMode {
+    /// No network at all.
+    None,
+    /// The session's NAT network, unfiltered.
+    Bridged,
+    /// An internal network whose only way out is the built-in proxy.
+    Proxied(ProxiedEgress),
+}
+
+/// Egress filtering for [`NetworkMode::Proxied`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxiedEgress {
+    pub(crate) egress: gateway::Egress,
+    /// Deny entries the proxy has nothing to apply to.
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Choose how a create-and-run container is networked, rejecting what the
+/// chosen mode cannot enforce. `field_path` names the port mappings list.
+pub(crate) fn create_and_run_network_mode(
+    request: &ExecutionRequest,
+    field_path: &str,
+    has_port_mappings: bool,
+) -> Result<NetworkMode, MxcError> {
+    let egress = request.policy.network_egress.clone().unwrap_or_default();
+    let ingress = request.policy.network_ingress.clone().unwrap_or_default();
+    let proxy = request.policy.network_proxy.is_enabled();
+
+    // Nothing reaches a container with no network, so ingress and deny
+    // rules are already enforced.
+    if egress.default == NetworkAction::Deny
+        && egress.allow.is_empty()
+        && ingress.host_loopback == NetworkAction::Deny
+    {
+        if proxy {
+            return Err(MxcError::policy_validation(ERR_PROXY_WITHOUT_ROUTE));
+        }
+        reject_port_mappings_without_bridged_network(request, field_path, has_port_mappings)?;
+        return Ok(NetworkMode::None);
+    }
+    if egress.default == NetworkAction::Allow
+        && egress.allow.is_empty()
+        && egress.deny.is_empty()
+        && ingress.default == NetworkAction::Allow
+        && ingress.host_loopback == NetworkAction::Allow
+    {
+        return Ok(NetworkMode::Bridged);
+    }
+
+    if has_port_mappings {
+        return Err(MxcError::policy_validation(format!(
+            "WSLc: {field_path} cannot be combined with egress filtering by the built-in proxy. \
+             Remove the port mappings, or use bridged networking: network.egress.default, \
+             network.ingress.default and network.ingress.hostLoopback all 'allow', with no \
+             egress rules"
+        )));
+    }
+    if ingress.host_loopback == NetworkAction::Allow {
+        return Err(MxcError::policy_validation(
+            "WSLc: network.ingress.hostLoopback 'allow' cannot be combined with egress filtering \
+             by the built-in proxy. Set it to 'deny', or use bridged networking",
+        ));
+    }
+    if proxy {
+        return Err(MxcError::policy_validation(
+            "WSLc: runtimeConfig.networkProxy cannot be combined with egress filtering by the \
+             built-in proxy. Remove the proxy, or use bridged networking",
+        ));
+    }
+    proxied_egress(&egress).map(NetworkMode::Proxied)
+}
+
+/// Lower egress rules to the proxy's TCP-only rules.
+fn proxied_egress(egress: &NetworkEgressPolicy) -> Result<ProxiedEgress, MxcError> {
+    let mut allow = Vec::with_capacity(egress.allow.len());
+    for rule in &egress.allow {
+        if let Some(port) = rule
+            .ports
+            .iter()
+            .find(|p| p.protocol != NetworkProtocol::Tcp)
+        {
+            return Err(MxcError::policy_validation(format!(
+                "WSLc: network.egress.allow supports only protocol 'tcp' (got '{}'); the \
+                 built-in proxy carries TCP only",
+                protocol_name(port.protocol)
+            )));
+        }
+        let to = targets(&rule.to)?;
+        if let Some(target) = to
+            .iter()
+            .find(|t| gateway::GATEWAY_SUBNETS.contains_network(&t.cidr))
+        {
+            return Err(MxcError::policy_validation(format!(
+                "WSLc: network.egress.allow target {} is inside {}, which the built-in proxy \
+                 reserves for its own networks",
+                target.cidr,
+                gateway::GATEWAY_SUBNETS
+            )));
+        }
+        allow.push(gateway::Rule {
+            to,
+            ports: port_ranges(&rule.ports)?,
+        });
+    }
+
+    let mut deny = Vec::with_capacity(egress.deny.len());
+    let mut warnings = Vec::new();
+    for rule in &egress.deny {
+        let to = targets(&rule.to)?;
+        let (tcp, other): (Vec<NetworkPort>, Vec<NetworkPort>) = rule
+            .ports
+            .iter()
+            .cloned()
+            .partition(|p| matches!(p.protocol, NetworkProtocol::Tcp | NetworkProtocol::Any));
+        for port in &other {
+            warnings.push(format!(
+                "network.egress.deny entry for '{}' has no effect: the built-in proxy carries \
+                 TCP only",
+                protocol_name(port.protocol)
+            ));
+        }
+        if !rule.ports.is_empty() && tcp.is_empty() {
+            continue;
+        }
+        deny.push(gateway::Rule {
+            to,
+            ports: port_ranges(&tcp)?,
+        });
+    }
+
+    Ok(ProxiedEgress {
+        egress: gateway::Egress {
+            default: match egress.default {
+                NetworkAction::Allow => gateway::Action::Allow,
+                NetworkAction::Deny => gateway::Action::Deny,
+            },
+            allow,
+            deny,
+        },
+        warnings,
+    })
+}
+
+fn protocol_name(protocol: NetworkProtocol) -> &'static str {
+    match protocol {
+        NetworkProtocol::Tcp => "tcp",
+        NetworkProtocol::Udp => "udp",
+        NetworkProtocol::Icmp => "icmp",
+        NetworkProtocol::Any => "any",
+    }
+}
+
+/// An empty `to` matches every IPv4 destination.
+fn targets(to: &[NetworkPeer]) -> Result<Vec<gateway::Target>, MxcError> {
+    if to.is_empty() {
+        return Ok(vec![gateway::Target {
+            cidr: gateway::Cidr::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+            except: Vec::new(),
+        }]);
+    }
+    to.iter()
+        .map(|peer| {
+            Ok(gateway::Target {
+                cidr: ipv4_cidr(&peer.cidr)?,
+                except: peer
+                    .except
+                    .iter()
+                    .map(ipv4_cidr)
+                    .collect::<Result<_, _>>()?,
+            })
+        })
+        .collect()
+}
+
+fn ipv4_cidr(cidr: &NetworkCidr) -> Result<gateway::Cidr, MxcError> {
+    match cidr.address {
+        IpAddr::V4(address) if cidr.prefix_length <= 32 => {
+            Ok(gateway::Cidr::new(address, cidr.prefix_length))
+        }
+        IpAddr::V4(address) => Err(MxcError::policy_validation(format!(
+            "WSLc: network.egress CIDR {address}/{} has an invalid prefix length",
+            cidr.prefix_length
+        ))),
+        IpAddr::V6(address) => Err(MxcError::policy_validation(format!(
+            "WSLc: network.egress CIDR {address}/{} is IPv6; the built-in proxy supports IPv4 \
+             only",
+            cidr.prefix_length
+        ))),
+    }
+}
+
+/// TCP port ranges; `None` matches every port.
+fn port_ranges(ports: &[NetworkPort]) -> Result<Option<Vec<gateway::PortRange>>, MxcError> {
+    let mut ranges = Vec::with_capacity(ports.len());
+    let mut every_port = ports.is_empty();
+    for port in ports {
+        match (port.port, port.end_port) {
+            (Some(0), _) | (_, Some(0)) => {
+                return Err(MxcError::policy_validation(
+                    "WSLc: network.egress port values must be between 1 and 65535",
+                ));
+            }
+            (None, Some(end)) => {
+                return Err(MxcError::policy_validation(format!(
+                    "WSLc: network.egress endPort {end} needs a matching port"
+                )));
+            }
+            (Some(start), Some(end)) if end < start => {
+                return Err(MxcError::policy_validation(format!(
+                    "WSLc: network.egress port range {start}-{end} ends before it starts"
+                )));
+            }
+            (Some(start), end) => ranges.push(gateway::PortRange {
+                start,
+                end: end.unwrap_or(start),
+            }),
+            (None, None) => every_port = true,
+        }
+    }
+    Ok((!every_port).then_some(ranges))
 }
 
 /// Read the directional posture; absent egress defaults to deny.
@@ -132,10 +373,7 @@ pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result
         ));
     }
     if isolated && policy.network_proxy.is_enabled() {
-        return Err(MxcError::policy_validation(
-            "WSLc runtimeConfig.networkProxy requires bridged networking; a proxy cannot \
-             create a route in an isolated container",
-        ));
+        return Err(MxcError::policy_validation(ERR_PROXY_WITHOUT_ROUTE));
     }
     Ok(())
 }
@@ -867,6 +1105,155 @@ mod tests {
         assert_policy_validation(
             validate_exec_policy(&request).unwrap_err(),
             "must not carry credentials",
+        );
+    }
+
+    // ---- create-and-run network modes ----
+
+    fn one_shot(network: &str) -> ExecutionRequest {
+        parsed(&format!(
+            r#"{{"version":"0.9.0-alpha","containment":"wslc","process":{{"commandLine":"echo"}},"network":{network}}}"#
+        ))
+    }
+
+    fn mode(network: &str) -> Result<NetworkMode, MxcError> {
+        create_and_run_network_mode(&one_shot(network), "wslc.portMappings", false)
+    }
+
+    fn proxied(network: &str) -> ProxiedEgress {
+        match mode(network).unwrap() {
+            NetworkMode::Proxied(proxied) => proxied,
+            other => panic!("{network} gave {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_and_run_uses_the_proxy_only_for_postures_the_sdk_cannot_express() {
+        assert_eq!(mode("{}").unwrap(), NetworkMode::None);
+        assert_eq!(
+            mode(
+                r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]},"ingress":{"default":"allow"}}"#
+            )
+            .unwrap(),
+            NetworkMode::None
+        );
+        assert_eq!(
+            mode(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#)
+                .unwrap(),
+            NetworkMode::Bridged
+        );
+
+        let open = proxied(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#);
+        assert_eq!(open.egress.default, gateway::Action::Allow);
+        assert!(open.egress.allow.is_empty() && open.egress.deny.is_empty());
+
+        let filtered = proxied(
+            r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24","except":["192.0.2.8/29"]}],"ports":[{"protocol":"tcp","port":8000,"endPort":8010},{"protocol":"tcp","port":443}]}]}}"#,
+        );
+        assert_eq!(filtered.egress.default, gateway::Action::Deny);
+        assert_eq!(
+            filtered.egress.allow,
+            vec![gateway::Rule {
+                to: vec![gateway::Target {
+                    cidr: "192.0.2.0/24".parse().unwrap(),
+                    except: vec!["192.0.2.8/29".parse().unwrap()],
+                }],
+                ports: Some(vec![
+                    gateway::PortRange {
+                        start: 8000,
+                        end: 8010
+                    },
+                    gateway::PortRange {
+                        start: 443,
+                        end: 443
+                    },
+                ]),
+            }]
+        );
+        assert!(
+            create_and_run_network_policy_support().contains(NetworkPolicySupport::EGRESS_RULES)
+        );
+    }
+
+    #[test]
+    fn the_proxy_rejects_what_it_cannot_enforce() {
+        let rule = r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}]}]}}"#;
+        assert_policy_validation(
+            create_and_run_network_mode(&one_shot(rule), "wslc.portMappings", true).unwrap_err(),
+            "wslc.portMappings cannot be combined",
+        );
+        let mut with_proxy = one_shot(rule);
+        with_proxy.policy.network_proxy = url_proxy();
+        assert_policy_validation(
+            create_and_run_network_mode(&with_proxy, "wslc.portMappings", false).unwrap_err(),
+            "runtimeConfig.networkProxy cannot be combined",
+        );
+        for (network, needle) in [
+            (
+                r#"{"egress":{"default":"allow"},"ingress":{"hostLoopback":"allow"}}"#,
+                "hostLoopback 'allow' cannot be combined",
+            ),
+            (
+                r#"{"egress":{"allow":[{"ports":[{"protocol":"udp","port":53}]}]}}"#,
+                "only protocol 'tcp' (got 'udp')",
+            ),
+            (
+                r#"{"egress":{"allow":[{"ports":[{"protocol":"any"}]}]}}"#,
+                "(got 'any')",
+            ),
+            (
+                r#"{"egress":{"allow":[{"to":[{"cidr":"2001:db8::/32"}]}]}}"#,
+                "is IPv6",
+            ),
+            (
+                r#"{"egress":{"default":"allow","deny":[{"to":[{"cidr":"::/0"}]}]}}"#,
+                "is IPv6",
+            ),
+            (
+                r#"{"egress":{"allow":[{"to":[{"cidr":"10.231.1.0/24"}]}]}}"#,
+                "reserves for its own networks",
+            ),
+        ] {
+            assert_policy_validation(mode(network).unwrap_err(), needle);
+        }
+    }
+
+    #[test]
+    fn deny_rules_keep_only_their_tcp_entries() {
+        let p = proxied(
+            r#"{"egress":{"default":"allow","deny":[{"ports":[{"protocol":"udp","port":53}]},{"to":[{"cidr":"10.0.0.0/8"}],"ports":[{"protocol":"icmp"},{"protocol":"any","port":22}]},{"to":[{"cidr":"10.231.0.0/16"}]}]}}"#,
+        );
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert_eq!(
+            p.egress.deny,
+            vec![
+                gateway::Rule {
+                    to: vec![gateway::Target {
+                        cidr: "10.0.0.0/8".parse().unwrap(),
+                        except: vec![],
+                    }],
+                    ports: Some(vec![gateway::PortRange { start: 22, end: 22 }]),
+                },
+                gateway::Rule {
+                    to: vec![gateway::Target {
+                        cidr: "10.231.0.0/16".parse().unwrap(),
+                        except: vec![],
+                    }],
+                    ports: None,
+                },
+            ]
+        );
+
+        let everywhere = proxied(r#"{"egress":{"allow":[{"ports":[{"protocol":"tcp"}]}]}}"#);
+        assert_eq!(
+            everywhere.egress.allow[0],
+            gateway::Rule {
+                to: vec![gateway::Target {
+                    cidr: "0.0.0.0/0".parse().unwrap(),
+                    except: vec![],
+                }],
+                ports: None,
+            }
         );
     }
 }

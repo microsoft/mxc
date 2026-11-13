@@ -626,9 +626,11 @@ while a potentially running workload remains.
 
 ## Supported and rejected policy fields
 
-WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
+Container lifecycle networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
 `Bridged`); there is no per-host filtering or independent ingress/host-loopback
-restriction primitive. Proxy configuration supplies environment variables, not
+restriction primitive. Create-and-run execution filters egress with the
+[built-in proxy](wsl-container-getting-started.md#built-in-proxy) instead.
+Proxy configuration supplies environment variables, not
 a firewall. Schema `0.9.0-alpha` supports two combinations:
 
 | Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |

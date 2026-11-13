@@ -518,16 +518,54 @@ no separate `--setup-wslc` step is required.
 
 | Exact v0.9 policy | WSLC behavior |
 |---|---|
-| Egress, ingress, and host-loopback defaults all `allow` | Bridged networking without independent directional filtering |
-| All three defaults `deny` (also the omitted defaults) | No networking (isolated) |
-| Mixed allow/deny directions or egress rules | Rejected; WSLC cannot enforce that combination |
+| Egress, ingress, and host-loopback defaults all `allow`, no egress rules | Bridged networking without independent directional filtering |
+| All three defaults `deny` (also the omitted defaults), no egress rules | No networking (isolated) |
+| Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
+| Any other combination, container lifecycle operations | Rejected |
 
-> **No per-host filtering primitive exists.** The container lacks
-> `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
-> unenforced. The removed legacy `allowOutbound` setting and JSON host-list
-> fields are not accepted by any supported contract.
+> The removed legacy `allowOutbound` setting and JSON host-list fields are not
+> accepted by any supported contract.
 
-### Network proxy (cooperative, unprivileged)
+### Built-in proxy
+
+For create-and-run execution, MXC enforces egress rules and mixed defaults
+with a filtering proxy that runs in a second container in the same session.
+The workload's only network is internal and has no route out, so its traffic
+leaves only through the proxy.
+
+- The proxy filters TCP by IPv4 CIDR and port. A `deny` rule wins over an
+  `allow` rule; otherwise `network.egress.default` applies. Loopback,
+  link-local, multicast, and `10.231.0.0/16` are always denied.
+
+- MXC points `HTTP_PROXY`/`HTTPS_PROXY` (and the lower-case forms) at the
+  proxy and sets `NO_PROXY` empty. Clients must use the proxy, through
+  `CONNECT` or an absolute `http://` request; direct connections fail.
+
+- The workload's `/etc/resolv.conf` names the proxy. It forwards DNS when
+  `network.egress.default` is `allow` or any `allow` rule exists; otherwise it
+  refuses lookups, including hostnames in proxy requests. The proxy resolves
+  hostnames itself and checks the resulting address.
+
+- DNS is outside the egress rules. The proxy resolves names through the WSL
+  and Windows resolvers, so a `deny` rule covering port 53 doesn't block
+  lookups. Known issue: when `network.egress.default` is `allow` or any `allow` rule
+  exists, a workload can send data out through DNS queries to any name, even
+  when every TCP destination it reaches is filtered.
+
+- Rejected with the proxy: `allow` entries for any protocol except `tcp`, IPv6
+  CIDRs, targets inside `10.231.0.0/16`, `wslc.portMappings`,
+  `hostLoopback: "allow"`, and `runtimeConfig.networkProxy`. `deny` entries
+  for `udp` or `icmp` have no effect, because only TCP leaves through the
+  proxy, and log a warning.
+
+- The proxy image ships as `mxc-wslc-gateway.tar` beside the MXC binaries and
+  is imported into the image store on first use. If the tar is missing or
+  holds a different image than the MXC build expects, the run fails before any
+  container starts; reinstall MXC.
+
+- Proxy decisions appear in the run log as `[WSLC][gateway]` lines.
+
+### External network proxy (cooperative, unprivileged)
 
 WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `runtimeConfig.networkProxy`
 routes a container's egress through a proxy you provide. WSLC cannot apply an
@@ -577,25 +615,19 @@ bridged posture shown above; a proxy cannot make isolated networking reach an
 external listener. Execution in an existing container (`exec`) instead supplies only `runtimeConfig` and
 inherits its provisioned network posture.
 
-### Per-host filtering is not supported
+### Filtering for container lifecycle operations
 
-WSLC **cannot** enforce per-host egress filtering. Directional allow/deny rules
-would require in-container `iptables`
-rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
-`Privileged` flag does not grant it), so those rules cannot be applied — and MXC
-has no VM-level enforcement hook either (WSLC cannot expose one without breaking
-other security promises such as MDE). Rather than fail the run at exec time,
-such configs are **rejected before provisioning**:
+Container lifecycle operations do not use the built-in proxy yet. A
+provisioned container is either isolated (deny/deny/deny) or bridged
+(allow/allow/allow), and any other network policy is **rejected before
+provisioning**:
 
 ```
 WSLc does not support network.egress allow/deny rules; networking is all-or-nothing
 ```
 
-Use a runtime proxy with unrestricted bridged networking for cooperative host
-filtering at the proxy layer. Without filtering rules, v0.9 accepts isolated
-deny/deny/deny or unrestricted allow/allow/allow across egress, ingress, and
-host-loopback. Mixed directions are rejected because no independent restriction
-primitive exists.
+Use a runtime proxy with unrestricted bridged networking for cooperative
+filtering at the proxy layer.
 
 ### Retired enforcement and inbound fields
 
@@ -765,7 +797,7 @@ images — cannot be used.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 3.0.5, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (specified by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build that includes a newer SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress. For a lifecycle operation the store is a daemon slot, so warm it with `setup-wslc.ps1 -DaemonSlots 1` |
+| `WSLC image '<name>' is not cached, and this sandbox's egress default is deny` | A config with `network.egress.default` `deny` named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress. For a lifecycle operation the store is a daemon slot, so warm it with `setup-wslc.ps1 -DaemonSlots 1` |
 | `WSLc store unavailable: the image store at <path> is already held by another live session` | Two processes reached the same store, which admits one live session | Wait for the holder to release it. A running `wxc-wslc-daemon.exe` releases its slot after `MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS` (default 300s); a create-and-run execution releases its store when the run ends |
 | `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
 | `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |

@@ -29,6 +29,9 @@ pub const S_OK: HRESULT = 0;
 /// Unspecified COM failure. Not declared in `wslcsdk.h`, so defined here.
 pub const E_FAIL: HRESULT = 0x8000_4005_u32 as HRESULT;
 
+/// The service has released the object behind a handle.
+pub const RPC_E_DISCONNECTED: HRESULT = 0x8001_0108_u32 as HRESULT;
+
 // The header declares its error codes with `MAKE_HRESULT(SEVERITY_ERROR,
 // FACILITY_ITF, WSLC_E_BASE + n)`, which bindgen cannot evaluate, so only the
 // base survives into the generated module. Packing severity 1 and facility 4
@@ -39,6 +42,10 @@ const fn wslc_error(offset: u32) -> HRESULT {
 
 /// The registry answered, but the image reference does not resolve there or needs credentials.
 pub const WSLC_E_IMAGE_NOT_FOUND: HRESULT = wslc_error(1);
+
+pub const WSLC_E_CONTAINER_NOT_FOUND: HRESULT = wslc_error(3);
+
+pub const WSLC_E_NETWORK_NOT_FOUND: HRESULT = wslc_error(9);
 
 /// Administrative policy on this host forbids reaching the registry.
 pub const WSLC_E_REGISTRY_BLOCKED_BY_POLICY: HRESULT = wslc_error(13);
@@ -187,6 +194,13 @@ impl WslcSdk {
             WslcGetMissingComponents,
             // Present only in SDKs that can open a process's stdin.
             WslcSetProcessSettingsFlags,
+            // Built-in proxy.
+            WslcCreateSessionNetwork,
+            WslcDeleteSessionNetwork,
+            WslcSetContainerSettingsNetworks,
+            WslcSetContainerSettingsName,
+            WslcOpenContainer,
+            WslcGetContainerState,
         );
         if missing.is_empty() {
             return Ok(());
@@ -633,6 +647,8 @@ mod tests {
     fn wslc_error_codes_match_the_header() {
         // The values the header spells out in its trailing comments.
         assert_eq!(WSLC_E_IMAGE_NOT_FOUND as u32, 0x8004_0601);
+        assert_eq!(WSLC_E_CONTAINER_NOT_FOUND as u32, 0x8004_0603);
+        assert_eq!(WSLC_E_NETWORK_NOT_FOUND as u32, 0x8004_0609);
         assert_eq!(WSLC_E_REGISTRY_BLOCKED_BY_POLICY as u32, 0x8004_060D);
     }
 }
