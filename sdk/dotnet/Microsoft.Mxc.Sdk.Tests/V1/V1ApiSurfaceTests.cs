@@ -30,6 +30,7 @@ public sealed class V1ApiSurfaceTests
         {
             typeof(Dev.JsonOptions),
             typeof(Dev.PtyJsonOptions),
+            typeof(Dev.SpawnWithExtendedJsonOptions),
             typeof(Dev.MxcContainer),
             typeof(Dev.MxcLifecycle),
         };
@@ -66,7 +67,7 @@ public sealed class V1ApiSurfaceTests
             typeof(RunOptions),
             typeof(SpawnOptions),
             typeof(SpawnWithPtyOptions),
-            typeof(SpawnWithInheritedStdioOptions),
+            typeof(SpawnWithExtendedOptions),
             typeof(ProvisionOptions),
             typeof(StartOptions),
             typeof(StopOptions),

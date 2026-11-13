@@ -125,27 +125,30 @@ public static class MxcContainer
         }
     }
 
-    /// <summary>
-    /// Spawn caller-authored exact JSON attached to the calling process's
-    /// standard input, output, and error.
-    /// </summary>
-    public static MxcProcess SpawnWithInheritedStdioJson(string json, JsonOptions? options = null)
+    /// <summary>Spawn caller-authored exact JSON with stdio chosen in the options.</summary>
+    public static MxcProcess SpawnWithExtendedOptionsJson(
+        string json,
+        SpawnWithExtendedJsonOptions? options = null)
     {
-        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithInheritedStdioJson));
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithExtendedOptionsJson));
         unsafe
         {
             fixed (byte* requestPtr = request)
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_with_inherited_stdio_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
+                var status = NativeMethods.mxc_spawn_extended_json(
+                    requestPtr,
+                    options?.Experimental == true ? 1 : 0,
+                    (int)(options?.Stdio ?? SpawnStdio.Pipes),
+                    &handle,
+                    &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
                     {
                         throw NativeError.ToException(
-                            status, error, "spawning exact JSON with inherited stdio failed");
+                            status, error, "spawning exact JSON with extended options failed");
                     }
                     finally
                     {

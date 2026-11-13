@@ -213,7 +213,7 @@ function Invoke-ProcessContainerStreamingTests {
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
                 'DevJson_CapturesOutputAndStreamsInput',
-                'SpawnWithInheritedStdio_UsesCallerStdio')
+                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
@@ -225,8 +225,8 @@ function Invoke-ProcessContainerStreamingTests {
             'V1.Dev runJson captures output and exit status',
             'V1.Dev spawnJson supports bidirectional pipes',
             'V1.Dev spawnWithPtyJson supports an interactive terminal',
-            'spawnWithInheritedStdio uses the calling process stdio',
-            'V1.Dev spawnWithInheritedStdioJson uses the calling process stdio'
+            'spawnWithExtendedOptions with inherited stdio uses the calling process stdio',
+            'V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio'
         )
         Push-Location $nodeSuiteRoot
         try {

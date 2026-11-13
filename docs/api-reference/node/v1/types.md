@@ -828,13 +828,23 @@ export interface SpawnWithPtyOptions {
 ```
 
 
-## `@microsoft/mxc-sdk/v1::SpawnWithInheritedStdioOptions`
+## `@microsoft/mxc-sdk/v1::SpawnStdio`
 
-Invocation controls for spawnWithInheritedStdio.
+How `spawnWithExtendedOptions` connects the workload's standard streams.
 
 ```typescript
-export interface SpawnWithInheritedStdioOptions {
+export type SpawnStdio = 'pipes' | 'inherit';
+```
+
+
+## `@microsoft/mxc-sdk/v1::SpawnWithExtendedOptions`
+
+Invocation controls for spawnWithExtendedOptions.
+
+```typescript
+export interface SpawnWithExtendedOptions {
   telemetry?: TelemetryConfig;
+  stdio?: SpawnStdio; // defaults to 'pipes'
 }
 ```
 

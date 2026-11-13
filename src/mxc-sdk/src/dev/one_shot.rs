@@ -6,7 +6,7 @@
 use crate::mxc_engine::Error;
 use crate::sandbox::{ExecutionResult, MxcProcess, MxcPtyProcess};
 
-use super::{JsonOptions, PtyJsonOptions};
+use super::{JsonOptions, PtyJsonOptions, SpawnWithExtendedJsonOptions};
 
 /// Run a caller-authored exact-version one-shot request to completion and capture its output.
 ///
@@ -32,13 +32,12 @@ pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions) -> Result<MxcPty
     crate::__ffi::spawn_with_pty_json(json, options.experimental, options.size)
 }
 
-/// Spawn a caller-authored exact-version one-shot request attached to the
-/// calling process's stdin, stdout, and stderr.
-pub fn spawn_with_inherited_stdio_json(
+/// Spawn a caller-authored exact-version one-shot request with stdio chosen in `options`.
+pub fn spawn_with_extended_options_json(
     json: &str,
-    options: JsonOptions,
+    options: SpawnWithExtendedJsonOptions,
 ) -> Result<MxcProcess, Error> {
-    crate::__ffi::spawn_with_inherited_stdio_json(json, options.experimental)
+    crate::__ffi::spawn_with_extended_options_json(json, options.experimental, options.stdio)
 }
 
 #[cfg(test)]
@@ -59,13 +58,21 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("missing version must fail"),
         };
-        let inherited_error = match spawn_with_inherited_stdio_json(json, options) {
-            Err(error) => error,
-            Ok(_) => panic!("missing version must fail"),
-        };
         assert_eq!(pipe_error.code, ErrorCode::MalformedRequest);
         assert_eq!(pty_error.code, ErrorCode::MalformedRequest);
-        assert_eq!(inherited_error.code, ErrorCode::MalformedRequest);
+        for stdio in [
+            crate::options::SpawnStdio::Pipes,
+            crate::options::SpawnStdio::Inherit,
+        ] {
+            let options = SpawnWithExtendedJsonOptions {
+                stdio,
+                ..Default::default()
+            };
+            match spawn_with_extended_options_json(json, options) {
+                Err(error) => assert_eq!(error.code, ErrorCode::MalformedRequest),
+                Ok(_) => panic!("missing version must fail"),
+            }
+        }
     }
 
     #[test]

@@ -29,7 +29,8 @@ import { SDK_CONTRACT_VERSION } from './contract-version.js';
 import type {
   RunOptions,
   SpawnOptions,
-  SpawnWithInheritedStdioOptions,
+  SpawnStdio,
+  SpawnWithExtendedOptions,
   SpawnWithPtyOptions,
 } from './operation-options.js';
 
@@ -492,17 +493,29 @@ export async function spawnWithPty(
   );
 }
 
-/** Create a container request attached to this process's standard input, output, and error. */
-export async function spawnWithInheritedStdio(
+/** Create a container request with stdio and other controls chosen in the options. */
+export async function spawnWithExtendedOptions(
   request: ContainerRequest,
-  options: SpawnWithInheritedStdioOptions = {},
+  options: SpawnWithExtendedOptions = {},
 ): Promise<MxcProcess> {
-  validateOperationOptions('spawnWithInheritedStdio', options, false);
+  validateOperationOptions('spawnWithExtendedOptions', options, false, ['stdio']);
+  const stdio = spawnStdio('spawnWithExtendedOptions', options.stdio);
   const preparedRequest = prepareContainerRequest(request, options.telemetry);
+  if (stdio === 'pipes') return spawnBindingSandboxProcess(preparedRequest, false);
   return spawnBindingInheritedStdioProcessJson(
     JSON.stringify(preparedRequest),
     false,
     preparedRequest.process.timeout,
+  );
+}
+
+/** @internal Validates the stdio choice shared by the typed and exact-JSON spawns. */
+export function spawnStdio(apiName: string, value: unknown): SpawnStdio {
+  if (value === undefined) return 'pipes';
+  if (value === 'pipes' || value === 'inherit') return value;
+  throw new MxcError(
+    'malformed_request',
+    `${apiName} option 'stdio' must be 'pipes' or 'inherit'`,
   );
 }
 

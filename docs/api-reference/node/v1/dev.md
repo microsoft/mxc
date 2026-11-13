@@ -10,6 +10,8 @@ checks policy and backend availability.
 `JsonOptions` contains optional `experimental?: boolean` authorization,
 independent of the authored JSON version. `PtyJsonOptions` additionally
 contains optional `size?: MxcPtySize` (24 rows by 80 columns by default).
+`SpawnWithExtendedJsonOptions` additionally contains optional
+`stdio?: SpawnStdio` (`'pipes'` by default).
 Execution returns the existing V1 result or process types. Lifecycle and
 validation return the complete native response JSON string. Phase-specific
 methods reject a different phase before native dispatch.
@@ -18,7 +20,9 @@ methods reject a different phase before native dispatch.
 export function runJson(json: string, options?: JsonOptions): Promise<ExecutionResult>;
 export function spawnJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
 export function spawnWithPtyJson(json: string, options?: PtyJsonOptions): Promise<MxcPtyProcess>;
-export function spawnWithInheritedStdioJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
+export function spawnWithExtendedOptionsJson(
+  json: string, options?: SpawnWithExtendedJsonOptions
+): Promise<MxcProcess>;
 
 export function runInContainerJson(json: string, options?: JsonOptions): Promise<ExecutionResult>;
 export function spawnInContainerJson(json: string, options?: JsonOptions): Promise<MxcProcess>;
@@ -38,8 +42,9 @@ export function validateProcessJson(json: string, options?: JsonOptions): Promis
 ```
 
 Captured stdout and stderr are lossy UTF-8 text. Callers own pipe and PTY
-handles. `spawnWithInheritedStdioJson` attaches the workload to this process's
-standard streams and supports ProcessContainer, Bubblewrap, and Seatbelt.
+handles. `spawnWithExtendedOptionsJson` with `stdio: 'inherit'` attaches the
+workload to this process's standard streams and supports ProcessContainer,
+Bubblewrap, and Seatbelt.
 Existing-container execution leaves the container caller-owned.
 On timeout, in-container capture returns partial text without waiting for
 output streams to close. Read failures reject promptly, and cleanup

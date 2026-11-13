@@ -305,7 +305,7 @@ Backend and phase semantics are validated by the native engine.
 | `run` | `ContainerRequest`, `RunOptions?` | `Promise<ExecutionResult>` |
 | `spawn` | `ContainerRequest`, `SpawnOptions?` | `Promise<MxcProcess>` |
 | `spawnWithPty` | `ContainerRequest`, `SpawnWithPtyOptions?` (includes `size`) | `Promise<MxcPtyProcess>` |
-| `spawnWithInheritedStdio` | `ContainerRequest`, `SpawnWithInheritedStdioOptions?` | `Promise<MxcProcess>` |
+| `spawnWithExtendedOptions` | `ContainerRequest`, `SpawnWithExtendedOptions?` (includes `stdio`) | `Promise<MxcProcess>` |
 | `provisionContainer` | `ProvisionRequest`, `ProvisionOptions?` | `Promise<ProvisionResult>` |
 | `startContainer` | `ContainerId`, `StartOptions?` | `Promise<LifecycleResult>` |
 | `spawnInContainer` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |

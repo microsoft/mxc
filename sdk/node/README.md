@@ -85,7 +85,7 @@ stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
 streams before awaiting completion; any untaken streams are drained internally
 to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
-`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithInheritedStdioOptions`.
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithExtendedOptions`.
 Execution options do not support `dryRun`.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI
@@ -133,16 +133,20 @@ even if that timeout ended the workload.
 
 ## Spawn with this process's own console
 
-`spawnWithInheritedStdio` attaches the workload to this Node.js process's
-standard input, output, and error, such as a console, pseudo-console, or pipes
-set up by the parent. MXC allocates no pipes or PTY, and the returned
-`MxcProcess` has no streams to take. ProcessContainer, Bubblewrap, and
-Seatbelt support it.
+`spawnWithExtendedOptions` takes extensible options; its default
+`stdio: 'pipes'` behaves like `spawn`. With `stdio: 'inherit'` it attaches the
+workload to this Node.js process's standard input, output, and error, such as
+a console, pseudo-console, or pipes set up by the parent. MXC allocates no
+pipes or PTY, and the returned `MxcProcess` has no streams to take.
+ProcessContainer, Bubblewrap, and Seatbelt support inherited stdio.
 
 ```typescript
-import { spawnWithInheritedStdio } from '@microsoft/mxc-sdk/v1';
+import { spawnWithExtendedOptions } from '@microsoft/mxc-sdk/v1';
 
-const proc = await spawnWithInheritedStdio({ command: 'echo hello', timeoutMs: 30_000 });
+const proc = await spawnWithExtendedOptions(
+  { command: 'echo hello', timeoutMs: 30_000 },
+  { stdio: 'inherit' },
+);
 try {
   console.log(await proc.wait());
 } finally {

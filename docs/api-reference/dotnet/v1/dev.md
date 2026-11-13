@@ -11,6 +11,7 @@ Phase-specific methods require the matching JSON `phase`.
 Use `JsonOptions` for non-PTY calls and `PtyJsonOptions` for PTY calls.
 Both define `Experimental`, independently of the JSON version; PTY options
 also define `MxcPtySize? Size` (24 rows by 80 columns by default).
+`SpawnWithExtendedJsonOptions` defines `Experimental` and `SpawnStdio Stdio`.
 Execution returns V1 result and process types. Lifecycle and validation
 return complete response JSON strings, including backend metadata. When
 importing both namespaces, qualify the Dev facade, for example with
@@ -25,7 +26,7 @@ MxcProcess SpawnJson(string json, JsonOptions? options = null);
 Task<MxcProcess> SpawnJsonAsync(string json, JsonOptions? options = null,
     CancellationToken cancellationToken = default);
 MxcPtyProcess SpawnWithPtyJson(string json, PtyJsonOptions? options = null);
-MxcProcess SpawnWithInheritedStdioJson(string json, JsonOptions? options = null);
+MxcProcess SpawnWithExtendedOptionsJson(string json, SpawnWithExtendedJsonOptions? options = null);
 
 // Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle
 ExecutionResult RunInContainerJson(string json, JsonOptions? options = null);
@@ -57,9 +58,10 @@ string ValidateProcessJson(string json, JsonOptions? options = null);
 Task<string> ValidateProcessJsonAsync(string json, JsonOptions? options = null);
 ```
 
-PTY methods are synchronous. `SpawnWithInheritedStdioJson` is synchronous,
-attaches the workload to the calling process's standard streams, and
-supports ProcessContainer, Bubblewrap, and Seatbelt. Async run/spawn methods accept cancellation
+PTY methods and `SpawnWithExtendedOptionsJson` are synchronous. With
+`SpawnStdio.Inherit`, `SpawnWithExtendedOptionsJson` attaches the workload to
+the calling process's standard streams and supports ProcessContainer,
+Bubblewrap, and Seatbelt. Async run/spawn methods accept cancellation
 tokens. Canceling `RunJsonAsync` stops awaiting, not native execution;
 canceling `RunInContainerJsonAsync` disposes its owned process. Async
 lifecycle management and validation calls run off the caller's thread

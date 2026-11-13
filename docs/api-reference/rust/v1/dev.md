@@ -10,6 +10,8 @@ unknown fields, and malformed JSON.
 `JsonOptions { experimental: bool }` authorizes experimental backends
 independently of the JSON version. `PtyJsonOptions` also carries
 `size: MxcPtySize` (24 rows by 80 columns by default).
+`SpawnWithExtendedJsonOptions` carries `experimental` and `stdio: SpawnStdio`;
+like `SpawnWithExtendedOptions`, it is `#[non_exhaustive]`.
 Result and process types belong to `mxc_sdk::v1`.
 
 `run_json` and `run_in_container_json` return byte-preserving
@@ -26,7 +28,7 @@ pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Err
 pub fn spawn_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error>;
 pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions)
     -> Result<MxcPtyProcess, Error>;
-pub fn spawn_with_inherited_stdio_json(json: &str, options: JsonOptions)
+pub fn spawn_with_extended_options_json(json: &str, options: SpawnWithExtendedJsonOptions)
     -> Result<MxcProcess, Error>;
 
 pub fn run_in_container_json(json: &str, options: JsonOptions)
@@ -59,6 +61,6 @@ for the 64 MiB capture limit, caller-owned streams, and sensitive
 
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail
-rather than switching to another I/O mode. `spawn_with_inherited_stdio_json`
-attaches the workload to the calling process's stdin, stdout, and stderr and
-supports ProcessContainer, Bubblewrap, and Seatbelt.
+rather than switching to another I/O mode. `spawn_with_extended_options_json`
+with `SpawnStdio::Inherit` attaches the workload to the calling process's
+stdin, stdout, and stderr and supports ProcessContainer, Bubblewrap, and Seatbelt.

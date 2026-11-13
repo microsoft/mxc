@@ -379,13 +379,10 @@ public static class MxcContainer
         }
     }
 
-    /// <summary>
-    /// Spawn a container request attached to the calling process's standard
-    /// input, output, and error.
-    /// </summary>
-    public static MxcProcess SpawnWithInheritedStdio(
+    /// <summary>Spawn a container request with stdio and other controls chosen in the options.</summary>
+    public static MxcProcess SpawnWithExtendedOptions(
         ContainerRequest request,
-        SpawnWithInheritedStdioOptions? options = null)
+        SpawnWithExtendedOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));
@@ -396,8 +393,8 @@ public static class MxcContainer
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_with_inherited_stdio_json(
-                    requestPtr, 0, &handle, &error);
+                var status = NativeMethods.mxc_spawn_extended_json(
+                    requestPtr, 0, (int)(options?.Stdio ?? SpawnStdio.Pipes), &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -405,7 +402,7 @@ public static class MxcContainer
                         throw NativeError.ToException(
                             status,
                             error,
-                            "spawning sandbox with inherited stdio failed");
+                            "spawning sandbox with extended options failed");
                     }
                     finally
                     {

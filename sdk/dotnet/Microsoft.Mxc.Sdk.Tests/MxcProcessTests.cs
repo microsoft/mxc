@@ -72,13 +72,13 @@ public class MxcProcessTests
     }
 
     [Fact]
-    public void SpawnWithInheritedStdio_NullRequest_Throws()
+    public void SpawnWithExtendedOptions_NullRequest_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => MxcContainer.SpawnWithInheritedStdio(null!));
+        Assert.Throws<ArgumentNullException>(() => MxcContainer.SpawnWithExtendedOptions(null!));
     }
 
     [Fact]
-    public async Task SpawnWithInheritedStdio_UsesCallerStdio()
+    public async Task SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
         var hostVariant = Environment.GetEnvironmentVariable(InheritedStdioHostVariable);
@@ -86,6 +86,22 @@ public class MxcProcessTests
         {
             RunInheritedStdioHost(hostVariant);
             return;
+        }
+
+        using (var piped = MxcContainer.SpawnWithExtendedOptions(
+            new ContainerRequest(InheritedStdioCommand("PIPES")) { TimeoutMs = 30_000 }))
+        {
+            var cancellation = TestContext.Current.CancellationToken;
+            var stdin = piped.StandardInput;
+            Assert.NotNull(stdin);
+            var output = piped.WaitForExitWithOutputAsync(cancellation);
+            await stdin.WriteAsync(Encoding.UTF8.GetBytes(
+                InheritedStdioInput + (OperatingSystem.IsWindows() ? "\r\n" : "\n")), cancellation);
+            stdin.Dispose();
+            var (outcome, pipedOut, pipedErr) = await output;
+            Assert.Equal(7, outcome.ExitCode);
+            Assert.Contains($"PIPES_OUT:{InheritedStdioInput}", Encoding.UTF8.GetString(pipedOut));
+            Assert.Contains("PIPES_ERR", Encoding.UTF8.GetString(pipedErr));
         }
 
         foreach (var variant in new[] { "typed", "1.0.0", "1.1.0-alpha" })
@@ -103,7 +119,7 @@ public class MxcProcessTests
             }
             start.ArgumentList.Add("-method");
             start.ArgumentList.Add(
-                $"{typeof(MxcProcessTests).FullName}.{nameof(SpawnWithInheritedStdio_UsesCallerStdio)}");
+                $"{typeof(MxcProcessTests).FullName}.{nameof(SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio)}");
             start.Environment[InheritedStdioHostVariable] = variant;
 
             using var host = Process.Start(start)!;
@@ -130,20 +146,26 @@ public class MxcProcessTests
     private static string InheritedStdioMarker(string variant) =>
         "INHERITED_STDIO_" + variant.Replace('.', '_').Replace('-', '_');
 
-    private static void RunInheritedStdioHost(string variant)
-    {
-        var marker = InheritedStdioMarker(variant);
-        var command = OperatingSystem.IsWindows()
+    private static string InheritedStdioCommand(string marker) =>
+        OperatingSystem.IsWindows()
             ? $"cmd.exe /v:on /c \"set /p L= & echo {marker}_OUT:!L! & echo {marker}_ERR 1>&2 & exit /b 7\""
             : $"IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit 7";
+
+    private static void RunInheritedStdioHost(string variant)
+    {
+        var command = InheritedStdioCommand(InheritedStdioMarker(variant));
         using var process = variant == "typed"
-            ? MxcContainer.SpawnWithInheritedStdio(new ContainerRequest(command) { TimeoutMs = 30_000 })
-            : Dev.MxcContainer.SpawnWithInheritedStdioJson(new JsonObject
-            {
-                ["version"] = variant,
-                ["containment"] = "process",
-                ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
-            }.ToJsonString());
+            ? MxcContainer.SpawnWithExtendedOptions(
+                new ContainerRequest(command) { TimeoutMs = 30_000 },
+                new SpawnWithExtendedOptions { Stdio = SpawnStdio.Inherit })
+            : Dev.MxcContainer.SpawnWithExtendedOptionsJson(
+                new JsonObject
+                {
+                    ["version"] = variant,
+                    ["containment"] = "process",
+                    ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
+                }.ToJsonString(),
+                new Dev.SpawnWithExtendedJsonOptions { Stdio = SpawnStdio.Inherit });
         Assert.Null(process.StandardInput);
         Assert.Null(process.StandardOutput);
         Assert.Null(process.StandardError);

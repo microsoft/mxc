@@ -122,6 +122,8 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
   ): void;
 }
 
+const MXC_SPAWN_STDIO_INHERIT = 1;
+
 function bindStreamingNativeFacade(
   handle: NativeLibraryHandle,
 ): StreamingNativeFacade {
@@ -175,16 +177,18 @@ function bindStreamingNativeFacade(
     ],
   });
 
-  const spawnWithInheritedStdioBinding = bindNativeFunction<KoffiFunc<(
+  const spawnExtendedBinding = bindNativeFunction<KoffiFunc<(
     request: string,
     experimental: number,
+    stdio: number,
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_spawn_with_inherited_stdio_json',
+    symbol: 'mxc_spawn_extended_json',
     result: 'int32_t',
     parameters: [
       'const char *',
+      'int32_t',
       'int32_t',
       koffi.out(koffi.pointer(AbiSandbox, 2)),
       koffi.out(koffi.pointer(AbiErrorDetailType)),
@@ -251,9 +255,10 @@ function bindStreamingNativeFacade(
     },
 
     spawnWithInheritedStdio(request, experimental, outHandle, error, completion) {
-      spawnWithInheritedStdioBinding.async(
+      spawnExtendedBinding.async(
         request,
         experimental,
+        MXC_SPAWN_STDIO_INHERIT,
         outHandle,
         error,
         completion,

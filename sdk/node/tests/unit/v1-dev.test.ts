@@ -20,7 +20,7 @@ import { MxcProcess, type NativeLifecycleDriver } from '../../src/v1/container-p
 import { captureProcessOutput } from '../../src/v1/capture.js';
 import { MxcPtyProcess } from '../../src/v1/mxc-pty-process.js';
 import { runInContainer } from '../../src/v1/lifecycle.js';
-import { spawnWithInheritedStdio } from '../../src/v1/container.js';
+import { spawnWithExtendedOptions } from '../../src/v1/container.js';
 import type { ContainerId } from '../../src/v1/lifecycle-types.js';
 import * as dev from '../../src/v1/dev/index.js';
 
@@ -108,28 +108,44 @@ it('one-shot live modes pass the exact request and timeout to their bindings', a
   terminal.dispose();
 });
 
-it('inherited-stdio exact JSON passes the request, authorization and timeout unchanged', async () => {
+it('extended exact JSON routes each stdio mode with the request, authorization and timeout unchanged', async () => {
   const json = '{"version":"1.1.0-alpha","containment":"process","process":{"commandLine":"echo","timeout":90}}';
-  let received: unknown[] = [];
-  const proc = fakeProcess();
+  let inherited: unknown[] = [];
+  let piped: unknown[] = [];
+  const inheritedProc = fakeProcess();
+  const pipedProc = fakeProcess();
   _setBindingInheritedStdioProcessFactory(async (...args) => {
-    received = args;
-    return proc;
+    inherited = args;
+    return inheritedProc;
   });
-  assert.strictEqual(await dev.spawnWithInheritedStdioJson(json, { experimental: true }), proc);
-  assert.deepStrictEqual(received, [json, true, 90]);
+  _setBindingRawSandboxProcessFactory(async (...args) => {
+    piped = args;
+    return pipedProc;
+  });
+  assert.strictEqual(
+    await dev.spawnWithExtendedOptionsJson(json, { experimental: true, stdio: 'inherit' }),
+    inheritedProc,
+  );
+  assert.deepStrictEqual(inherited, [json, true, 90]);
+  assert.strictEqual(await dev.spawnWithExtendedOptionsJson(json), pipedProc);
+  assert.deepStrictEqual(piped, [json, false, 90]);
   await assert.rejects(
-    dev.spawnWithInheritedStdioJson(json, { size: { rows: 1, columns: 1 } } as never),
+    dev.spawnWithExtendedOptionsJson(json, { stdio: 'pty' } as never),
+    /must be 'pipes' or 'inherit'/,
+  );
+  await assert.rejects(
+    dev.spawnWithExtendedOptionsJson(json, { size: { rows: 1, columns: 1 } } as never),
     /does not support option 'size'/,
   );
   await assert.rejects(
-    dev.spawnWithInheritedStdioJson('{"version":"1.0.0","phase":"exec"}'),
+    dev.spawnWithExtendedOptionsJson('{"version":"1.0.0","phase":"exec"}'),
     /one-shot document without phase/,
   );
-  proc.dispose();
+  inheritedProc.dispose();
+  pipedProc.dispose();
 });
 
-it('typed inherited-stdio spawn sends a prepared V1 request', async () => {
+it('typed extended spawn with inherited stdio sends a prepared V1 request', async () => {
   let received: unknown[] = [];
   const proc = fakeProcess();
   _setBindingInheritedStdioProcessFactory(async (...args) => {
@@ -137,7 +153,10 @@ it('typed inherited-stdio spawn sends a prepared V1 request', async () => {
     return proc;
   });
   assert.strictEqual(
-    await spawnWithInheritedStdio({ command: 'echo hi', timeoutMs: 45 }, { telemetry: { enabled: true } }),
+    await spawnWithExtendedOptions(
+      { command: 'echo hi', timeoutMs: 45 },
+      { telemetry: { enabled: true }, stdio: 'inherit' },
+    ),
     proc,
   );
   const [requestJson, experimental, timeoutMs] = received as [string, boolean, number];
@@ -148,7 +167,7 @@ it('typed inherited-stdio spawn sends a prepared V1 request', async () => {
   assert.strictEqual(experimental, false);
   assert.strictEqual(timeoutMs, 45);
   await assert.rejects(
-    spawnWithInheritedStdio({ command: 'echo hi' }, { dryRun: true } as never),
+    spawnWithExtendedOptions({ command: 'echo hi' }, { dryRun: true } as never),
     /does not support dryRun/,
   );
   proc.dispose();

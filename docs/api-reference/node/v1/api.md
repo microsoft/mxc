@@ -15,7 +15,7 @@ Callers do not supply JSON or a schema version.
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
 | Live standard pipes with a writable WSLC stdin | `spawnWithStdin` | `spawnInContainerWithStdin` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
-| The caller's own standard input, output, and error | `spawnWithInheritedStdio` | — | `Promise<MxcProcess>` |
+| The caller's own standard input, output, and error | `spawnWithExtendedOptions` with `stdio: 'inherit'` | — | `Promise<MxcProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
@@ -24,10 +24,11 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership. `spawnWithInheritedStdio` instead attaches the workload to whatever
-this Node.js process's standard streams already are, such as a console,
-pseudo-console, or pipes set up by the parent; it supports ProcessContainer,
-Bubblewrap, and Seatbelt. Typed V1 does
+ownership. `spawnWithExtendedOptions` takes extensible options; its default
+`stdio: 'pipes'` behaves like `spawn`. `stdio: 'inherit'` instead attaches the
+workload to whatever this Node.js process's standard streams already are, such
+as a console, pseudo-console, or pipes set up by the parent; it supports
+ProcessContainer, Bubblewrap, and Seatbelt. Typed V1 does
 not accept ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
 [V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
 accepts caller-authored requests separately.
@@ -252,14 +253,15 @@ export async function spawnWithPty(request: ContainerRequest, options: SpawnWith
 ```
 
 
-## `@microsoft/mxc-sdk/v1::spawnWithInheritedStdio`
+## `@microsoft/mxc-sdk/v1::spawnWithExtendedOptions`
 
-Create a container request attached to this process's standard input, output,
-and error. The returned process has no streams to take; other backends than
-ProcessContainer, Bubblewrap, and Seatbelt reject with `unsupported_containment`.
+Create a container request with stdio and other controls chosen in the options.
+With `stdio: 'inherit'` the returned process has no streams to take, and
+backends other than ProcessContainer, Bubblewrap, and Seatbelt reject with
+`unsupported_containment`.
 
 ```typescript
-export async function spawnWithInheritedStdio(request: ContainerRequest, options: SpawnWithInheritedStdioOptions = {}): Promise<MxcProcess>;
+export async function spawnWithExtendedOptions(request: ContainerRequest, options: SpawnWithExtendedOptions = {}): Promise<MxcProcess>;
 ```
 
 

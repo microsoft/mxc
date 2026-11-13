@@ -4,8 +4,11 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use mxc_sdk::v1::dev::{self, JsonOptions};
-use mxc_sdk::v1::{spawn_with_inherited_stdio, ContainerRequest, MxcProcess, WaitResult};
+use mxc_sdk::v1::dev::{self, SpawnWithExtendedJsonOptions};
+use mxc_sdk::v1::{
+    spawn_with_extended_options, ContainerRequest, MxcProcess, SpawnStdio,
+    SpawnWithExtendedOptions, WaitResult,
+};
 
 const HOST_ENV: &str = "MXC_INHERITED_STDIO_HOST";
 const EXIT_CODE: i32 = 7;
@@ -23,6 +26,8 @@ pub fn assert_uses_caller_stdio(
         run_host(&variant, typed_request, command);
         return;
     }
+
+    assert_default_pipes(typed_request(command("PIPES", EXIT_CODE)));
 
     for variant in VARIANTS {
         let mut child = Command::new(std::env::current_exe().expect("test executable"))
@@ -73,7 +78,9 @@ fn run_host(
 ) {
     let command_line = command(&marker(variant), EXIT_CODE);
     let process = if variant == "typed" {
-        spawn_with_inherited_stdio(typed_request(command_line), Default::default())
+        let mut options = SpawnWithExtendedOptions::default();
+        options.stdio = SpawnStdio::Inherit;
+        spawn_with_extended_options(typed_request(command_line), options)
             .expect("spawn with inherited stdio")
     } else {
         let json = serde_json::json!({
@@ -82,10 +89,33 @@ fn run_host(
             "process": { "commandLine": command_line, "timeout": 30000 },
         })
         .to_string();
-        dev::spawn_with_inherited_stdio_json(&json, JsonOptions::default())
+        let mut options = SpawnWithExtendedJsonOptions::default();
+        options.stdio = SpawnStdio::Inherit;
+        dev::spawn_with_extended_options_json(&json, options)
             .expect("spawn exact JSON with inherited stdio")
     };
     assert_inherited_exit(process);
+}
+
+fn assert_default_pipes(request: ContainerRequest) {
+    let mut process = spawn_with_extended_options(request, SpawnWithExtendedOptions::default())
+        .expect("spawn with default extended options");
+    let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    let mut stdin = process.take_stdin().expect("pipes mode provides stdin");
+    stdin
+        .write_all(format!("{INPUT}{line_ending}").as_bytes())
+        .expect("write stdin");
+    drop(stdin);
+    let output = process.wait_with_output().expect("wait with output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.outcome,
+        WaitResult::Exited(EXIT_CODE),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains(&format!("PIPES_OUT:{INPUT}")), "{stdout}");
+    assert!(stderr.contains("PIPES_ERR"), "{stderr}");
 }
 
 fn assert_inherited_exit(mut process: MxcProcess) {

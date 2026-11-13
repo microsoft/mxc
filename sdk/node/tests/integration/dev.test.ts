@@ -20,12 +20,12 @@ const inheritedStdioCommand = windows
   : "IFS= read -r line; printf 'INHERITED_OUT:%s\\n' \"$line\"; printf 'INHERITED_ERR\\n' >&2; exit 7";
 
 const inheritedStdioScript = `
-import { spawnWithInheritedStdio } from '@microsoft/mxc-sdk/v1';
-import { spawnWithInheritedStdioJson } from '@microsoft/mxc-sdk/v1/dev';
+import { spawnWithExtendedOptions } from '@microsoft/mxc-sdk/v1';
+import { spawnWithExtendedOptionsJson } from '@microsoft/mxc-sdk/v1/dev';
 const request = process.env.MXC_INHERITED_REQUEST;
 const proc = process.env.MXC_INHERITED_API === 'typed'
-  ? await spawnWithInheritedStdio({ command: request })
-  : await spawnWithInheritedStdioJson(request);
+  ? await spawnWithExtendedOptions({ command: request }, { stdio: 'inherit' })
+  : await spawnWithExtendedOptionsJson(request, { stdio: 'inherit' });
 try {
   if (proc.standardInput || proc.standardOutput || proc.standardError) process.exit(90);
   process.exitCode = (await proc.wait()).exitCode;
@@ -62,7 +62,7 @@ function assertUsedCallerStdio(result: { exitCode: number | null; stdout: string
   assert.ok(result.stderr.includes('INHERITED_ERR'), result.stderr);
 }
 
-it('spawnWithInheritedStdio uses the calling process stdio', { skip: creationSkip }, async () => {
+it('spawnWithExtendedOptions with inherited stdio uses the calling process stdio', { skip: creationSkip }, async () => {
   assertUsedCallerStdio(await runInheritedStdioHost('typed', inheritedStdioCommand));
 });
 
@@ -112,7 +112,7 @@ for (const version of ['1.0.0', '1.1.0-alpha']) {
     }
   });
 
-  it(`V1.Dev spawnWithInheritedStdioJson uses the calling process stdio (${version})`, { skip: creationSkip }, async () => {
+  it(`V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio (${version})`, { skip: creationSkip }, async () => {
     assertUsedCallerStdio(await runInheritedStdioHost('dev', request(inheritedStdioCommand)));
   });
 

@@ -55,7 +55,7 @@ returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
 Creation takes `RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or
-`SpawnWithInheritedStdioOptions` after the request. `SpawnWithPtyOptions.size`
+`SpawnWithExtendedOptions` after the request. `SpawnWithPtyOptions.size`
 carries initial dimensions and defaults to 24 rows by 80 columns.
 
 Set the request's typed `Containment` when a specific backend is required.
@@ -158,12 +158,23 @@ applications must use their own completion protocol. Untaken merged output is
 drained and discarded without waiting indefinitely for descendants that keep
 the terminal open. Ordinary `spawn` continues to use separate pipes.
 
-`v1::spawn_with_inherited_stdio` attaches the workload to the calling process's
-own stdin, stdout, and stderr, such as a console, pseudo-console, or pipes the
-caller already set up. The returned `MxcProcess` has no streams to take.
-ProcessContainer, Bubblewrap, and Seatbelt support it. Its
-`SpawnWithInheritedStdioOptions` is `#[non_exhaustive]`: start from
-`Default::default()` and assign fields.
+`v1::spawn_with_extended_options` takes `SpawnWithExtendedOptions`, which can
+gain fields in V1. Its default `SpawnStdio::Pipes` behaves like `spawn`.
+`SpawnStdio::Inherit` attaches the workload to the calling process's own
+stdin, stdout, and stderr, such as a console, pseudo-console, or pipes the
+caller already set up; the returned `MxcProcess` has no streams to take, and
+ProcessContainer, Bubblewrap, and Seatbelt support it. The options and the
+enum are `#[non_exhaustive]`: start from `Default::default()` and assign fields.
+
+```rust,no_run
+use mxc_sdk::v1::{self, SpawnStdio, SpawnWithExtendedOptions};
+
+let mut options = SpawnWithExtendedOptions::default();
+options.stdio = SpawnStdio::Inherit;
+let mut process = v1::spawn_with_extended_options(v1::ContainerRequest::new("echo hi"), options)?;
+process.wait()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
@@ -181,7 +192,7 @@ features. See the backend documentation under
 host prerequisites and enforcement details.
 
 Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `RunOptions`,
-`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithInheritedStdioOptions`, not
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnWithExtendedOptions`, not
 on `ContainerRequest`. Omission
 leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
 explicitly disables it. Opt-in remains

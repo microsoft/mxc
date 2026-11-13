@@ -79,7 +79,7 @@ remains deny rather than inheriting ingress allow.
 | Proxy peer identity pinning | ❌ | Rejected — not supported |
 | Named containers, attach, lifecycle | ❌ | Not applicable — process-scoped |
 | Caller-controlled PTY | ✅ | Incompatible with `guiAccess` |
-| SDK inherited stdio (`spawn_with_inherited_stdio`) | ✅ | Keeps the caller's terminal session; the only SDK mode that accepts `guiAccess` |
+| SDK inherited stdio (`spawn_with_extended_options` with `SpawnStdio::Inherit`) | ✅ | Keeps the caller's terminal session; the only SDK mode that accepts `guiAccess` |
 
 The short version: **Seatbelt gives you an on/off switch for outbound network
 plus a loopback exception. It has no concept of "this host but not that one."**
