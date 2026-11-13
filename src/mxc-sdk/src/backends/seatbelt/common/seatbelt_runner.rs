@@ -20,18 +20,28 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::io::IsTerminal;
 use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::learning_mode_core::capture_output::{
+    combine_capture_and_cleanup_results, combine_process_and_teardown_results,
+    random_capture_suffix, remove_internal_capture_file, unique_denials_output_path,
+    write_capture_denials_document,
+};
+use crate::learning_mode_core::capture_sibling_path;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{
+    CaptureDenialsErrorOutput, CaptureDenialsMode, CaptureDenialsOutput, ExecutionRequest,
+    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+};
 use crate::mxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
-    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+    take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize, SandboxBackend,
+    SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
@@ -41,43 +51,26 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
+use crate::seatbelt_common::denial_capture::{CollectedEvents, DenialCollector, MAX_TRACE_BYTES};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::{build_profile_with_terminals, ProfileError};
 use crate::seatbelt_common::profile_preparation::{
-    classify_io_error, expand_tilde, prepare_profile, resolve_policy_path,
+    classify_io_error, expand_tilde, prepare_capture_output_path, prepare_profile,
+    resolve_policy_path,
 };
+use crate::seatbelt_common::run_marker::RunMarker;
 
-#[link(name = "proc")]
-unsafe extern "C" {
-    fn proc_listallpids(buffer: *mut libc::c_void, buffersize: libc::c_int) -> libc::c_int;
-    fn proc_pidinfo(
-        pid: libc::c_int,
-        flavor: libc::c_int,
-        arg: u64,
-        buffer: *mut libc::c_void,
-        buffersize: libc::c_int,
-    ) -> libc::c_int;
-    fn proc_signal_with_audittoken(token: *mut AuditToken, signal: libc::c_int) -> libc::c_int;
+/// How long cleanup may keep finding new processes in a run before it gives up.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn exit_cleanup_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = tests::EXIT_CLEANUP_TIMEOUT.get() {
+        return timeout;
+    }
+    CLEANUP_TIMEOUT
 }
-
-#[repr(C)]
-struct AuditToken {
-    val: [u32; 8],
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct ProcUniqueIdentifierInfo {
-    uuid: [u8; 16],
-    unique_id: u64,
-    parent_unique_id: u64,
-    id_version: i32,
-    original_parent_id_version: i32,
-    reserved: [u64; 2],
-}
-
-const PROC_PID_UNIQUE_IDENTIFIER_INFO: libc::c_int = 17;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
@@ -96,118 +89,6 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "NO_PROXY",
     "no_proxy",
 ];
-
-fn session_kill(child: &mut std::process::Child, session_id: libc::pid_t) -> std::io::Result<()> {
-    let leader_result = match child.try_wait()? {
-        Some(_) => Ok(()),
-        None => child.kill(),
-    };
-    let session_result = kill_session_members(session_id);
-    leader_result.and(session_result)
-}
-
-fn terminate_session_and_reap(
-    child: &mut std::process::Child,
-    session_id: libc::pid_t,
-    timeout: Duration,
-) -> std::io::Result<()> {
-    session_kill(child, session_id)?;
-    match wait_with_timeout(child, Some(timeout)) {
-        Ok(_) => Ok(()),
-        Err(WaitError::Timeout) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "Seatbelt: killed process did not become reapable before the deadline",
-        )),
-        Err(WaitError::Io(error)) => Err(error),
-    }
-}
-
-fn kill_session_members(session_id: libc::pid_t) -> std::io::Result<()> {
-    const SESSION_SWEEPS: usize = 3;
-
-    let mut first_error = None;
-    // SAFETY: `getpid` has no preconditions.
-    let current_pid = unsafe { libc::getpid() };
-    for _ in 0..SESSION_SWEEPS {
-        for pid in list_all_pids()? {
-            if pid <= 0 || pid == current_pid {
-                continue;
-            }
-            let Some(mut token) = process_audit_token(pid)? else {
-                continue;
-            };
-            // The token is captured first. If the PID exits before this query,
-            // a replacement's different session is rejected; if it exits after
-            // the query, the token's pid-version prevents signaling a replacement.
-            // SAFETY: `getsid` only queries the process identified by `pid`.
-            if unsafe { libc::getsid(pid) } != session_id {
-                continue;
-            }
-            // SAFETY: libproc validates the token's PID version atomically with
-            // process lookup before signaling.
-            let error = unsafe { proc_signal_with_audittoken(&mut token, libc::SIGKILL) };
-            if error != 0 && error != libc::ESRCH && first_error.is_none() {
-                first_error = Some(std::io::Error::from_raw_os_error(error));
-            }
-        }
-        std::thread::yield_now();
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> {
-    let mut info = ProcUniqueIdentifierInfo::default();
-    let size = libc::c_int::try_from(std::mem::size_of_val(&info))
-        .map_err(|_| std::io::Error::other("macOS process identity is too large"))?;
-    // SAFETY: `info` is writable for `size` bytes and libproc only fills the
-    // requested identity record for `pid`.
-    let copied = unsafe {
-        proc_pidinfo(
-            pid,
-            PROC_PID_UNIQUE_IDENTIFIER_INFO,
-            0,
-            std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
-            size,
-        )
-    };
-    if copied == 0 {
-        let error = std::io::Error::last_os_error();
-        return match error.raw_os_error() {
-            Some(libc::ESRCH) => Ok(None),
-            _ => Err(error),
-        };
-    }
-    if copied != size {
-        return Err(std::io::Error::other(format!(
-            "macOS returned a truncated process identity for pid {pid}"
-        )));
-    }
-    let mut token = AuditToken { val: [0; 8] };
-    token.val[5] = pid as u32;
-    token.val[7] = info.id_version as u32;
-    Ok(Some(token))
-}
-
-fn list_all_pids() -> std::io::Result<Vec<libc::pid_t>> {
-    // SAFETY: a null buffer asks libproc for the current process count.
-    let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-    if count < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut pids = vec![0; count as usize + 128];
-    let buffer_size = pids
-        .len()
-        .checked_mul(std::mem::size_of::<libc::pid_t>())
-        .and_then(|size| libc::c_int::try_from(size).ok())
-        .ok_or_else(|| std::io::Error::other("macOS process list is too large"))?;
-    // SAFETY: `pids` is writable for exactly `buffer_size` bytes.
-    let listed = unsafe { proc_listallpids(pids.as_mut_ptr().cast::<libc::c_void>(), buffer_size) };
-    if listed < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    pids.truncate((listed as usize).min(pids.len()));
-    Ok(pids)
-}
 
 /// Proxy env var keys injected (pointing at the resolved proxy URL) when a
 /// proxy is active. `NO_PROXY` is intentionally absent — see the module docs
@@ -288,8 +169,13 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(rejected_response)?;
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_capture_denials(request)
+            .map_err(rejected_response)?;
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_reserved_names(request)
+            .map_err(rejected_response)?;
         // Dry runs never reach spawn, so reject unresolvable paths here too.
         prepare_profile(request).map_err(profile_error_response)?;
+        prepare_capture_output_path(request).map_err(profile_error_response)?;
         resolved_working_directory_opt(request).map_err(profile_error_response)?;
 
         Ok(())
@@ -327,12 +213,13 @@ impl SandboxBackend for SeatbeltScriptRunner {
 }
 
 /// Exec launch path: fork → sandbox_init → exec `/bin/sh -c <script>`. With
-/// [`StdioMode::Pipes`] the child gets pipes and leads its own session (so the
-/// caller can tree-terminate via the process group); with
+/// [`StdioMode::Pipes`] the child gets pipes and leads its own session, away
+/// from the host's terminal; with
 /// [`StdioMode::Inherit`] it inherits the process's stdio (a TTY when the
 /// binary has one) and stays in the binary's session; with [`StdioMode::Pty`]
 /// it gets a caller-owned terminal and leads its own session. `gui_access`
-/// apps require inherited stdio.
+/// apps require inherited stdio. Cleanup finds the run's processes by the
+/// profile's run marker, not by session or process group.
 fn spawn_exec(
     request: &ExecutionRequest,
     gui_access: bool,
@@ -351,26 +238,22 @@ fn spawn_exec(
         )));
     }
 
-    // Pipes → own session (setsid) so a process-group tree-kill never touches
-    // the host. Inherit/GUI → keep the binary's session and controlling
+    // Pipes → own session (setsid), detached from the host's terminal.
+    // Inherit/GUI → keep the binary's session and controlling
     // terminal so the child sees a TTY exactly when the binary does.
     let new_session = stdio == StdioMode::Pipes;
-    // Inherit mode with a finite timeout: put the child in its own process group
-    // (same session, so it keeps the controlling terminal) so the timeout branch
-    // can tree-kill its descendants instead of only the direct `/bin/sh`. A
-    // backgrounded group reading the inherited TTY can be SIGTTIN-stopped, so
-    // this is limited to timeout-bounded runs, which are inherently
-    // non-interactive.
-    let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+    let capture_plan = plan_denial_capture(request).map_err(profile_error_response)?;
+    let marker = RunMarker::new().map_err(|error| launch_failed_response(error.to_string()))?;
     let (mut command, pty) = build_sandbox_command(
         request,
         proxy_address,
         new_session,
-        new_group,
+        &marker,
         match stdio {
             StdioMode::Pty(size) => Some(size),
             _ => None,
         },
+        capture_plan.as_ref().map(|plan| plan.tag.as_str()),
         logger,
     )?;
 
@@ -394,6 +277,15 @@ fn spawn_exec(
     command.current_dir(cwd);
     command.env("PWD", cwd);
 
+    // Fail closed: never run a capture request without a live log stream.
+    if capture_plan.as_ref().is_some_and(|plan| plan.allow_mode) {
+        logger.warning_line(ALLOW_MODE_WARNING);
+    }
+    let capture = capture_plan
+        .map(|plan| plan.start())
+        .transpose()
+        .map_err(launch_failed_response)?;
+
     match stdio {
         StdioMode::Pipes => {
             command
@@ -412,9 +304,15 @@ fn spawn_exec(
         StdioMode::Pty(_) => {}
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| launch_failed_response(spawn_error(&error)))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(discard_capture(
+                capture,
+                launch_failed_response(spawn_error(&error)),
+            ))
+        }
+    };
 
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -435,16 +333,20 @@ fn spawn_exec(
                 let _ = child.kill();
                 let _ = child.wait();
                 let error = out_result.err().or(err_result.err());
-                return Err(launch_failed_response(format!(
+                let mut message = format!(
                     "Seatbelt: failed to wrap stdio pipes: {}",
                     error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
-                )));
+                );
+                if let Err(cleanup) = marker.kill_members(CLEANUP_TIMEOUT) {
+                    message.push_str(&format!(
+                        "; processes it started could not be terminated: {cleanup}"
+                    ));
+                }
+                return Err(discard_capture(capture, launch_failed_response(message)));
             }
         };
 
     let started = Instant::now();
-    let session_id =
-        (new_session || matches!(stdio, StdioMode::Pty(_))).then_some(child.id() as libc::pid_t);
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
         stdin,
@@ -457,10 +359,147 @@ fn spawn_exec(
         started,
         timed_out: false,
         termination_error: None,
-        group: new_session || new_group || stdio != StdioMode::Inherit,
-        session_id,
+        marker,
+        members_cleaned: false,
+        cleanup_failures: Vec::new(),
+        capture,
+        capture_error: None,
+        capture_warnings: Vec::new(),
+        output_metadata: None,
     }))
 }
+
+struct DenialCapturePlan {
+    tag: String,
+    output_path: PathBuf,
+    /// The `.seatbelt.log` path when `retainEtl` is set.
+    trace_path: Option<PathBuf>,
+    allow_mode: bool,
+}
+
+impl DenialCapturePlan {
+    fn start(self) -> Result<ActiveDenialCapture, String> {
+        let trace = match &self.trace_path {
+            // Owner-only, like the reports: the trace holds the same paths.
+            Some(path) => Some(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .map_err(|error| {
+                        format!(
+                            "captureDenials could not create trace file {}: {error}",
+                            path.display()
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+        match DenialCollector::start(&self.tag, trace) {
+            Ok(collector) => Ok(ActiveDenialCapture {
+                collector,
+                output_path: self.output_path,
+                trace_path: self.trace_path,
+            }),
+            Err(error) => match self.trace_path.as_deref().map(remove_internal_capture_file) {
+                Some(Err(cleanup)) => Err(format!("{error}; additionally {cleanup}")),
+                _ => Err(error),
+            },
+        }
+    }
+}
+
+struct ActiveDenialCapture {
+    collector: DenialCollector,
+    output_path: PathBuf,
+    trace_path: Option<PathBuf>,
+}
+
+/// Stops `log stream` and deletes the trace when the workload never ran.
+fn discard_capture(
+    capture: Option<ActiveDenialCapture>,
+    mut response: ScriptResponse,
+) -> ScriptResponse {
+    let Some(capture) = capture else {
+        return response;
+    };
+    drop(capture.collector);
+    if let Some(Err(error)) = capture
+        .trace_path
+        .as_deref()
+        .map(remove_internal_capture_file)
+    {
+        response.error_message = format!("{}; additionally {error}", response.error_message);
+    }
+    response
+}
+
+impl ActiveDenialCapture {
+    /// Stops `log stream`. Returns the collected events and the trace path if
+    /// the trace was fully written; a partly written trace is removed.
+    fn stop(self) -> (std::io::Result<CollectedEvents>, PathBuf, Option<PathBuf>) {
+        let collected = self.collector.finish().map_err(|error| {
+            std::io::Error::other(format!("captureDenials failed to collect denials: {error}"))
+        });
+        let Some(trace_path) = self.trace_path else {
+            return (collected, self.output_path, None);
+        };
+        let trace_error = collected
+            .as_ref()
+            .ok()
+            .and_then(|collected| collected.trace_error.clone());
+        match trace_error {
+            None => (collected, self.output_path, Some(trace_path)),
+            Some(error) => {
+                let error = std::io::Error::other(format!(
+                    "captureDenials failed to write trace file {}: {error}",
+                    trace_path.display()
+                ));
+                let result = combine_capture_and_cleanup_results(
+                    Err(error),
+                    remove_internal_capture_file(&trace_path),
+                );
+                (result, self.output_path, None)
+            }
+        }
+    }
+}
+
+/// Picks the log tag and denials file path for a `captureDenials` request.
+fn plan_denial_capture(
+    request: &ExecutionRequest,
+) -> Result<Option<DenialCapturePlan>, ProfileError> {
+    let Some(config) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|config| config.capture_denials.as_ref())
+    else {
+        return Ok(None);
+    };
+    let configured_path = prepare_capture_output_path(request)?;
+    let output_path =
+        unique_denials_output_path(configured_path.as_deref()).map_err(ProfileError::Host)?;
+    let trace_path = config
+        .retain_etl
+        .then(|| capture_sibling_path(&output_path, TRACE_SUFFIX))
+        .transpose()
+        .map_err(|error| ProfileError::Host(format!("captureDenials {error}")))?;
+    Ok(Some(DenialCapturePlan {
+        tag: format!(
+            "mxc-capture-{}",
+            random_capture_suffix().map_err(ProfileError::Host)?
+        ),
+        output_path,
+        trace_path,
+        allow_mode: config.mode == CaptureDenialsMode::Allow,
+    }))
+}
+
+const TRACE_SUFFIX: &str = "seatbelt.log";
+
+const ALLOW_MODE_WARNING: &str = "Seatbelt captureDenials mode 'allow' ran the workload without \
+     enforcing default-denied operations; denials.json lists what would have been blocked";
 
 /// A running Seatbelt-sandboxed process: the child plus, for the pipes path,
 /// its parent-side pipe ends. See [`SandboxProcess`] for the contract.
@@ -485,15 +524,128 @@ struct SeatbeltSandboxProcess {
     started: Instant,
     timed_out: bool,
     termination_error: Option<String>,
-    /// The child leads its own process group, so termination can signal that
-    /// group without touching the host process group.
-    group: bool,
-    /// The child leads an owned session, so job-control descendants in other
-    /// process groups can be terminated without touching the host session.
-    session_id: Option<libc::pid_t>,
+    /// Identifies every process in this run, including ones that left its
+    /// session or process group.
+    marker: RunMarker,
+    /// The run's remaining processes were killed after the child exited.
+    members_cleaned: bool,
+    /// Reported through `warnings()`, so the exit code is kept.
+    cleanup_failures: Vec<String>,
+    /// Live `captureDenials` log stream; consumed by `wait()`.
+    capture: Option<ActiveDenialCapture>,
+    /// A failed capture, replayed by later `wait()` calls.
+    capture_error: Option<(std::io::ErrorKind, String)>,
+    capture_warnings: Vec<String>,
+    output_metadata: Option<SandboxOutputMetadata>,
+}
+
+impl SeatbeltSandboxProcess {
+    /// Drains the capture stream after the child exits and writes denials.json.
+    fn finish_capture(&mut self, exit_code: Option<i32>) -> std::io::Result<()> {
+        if let Some((kind, message)) = &self.capture_error {
+            return Err(std::io::Error::new(*kind, message.clone()));
+        }
+        let Some(capture) = self.capture.take() else {
+            return Ok(());
+        };
+        let (collected, output_path, trace_path) = capture.stop();
+        let result = collected.and_then(|collected| {
+            if self.termination_error.is_some() {
+                // Caller-visible results carry only the error, so a report here
+                // would be unreachable.
+                return Err(std::io::Error::other(
+                    "captureDenials did not write a report because the workload could not be \
+                     terminated",
+                ));
+            }
+            if !self.cleanup_failures.is_empty() {
+                // Surviving processes can keep causing denials after collection ends.
+                return Err(std::io::Error::other(format!(
+                    "captureDenials did not write a report: {}",
+                    self.cleanup_failures.join("; ")
+                )));
+            }
+            self.write_capture(collected, &output_path, trace_path.as_deref(), exit_code)
+        });
+        let result = result.map_err(|error| match &trace_path {
+            Some(path) => std::io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the captureDenials trace was kept at {}",
+                    path.display()
+                ),
+            ),
+            None => error,
+        });
+        if let Err(error) = &result {
+            self.capture_error = Some((error.kind(), error.to_string()));
+            if let Some(path) = &trace_path {
+                self.output_metadata = Some(SandboxOutputMetadata {
+                    capture_denials: None,
+                    capture_denials_error: Some(CaptureDenialsErrorOutput {
+                        message: error.to_string(),
+                        etl_path: path.to_string_lossy().into_owned(),
+                    }),
+                });
+            }
+            // FFI waits expose only a status, so preserve capture diagnostics in warnings too.
+            self.capture_warnings.push(if self.timed_out {
+                format!("Seatbelt captureDenials failed after the run timed out: {error}")
+            } else {
+                format!("Seatbelt captureDenials failed: {error}")
+            });
+        }
+        result
+    }
+
+    fn write_capture(
+        &mut self,
+        collected: CollectedEvents,
+        output_path: &Path,
+        trace_path: Option<&Path>,
+        exit_code: Option<i32>,
+    ) -> std::io::Result<()> {
+        if !collected.drained {
+            self.capture_warnings.push(
+                "Seatbelt captureDenials could not confirm that all sandbox log events were \
+                 received; denials.json may be incomplete"
+                    .to_string(),
+            );
+        }
+        if let (true, Some(path)) = (collected.trace_truncated, trace_path) {
+            self.capture_warnings.push(format!(
+                "Seatbelt captureDenials stopped writing trace file {} at its {} GiB limit; \
+                 the denial report is not affected",
+                path.display(),
+                MAX_TRACE_BYTES >> 30
+            ));
+        }
+        let pointer = write_capture_denials_document(
+            collected.into_analysis(),
+            exit_code.unwrap_or(-1),
+            output_path,
+        )?;
+        let mut output = CaptureDenialsOutput::from(pointer);
+        output.etl_path = trace_path.map(|path| path.to_string_lossy().into_owned());
+        self.output_metadata = Some(SandboxOutputMetadata {
+            capture_denials: Some(output),
+            capture_denials_error: None,
+        });
+        Ok(())
+    }
 }
 
 impl SandboxProcess for SeatbeltSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        let mut warnings = self.cleanup_failures.clone();
+        warnings.extend(self.capture_warnings.iter().cloned());
+        warnings
+    }
+
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_ref()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         if let Some(pty) = self.pty.as_ref() {
             let stdio = pty.take_native_stdio()?;
@@ -603,6 +755,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                 "Seatbelt: process timed out",
             ));
         }
+        // Status only; `wait`, `kill`, and drop clean up the run.
         if let Some(status) = self.child.try_wait()? {
             return Ok(Some(status.code().unwrap_or(-1)));
         }
@@ -631,44 +784,31 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        if let Some(session_id) = self.session_id {
-            return session_kill(&mut self.child, session_id);
-        }
-        // No-op once the child has exited and been reaped: its pid/pgid can be
-        // recycled, so signaling it could hit an unrelated process (group). A
-        // reaped `Child` returns its cached status here without a syscall.
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        if self.group {
-            // The child leads its own process group — signal the whole group so
-            // sandboxed descendants are terminated too.
-            group_kill(&mut self.child)
-        } else {
-            // Inherited stdio: a single process sharing the binary's
-            // process group, so signal just it (a group-kill would hit the
-            // binary itself).
-            self.child.kill()
-        }
+        // Only signal the child while it is unreaped; a reaped pid can be reused.
+        // The marker scan still reaches the child if its status is unknown.
+        let child_result = match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill(),
+            Err(error) => Err(error),
+        };
+        let members_result = self.marker.kill_members(CLEANUP_TIMEOUT);
+        child_result.and(members_result)
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        let result = if let Some(session_id) = self.session_id {
-            terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT)
-        } else {
-            self.kill()?;
-            match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
-                Ok(_) => Ok(()),
-                Err(WaitError::Timeout) => Err(std::io::Error::new(
+        self.kill()?;
+        match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
+            Ok(_) => {}
+            Err(WaitError::Timeout) => {
+                return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "Seatbelt: killed process did not become reapable within 5 seconds",
-                )),
-                Err(WaitError::Io(error)) => Err(error),
+                ))
             }
-        };
-        result?;
+            Err(WaitError::Io(error)) => return Err(error),
+        }
         self.timed_out = true;
         Ok(())
     }
@@ -715,7 +855,10 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             ))
         } else {
             match wait_with_timeout(&mut self.child, remaining_timeout) {
-                Ok(status) => Ok(status.code().unwrap_or(-1)),
+                Ok(status) => {
+                    self.clean_up_after_exit();
+                    Ok(status.code().unwrap_or(-1))
+                }
                 Err(WaitError::Timeout) => {
                     if let Err(error) = self.kill_for_timeout() {
                         let error =
@@ -746,21 +889,43 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             pty.finish_native_bridge();
         }
         cancel_and_join_discard(pty_thread, &pty_canceller);
-        result
+        let capture_result = self.finish_capture(result.as_ref().ok().copied());
+        combine_process_and_teardown_results(result, capture_result)
+    }
+}
+
+impl SeatbeltSandboxProcess {
+    /// Kills what the run left running once its child has exited. A failure
+    /// becomes a warning so the caller still gets the exit code.
+    fn clean_up_after_exit(&mut self) {
+        if self.members_cleaned {
+            return;
+        }
+        self.members_cleaned = true;
+        if let Err(error) = self.marker.kill_members(exit_cleanup_timeout()) {
+            self.cleanup_failures.push(format!(
+                "Seatbelt: the process exited, but processes it started could not be \
+                 terminated: {error}"
+            ));
+        }
     }
 }
 
 impl Drop for SeatbeltSandboxProcess {
     fn drop(&mut self) {
-        // Don't leak a running sandboxed process (and its group) or a zombie if
-        // the handle is dropped without `wait()`, but never block destruction
-        // indefinitely when macOS does not make a signalled child reapable.
+        // Don't leak a running sandboxed process or a zombie if the handle is
+        // dropped without `wait()`, but never block destruction indefinitely
+        // when macOS does not make a signalled child reapable.
         const DROP_REAP_TIMEOUT: Duration = Duration::from_secs(5);
-        if let Some(session_id) = self.session_id {
-            let _ = terminate_session_and_reap(&mut self.child, session_id, DROP_REAP_TIMEOUT);
-        } else {
-            let _ = self.kill();
-            let _ = wait_with_timeout(&mut self.child, Some(DROP_REAP_TIMEOUT));
+        let _ = self.kill();
+        let _ = wait_with_timeout(&mut self.child, Some(DROP_REAP_TIMEOUT));
+        // Without `wait()` the caller never learns the trace path.
+        if let Some(capture) = self.capture.take() {
+            let trace_path = capture.trace_path.clone();
+            drop(capture);
+            if let Some(path) = trace_path {
+                let _ = remove_internal_capture_file(&path);
+            }
         }
     }
 }
@@ -780,40 +945,25 @@ fn build_sandbox_command(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     new_session: bool,
-    new_group: bool,
+    marker: &RunMarker,
     pty_size: Option<PtySize>,
+    capture_tag: Option<&str>,
     logger: &mut Logger,
 ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
     let mut command = Command::new(DEFAULT_SHELL);
     command.arg("-c").arg(&request.script_code);
 
-    // When requested (streaming path), put the child in its own session /
-    // process group via `setsid()` so a caller can tree-kill it with a single
-    // `killpg` without touching the host's process group. This runs before
+    // When requested (streaming path), put the child in its own session via
+    // `setsid()`, away from the host's terminal. This runs before
     // `sandbox_init` so the detach happens regardless of the profile.
     //
     // SAFETY: `setsid` is async-signal-safe and runs after fork(), before
     // exec(); the child is not a process-group leader at this point, so it
-    // succeeds. Failure is non-fatal (the caller's negative-pid kill simply
-    // targets a group that does not exist).
+    // succeeds.
     if new_session {
         unsafe {
             command.pre_exec(|| {
                 libc::setsid();
-                Ok(())
-            });
-        }
-    } else if new_group {
-        // Inherit-with-timeout: a new process group within the *existing*
-        // session, so the child keeps the controlling terminal yet can be
-        // tree-killed via `killpg(-pgid)` on timeout.
-        //
-        // SAFETY: `setpgid` is async-signal-safe and runs after fork(), before
-        // exec(); the child is not yet a group leader, so it succeeds. Failure
-        // is non-fatal (the timeout kill then targets the direct child only).
-        unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
                 Ok(())
             });
         }
@@ -846,15 +996,29 @@ fn build_sandbox_command(
         })?,
         None => Vec::new(),
     };
-    let inputs = prepare_profile(request).map_err(profile_error_response)?;
-    let profile = build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
-        .map_err(profile_error_response)?;
+    let mut inputs = prepare_profile(request).map_err(profile_error_response)?;
+    inputs.capture_tag = capture_tag.map(str::to_string);
+    let mut profile =
+        build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
+            .map_err(profile_error_response)?;
     log_generated_profile(&profile, logger);
+    // Last, so neither generated rules nor `profileOverride` can change it.
+    let marker_rules = marker.profile_rules();
+    log_run_marker_rules(&marker_rules, logger);
+    profile.push_str(&marker_rules);
     let profile_cstr = CString::new(profile).map_err(|e| {
         rejected_response(format!("seatbelt profile contains embedded NUL byte: {e}"))
     })?;
     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
+    apply_profile_before_exec(&mut command, profile_cstr);
+
+    Ok((command, pty))
+}
+
+/// Applies `profile` with `sandbox_init` in the child, after any earlier
+/// `pre_exec` hooks and before `exec`.
+pub(crate) fn apply_profile_before_exec(command: &mut Command, profile_cstr: CString) {
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
     // happen inside the closure. sandbox_init is used in this fork+exec
@@ -880,8 +1044,6 @@ fn build_sandbox_command(
             Ok(())
         });
     }
-
-    Ok((command, pty))
 }
 
 fn inherited_terminal_paths() -> std::io::Result<Vec<PathBuf>> {
@@ -909,6 +1071,17 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
         let _ = writeln!(logger, "{line}");
     }
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
+}
+
+/// Logged outside the copyable block: the rules belong to this run only.
+fn log_run_marker_rules(rules: &str, logger: &mut Logger) {
+    let _ = writeln!(
+        logger,
+        "Seatbelt: process cleanup rules for this run, added after the profile above:"
+    );
+    for line in rules.lines().filter(|line| line.starts_with('(')) {
+        let _ = writeln!(logger, "Seatbelt:   {line}");
+    }
 }
 
 /// A request this backend refuses.
@@ -1083,6 +1256,12 @@ mod tests {
         ExecutionRequest, NetworkAction, NetworkEgressPolicy, ProxyAddress, SeatbeltConfig,
     };
 
+    thread_local! {
+        /// Shortens cleanup after a normal exit so a test can make it fail.
+        pub(super) static EXIT_CLEANUP_TIMEOUT: std::cell::Cell<Option<Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
+
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
@@ -1104,8 +1283,9 @@ mod tests {
             &request,
             None,
             !with_pty,
-            false,
+            &RunMarker::new().expect("run marker"),
             with_pty.then_some(PtySize::default()),
+            None,
             &mut logger,
         )
         .expect("build probe command");
@@ -1733,5 +1913,304 @@ os.close(fd)
         };
         let err = absolute_working_directory_with("work", gone).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// Allow mode lets the read through, still lists it, and reports the
+    /// written file and retained trace through `output_metadata` once `wait`
+    /// returns.
+    #[test]
+    fn capture_denials_allow_mode_reports_after_wait() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let secret = directory.join("secret.txt");
+        std::fs::write(&secret, "visible").unwrap();
+        let mut request = base_request();
+        request.script_code = format!("cat '{}'; exit 3", secret.display());
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            mode: CaptureDenialsMode::Allow,
+            output_path: Some(directory.join("denials.json").display().to_string()),
+            retain_etl: true,
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+        let mut stdout = String::new();
+        std::io::Read::read_to_string(&mut process.take_stdout().unwrap(), &mut stdout).unwrap();
+        assert_eq!(process.wait().unwrap(), 3);
+
+        assert_eq!(stdout, "visible");
+        assert!(logger.warnings().contains(&ALLOW_MODE_WARNING.to_string()));
+        let pointer = process
+            .output_metadata()
+            .and_then(|metadata| metadata.capture_denials.as_ref())
+            .expect("capture pointer");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&pointer.output_path).unwrap()).unwrap();
+        assert_eq!(document["summary"]["exitCode"], 3);
+        assert!(document["denials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|denial| denial["resource"] == secret.display().to_string()
+                && denial["accessType"] == "read"));
+        let trace = pointer.etl_path.as_deref().expect("etlPath");
+        assert_eq!(
+            trace,
+            pointer.output_path.replace(".json", ".seatbelt.log"),
+            "trace shares the report stem"
+        );
+        let trace = std::fs::read_to_string(trace).unwrap();
+        assert!(trace.contains("secret.txt"), "{trace}");
+    }
+
+    fn exited_process_with_capture(output_path: PathBuf, retain: bool) -> SeatbeltSandboxProcess {
+        let trace_path = retain.then(|| capture_sibling_path(&output_path, TRACE_SUFFIX).unwrap());
+        let capture = DenialCapturePlan {
+            tag: format!("mxc-capture-{}", random_capture_suffix().unwrap()),
+            output_path,
+            trace_path,
+            allow_mode: false,
+        }
+        .start()
+        .expect("log stream");
+        SeatbeltSandboxProcess {
+            child: Command::new("/usr/bin/true").spawn().unwrap(),
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            stdout_canceller: None,
+            stderr_canceller: None,
+            pty: None,
+            timeout: None,
+            started: Instant::now(),
+            timed_out: false,
+            termination_error: None,
+            marker: RunMarker::new().unwrap(),
+            members_cleaned: false,
+            cleanup_failures: Vec::new(),
+            capture: Some(capture),
+            capture_error: None,
+            capture_warnings: Vec::new(),
+            output_metadata: None,
+        }
+    }
+
+    /// Runs a capture request whose `log stream` is replaced by `log`, checks
+    /// that it was rejected before the workload ran, and returns the error.
+    fn rejected_capture_start(log: &str, directory: &Path) -> String {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+        use crate::seatbelt_common::denial_capture::test_tools;
+
+        test_tools::set(test_tools::TestTools {
+            log: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                log.to_string(),
+            ]),
+            timeout: Some(Duration::from_secs(1)),
+            ..Default::default()
+        });
+        let sentinel = directory.join("workload-ran");
+        let output_dir = directory.join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        let mut request = base_request();
+        request.script_code = format!("touch '{}'", sentinel.display());
+        request.policy.readwrite_paths = vec![directory.display().to_string()];
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(output_dir.join("denials.json").display().to_string()),
+            retain_etl: true,
+            ..Default::default()
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let started = Instant::now();
+
+        let error = match SeatbeltScriptRunner::new().spawn(&request, &mut logger, StdioMode::Pipes)
+        {
+            Ok(_) => panic!("the workload started without a ready log stream"),
+            Err(response) => response.error_message,
+        };
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!sentinel.exists(), "the workload ran");
+        let left: Vec<_> = std::fs::read_dir(&output_dir).unwrap().collect();
+        assert!(left.is_empty(), "the trace was not removed: {left:?}");
+        error
+    }
+
+    #[test]
+    fn a_log_stream_that_never_becomes_ready_rejects_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let pid_file = directory.join("collector.pid");
+
+        let error = rejected_capture_start(
+            &format!("echo $$ > '{}'; exec /bin/sleep 60", pid_file.display()),
+            &directory,
+        );
+
+        assert!(error.contains("could not confirm within 1s"), "{error}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stopped = (0..100).any(|_| {
+            // SAFETY: signal 0 only checks whether the process exists.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if alive {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !alive
+        });
+        assert!(stopped, "the stand-in log stream was left running");
+    }
+
+    #[test]
+    fn a_log_stream_that_exits_before_ready_rejects_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+
+        let error = rejected_capture_start("echo 'log: not permitted' >&2; exit 1", &directory);
+
+        assert!(error.contains("exited unexpectedly"), "{error}");
+        assert!(error.contains("log: not permitted"), "{error}");
+    }
+
+    #[test]
+    fn launch_failure_after_capture_start_removes_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("denials.json");
+        let trace_path = capture_sibling_path(&output_path, TRACE_SUFFIX).unwrap();
+        let capture = DenialCapturePlan {
+            tag: format!("mxc-capture-{}", random_capture_suffix().unwrap()),
+            output_path,
+            trace_path: Some(trace_path.clone()),
+            allow_mode: false,
+        }
+        .start()
+        .expect("log stream");
+        assert!(trace_path.exists());
+
+        let response = discard_capture(
+            Some(capture),
+            launch_failed_response("spawn failed".to_string()),
+        );
+
+        assert_eq!(response.error_message, "spawn failed");
+        assert!(!trace_path.exists());
+    }
+
+    #[test]
+    fn capture_after_termination_failure_skips_report_and_keeps_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("denials.json");
+        let mut process = exited_process_with_capture(output.clone(), true);
+        process.termination_error = Some("session could not be terminated".to_string());
+
+        let error = process.wait().unwrap_err().to_string();
+
+        let trace = directory.path().join("denials.seatbelt.log");
+        assert!(error.contains("session could not be terminated"), "{error}");
+        assert!(error.contains("did not write a report"), "{error}");
+        assert!(error.contains(&trace.display().to_string()), "{error}");
+        assert!(trace.exists());
+        assert!(!output.exists());
+        assert!(!directory.path().join("denials.verbose.json").exists());
+        let metadata = process.output_metadata().unwrap();
+        assert!(metadata.capture_denials.is_none());
+        let failure = metadata.capture_denials_error.as_ref().unwrap();
+        assert_eq!(failure.etl_path, trace.display().to_string());
+        assert!(failure.message.contains("did not write a report"));
+    }
+
+    #[test]
+    fn capture_after_exit_cleanup_failure_skips_report_and_keeps_trace() {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let mut request = base_request();
+        // Cleanup finds the leftover sleep, then fails because no time is left.
+        request.script_code = "/bin/sleep 30 & exit 0".to_string();
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(directory.join("denials.json").display().to_string()),
+            retain_etl: true,
+            ..Default::default()
+        });
+        EXIT_CLEANUP_TIMEOUT.set(Some(Duration::ZERO));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+
+        let error = process.wait().unwrap_err().to_string();
+
+        assert!(error.contains("did not write a report"), "{error}");
+        assert!(error.contains("could not be terminated"), "{error}");
+        let failure = process
+            .output_metadata()
+            .and_then(|metadata| metadata.capture_denials_error.as_ref())
+            .expect("captureDenialsError");
+        assert!(error.contains(&failure.etl_path), "{error}");
+        assert!(Path::new(&failure.etl_path).exists());
+        let reports: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".json"))
+            .collect();
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(process
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("could not be terminated")));
+    }
+
+    #[test]
+    fn capture_failure_after_timeout_is_a_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("missing").join("denials.json");
+        let mut process = exited_process_with_capture(output, false);
+        process.timed_out = true;
+
+        let error = process.wait().unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("captureDenials"), "{error}");
+        let warnings = process.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("failed after the run timed out"));
+        process.wait().unwrap_err();
+        assert_eq!(process.warnings().len(), 1, "later waits don't repeat it");
+    }
+
+    #[test]
+    fn capture_write_failure_is_repeated_by_later_waits() {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+
+        let directory = tempfile::tempdir().unwrap();
+        let output_dir = directory.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        let mut request = base_request();
+        request.script_code = "exit 0".to_string();
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(output_dir.join("denials.json").display().to_string()),
+            ..Default::default()
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+        std::fs::remove_dir(&output_dir).unwrap();
+
+        let first = process.wait().expect_err("report write must fail");
+        let second = process
+            .wait()
+            .expect_err("a later wait must not report success");
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(process.output_metadata().is_none());
     }
 }

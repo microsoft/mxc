@@ -115,8 +115,8 @@ fn emit_active() -> bool {
 
 /// Evaluate authorization for one complete logical emission.
 ///
-/// Development-contract requests emit Required diagnostics: no consent or
-/// request opt-in, only build eligibility and administrative policy. Other
+/// Supported-contract requests emit Required diagnostics: no consent,
+/// request opt-in or administrative policy, only build eligibility. Other
 /// requests need consent and policy.
 fn authorization_allows_emission() -> bool {
     #[cfg(test)]
@@ -131,7 +131,14 @@ fn authorization_allows_emission() -> bool {
 }
 
 fn required_collection_allowed() -> bool {
-    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE && policy::required_collection_permitted()
+    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
+}
+
+pub(super) fn uses_required_events(source_contract: Option<ContractVersion>) -> bool {
+    matches!(
+        source_contract,
+        Some(ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha)
+    )
 }
 
 fn invocation_can_emit(active: bool) -> bool {
@@ -246,21 +253,17 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 
 /// Initialize the provider for one request, selecting the gate by contract.
 ///
-/// Development-contract requests collect Required diagnostics regardless of
-/// the request's telemetry object or MXC consent, when the build is eligible
-/// and administrative policy permits. All other requests use [`init`].
+/// Supported-contract requests collect Required diagnostics regardless of
+/// the request's telemetry object, MXC consent or administrative policy, when
+/// the build is eligible. All other requests use [`init`].
 pub fn init_for_request(
     config: Option<&TelemetryConfig>,
     source_contract: Option<ContractVersion>,
     logger: &mut Logger,
 ) -> bool {
-    if source_contract == Some(ContractVersion::V1_1_0Alpha) {
+    if uses_required_events(source_contract) {
         if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
             logger.log_line("telemetry: Required diagnostics are not collected by this build");
-            return false;
-        }
-        if !policy::required_collection_permitted() {
-            logger.log_line("telemetry: Required diagnostics are blocked by administrative policy");
             return false;
         }
         return activate_provider(logger);
@@ -1412,21 +1415,28 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_development_end_uses_required_gate_on_a_fresh_thread() {
+    fn out_of_band_contract_end_uses_required_gate_on_a_fresh_thread() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = TelemetryTestEnv::new(tmp.path());
         let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        for emit in [emit_panic as fn(), emit_cancellation as fn()] {
+        for (contract, emit) in [
+            ContractVersion::V0_9_0Alpha,
+            ContractVersion::V1_0_0,
+            ContractVersion::V1_1_0Alpha,
+        ]
+        .into_iter()
+        .flat_map(|contract| {
+            [emit_panic as fn(), emit_cancellation as fn()].map(|emit| (contract, emit))
+        }) {
             reset_for_test();
             events::test_sink::install();
             {
                 let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-                let _scope =
-                    session::start(true, "", Some(ContractVersion::V1_1_0Alpha), &mut logger);
+                let _scope = session::start(true, "", Some(contract), &mut logger);
                 set_process_context(&ContainmentBackend::ProcessContainer);
             }
             // No authorization override: the real gate runs with consent
-            // undetermined, which a development request must not need.
+            // undetermined, which a supported contract must not need.
             let ends = std::thread::spawn(move || {
                 assert!(!session::critical_events());
                 events::test_sink::install();
@@ -1443,28 +1453,50 @@ mod tests {
     }
 
     #[test]
-    fn init_for_request_ignores_request_flag_and_consent_only_for_development() {
+    fn init_for_request_ignores_request_flag_consent_and_policy_for_supported_contracts() {
         let tmp = tempfile::tempdir().unwrap();
-        let _env = TelemetryTestEnv::new(tmp.path());
+        let env = TelemetryTestEnv::new(tmp.path());
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let enabled = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
 
-        // Published and unattributed requests still need consent.
-        for contract in [None, Some(ContractVersion::V1_0_0)] {
-            assert!(!init_for_request(Some(&enabled), contract, &mut logger));
-            assert!(!init_for_request(None, contract, &mut logger));
+        assert!(!init_for_request(Some(&enabled), None, &mut logger));
+        assert!(!init_for_request(None, None, &mut logger));
+        for consent in [None, Some(false)] {
+            if let Some(granted) = consent {
+                let result = consent::set_consent(granted, "test");
+                if cfg!(target_os = "windows") {
+                    result.unwrap();
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+            for contract in [
+                ContractVersion::V0_9_0Alpha,
+                ContractVersion::V1_0_0,
+                ContractVersion::V1_1_0Alpha,
+            ] {
+                for policy in [0, 1, 7] {
+                    env.set_policy_value(policy);
+                    for config in [
+                        None,
+                        Some(TelemetryConfig::default()),
+                        Some(TelemetryConfig {
+                            enabled: Some(false),
+                        }),
+                        Some(enabled.clone()),
+                    ] {
+                        let active = init_for_request(config.as_ref(), Some(contract), &mut logger);
+                        assert_eq!(active, crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                        if active {
+                            crate::mxc_telemetry::shutdown();
+                        }
+                    }
+                }
+            }
         }
-
-        // Development requests need only build eligibility and policy, never
-        // consent, and a blocking policy always wins.
-        let dev = Some(ContractVersion::V1_1_0Alpha);
-        if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
-            assert!(!init_for_request(None, dev, &mut logger));
-        }
-        assert!(!required_collection_allowed() || policy::required_collection_permitted());
     }
 
     #[test]
@@ -1476,7 +1508,6 @@ mod tests {
         let _env = TelemetryTestEnv::new(tmp.path());
         let config = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
     }
@@ -1503,7 +1534,6 @@ mod tests {
         );
         let config = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
@@ -1519,7 +1549,6 @@ mod tests {
         // An explicit opt-in is required in addition to consent.
         assert!(is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1535,7 +1564,6 @@ mod tests {
 
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1552,7 +1580,6 @@ mod tests {
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1572,7 +1599,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "denied consent must win over explicit enable under policy {policy_value:?}"
             );
@@ -1597,7 +1623,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "undetermined consent must block an explicit enable under policy {policy_value:?}"
             );
@@ -1613,7 +1638,6 @@ mod tests {
         consent::set_consent(true, "cli").unwrap();
         let config = TelemetryConfig {
             enabled: Some(false),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
     }
@@ -1641,10 +1665,7 @@ mod tests {
         assert_eq!(consent::get_consent(), consent::ConsentState::Granted);
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         // Every other gate is open; only the omitted opt-in keeps it off.
-        assert!(!is_enabled(&TelemetryConfig {
-            enabled: None,
-            ..Default::default()
-        }));
+        assert!(!is_enabled(&TelemetryConfig { enabled: None }));
     }
 
     #[test]

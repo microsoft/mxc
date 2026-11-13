@@ -637,7 +637,7 @@ impl<B: SandboxBackend> Runner<B> {
             Err(response) => return response,
         };
 
-        match child.wait() {
+        let mut response = match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
@@ -663,7 +663,7 @@ impl<B: SandboxBackend> Runner<B> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
                 exit_code: -1,
-                error_message: format!("script timed out after {}ms", request.script_timeout),
+                error_message: format!("script timed out after {}ms: {e}", request.script_timeout),
                 output_metadata: child.output_metadata().cloned().map(Box::new),
                 failure_phase: FailurePhase::Timeout,
                 ..Default::default()
@@ -673,7 +673,10 @@ impl<B: SandboxBackend> Runner<B> {
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
                 response
             }
-        }
+        };
+        // Backends report failures after exit, such as cleanup, here.
+        response.extend_warnings(child.warnings());
+        response
     }
 }
 
@@ -719,7 +722,11 @@ mod runner_tests {
 
     use super::*;
 
-    struct CompletedProcess;
+    #[derive(Default)]
+    struct CompletedProcess {
+        wait_error: Option<std::io::Error>,
+        warnings: Vec<String>,
+    }
 
     struct NativePipeSource;
 
@@ -840,6 +847,10 @@ mod runner_tests {
     }
 
     impl SandboxProcess for CompletedProcess {
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -865,7 +876,7 @@ mod runner_tests {
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
-            Ok(0)
+            self.wait_error.take().map_or(Ok(0), Err)
         }
     }
 
@@ -894,8 +905,77 @@ mod runner_tests {
             validate_common(request)?;
             self.validate(request)?;
             self.direct_spawns.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(CompletedProcess))
+            Ok(Box::new(CompletedProcess::default()))
         }
+    }
+
+    struct CleanupWarningBackend;
+
+    impl SandboxBackend for CleanupWarningBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            Ok(Box::new(CompletedProcess {
+                warnings: vec!["cleanup failed".to_string()],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[test]
+    fn runner_reports_process_warnings_with_the_exit_code() {
+        let mut runner = Runner::new(CleanupWarningBackend);
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.warnings(), ["cleanup failed"]);
+    }
+
+    #[test]
+    fn runner_capture_timeout_preserves_wait_diagnostics() {
+        let runner = Runner::new(CountingBackend {
+            validations: Arc::default(),
+            direct_spawns: Arc::default(),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest {
+            script_timeout: 1000,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let diagnostic =
+            "process timed out; captureDenials teardown also failed: report write failed";
+        let child = CompletedProcess {
+            wait_error: Some(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                diagnostic,
+            )),
+            warnings: vec!["capture failed after timeout".to_string()],
+        };
+
+        let response = runner.wait_for_child(&request, &mut logger, Ok(Box::new(child)));
+
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(response.failure_phase, FailurePhase::Timeout);
+        assert!(response
+            .error_message
+            .contains("script timed out after 1000ms"));
+        assert!(response.error_message.contains(diagnostic));
+        assert_eq!(response.warnings(), ["capture failed after timeout"]);
+        assert!(response.output_metadata.is_none());
     }
 
     #[test]

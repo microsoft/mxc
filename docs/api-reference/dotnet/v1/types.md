@@ -318,8 +318,12 @@ public enum ContainmentBackend
     IsolationSession,
     Bubblewrap,
     Hyperlight,
+    MicroVm,
 }
 ```
+
+`MicroVm` identifies NVX in host discovery. MicroVM streaming and container
+lifecycle operations remain restricted to Rust development JSON APIs.
 
 
 ## `Microsoft.Mxc.Sdk.V1.DeprovisionOptions`
@@ -1474,7 +1478,7 @@ public enum TelemetryPolicyState
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```csharp
 public sealed class TelemetryConfig

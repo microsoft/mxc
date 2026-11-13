@@ -16,7 +16,7 @@ use serde::Serialize;
 #[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub enum BackendCapability {
-    /// Windows ProcessContainer denial capture.
+    /// Denial capture (`captureDenials`) on ProcessContainer and Seatbelt.
     CaptureDenials,
     /// Native `filesystem.deniedPaths` enforcement at the reported tier.
     FilesystemDeniedPaths,
@@ -114,6 +114,7 @@ pub fn available_backends() -> Vec<AvailableBackend> {
                 wslc: wslc_host_available(),
                 isolation_session: isolation_session_host_available(),
                 hyperlight: hyperlight_host_available(),
+                microvm: microvm_host_available(),
             },
         )
     }
@@ -133,18 +134,28 @@ pub fn to_json_pretty(backends: &[AvailableBackend]) -> Result<String, serde_jso
 
 #[cfg(target_os = "macos")]
 fn macos_backends() -> Vec<AvailableBackend> {
-    macos_backends_with(crate::seatbelt_common::seatbelt_runner::sandbox_init_available())
+    macos_backends_with(
+        crate::seatbelt_common::seatbelt_runner::sandbox_init_available(),
+        crate::seatbelt_common::denial_capture::log_tool_available(),
+    )
 }
 
 /// Split from [`macos_backends`] so the reporting is testable without
 /// depending on what the test host has installed.
 #[cfg(target_os = "macos")]
-fn macos_backends_with(sandbox_init_available: bool) -> Vec<AvailableBackend> {
+fn macos_backends_with(
+    sandbox_init_available: bool,
+    log_tool_available: bool,
+) -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
     if sandbox_init_available {
-        backends.push(AvailableBackend::tierless(
-            ContainmentBackend::Seatbelt.wire_name(),
-        ));
+        let mut seatbelt = AvailableBackend::tierless(ContainmentBackend::Seatbelt.wire_name());
+        if log_tool_available {
+            seatbelt
+                .capabilities
+                .push(BackendCapability::CaptureDenials);
+        }
+        backends.push(seatbelt);
     }
     backends
 }
@@ -234,6 +245,19 @@ struct WindowsHostAvailability {
     wslc: bool,
     isolation_session: bool,
     hyperlight: bool,
+    microvm: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn microvm_host_available() -> bool {
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+    {
+        crate::backend_modules::nvx::is_available()
+    }
+    #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
+    {
+        false
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -339,6 +363,12 @@ fn windows_backends(
         ));
     }
 
+    if hosts.microvm {
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::MicroVm.wire_name(),
+        ));
+    }
+
     backends
 }
 
@@ -363,6 +393,7 @@ mod tests {
                 wslc: true,
                 isolation_session: true,
                 hyperlight: true,
+                microvm: true,
             },
         )
     }
@@ -381,7 +412,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn backends_with_host_checks_passing() -> Vec<AvailableBackend> {
-        macos_backends_with(true)
+        macos_backends_with(true, true)
     }
 
     fn reported_names(backends: &[AvailableBackend]) -> Vec<&str> {
@@ -486,8 +517,21 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_macos_host_check_reports_only_seatbelt() {
-        assert_eq!(reported_names(&macos_backends_with(true)), vec!["seatbelt"]);
-        assert!(macos_backends_with(false).is_empty());
+        assert_eq!(
+            reported_names(&macos_backends_with(true, true)),
+            vec!["seatbelt"]
+        );
+        assert!(macos_backends_with(false, true).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_reports_capture_denials_only_with_the_log_tool() {
+        assert_eq!(
+            macos_backends_with(true, true)[0].capabilities,
+            vec![BackendCapability::CaptureDenials]
+        );
+        assert!(macos_backends_with(true, false)[0].capabilities.is_empty());
     }
 
     /// Holds each backend in the real [`available_backends`] to its own

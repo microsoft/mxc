@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::learning_mode_core::{
     capture_diagnostics::{
         parse_supported_verbose_document, CaptureVerboseLoggingDocument,
-        CaptureVerboseLoggingProvider,
+        CaptureVerboseLoggingProvider, SEATBELT_PROVIDER_ID,
     },
     verbose_logging_sibling_path,
 };
@@ -179,6 +179,7 @@ fn canonical_provider_guid(provider: CaptureVerboseLoggingProvider) -> &'static 
         CaptureVerboseLoggingProvider::LearningModeNetworkDecision => {
             "{301EC03D-2951-5EFB-6D99-59C64628BBFC}"
         }
+        CaptureVerboseLoggingProvider::Seatbelt => SEATBELT_PROVIDER_ID,
     }
 }
 
@@ -419,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn development_inventory_skips_verbose_transport_without_removing_local_reports() {
+    fn supported_contracts_skip_verbose_transport_without_removing_local_reports() {
         use crate::mxc_common::logger::{Logger, Mode};
         use crate::mxc_contract::ContractVersion;
 
@@ -444,20 +445,23 @@ mod tests {
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);
-        let _development =
-            telemetry::session::start(true, "", Some(ContractVersion::V1_1_0Alpha), &mut logger);
-        assert!(emit_verbose_telemetry(
-            true,
-            &ContainmentBackend::ProcessContainer,
-            None,
-            &response
-        )
-        .is_ok());
-        assert_eq!(std::fs::read(&denials_path).unwrap(), b"{}");
-        assert_eq!(std::fs::read(&verbose_path).unwrap(), verbose_bytes);
-
-        let _published =
-            telemetry::session::start(true, "", Some(ContractVersion::V1_0_0), &mut logger);
+        for contract in [
+            ContractVersion::V0_9_0Alpha,
+            ContractVersion::V1_0_0,
+            ContractVersion::V1_1_0Alpha,
+        ] {
+            let _session = telemetry::session::start(true, "", Some(contract), &mut logger);
+            assert!(emit_verbose_telemetry(
+                true,
+                &ContainmentBackend::ProcessContainer,
+                None,
+                &response
+            )
+            .is_ok());
+            assert_eq!(std::fs::read(&denials_path).unwrap(), b"{}");
+            assert_eq!(std::fs::read(&verbose_path).unwrap(), verbose_bytes);
+        }
+        let _unattributed = telemetry::session::start(true, "", None, &mut logger);
         assert_eq!(
             emit_verbose_telemetry(true, &ContainmentBackend::ProcessContainer, None, &response)
                 .unwrap_err(),

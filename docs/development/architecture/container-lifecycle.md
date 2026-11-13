@@ -685,9 +685,11 @@ The three optional named fields carry structured failure detail. `operation` and
 | `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
 | `remediation` | An actionable "how to fix it" hint, when the failure has one. |
 
-**Availability.** These fields are currently populated only by **IsolationSession
-state-aware** operations. Other backends may adopt them — treat all three as optional on
-every backend, and branch program logic on `code` first.
+**Availability.** IsolationSession container lifecycle operations may populate all
+three fields. WSLc container lifecycle operations populate `operation` for failures
+reported by the WSLc SDK and `nativeCode` when the SDK supplies an HRESULT. Other
+backends may adopt them — treat all three as optional on every backend, and branch
+program logic on `code` first.
 
 **Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 

@@ -17,13 +17,13 @@ function Assert-TelemetryExecutionTrace {
         throw 'Each invocation must have a distinct positive executor PID.'
     }
     if ($RequireLifecycles) {
-        foreach ($lifecycle in 1, 2) {
+        foreach ($lifecycle in 1, 2, 3) {
             $phases = @($Invocations | Where-Object { $_.Lifecycle -eq $lifecycle } | ForEach-Object Phase)
             if (($phases -join ',') -cne 'provision,start,exec,exec,stop,deprovision') {
                 throw "Lifecycle $lifecycle did not complete provision/start/repeated-exec/stop/deprovision."
             }
         }
-        if ($Invocations.Count -ne 12) { throw 'Expected exactly two complete lifecycles.' }
+        if ($Invocations.Count -ne 18) { throw 'Expected exactly three complete lifecycles.' }
     }
 
     [xml]$trace = $XmlText
@@ -57,10 +57,10 @@ function Assert-TelemetryExecutionTrace {
     $lifecycleRoots = @{}
     foreach ($invocation in $Invocations) {
         $emitted = @($telemetryEvents | Where-Object { $_.ProcessId -eq $invocation.ProcessId })
-        if ($invocation.ContractVersion -ceq '1.1.0-alpha') {
+        if ($invocation.ContractVersion -cin @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
             foreach ($event in $emitted) {
                 if ($event.Task -cnotin @('MXC.ExecutionStart', 'MXC.ExecutionEnd', 'MXC.Error', 'MXC.ProcessExited')) {
-                    throw "$($event.Task) is excluded for development contract 1.1.0-alpha."
+                    throw "$($event.Task) is excluded for contract $($invocation.ContractVersion)."
                 }
             }
         }
@@ -69,13 +69,10 @@ function Assert-TelemetryExecutionTrace {
                 throw "Missing or unsupported contract attribution for executor $($invocation.ProcessId)."
             }
             foreach ($event in $emitted) {
-                $expectedKeyword = [uint64]0x0000400000000000
-                $expectedPrivacyTag = [uint64]0x02000000
-                if ($invocation.ContractVersion -ceq '1.1.0-alpha' -and
-                    $event.Task -cin @('MXC.ExecutionStart', 'MXC.ExecutionEnd', 'MXC.Error', 'MXC.ProcessExited')) {
-                    $expectedKeyword = [uint64]0x0000800000000000
-                    $expectedPrivacyTag = [uint64]0x01000000
-                }
+                # Mock values: they must match the placeholder metadata used by
+                # unrouted test builds, not real telemetry classification values.
+                $expectedKeyword = [uint64]0x0000200000000000
+                $expectedPrivacyTag = [uint64]0x00020000
                 if ($event.Keywords -notmatch '^0x[0-9a-fA-F]{1,16}$' -or
                     [Convert]::ToUInt64($event.Keywords.Substring(2), 16) -ne $expectedKeyword) {
                     throw "$($event.Task) from executor $($invocation.ProcessId) has incorrect Keywords '$($event.Keywords)'."
@@ -172,8 +169,8 @@ function Assert-TelemetryExecutionTrace {
         }
     }
     if ($RequireLifecycles -and
-        ($lifecycleSessions['1'] -eq $lifecycleSessions['2'] -or
-         $lifecycleRoots['1'] -ceq $lifecycleRoots['2'])) {
+        (@($lifecycleSessions.Values | Sort-Object -Unique).Count -ne $lifecycleSessions.Count -or
+         @($lifecycleRoots.Values | Sort-Object -Unique -CaseSensitive).Count -ne $lifecycleRoots.Count)) {
         throw 'The new lifecycle reused attribution from the cleaned-up lifecycle.'
     }
 }

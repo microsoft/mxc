@@ -685,8 +685,6 @@ pub(crate) struct PreparedContainerRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
-    #[cfg(test)]
-    requested_sandbox_kind: &'static str,
 }
 
 #[cfg(test)]
@@ -772,15 +770,12 @@ impl PreparedContainerRequest {
         self
     }
 
-    /// Enable or disable telemetry for this invocation.
+    /// Preserve the invocation's telemetry compatibility preference.
     ///
-    /// Enabling this per-request switch is necessary but not sufficient:
-    /// telemetry still requires persisted user consent and an administrative
-    /// policy that permits collection. It is independent of experimental mode.
+    /// Required collection ignores this value. It is independent of experimental mode.
     pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
-            requested_sandbox_kind: Some(self.requested_sandbox_kind),
         });
         self
     }
@@ -874,7 +869,6 @@ pub(crate) fn prepare_creation_request(
     if let Some(telemetry) = telemetry {
         prepared.inner.telemetry = Some(TelemetryConfig {
             enabled: telemetry.enabled,
-            requested_sandbox_kind: Some(request.containment.telemetry_kind()),
         });
     }
     Ok(prepared)
@@ -916,15 +910,18 @@ mod tests {
             let prepared = super::prepare_creation_request(&request, telemetry).unwrap();
             assert!(!prepared.inner.experimental_enabled);
             assert_eq!(
+                prepared.inner.source_contract,
+                Some(crate::mxc_contract::ContractVersion::V1_0_0)
+            );
+            assert_eq!(
                 prepared.inner.telemetry.as_ref().and_then(|t| t.enabled),
                 enabled
             );
-            if let Some(telemetry) = prepared.inner.telemetry {
-                assert_eq!(
-                    telemetry.requested_sandbox_kind,
-                    Some(request.containment.telemetry_kind())
-                );
-            }
+            assert_eq!(prepared.inner.telemetry.is_some(), enabled.is_some());
+            assert_eq!(
+                prepared.inner.requested_sandbox_kind,
+                Some(request.containment.telemetry_kind())
+            );
         }
         assert!(super::prepare_request(&request)
             .unwrap()
@@ -1627,7 +1624,7 @@ mod tests {
     // The shared parser owns the wire contract and its `captureDenials` branch
     // is not Windows-gated, so drive it directly to pin the combination on
     // every platform. The only documented mutual exclusion is with the
-    // `--audit` CLI flag (docs/logging-access-denied.md), which
+    // `--audit` CLI flag (docs/learning-mode.md), which
     // `wxc-exec` enforces in `validate_audit_request`.
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
@@ -1765,14 +1762,7 @@ mod tests {
 
         request.set_telemetry_opt_in(true);
         assert_eq!(request.telemetry_enabled(), Some(true));
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.requested_sandbox_kind),
-            Some("process")
-        );
+        assert_eq!(request.inner.requested_sandbox_kind, Some("process"));
         assert!(
             !request.inner.experimental_enabled,
             "stable telemetry enablement must not opt into experimental features"
@@ -1797,11 +1787,7 @@ mod tests {
         request.set_telemetry_opt_in(true);
 
         assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            request.inner.requested_sandbox_kind,
             Some("processcontainer")
         );
     }

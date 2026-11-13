@@ -132,25 +132,27 @@ wxc-exec.exe --audit policy.json
 ```
 
 MXC records the observed accesses and produces policy-authoring artifacts. See
-[logging access denied](docs/logging-access-denied.md) for safe
+[learning mode](docs/learning-mode.md) for safe
 deny-and-record diagnostics, audit outputs, and supported workflows.
 
 ## Telemetry
 
-Official Microsoft builds send Required diagnostic data to Microsoft for the
-development `1.1.0-alpha` request contract. MXC is moving to Required telemetry
-to keep MXC secure, reliable, and up to date: four events describe execution
+Eligible Windows builds send Required diagnostic data to Microsoft for all
+supported request contracts: `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha`.
+MXC uses Required telemetry to keep MXC secure, reliable, and up to date:
+four events describe execution
 start and end, categorized failures, and process exits. They need no user
-consent or per-request opt-in, and an administrator can block them with
-machine-wide policy.
+consent or per-request opt-in, and administrative policy does not block them.
 
-Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
-unless the run opts in, the Windows user has consented, and administrative
-policy permits collection. An administrator can block that telemetry but cannot
-grant consent for the user.
+Only those four events are collected for supported contracts. Existing
+consent-management APIs and commands remain available, but their state does not
+enable or disable Required collection. Local diagnostic and denial reports
+remain separate.
 
-Local open-source builds are not configured to route telemetry to Microsoft,
-and telemetry is a no-op on non-Windows platforms. See
+Local open-source debug builds are not configured to route telemetry to
+Microsoft. Windows release builds from source use the bundled signed telemetry
+component and are routed; set an empty `MXC_TELEMETRY_COMPONENT_PATH` to build
+without routing. Telemetry is a no-op on non-Windows platforms. See
 [telemetry policy and consent](docs/telemetry.md) for controls and privacy
 details.
 
@@ -198,7 +200,7 @@ build.bat --all             # Release build for current architecture
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
-| Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
+| Learning mode | [`docs/learning-mode.md`](docs/learning-mode.md) | Diagnose blocked accesses and author policy |
 | Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Required diagnostic data and administrative controls |
 | Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
 

@@ -46,12 +46,12 @@ provider metadata through Rust constants and `write_event!` struct fields.
 | Feature | WIL (`wil/TraceLogging.h`) | Rust `tracelogging` crate | MXC approach |
 |---|---|---|---|
 | **Provider group GUID** | WinExt telemetry group | `group_id("...")` in `define_provider!` | One `Microsoft.MXC` registration uses the WinExt group for all events; see [Private GUID Substitution](#private-guid-substitution-internal-builds) |
-| **Sampling keywords** | Measures / Critical Data constants | Raw `u64` in `keyword(...)` | Generated legacy and Critical Data constants; ordinary local builds use `0x1` for both. Grouped builds select metadata by event and source contract as described below |
+| **Sampling keywords** | Measures / Critical Data constants | Raw `u64` in `keyword(...)` | Supplied at build time by the signed telemetry component (see [Telemetry component](#telemetry-component)); ordinary local builds use `0x1` for both. Grouped builds select metadata by event and source contract as described below |
 | **Common event fields** | `_GENERIC_PARTB_FIELDS_ENABLED` pattern | `struct("Name", { ... })` in `write_event!` | `struct("COMMON_MXC_PARAMS", { Version, Channel, IsDebugging, UTCReplace_AppSessionGuid })` |
 | **Provider lifecycle** | `IMPLEMENT_TRACELOGGING_CLASS` singleton | `define_provider!` static + `register()`/`unregister()` | `OnceLock<ProviderState>` for version/channel, manual lifecycle |
-| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct = 11` (`MXC (Microsoft Execution Containers)`) on all events |
-| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory = 1` (`Client Diagnostic Data`) on all events |
-| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Generated Usage/Performance constants selected with the keyword. Ordinary local builds use `0`; the field and its position remain unchanged |
+| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct` (the privacy-approved MXC product, from the telemetry component) on all events |
+| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory` (Client Diagnostic Data, from the telemetry component) on all events |
+| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Usage/Performance values from the telemetry component, selected with the keyword. Ordinary local builds use `0`; the field and its position remain unchanged |
 | **Activity tracking** | `DEFINE_TELEMETRY_ACTIVITY` | Manual `Opcode` | Not needed for current events |
 
 The remaining gap (activity tracking) is not needed for current events.
@@ -60,14 +60,13 @@ If needed later, it can be added incrementally.
 ### Event keyword and privacy-tag selection
 
 For Windows builds with the WinExt group configured, `MXC.ExecutionStart`, `MXC.ExecutionEnd`,
-`MXC.Error`, and `MXC.ProcessExited` use `MICROSOFT_KEYWORD_CRITICAL_DATA`
-(`0x0000_8000_0000_0000`) and `PDT_ProductAndServicePerformance`
-(`0x01000000`) when the request uses development contract
-`1.1.0-alpha`. Published `0.9.0-alpha` and `1.0.0` requests, and requests
-without source-contract attribution, retain `MICROSOFT_KEYWORD_MEASURES`
-(`0x0000_4000_0000_0000`) and `PDT_ProductAndServiceUsage` (`0x02000000`).
-Published requests retain Measures and Usage for the other event families.
-Development `1.1.0-alpha` requests emit only those four events, suppressing
+`MXC.Error`, and `MXC.ProcessExited` use the Critical Data keyword and the Performance
+privacy tag when the request uses `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`.
+Requests without source-contract attribution retain the Measures keyword and
+the Usage privacy tag.
+The numeric values are not in this repository; they come from the telemetry component.
+Unattributed requests retain Measures and Usage for the other event families.
+All three supported contracts emit only those four events, suppressing
 VerboseDenials, ProcessTimedOut, ProcessKillFailed, PolicyHash,
 SandboxNetworkPolicyApplied, SandboxTornDown and ConfigRejected.
 Without a group, ordinary local
@@ -76,24 +75,25 @@ builds use keyword `0x1` and privacy tag `0` for both categories.
 The selection travels with request-scoped session context, including streaming
 handles and worker threads. The shared writer selects the keyword and tag
 together. Event names, field order and types are unchanged for every contract.
-Published contracts and requests without source-contract attribution retain the
+Typed SDK creation and lifecycle normalization preserve their selected compatibility contract
+for this decision, without retaining caller JSON or changing operation routing.
+Caller-requested containment is retained independently of the optional `telemetry`
+preference. For example, `"process"` remains the sandbox kind when it resolves
+to the ProcessContainer backend, whether telemetry is omitted or explicitly disabled.
+Requests without source-contract attribution retain the
 full inventory, request opt-in, MXC consent and administrative policy gates.
 Excluded verbose telemetry is not read or prepared for transport; caller-requested
 local denial reports and verbose artifacts remain available.
 
-Development `1.1.0-alpha` requests collect the four Required events by default.
+All three supported contracts collect the four Required events by default.
 The request's `telemetry` object (including `enabled: false`) and MXC consent
 are not consulted. Initialization runs for every such request and collection
-requires both:
+requires only a build eligible for Required collection: routed through the internal
+group, or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`).
+Administrative policy is not consulted, so no registry setting disables it.
 
-- a build eligible for Required collection: routed through the internal group,
-  or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`); and
-- administrative policy that permits it: an absent value, `1` or `3`. `0`, an
-  unsupported value, a wrong registry type or a read failure blocks. Policy is
-  rechecked for each emission.
-
-The gate is selected from the request-scoped contract, so published and
-development requests running concurrently do not share authorization. UTC's
+The gate is selected from the request-scoped contract, so supported-contract and
+unattributed requests running concurrently do not share authorization. UTC's
 Required/Optional controls apply to Windows Diagnostic Data, not to MXC's WinExt
 events.
 Consent-free collection is not implemented by the inventory or metadata selection.
@@ -114,13 +114,13 @@ provider-group input. This test input grants no collection authorization.
 ## Common Event Fields (Part A)
 
 Every MXC telemetry event carries the WinExt-required Common Schema fields
-`PartA_PrivacyProduct = 11` and `PartA_PrivacyDataCategory = 1`. The
+`PartA_PrivacyProduct` and `PartA_PrivacyDataCategory`. The
 `PartA_PrivTags` field is also always present. Ordinary public and local
-builds use `0`; grouped builds use Performance for the four development
-events and Usage otherwise, as described above. Product `11` is
-privacy-approved and registered in the
-WinExt product list. The provider-group identifier remains a secure build
-input and must not be copied into source, tests, documentation, or commits.
+builds use `0`; grouped builds use Performance for the four Required
+events and Usage otherwise, as described above. The product is
+privacy-approved and registered in the WinExt product list. The provider-group
+identifier and these values come from the telemetry component and must not be
+copied into source, tests, documentation, or commits.
 
 ## Common Event Fields (Part C)
 
@@ -142,10 +142,10 @@ Disabled invocations suppress backend telemetry even when another request owns
 the provider. See [Correlating a lifecycle](#correlating-a-lifecycle).
 
 Unreleased consent resource version `4` discloses the random lifecycle session
-inventory, pending privacy/release-owner review, and requires
-explicit re-consent for earlier grants. Administrative policy, per-request
-opt-in, emission reauthorization, privacy tags and non-Windows no-ops remain
-unchanged.
+inventory, pending privacy/release-owner review.
+The optional path for unattributed requests requires explicit re-consent for
+earlier grants. Supported-contract Required collection does not consult the
+consent resource or change existing grants. Non-Windows builds remain no-ops.
 
 ## Windows-only M-ETW specification
 
@@ -156,21 +156,21 @@ does not start a collection session, upload events, contact a network service,
 or create a background process. Events exist only when a local ETW consumer
 enables the provider.
 
-The provider is defined by the name `Microsoft.MXC`.
-`MXC_TELEMETRY_PROVIDER_GROUP_GUID` supplies its WinExt routing group for all
-events; event metadata is selected from the source contract — see
-[Private GUID Substitution](#private-guid-substitution-internal-builds)
-below. Public/OSS and normal development builds do not set it, so
-`group_id(...)` is omitted, `MXC_EVENT_KEYWORD` is a provider-local bit with
-no UTC meaning, and `MXC_PRIVACY_TAG` is `0`: events are ordinary local ETW
-and are not directed to an upload pipeline by MXC.
+The provider is defined by the name `Microsoft.MXC`. The signed telemetry
+component supplies its WinExt routing group for all events; event metadata is
+selected from the source contract — see
+[Telemetry component](#telemetry-component) below. Debug and unrouted builds
+have no group, so `group_id(...)` is omitted, `MXC_EVENT_KEYWORD` is a
+provider-local bit with no UTC meaning, and `MXC_PRIVACY_TAG` is `0`: events
+are ordinary local ETW and are not directed to an upload pipeline by MXC.
 
 The M-ETW scope is Windows `process_container` and `isolation_session`.
 Linux/macOS retain no-op telemetry stubs and are not requirement-behavior
 targets for this work.
 
-The following table describes the published-contract inventory. Development
-`1.1.0-alpha` retains only ExecutionStart, ExecutionEnd, Error and ProcessExited.
+The following table describes the optional inventory for unattributed internal
+requests. Supported contracts retain only ExecutionStart, ExecutionEnd, Error
+and ProcessExited.
 
 | Requirement | ETW event | Required fields | Backend coverage |
 |---|---|---|---|
@@ -253,8 +253,9 @@ Streaming SDK calls emit Start before spawn and End on terminal observation,
 confirmed cancellation, timeout, or handle disposal, not when spawn returns.
 Start does not claim the terminal slot or release the provider. End retains
 the existing exactly-once terminal ownership, including best-effort executor
-panic/cancellation reporting. Each emission independently rechecks consent
-and policy, so withdrawal can suppress End after Start.
+panic/cancellation reporting. Each emission independently rechecks authorization.
+For unattributed optional requests, withdrawal or policy can suppress End after
+Start; neither affects supported-contract Required collection.
 
 Hard process termination, native crashes, or collection/delivery loss can leave
 an unmatched Start; absence of End is not proof of a crash. Requests rejected
@@ -319,14 +320,15 @@ Emitted on execution errors.
 
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
-versioned `*.verbose.json` sibling and dispatches document versions 3, 4, and 5
-to their separate closed schemas. It rejects cross-version or unknown
+versioned `*.verbose.json` sibling and dispatches document versions 3, 4, 5,
+and 6 to their separate closed schemas. It rejects cross-version or unknown
 vocabulary, derives each provider GUID from the version's closed provider
 vocabulary, removes schema `eventName`, every verbose property name and value,
 and structured network endpoints, then regroups signatures that become
 identical and sums their counts before compact serialization. Version 5
 retains the WFP provider and its closed typed reason and
-configuration-recommendation fields. Unsupported document versions are
+configuration-recommendation fields. Version 6 adds the macOS `seatbelt`
+provider; Seatbelt runs never emit telemetry. Unsupported document versions are
 rejected. The event never contains the actionable denials file, raw ETL,
 commands, sandbox output, or general logger text.
 
@@ -383,8 +385,8 @@ documents, general logger text, or free-form error text.
 ### Privacy review status
 
 The current `en-US` consent resource is version 4, which is privacy-reviewed.
-The consent wording applies only to the consent-gated optional events of the
-published contracts. The four Required events of the development contract do
+The consent wording applies only to consent-gated optional events from
+unattributed internal requests. The four Required events of supported contracts do
 not use it. The
 verbose-event inventory, current WinExt classification, retention, access,
 regional processing, deletion, and localization/accessibility decisions
@@ -448,7 +450,7 @@ even when telemetry is disabled. Failed and dry-run deprovision retain it.
 Loads refresh active records; opportunistic pruning removes unrelated records
 older than 30 days and temporary files older than one day, with bounded sweeps.
 Disabling telemetry does not generate new roots; cleanup can remove existing
-state. Withdrawn consent continues to suppress emission.
+state. Withdrawn consent suppresses only unattributed optional emission.
 
 Store unavailability reports a diagnostic and permits a disconnected root
 without changing sandbox results. Cross-process continuity cannot be guaranteed
@@ -500,12 +502,12 @@ free-form text.
 
 ## Consent
 
-The development `1.1.0-alpha` contract emits only the four Required events. MXC
+The `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha` contracts emit only the four Required events. MXC
 moved these events to Required telemetry to keep MXC secure, reliable, and up to
-date, so they are gated by administrative policy and provider availability, not
-by the per-run request or MXC consent.
+date, so they are gated by build eligibility and provider availability, not
+by the per-run request, MXC consent or administrative policy.
 
-Published contracts keep the optional model: emission is gated by the per-run
+Unattributed internal requests keep the optional model: emission is gated by the per-run
 request, MXC-owned consent, administrative policy, and provider availability.
 See [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
@@ -835,13 +837,13 @@ or production approval.
 
 | Handle | Private build input | Metadata when configured |
 |---|---|---|
-| `MXC_PROVIDER` | `MXC_TELEMETRY_PROVIDER_GROUP_GUID` | Measures/Usage, or Critical Data/Performance for the four selected development events |
+| `MXC_PROVIDER` | Signed telemetry component | Critical Data/Performance for the four supported-contract events; Measures/Usage for unattributed optional requests |
 
-An absent or empty group produces a local-only registration with keyword
-`0x1` and privacy tag `0` for every event. Malformed nonempty GUIDs fail the
-Windows build. The obsolete `MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID` input
-also fails Windows builds when nonempty; clear it rather than substituting
-its value for WinExt. Non-Windows builds ignore group inputs.
+An unrouted build produces a local-only registration with keyword
+`0x1` and privacy tag `0` for every event. The obsolete
+`MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID` and
+`MXC_TELEMETRY_PROVIDER_GROUP_GUID` inputs fail Windows builds when nonempty.
+Non-Windows builds ignore them.
 
 The shared event writer selects the keyword and privacy tag using the event
 and request's source contract, always on the same registration. Field names, types
@@ -862,30 +864,58 @@ The zero-value default (no group GUID → keyword `0x1`, privacy tag `0`)
 mirrors Microsoft's own public WSL repo, which defines these same telemetry
 constants as literal `0` for non-official builds.
 
+### Telemetry component
+
+Release builds read the group, keywords, privacy tags, product and data
+category from a signed `mxc_telemetry.dll` that is built in a private
+repository. The component only carries data; MXC never loads it at run time.
+
+The signed x64 and ARM64 DLLs are committed under
+`src/mxc-sdk/resources/telemetry-component/<arch>/` so source builds are
+routed too. Release builds on Windows use the DLL for the build host's
+architecture. Debug builds, and builds where that DLL is absent, are unrouted.
+`MXC_TELEMETRY_COMPONENT_PATH` overrides the DLL; set it to an empty value to
+force an unrouted release build. To refresh the DLLs, rebuild them in the
+private pipeline and replace both files. The values are plain data in the DLL,
+so anyone can read them, and forks inherit the routing.
+
+When a DLL is selected on a Windows build host, the MXC build script:
+
+1. opens the DLL with writers denied and verifies its Authenticode signature
+   and signer name, and fails the build if either is wrong;
+2. loads it and calls the exported `mxc_telemetry_metadata_v1` function, which
+   returns `1;<group>;<keyword>;<privacy tag>;<critical keyword>;<critical privacy tag>;<product>;<data category>`;
+3. passes the numbers to the crate as `MXC_BUILD_*` environment variables read
+   with `env!`.
+
+Without a component, builds use placeholder values that are never routed.
+`MXC_TELEMETRY_PROVIDER_GROUP_GUID` is no longer supported: a nonempty value
+fails Windows builds, so routing always comes from the verified component.
+
 ### CI pipeline steps
 
-The private pipeline owner supplies the approved WinExt group through
-`MXC_TELEMETRY_PROVIDER_GROUP_GUID` on the final Windows Cargo build,
-including builds of the SDK/FFI native library. Generation happens before
-compilation; there is no runtime or post-build binary patch.
-Do not copy private values into repository files or logs.
+The private pipeline builds and signs the component DLL; its output is copied
+into `src/mxc-sdk/resources/telemetry-component/`. Do not copy private values
+into repository files or logs.
 
-Published contracts retain their existing registration, Measures/Usage
-metadata, request opt-in, consent and policy gates. Public/OSS builds omit
-the group input and retain local-only metadata.
+Supported contracts share Required collection and Critical Data/Performance
+metadata. Unattributed requests retain request opt-in, consent and policy gates.
+Ordinary debug builds and builds
+with an empty `MXC_TELEMETRY_COMPONENT_PATH` retain local-only metadata.
 
-The public Windows test artifact explicitly clears the group input. Its local
-metadata tests cannot verify the private pipeline's group value or establish
-Microsoft ingestion.
+The public Windows test artifact explicitly clears the component input. Its
+local metadata tests cannot verify the routing values or establish Microsoft
+ingestion.
 
 ### WinExt routing acceptance
 
-On an approved disposable Windows VM, use a build with the approved WinExt
-group injected. For published contracts keep MXC's explicit consent, request
-opt-in, and permitting MXC policy satisfied. Development requests need no
-consent or opt-in. Verify actual collection for both, including successful
-process exit and operational failure; verify published suppression after
-consent withdrawal and development suppression at policy value `0`.
+On an approved disposable Windows VM, use a release build with the signed
+component. Exercise each supported contract with consent absent, granted, and
+withdrawn, and request telemetry omitted or disabled. Verify actual collection,
+including successful process exit and operational failure, with only the four
+Required events. They keep emitting at every administrative policy value,
+including `0`. Separately verify consent and policy suppression for any
+unattributed optional callers.
 
 Windows Required/Optional settings do not authorize or gate these WinExt
 events. Do not use acceptance at a Windows diagnostic-data level as evidence
@@ -895,13 +925,13 @@ metadata, not acceptance by the Microsoft collection pipeline.
 ### Local developer testing
 
 ```powershell
-# Test with a dummy group GUID (not the real one) — telemetry-mode metadata
-$env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
-cargo build -p mxc-sdk
+# Release build with the bundled signed component (routed)
+cargo build --release -p mxc-sdk
 
-# Test without (public build) — local-only metadata
-Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
-cargo build -p mxc-sdk
+# Release build without routing (local-only metadata)
+$env:MXC_TELEMETRY_COMPONENT_PATH = ''
+cargo build --release -p mxc-sdk
+Remove-Item Env:\MXC_TELEMETRY_COMPONENT_PATH
 ```
 
 ### What's public vs. private
@@ -910,9 +940,9 @@ cargo build -p mxc-sdk
 |------|---------|-----|
 | Provider name `"Microsoft.MXC"` | Yes | Standard ETW naming |
 | Provider GUID `{7f10def4-a258-5fea-510e-2c3bb976687f}` | Yes | Derived from the name; identifies the provider, harmless |
-| `build.rs` env var mechanism | Yes | Mechanism is public |
-| `MXC_TELEMETRY_PROVIDER_GROUP_GUID` env var name | Yes | Key is public; value is private |
-| Actual Microsoft telemetry group GUID | No | Private - set in CI only |
+| `build.rs` component mechanism | Yes | Mechanism is public |
+| Signed `mxc_telemetry.dll` | Yes | Committed so source builds are routed |
+| Component source and pipeline | No | Private repository |
 
 ## SDK License Override (EULA for npm Package)
 

@@ -9,7 +9,7 @@
     and restores all process/machine state in finally.
 
 .PARAMETER IsolationSessionLifecycle
-    Captures two real IsolationSession lifecycles through the existing lifecycle
+    Captures three real IsolationSession lifecycles through the existing lifecycle
     suite instead of the create-and-run smoke request. Requires an available
     IsolationSession backend and Administrator; missing prerequisites fail.
     The executor must be a local-only debug build with test-support and
@@ -18,7 +18,7 @@
 .PARAMETER CheckKeywords
     Requires a local-only debug test-support executor built with
     MXC_TELEMETRY_TEST_KEYWORDS=1. Checks actual Critical Data/Performance and
-    Measures/Usage metadata for development/published contracts, including failures.
+    Required event metadata for all supported contracts, including failures.
 #>
 
 [CmdletBinding()]
@@ -246,10 +246,11 @@ try {
         if ($remainingRecords.Count -ne 0) { throw 'Deprovision left lifecycle correlation records behind.' }
     } elseif ($CheckKeywords) {
         $invocations = @(
-            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+            foreach ($version in @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
                 $request = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json -AsHashtable
                 $request.version = $version
                 $null = $request.Remove('$schema')
+                $null = $request.Remove('telemetry')
                 Invoke-TraceRequest -Request $request
             }
         )
@@ -268,14 +269,12 @@ try {
     }
     $failureInvocations = @(
         if ($CheckKeywords) {
-            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
-                # Required diagnostics ignore the request flag; published
-                # contracts still need the explicit opt-in.
+            foreach ($version in @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
                 Invoke-TraceRequest -RequireFailure -Request @{
                     version = $version
                     containment = 'bubblewrap'
                     process = @{ commandLine = 'true' }
-                    telemetry = @{ enabled = ($version -ne '1.1.0-alpha') }
+                    telemetry = @{ enabled = $false }
                 }
             }
         }
@@ -285,8 +284,7 @@ try {
             Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
     }
 
-    # Required diagnostics ignore consent and the request flag but honor
-    # administrative policy; published contracts still need consent.
+    # Required diagnostics ignore consent, the request flag and administrative policy.
     $gatingCases = @()
     if ($CheckKeywords) {
         function Set-GatingState([string]$Consent, $Policy) {
@@ -303,25 +301,25 @@ try {
             if ($null -eq $Policy) { Remove-ItemProperty -Path $policyPath -Name AllowTelemetry -ErrorAction SilentlyContinue }
             else { Set-ItemProperty -Path $policyPath -Name AllowTelemetry -Value $Policy -Type DWord }
         }
-        foreach ($case in @(
-            @{ Name = 'development, consent denied'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 3; Emits = $true },
-            @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Policy = 3; Emits = $true },
-            @{ Name = 'development, no policy'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = $null; Emits = $true },
-            @{ Name = 'development, policy 1'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 1; Emits = $true },
-            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $false },
-            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $false },
-            @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Policy = 3; Emits = $false },
-            @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Policy = 3; Emits = $false }
-        )) {
-            Set-GatingState $case.Consent $case.Policy
-            $gatingCases += [pscustomobject]@{
-                Name = $case.Name
-                Emits = $case.Emits
-                Invocation = Invoke-TraceRequest -RequireFailure -Request @{
-                    version = $case.Version
-                    containment = 'bubblewrap'
-                    process = @{ commandLine = 'true' }
-                    telemetry = @{ enabled = $true }
+        foreach ($version in @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
+            foreach ($case in @(
+                @{ Name = 'consent denied'; Consent = 'denied'; Policy = 3 },
+                @{ Name = 'consent absent'; Consent = 'absent'; Policy = 3 },
+                @{ Name = 'no policy'; Consent = 'denied'; Policy = $null },
+                @{ Name = 'policy 1'; Consent = 'denied'; Policy = 1 },
+                @{ Name = 'policy 0'; Consent = 'granted'; Policy = 0 },
+                @{ Name = 'unsupported policy'; Consent = 'granted'; Policy = 7 }
+            )) {
+                Set-GatingState $case.Consent $case.Policy
+                $gatingCases += [pscustomobject]@{
+                    Name = "$version, $($case.Name)"
+                    Emits = $true
+                    Invocation = Invoke-TraceRequest -RequireFailure -Request @{
+                        version = $version
+                        containment = 'bubblewrap'
+                        process = @{ commandLine = 'true' }
+                        telemetry = @{ enabled = $false }
+                    }
                 }
             }
         }

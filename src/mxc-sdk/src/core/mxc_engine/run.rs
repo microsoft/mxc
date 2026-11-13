@@ -19,8 +19,8 @@
 //!
 //! Backend selection is per-host: the Windows body drives native
 //! ProcessContainer plus the Windows experimental backends; the Linux body
-//! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
-//! resolves to Seatbelt.
+//! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body supports
+//! Seatbelt and experimental W365 runner selection.
 
 use crate::mxc_common::logger::Logger;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -120,7 +120,7 @@ mod attribution_tests {
     use crate::mxc_common::state_aware_request::MxcRequest;
 
     #[test]
-    fn telemetry_attributes_exact_json_but_not_typed_sdk_requests() {
+    fn telemetry_attributes_contracts_but_not_unattributed_requests() {
         let mut logger = Logger::new(Mode::Buffer);
         let parsed = crate::mxc_common::config_parser::load_mxc_request_from_json(
             r#"{
@@ -188,6 +188,11 @@ fn resolve_runner_inner_windows(
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
     match request.containment {
+        ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(
+            crate::mxc_common::sandbox_process::Runner::new(
+                crate::backend_modules::W365AgentsRunner,
+            ),
+        ))),
         ContainmentBackend::ProcessContainer => {
             use crate::mxc_common::sandbox_process::Runner;
             use crate::process_container_common::base_container_runner::BaseContainerRunner;
@@ -290,6 +295,9 @@ fn resolve_runner_inner(
     use crate::mxc_common::sandbox_process::Runner;
 
     match request.containment {
+        ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
+            crate::backend_modules::W365AgentsRunner,
+        )))),
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
         ContainmentBackend::MicroVm => Err(MxcError::unsupported_containment(
             "the NVX MicroVM backend is available only on Windows x64",
@@ -323,15 +331,18 @@ fn resolve_runner_inner(
 ) -> Result<ResolvedRunner, MxcError> {
     use crate::mxc_common::sandbox_process::Runner;
 
-    if request.containment != ContainmentBackend::Seatbelt {
-        return Err(MxcError::unsupported_containment(format!(
+    match request.containment {
+        ContainmentBackend::W365Agents => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
+            crate::backend_modules::W365AgentsRunner,
+        )))),
+        ContainmentBackend::Seatbelt => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
+            crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
+        )))),
+        ref other => Err(MxcError::unsupported_containment(format!(
             "the '{}' backend is not available on macOS",
-            request.containment.wire_name()
-        )));
+            other.wire_name()
+        ))),
     }
-    Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
-        crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
-    ))))
 }
 
 #[cfg(all(test, target_os = "linux"))]

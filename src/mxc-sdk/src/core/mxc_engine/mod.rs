@@ -55,10 +55,11 @@ pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
-    exec_state_aware_attached, exec_state_aware_json, exec_state_aware_pty_json,
-    exec_typed_state_aware_attached_request, exec_typed_state_aware_pty_request,
-    exec_typed_state_aware_request, run_state_aware, run_state_aware_json,
-    run_typed_state_aware_request, EngineProvisionMetadata, EngineStateAwareResult,
+    exec_state_aware_attached, exec_state_aware_capture_json, exec_state_aware_json,
+    exec_state_aware_pty_json, exec_typed_state_aware_attached_request,
+    exec_typed_state_aware_pty_request, exec_typed_state_aware_request, run_state_aware,
+    run_state_aware_json, run_typed_state_aware_request, EngineProvisionMetadata,
+    EngineStateAwareResult,
 };
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;
@@ -237,10 +238,7 @@ fn invoke_execution_request(
         telemetry::LearningMode::for_request(request),
         &mut logger,
     );
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
@@ -1151,7 +1149,6 @@ mod telemetry_process_tests {
         let mut request = ExecutionRequest {
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1495,7 +1492,6 @@ mod telemetry_process_tests {
             containment: ContainmentBackend::MicroVm,
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };

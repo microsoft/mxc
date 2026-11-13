@@ -399,7 +399,9 @@ public static MxcPtySize Default { get; } = new(24, 80);
 
 ## `Microsoft.Mxc.Sdk.V1.MxcTelemetry` — GetConsent
 
-Read effective telemetry consent.
+Read effective optional-telemetry consent. This state and consent-management
+operations do not control Required collection for supported contracts.
+See [Telemetry](../../../telemetry.md).
 
 ```csharp
 public static TelemetryConsentState GetConsent();

@@ -1,0 +1,13 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "telemetry": { "enabled": false },
+  "w365Agents": {
+    "provision": {
+      "poolId": "AAAAAAAA-bbbb-CCCC-dddd-EEEEEEEEEEEE",
+      "userType": "HumanUser",
+      "userObjectId": "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}

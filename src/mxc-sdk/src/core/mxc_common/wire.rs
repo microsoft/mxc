@@ -46,6 +46,8 @@ pub enum Containment {
     IsolationSession,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
+    /// Remote Windows 365 container lifecycle operations (experimental).
+    W365Agents,
 }
 
 impl Containment {
@@ -62,6 +64,7 @@ impl Containment {
             "seatbelt" | "macos_sandbox" => Self::Seatbelt,
             "isolation_session" => Self::IsolationSession,
             "bubblewrap" => Self::Bubblewrap,
+            "w365_agents" => Self::W365Agents,
             _ => return None,
         })
     }
@@ -418,6 +421,21 @@ pub struct Seatbelt {
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
+    /// Seatbelt denial capture (development contract only).
+    pub capture_denials: Option<SeatbeltCaptureDenials>,
+}
+
+/// macOS Seatbelt denial-capture settings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCaptureDenials {
+    /// Defaults to `block` when omitted.
+    pub mode: Option<CaptureDenialsMode>,
+    /// Absolute path for the JSON denials report; a run id is inserted into
+    /// the file stem. Its parent directory must exist.
+    pub output_path: Option<String>,
+    /// Keep the raw `log stream` trace next to the report. Defaults to `false`.
+    pub retain_etl: Option<bool>,
 }
 
 /// Telemetry configuration (`telemetry`).
