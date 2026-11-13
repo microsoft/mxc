@@ -88,6 +88,8 @@ unsafe changes fail explicitly.
 
 Preparation accepts create-and-run requests for every backend and OS. With
 empty observations it returns the request unchanged with no changes.
+As with creation, experimental backends require `Experimental = true`; without
+it, preparation throws `MxcException` with `BackendUnavailable`.
 Observations are specific to the backend that reported them; native Windows
 ProcessContainer is currently the only backend that reports and applies them.
 Non-empty observations for any other backend throw `MxcException` with

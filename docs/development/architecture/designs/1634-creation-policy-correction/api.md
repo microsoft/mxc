@@ -574,6 +574,7 @@ and application stop/budget state are not retained by observation serialization.
 | Preparation succeeds | Owned candidate request and exact changes, no container/process handle. The caller can inspect, accept, edit, reject or store it. |
 | Unsafe/unsupported preparation or exceeded input/result limit | Existing validation/unsupported error; structured terminal context where applicable. No guessed edit, partial candidate, fallback or workload. |
 | Non-empty observations for a backend that cannot apply them | Rust `UnsupportedContainment`; Node/.NET corresponding existing unsupported-containment category. |
+| Experimental backend without the experimental opt-in | Existing `BackendUnavailable` category, for empty and non-empty observations alike. |
 | Invalid request phase | Existing request parsing/phase error; preparation produces no candidate or creation. |
 | Native environment succeeds | Existing `ExecutionResult` or process handle and ordinary warnings; no policy-correction report/text. |
 | Launch/wait/read/cancellation/cleanup failure | Existing error and ownership semantics; stored observations do not make a workload retry safe. |

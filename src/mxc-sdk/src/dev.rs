@@ -40,7 +40,10 @@ pub struct PolicyPreparationOptions {
 /// Prepare a restrictive candidate, without creating an environment or workload.
 ///
 /// Accepts create-and-run requests for every backend. Empty observations return
-/// the request unchanged. Non-empty observations must come from a backend that
+/// the request unchanged. As with creation, experimental backends require
+/// [`PolicyPreparationOptions::experimental`] and otherwise fail with
+/// [`ErrorCode::BackendUnavailable`](crate::mxc_engine::ErrorCode::BackendUnavailable).
+/// Non-empty observations must come from a backend that
 /// applies them; currently only native Windows ProcessContainer does, and other
 /// backends return [`ErrorCode::UnsupportedContainment`](crate::mxc_engine::ErrorCode::UnsupportedContainment).
 /// Inspect and accept, edit or reject the result before submitting the chosen

@@ -49,6 +49,35 @@ fn preparation_returns_empty_observation_requests_unchanged_on_every_backend() {
 }
 
 #[test]
+fn preparation_requires_the_experimental_optin_for_experimental_backends() {
+    let empty = PolicyFailures::default();
+    let observed = PolicyFailures {
+        results: vec![PolicyFailureResult::default()],
+        ..PolicyFailures::default()
+    };
+    for (backend, section) in [
+        ("hyperlight", ""),
+        (
+            "microvm",
+            r#","microvm":{"image":"docker.io/library/python:3.12-alpine"}"#,
+        ),
+        ("windows_sandbox", ""),
+    ] {
+        let json = format!(
+            r#"{{"version":"1.1.0-alpha","containment":"{backend}","process":{{"commandLine":"must-not-run"}}{section}}}"#
+        );
+        for failures in [&empty, &observed] {
+            let error = prepare_policy_json(&json, failures, false).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BackendUnavailable, "{backend}");
+            assert!(error.message.contains("experimental"), "{error:?}");
+        }
+        let prepared = prepare_policy_json(&json, &empty, true).unwrap();
+        assert_eq!(prepared.request_json, json);
+        assert!(prepared.changes.is_empty());
+    }
+}
+
+#[test]
 fn preparation_rejects_observations_the_backend_cannot_apply() {
     let failures = PolicyFailures {
         results: vec![PolicyFailureResult::default()],

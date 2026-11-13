@@ -292,6 +292,7 @@ directories.
 optional `PolicyPreparationOptions`. Preparation validates supported
 restrictive changes without creating a container. It accepts create-and-run
 requests for every backend; empty observations return the request unchanged.
+As with creation, experimental backends require `Experimental = true`.
 Native Windows ProcessContainer is currently the only backend that reports and
 applies observations, and other backends reject non-empty observations with
 `UnsupportedContainment`.

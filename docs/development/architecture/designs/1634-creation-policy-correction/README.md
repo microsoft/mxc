@@ -87,7 +87,8 @@ request JSON field carries observations. See [api.md](api.md).
 
 1. Parse the request through its registered authoring contract and select the
    ordinary backend. Validate observation shape, format and input limits.
-   Empty observations return the request unchanged on every backend and OS.
+   Empty observations return the request unchanged on every backend and OS;
+   experimental backends still require the experimental opt-in.
    Non-empty observations require the backend that reported them, currently a
    serviceable native Windows ProcessContainer create-and-run path; never
    ignore unsupported observations or obtain a fallback.
@@ -196,7 +197,8 @@ normal caller disposal/stream/wait responsibilities.
 
 This table concerns the feature, not whether a backend can otherwise run.
 Every backend accepts preparation with empty observations and returns the
-request unchanged. Support below means reporting and applying observations;
+request unchanged; experimental backends also require the experimental opt-in.
+Support below means reporting and applying observations;
 observations are specific to the backend that reported them.
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |

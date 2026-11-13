@@ -3,7 +3,8 @@
 
 //! Prepare ordinary request JSON without creating an environment or workload.
 //!
-//! Every backend accepts empty observations and returns the request unchanged.
+//! Every authorized backend accepts empty observations and returns the request
+//! unchanged; experimental backends require the caller's experimental opt-in.
 //! Non-empty observations route to the backend that produced their format;
 //! native Windows ProcessContainer is currently the only one.
 
@@ -38,6 +39,10 @@ pub(crate) fn prepare_policy_json(
             "policy preparation requires a valid create-and-run request in a registered JSON contract",
         )
     })?;
+    super::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     let result = if failures.results.is_empty() {
         PreparedPolicyRequest {
             request_json: json.to_owned(),

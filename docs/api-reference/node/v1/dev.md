@@ -85,6 +85,8 @@ creator's policy during strict creation.
 
 Preparation accepts create-and-run requests for every backend and OS. With
 empty observations it returns the request unchanged with no changes.
+As with creation, experimental backends require `experimental: true`; without
+it, preparation throws `MxcError` (`backend_unavailable`).
 Observations are specific to the backend that reported them; native Windows
 ProcessContainer is currently the only backend that reports and applies them.
 Non-empty observations for any other backend throw `MxcError`
