@@ -119,6 +119,7 @@ fn relay(mut handle: ExecHandle) -> Result<ExecHandle, MxcError> {
             let details = error.details.get_or_insert_with(|| serde_json::json!({}));
             details["hostStderrUndelivered"] = serde_json::json!(output.undelivered[1]);
             details["hostStdoutUndelivered"] = serde_json::json!(output.undelivered[0]);
+            details["hostStderrUnavailable"] = serde_json::json!(output.stderr_unavailable);
         }
         if let Some(input_error) = &input_error {
             error
@@ -135,6 +136,7 @@ fn relay(mut handle: ExecHandle) -> Result<ExecHandle, MxcError> {
                 } else { "output_io" },
                 "hostStdoutUndelivered":output.undelivered[0],
                 "hostStderrUndelivered":output.undelivered[1],
+                "hostStderrUnavailable":output.stderr_unavailable,
                 "exitCode":code
             }));
         if let Some(input_error) = &input_error {

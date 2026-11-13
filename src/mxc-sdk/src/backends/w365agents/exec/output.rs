@@ -11,6 +11,7 @@ const FINAL_DRAIN: Duration = Duration::from_secs(5);
 
 pub(crate) struct OutputRelays {
     workers: [OutputWorker; 2],
+    shared_destination: bool,
     #[cfg(unix)]
     destinations: UnixOutputs,
 }
@@ -18,6 +19,7 @@ pub(crate) struct OutputRelays {
 pub(crate) struct OutputResult {
     pub(crate) writes: io::Result<()>,
     pub(crate) undelivered: [bool; 2],
+    pub(crate) stderr_unavailable: bool,
 }
 
 impl OutputRelays {
@@ -48,6 +50,26 @@ impl OutputRelays {
         #[cfg(unix)]
         let err_file = destinations.files[1].try_clone()?;
         #[cfg(unix)]
+        let shared_destination = {
+            use std::os::unix::fs::MetadataExt;
+            let out = out_file.metadata()?;
+            let err = err_file.metadata()?;
+            out.dev() == err.dev() && out.ino() == err.ino()
+        };
+        #[cfg(windows)]
+        let shared_destination = {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::{CompareObjectHandles, HANDLE};
+            // SAFETY: both standard handles remain owned by the host.
+            unsafe {
+                CompareObjectHandles(
+                    HANDLE(io::stdout().as_raw_handle()),
+                    HANDLE(io::stderr().as_raw_handle()),
+                )
+                .as_bool()
+            }
+        };
+        #[cfg(unix)]
         destinations.activate()?;
         let out = OutputWorker::start(
             stdout,
@@ -65,6 +87,7 @@ impl OutputRelays {
         )?;
         Ok(Self {
             workers: [out, err],
+            shared_destination,
             #[cfg(unix)]
             destinations,
         })
@@ -76,9 +99,7 @@ impl OutputRelays {
             thread::sleep(Duration::from_millis(5));
         }
         let undelivered = self.workers.each_ref().map(|worker| !worker.finished());
-        for worker in &self.workers {
-            worker.cancel();
-        }
+        OutputWorker::cancel(&self.workers);
         let out = self.workers[0].join();
         let err = self.workers[1].join();
         #[cfg(unix)]
@@ -94,6 +115,7 @@ impl OutputRelays {
                 out.and(err).and(restored)
             },
             undelivered,
+            stderr_unavailable: undelivered[1] || (self.shared_destination && undelivered[0]),
         }
     }
 }
@@ -193,22 +215,24 @@ impl OutputWorker {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    fn cancel(&self) {
-        if self.finished() {
-            return;
+    fn cancel(workers: &[Self]) {
+        for worker in workers.iter().filter(|worker| !worker.finished()) {
+            worker.cancelled.store(true, Ordering::Release);
+            (worker.close_source)();
         }
-        self.cancelled.store(true, Ordering::Release);
-        (self.close_source)();
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
             use windows::Win32::Foundation::HANDLE;
             use windows::Win32::System::IO::CancelSynchronousIo;
-            // Retry across the flag-check -> synchronous write window.
-            while let Some(worker) = self.thread.as_ref().filter(|worker| !worker.is_finished()) {
-                // SAFETY: JoinHandle owns this exact worker's thread handle.
-                unsafe {
-                    let _ = CancelSynchronousIo(HANDLE(worker.as_raw_handle()));
+            // Cancel both writers before waiting: duplicated destinations can
+            // serialize synchronous I/O and handle closure between workers.
+            while workers.iter().any(|worker| !worker.finished()) {
+                for worker in workers.iter().filter_map(|worker| worker.thread.as_ref()) {
+                    // SAFETY: JoinHandle owns this exact worker's thread handle.
+                    unsafe {
+                        let _ = CancelSynchronousIo(HANDLE(worker.as_raw_handle()));
+                    }
                 }
                 thread::sleep(Duration::from_millis(1));
             }
@@ -226,7 +250,7 @@ impl OutputWorker {
 
 impl Drop for OutputWorker {
     fn drop(&mut self) {
-        self.cancel();
+        Self::cancel(std::slice::from_ref(self));
         let _ = self.join();
     }
 }

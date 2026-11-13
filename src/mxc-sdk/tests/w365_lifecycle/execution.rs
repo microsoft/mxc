@@ -1582,10 +1582,11 @@ fn execution_fresh_executor_fixture() {
     assert_eq!(envelope["error"]["code"], "backend_error");
     assert!(!envelope["error"]["message"].as_str().unwrap().is_empty());
     for example_mode in [false, true] {
+        shared_host_output(&fixture, || command(example_mode));
         unread_host_output(&fixture, || command(example_mode));
     }
-    assert_eq!(fixture.fixture.count(), 24);
-    for n in 0..24 {
+    assert_eq!(fixture.fixture.count(), 28);
+    for n in 0..28 {
         assert!(fixture.fixture.request(n).contains(concat!(
             "\r\nUser-Agent: mxc/",
             env!("CARGO_PKG_VERSION"),
@@ -1618,51 +1619,76 @@ fn execution_host_output_fixture() {
         command.args(["--experimental", "live"]).arg(file.path());
         command
     };
+    shared_host_output(&fixture, command);
     for code in [0, 7] {
         pending_host_input(&fixture, command(), code);
     }
     unreadable_host_input(&fixture, command());
     unread_host_output(&fixture, command);
-    let (release, released) = mpsc::channel();
-    fixture.script(move |stream| {
-        started(stream);
-        assert!(eof(stream).is_empty());
-        for _ in 0..4 {
-            send(stream, 0x12, &[0x42; 65536]);
-            send(stream, 0x13, &[0x43; 65536]);
+    assert_eq!(fixture.fixture.count(), 11);
+}
+
+fn shared_host_output(fixture: &ExecFixture, command: impl Fn() -> std::process::Command) {
+    for guest_stderr in [false, true] {
+        let (release, released) = mpsc::channel();
+        fixture.script(move |stream| {
+            started(stream);
+            assert!(eof(stream).is_empty());
+            for _ in 0..4 {
+                send(stream, 0x12, &[0x42; 65536]);
+                if guest_stderr {
+                    send(stream, 0x13, &[0x43; 65536]);
+                }
+            }
+            exit(stream, 0);
+            released.recv_timeout(Duration::from_secs(20)).unwrap();
+        });
+        #[cfg(unix)]
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        #[cfg(windows)]
+        let (mut reader, writer) = {
+            use std::os::windows::io::FromRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Pipes::CreatePipe;
+            let mut read = HANDLE::default();
+            let mut write = HANDLE::default();
+            // Leave room for a prefix before the synchronous host write blocks.
+            // SAFETY: fresh pipe handles transfer immediately to their owning files.
+            unsafe {
+                CreatePipe(&mut read, &mut write, None, 65536).unwrap();
+                (
+                    std::fs::File::from_raw_handle(read.0),
+                    std::fs::File::from_raw_handle(write.0),
+                )
+            }
+        };
+        let mut child = {
+            let mut command = command();
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(writer.try_clone().unwrap())
+                .stderr(writer);
+            command.spawn().unwrap()
+        };
+        let began = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if began.elapsed() > Duration::from_secs(15) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                release.send(()).unwrap();
+                panic!("shared unread output blocked completion with guest_stderr={guest_stderr}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        exit(stream, 0);
-        released.recv_timeout(Duration::from_secs(20)).unwrap();
-    });
-    let (mut reader, writer) = std::io::pipe().unwrap();
-    let mut child = {
-        let mut command = std::process::Command::new(&example);
-        command
-            .args(["--experimental", "live"])
-            .arg(file.path())
-            .stdin(std::process::Stdio::null())
-            .stdout(writer.try_clone().unwrap())
-            .stderr(writer);
-        command.spawn().unwrap()
-    };
-    let began = Instant::now();
-    while child.try_wait().unwrap().is_none() {
-        if began.elapsed() > Duration::from_secs(15) {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            release.send(()).unwrap();
-            panic!("shared unread stdout/stderr must not block execution completion");
-        }
-        std::thread::sleep(Duration::from_millis(10));
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        release.send(()).unwrap();
+        let mut prefix = Vec::new();
+        // Reading after exit also checks restoration of shared descriptor flags.
+        reader.read_to_end(&mut prefix).unwrap();
+        assert!(!prefix.is_empty(), "shared output was empty: {status}");
+        assert!(prefix.len() < 4 * 65536);
     }
-    assert!(!child.wait().unwrap().success());
-    release.send(()).unwrap();
-    let mut prefix = Vec::new();
-    // Both streams shared the write description; its original flags must be restored.
-    reader.read_to_end(&mut prefix).unwrap();
-    assert!(!prefix.is_empty());
-    assert!(prefix.len() < 8 * 65536);
-    assert_eq!(fixture.fixture.count(), 10);
 }
 
 fn pending_host_input(fixture: &ExecFixture, mut command: std::process::Command, code: i32) {

@@ -745,7 +745,7 @@ fn finalize_state_aware_outcome(
             if phase == "exec" && !dry_run {
                 if e.details
                     .as_ref()
-                    .is_some_and(|details| details["hostStderrUndelivered"] == true)
+                    .is_some_and(|details| details["hostStderrUnavailable"] == true)
                 {
                     StateAwareExit::UndeliverableExecError(exit_code)
                 } else {

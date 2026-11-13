@@ -72,6 +72,7 @@ fn execute() -> Result<i32, MxcError> {
                 let details = error.details.get_or_insert_with(|| serde_json::json!({}));
                 details["hostStderrUndelivered"] = serde_json::json!(output.undelivered[1]);
                 details["hostStdoutUndelivered"] = serde_json::json!(output.undelivered[0]);
+                details["hostStderrUnavailable"] = serde_json::json!(output.stderr_unavailable);
             }
             if let Some(input_error) = &input_error {
                 error
@@ -83,6 +84,7 @@ fn execute() -> Result<i32, MxcError> {
         output.writes.map_err(|error| {
             let mut error = io_error(error).with_details(serde_json::json!({
                 "hostStderrUndelivered":output.undelivered[1],
+                "hostStderrUnavailable":output.stderr_unavailable,
                 "hostStdoutUndelivered":output.undelivered[0]
             }));
             if let Some(input_error) = &input_error {
@@ -158,7 +160,7 @@ fn main() {
             if !error
                 .details
                 .as_ref()
-                .is_some_and(|details| details["hostStderrUndelivered"] == true)
+                .is_some_and(|details| details["hostStderrUnavailable"] == true)
             {
                 eprintln!("{}", error.to_envelope_string());
             }

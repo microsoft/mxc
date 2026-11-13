@@ -112,7 +112,8 @@ output after completion, even after a failed wait and process disposal.
 
 The executor and live example allow five seconds to drain host output after
 completion; undelivered output fails with `host_output_undelivered`. A blocked
-stderr may prevent a diagnostic response. Capture buffers the full output in
+stderr, including one sharing an undrained stdout pipe, prevents a final
+diagnostic response rather than blocking exit. Capture buffers the full output in
 memory and fails rather than returning successful partial output.
 
 Disposal stops local I/O, not necessarily the remote command. Kill reports
