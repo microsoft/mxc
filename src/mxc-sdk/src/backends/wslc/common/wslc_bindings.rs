@@ -194,9 +194,11 @@ impl WslcSdk {
             WslcGetMissingComponents,
             // Present only in SDKs that can open a process's stdin.
             WslcSetProcessSettingsFlags,
+            WslcGetProcessIOHandle,
             // Built-in proxy.
             WslcCreateSessionNetwork,
             WslcDeleteSessionNetwork,
+            WslcListSessionNetworks,
             WslcSetContainerSettingsNetworks,
             WslcSetContainerSettingsCapabilityDrops,
             WslcSetContainerSettingsName,
