@@ -1098,6 +1098,7 @@ fn fragmented_tls_deadline(env: &Environment) {
                 Err(error) => panic!("{error}"),
             }
         };
+        socket.set_nonblocking(false).unwrap();
         accepted.send(socket.try_clone().unwrap()).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
