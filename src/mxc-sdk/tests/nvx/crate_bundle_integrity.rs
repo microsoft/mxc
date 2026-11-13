@@ -11,10 +11,6 @@ mod verify_nvx_runtime_signatures;
 use verify_nvx_runtime_signatures::signature_verification;
 
 const BUNDLE_CHILD: &str = "MXC_NVX_BUNDLE_CHILD";
-const BUNDLE_FINGERPRINTS: &[signature_verification::BundleFingerprint<'static>] = {
-    use signature_verification::BundleFingerprint;
-    include!(concat!(env!("OUT_DIR"), "\\nvx_bundle_fingerprints.rs"))
-};
 
 fn copy_bundle(source: &std::path::Path, destination: &std::path::Path) {
     std::fs::create_dir_all(destination).unwrap();
@@ -27,21 +23,6 @@ fn copy_bundle(source: &std::path::Path, destination: &std::path::Path) {
             std::fs::copy(entry.path(), target).unwrap();
         }
     }
-}
-
-fn flip_byte(path: &std::path::Path, offset: u64) {
-    use std::io::{Read, Seek, SeekFrom, Write};
-
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-    file.seek(SeekFrom::Start(offset)).unwrap();
-    let mut byte = [0];
-    file.read_exact(&mut byte).unwrap();
-    file.seek(SeekFrom::Start(offset)).unwrap();
-    file.write_all(&[byte[0] ^ 1]).unwrap();
 }
 
 fn rewrite_guest_checksum(directory: &std::path::Path, guest: &str) {
@@ -75,26 +56,26 @@ fn bundle_rejects_modified_guest_with_self_declared_checksums() {
     let guest = "guest/nvx-edge-agent";
     std::fs::write(state.path().join(guest), b"unapproved guest replacement").unwrap();
     rewrite_guest_checksum(state.path(), guest);
-    let error = signature_verification::verify_bundle(state.path(), None).unwrap_err();
+    let error = signature_verification::verify_bundle(state.path()).unwrap_err();
     assert!(error.to_string().contains("checksum manifest"), "{error}");
 }
 
 #[test]
 fn crate_staged_bundle_opens_and_rejects_an_unverified_library() {
-    if std::env::var_os(BUNDLE_CHILD).is_some_and(|value| value == "approved-fingerprints") {
+    if std::env::var_os(BUNDLE_CHILD).is_some_and(|value| value == "runtime-with-extra-file") {
         mxc_sdk::v1::dev::validate_provision_json(
             r#"{"version":"1.1.0-alpha","phase":"provision","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"}}"#,
             mxc_sdk::v1::dev::JsonOptions { experimental: true },
         )
-        .expect("public validation accepts build-generated fingerprints without starting a VM");
+        .expect("public validation does not repeat build-time bundle inventory checks");
         return;
     }
     if std::env::var_os(BUNDLE_CHILD).is_some() {
-        json_execution_and_build_reject_unapproved_bundle_before_agent_load();
+        build_rejects_unapproved_bundle();
         return;
     }
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
-    let _verified = signature_verification::verify_bundle(bundle.directory(), None)
+    let _verified = signature_verification::verify_bundle(bundle.directory())
         .expect("Microsoft-signed binaries");
     let state = tempfile::tempdir().expect("private test state");
     let config = bundle.config(bundle.setup(state.path()));
@@ -127,102 +108,21 @@ fn crate_staged_bundle_opens_and_rejects_an_unverified_library() {
         "{error}"
     );
     // Package and staging gates select this test, so their success includes these negative controls.
-    sampled_fingerprints_cover_bounded_ranges();
-    sampled_bundle_checks_keep_guards_and_reject_sample_changes();
-    json_execution_and_build_reject_unapproved_bundle_before_agent_load();
+    runtime_does_not_repeat_build_inventory_checks();
+    build_rejects_unapproved_bundle();
 }
 
-fn sampled_fingerprints_cover_bounded_ranges() {
-    use std::io::{Cursor, Read, Seek, SeekFrom};
-
-    struct CountedReader {
-        bytes: Cursor<Vec<u8>>,
-        read: usize,
-    }
-    impl Read for CountedReader {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            let count = self.bytes.read(buffer)?;
-            self.read += count;
-            Ok(count)
-        }
-    }
-    impl Seek for CountedReader {
-        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-            self.bytes.seek(position)
-        }
-    }
-
-    for length in [0, 17, 12 * 1024, 64 * 1024 + 1] {
-        let bytes = vec![0x5a; length];
-        let mut reader = CountedReader {
-            bytes: Cursor::new(bytes.clone()),
-            read: 0,
-        };
-        let expected =
-            signature_verification::file_fingerprint(&mut reader, length as u64).unwrap();
-        assert_eq!(reader.read, length.min(12 * 1024));
-        assert_eq!(expected, vec![0x5a; reader.read]);
-        if length == 0 {
-            continue;
-        }
-        for offset in [0, length / 2, length - 1] {
-            let mut changed = bytes.clone();
-            changed[offset] ^= 1;
-            let actual =
-                signature_verification::file_fingerprint(&mut Cursor::new(changed), length as u64)
-                    .unwrap();
-            assert_ne!(actual, expected, "sampled byte at {offset}");
-        }
-        let error =
-            signature_verification::file_fingerprint(&mut Cursor::new(bytes), length as u64 + 1)
-                .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-    }
-}
-
-fn sampled_bundle_checks_keep_guards_and_reject_sample_changes() {
+fn runtime_does_not_repeat_build_inventory_checks() {
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
-    let state = tempfile::tempdir().expect("private fingerprint fixtures");
+    let state = tempfile::tempdir().expect("private runtime bundle");
     copy_bundle(bundle.directory(), state.path());
-    let verified =
-        signature_verification::verify_bundle(state.path(), Some(BUNDLE_FINGERPRINTS)).unwrap();
-    for name in ["guest/vmlinux", "SHA256SUMS"] {
-        let error = std::fs::OpenOptions::new()
-            .write(true)
-            .open(state.path().join(name))
-            .unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(32), "{error}");
-    }
-    drop(verified);
-
-    // Changes in these gaps intentionally pass: runtime fingerprints do not verify all bytes.
-    let guest = state.path().join("guest").join("vmlinux");
-    flip_byte(&guest, 4097);
-    let verified =
-        signature_verification::verify_bundle(state.path(), Some(BUNDLE_FINGERPRINTS)).unwrap();
-    drop(verified);
-    let error = signature_verification::verify_bundle(state.path(), None).unwrap_err();
-    assert!(error.to_string().contains("SHA-256 mismatch"), "{error}");
-
-    flip_byte(&state.path().join("bin").join("aci_edge_agent.dll"), 4097);
-    let verified =
-        signature_verification::verify_bundle(state.path(), Some(BUNDLE_FINGERPRINTS)).unwrap();
-    drop(verified);
-    let error = signature_verification::verify_bundle(state.path(), None).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Authenticode trust verification failed"),
-        "{error}"
-    );
-
-    flip_byte(&guest, guest.metadata().unwrap().len() - 1);
-    let error =
-        signature_verification::verify_bundle(state.path(), Some(BUNDLE_FINGERPRINTS)).unwrap_err();
-    assert!(
-        error.to_string().contains("sampled fingerprint mismatch"),
-        "{error}"
-    );
+    std::fs::write(
+        state.path().join("unapproved.extra"),
+        b"not part of the build",
+    )
+    .unwrap();
+    let error = signature_verification::verify_bundle(state.path()).unwrap_err();
+    assert!(error.to_string().contains("inventory differs"), "{error}");
 
     let local_app_data = tempfile::tempdir().expect("private SDK validation state");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -231,11 +131,11 @@ fn sampled_bundle_checks_keep_guards_and_reject_sample_changes() {
             "crate_staged_bundle_opens_and_rejects_an_unverified_library",
             "--nocapture",
         ])
-        .env(BUNDLE_CHILD, "approved-fingerprints")
-        .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", bundle.directory())
+        .env(BUNDLE_CHILD, "runtime-with-extra-file")
+        .env("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR", state.path())
         .env("LOCALAPPDATA", local_app_data.path())
         .output()
-        .expect("isolated public fingerprint validation");
+        .expect("isolated public runtime validation without starting a VM");
     assert!(
         output.status.success(),
         "{}{}",
@@ -305,7 +205,7 @@ fn verified_bundle_keeps_its_binary_directory_in_place() {
     let state = tempfile::tempdir().expect("private signature fixtures");
     let bin = state.path().join("bin");
     copy_bundle(bundle.directory(), state.path());
-    let verified = signature_verification::verify_bundle(state.path(), None).unwrap();
+    let verified = signature_verification::verify_bundle(state.path()).unwrap();
     for name in [
         "guest/vmlinux",
         "guest/initramfs-edge.cpio.gz",
@@ -329,33 +229,15 @@ fn verified_bundle_keeps_its_binary_directory_in_place() {
         .unwrap();
 }
 
-fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
+fn build_rejects_unapproved_bundle() {
     if std::env::var_os(BUNDLE_CHILD).is_some() {
-        // Even a broken pre-load gate must not reach VM provisioning.
-        let error = mxc_sdk::__ffi::run_json(
-            r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"runtimeConfig":{"networkProxy":"http://[::1]:3128"},"process":{"commandLine":"printf forbidden"}}"#,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::BackendUnavailable);
-        assert!(error.message.contains("NVX bundle"), "{error}");
-        let module = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!(
-                "aci_edge_agent.dll"
-            ))
-        };
-        assert_eq!(
-            module.unwrap_err().code(),
-            windows::core::HRESULT::from_win32(126),
-            "bundle rejection must precede agent loading"
-        );
         let error = verify_nvx_runtime_signatures::run().unwrap_err();
         assert!(error.to_string().contains("NVX bundle"), "{error}");
         return;
     }
 
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
-    let _approved = signature_verification::verify_bundle(bundle.directory(), None).unwrap();
+    let _approved = signature_verification::verify_bundle(bundle.directory()).unwrap();
     let local_app_data = tempfile::tempdir().expect("private bundle-rejection state");
     for changed in [
         "guest/vmlinux",
@@ -364,9 +246,6 @@ fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
         "SHA256SUMS",
         "missing-file",
         "unexpected-file",
-        "guest-head",
-        "guest-middle",
-        "guest-tail",
     ] {
         let state = tempfile::tempdir().unwrap();
         copy_bundle(bundle.directory(), state.path());
@@ -382,16 +261,6 @@ fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
             }
             "unexpected-file" => {
                 std::fs::write(state.path().join("unapproved.extra"), b"unexpected").unwrap();
-            }
-            "guest-head" | "guest-middle" | "guest-tail" => {
-                let guest = state.path().join("guest").join("vmlinux");
-                let length = guest.metadata().unwrap().len();
-                let offset = match changed {
-                    "guest-head" => 0,
-                    "guest-middle" => length / 2,
-                    _ => length - 1,
-                };
-                flip_byte(&guest, offset);
             }
             name => std::fs::write(state.path().join(name), b"unapproved guest").unwrap(),
         }
@@ -431,7 +300,7 @@ fn json_execution_and_build_reject_unapproved_bundle_before_agent_load() {
 #[test]
 fn verified_tools_can_execute_while_file_guards_are_held() {
     let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
-    let _verified = signature_verification::verify_bundle(bundle.directory(), None).unwrap();
+    let _verified = signature_verification::verify_bundle(bundle.directory()).unwrap();
     for name in ["openvmm.exe", "direct-images.exe"] {
         let output = std::process::Command::new(bundle.directory().join("bin").join(name))
             .arg("--help")
@@ -448,31 +317,9 @@ fn verified_tools_can_execute_while_file_guards_are_held() {
 }
 
 #[test]
-fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
+fn build_rejects_each_unsigned_binary() {
     const CHILD: &str = "MXC_NVX_SIGNATURE_CHILD";
     if let Some(name) = std::env::var_os(CHILD) {
-        let error = mxc_sdk::__ffi::run_json(
-            r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"process":{"commandLine":"printf forbidden"}}"#,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::BackendUnavailable);
-        // This isolated child has not opened an agent through any other test.
-        let module = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!(
-                "aci_edge_agent.dll"
-            ))
-        };
-        assert_eq!(
-            module.unwrap_err().code(),
-            windows::core::HRESULT::from_win32(126),
-            "fingerprint rejection must precede loading the agent"
-        );
-        assert!(
-            error.message.contains("sampled fingerprint mismatch"),
-            "{error}"
-        );
-        assert!(error.message.contains(&*name.to_string_lossy()), "{error}");
         let error = verify_nvx_runtime_signatures::run().unwrap_err();
         assert!(
             error
@@ -491,12 +338,24 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
     let local_app_data = tempfile::tempdir().expect("private binary-rejection state");
     for rejected in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
         let state = tempfile::tempdir().expect("isolated invalid runtime");
-        copy_bundle(bundle.directory(), state.path());
-        flip_byte(&state.path().join("bin").join(rejected), 0x50);
+        std::fs::create_dir(state.path().join("bin")).unwrap();
+        std::fs::copy(
+            bundle.directory().join("SOURCE-MANIFEST.json"),
+            state.path().join("SOURCE-MANIFEST.json"),
+        )
+        .unwrap();
+        for name in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
+            let destination = state.path().join("bin").join(name);
+            if name == rejected {
+                std::fs::write(destination, b"unsigned runtime replacement").unwrap();
+            } else {
+                std::fs::copy(bundle.directory().join("bin").join(name), destination).unwrap();
+            }
+        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "json_execution_rejects_each_unsigned_binary_before_agent_load",
+                "build_rejects_each_unsigned_binary",
                 "--nocapture",
             ])
             .env(CHILD, rejected)

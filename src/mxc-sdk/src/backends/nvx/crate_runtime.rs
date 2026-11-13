@@ -19,11 +19,6 @@ use aci_edge_sandboxes::{
     ImageSource, OutputCloser, OutputSink, ProvisionRequest, SandboxSpec, StartResult,
 };
 
-const BUNDLE_FINGERPRINTS: &[super::signature_verification::BundleFingerprint<'static>] = {
-    use super::signature_verification::BundleFingerprint;
-    include!(concat!(env!("OUT_DIR"), "\\nvx_bundle_fingerprints.rs"))
-};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SandboxId(aci_edge_sandboxes::SandboxId);
 
@@ -177,7 +172,6 @@ pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
 struct ClientInner {
     backend: Arc<AgentBackend>,
     client: AciEdgeSandbox,
-    _bundle_guard: super::signature_verification::BundleGuard,
     _state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 }
 
@@ -216,9 +210,6 @@ fn create_client_with_guard(
         MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
     })?;
     let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
-    let bundle_guard =
-        super::signature_verification::verify_bundle(bundle.directory(), Some(BUNDLE_FINGERPRINTS))
-            .map_err(|error| MxcError::backend_unavailable(error.to_string()))?;
     // The crate's output pump can outlive an unknown execution outcome and client teardown.
     crate::mxc_common::module_lifetime::pin_current_module()
         .map_err(MxcError::backend_unavailable)?;
@@ -228,7 +219,6 @@ fn create_client_with_guard(
     Ok(NvxClient(Some(ClientInner {
         backend,
         client,
-        _bundle_guard: bundle_guard,
         _state_root_guard: guard,
     })))
 }
@@ -911,7 +901,6 @@ impl SandboxClient for NvxClient {
         let Some(ClientInner {
             backend,
             client,
-            _bundle_guard,
             _state_root_guard,
         }) = self.0.take()
         else {
