@@ -300,6 +300,7 @@ fn spawn_exec(
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
+            crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(&mut command);
         }
         StdioMode::Pty(_) => {}
     }

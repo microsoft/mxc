@@ -76,6 +76,8 @@ fn run_host(
     typed_request: impl FnOnce(String) -> ContainerRequest,
     command: impl Fn(&str, i32) -> String,
 ) {
+    #[cfg(unix)]
+    mark_stdio_close_on_exec();
     let command_line = command(&marker(variant), EXIT_CODE);
     let process = if variant == "typed" {
         let mut options = SpawnWithExtendedOptions::default();
@@ -127,4 +129,17 @@ fn assert_inherited_exit(mut process: MxcProcess) {
 
 fn marker(variant: &str) -> String {
     format!("INHERITED_STDIO_{}", variant.replace(['.', '-'], "_"))
+}
+
+// Node marks its stdio close-on-exec; doing the same makes this host as strict.
+#[cfg(unix)]
+fn mark_stdio_close_on_exec() {
+    for fd in 0..=2 {
+        // SAFETY: fcntl only reads and sets descriptor flags on this process's stdio.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            assert!(flags >= 0, "read flags of fd {fd}");
+            assert!(libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) >= 0);
+        }
+    }
 }

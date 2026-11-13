@@ -432,6 +432,30 @@ pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Keep the caller's stdin, stdout, and stderr open across `exec` in `command`'s child.
+#[cfg(unix)]
+pub fn keep_caller_stdio_across_exec(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Hosts such as Node mark their stdio close-on-exec, which would leave the
+    // workload with none.
+    // SAFETY: fcntl is async-signal-safe and only changes the forked child's descriptors.
+    unsafe {
+        command.pre_exec(|| {
+            for fd in 0..=2 {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0
+                    && flags & libc::FD_CLOEXEC != 0
+                    && libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 /// `SIGKILL` `target` (a pid, or a negative pgid), treating the "already gone"
 /// outcomes as success. The caller only invokes this on its own still-unreaped
 /// child (so the pid/pgid can't have been recycled), which leaves two benign

@@ -700,6 +700,7 @@ impl BubblewrapScriptRunner {
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit());
+                crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(&mut command);
                 None
             }
             StdioMode::Pty(size) => match LivePty::attach(
