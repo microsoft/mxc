@@ -627,6 +627,14 @@ mod tests {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     fn microvm_low_stack_exec_reaches_client() {
         const CHILD: &str = "MXC_TEST_LOW_STACK_EXEC";
+        fn assert_kernel_digest_error(mode: &str, message: &str) {
+            assert!(
+                message.contains("guest kernel")
+                    && message.contains(r"guest\vmlinux")
+                    && message.contains("does not match the approved SHA-256"),
+                "{mode}: {message}"
+            );
+        }
         if let Ok(mode) = std::env::var(CHILD) {
             let stack_size = std::env::var("MXC_TEST_STACK_BYTES")
                 .unwrap_or_else(|_| (128 * 1024).to_string())
@@ -669,7 +677,7 @@ mod tests {
                             crate::MXC_STATUS_BACKEND_UNAVAILABLE,
                             "{mode}: {message}"
                         );
-                        assert!(message.contains("SHA-256 mismatch"), "{mode}: {message}");
+                        assert_kernel_digest_error(&mode, &message);
                         return;
                     }
                     let mut handle = ptr::null_mut();
@@ -703,7 +711,7 @@ mod tests {
                             crate::MXC_STATUS_BACKEND_UNAVAILABLE,
                             "{mode}: {message}"
                         );
-                        assert!(message.contains("SHA-256 mismatch"), "{mode}: {message}");
+                        assert_kernel_digest_error(&mode, &message);
                     } else {
                         assert_eq!(status, crate::MXC_STATUS_STALE_ID, "{mode}: {message}");
                     }
