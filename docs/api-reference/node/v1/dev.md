@@ -44,13 +44,6 @@ For SDK-enforced timeouts, in-container capture returns partial text without
 waiting for output streams to close. Read failures reject promptly, and
 cleanup preserves the original read or wait error.
 
-For W365 execution, `process.timeout` is sent unchanged to the service.
-The native backend allows a further 30 seconds for transport and output drain;
-the SDK does not attempt a local kill at the guest runtime limit.
-A service exit code of 124 is preserved with `timedOut: false`, since it
-can also be a program's exit code. Exhausting the native deadline rejects
-with an error and unknown remote outcome, rather than returning partial success.
-
 On Windows, ProcessContainer `spawnWithPtyJson` uses `wxc-exec`;
 `0.9.0-alpha` requests support the `appcontainer` alias. Its Promise resolves
 at executor startup, before policy validation. Later failures appear in
