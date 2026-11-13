@@ -502,17 +502,25 @@ impl LxcContainer {
     }
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
-        let mut cmd = self.lxc_command("lxc-start");
-        cmd.args(network.to_start_args(self.configured_interface_count()));
+        self.prepare_and_start(network, || Ok(()))
+    }
 
-        #[cfg(target_os = "linux")]
-        unblock_fatal_signals(&mut cmd);
+    pub(crate) fn prepare_and_start<T>(
+        &self,
+        network: StartNetwork,
+        prepare: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let start = || {
+            let prepared = prepare()?;
+            let mut cmd = self.lxc_command("lxc-start");
+            cmd.args(network.to_start_args(self.configured_interface_count()));
 
-        #[cfg(target_os = "linux")]
-        {
-            use crate::lxc_common::signal_cleanup;
+            #[cfg(target_os = "linux")]
+            unblock_fatal_signals(&mut cmd);
 
-            let start = || {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::lxc_common::signal_cleanup;
                 if signal_cleanup::watchdog_installed() {
                     let mut readiness = self.lxc_command("lxc-wait");
                     readiness.args(["-s", "RUNNING"]);
@@ -520,14 +528,14 @@ impl LxcContainer {
                 } else {
                     Self::run_tool(cmd)?;
                 }
-                self.validate_unprivileged()
-            };
-            crate::lxc_common::signal_cleanup::with_container_startup(self, start)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Self::run_tool(cmd).and_then(|()| self.validate_unprivileged())
-        }
+            }
+            #[cfg(not(target_os = "linux"))]
+            Self::run_tool(cmd)?;
+
+            self.validate_unprivileged()?;
+            Ok(prepared)
+        };
+        crate::lxc_common::signal_cleanup::with_container_startup(self, start)
     }
 
     /// How many `lxc.net.N` interfaces the container's config declares.

@@ -25,9 +25,11 @@ impl MountShape {
     }
 }
 
+// Keep inherited child mounts that cannot be omitted in a user namespace.
+// https://github.com/torvalds/linux/blob/v6.18/fs/namespace.c#L2944-L2960
 pub(crate) const MOUNT_READWRITE: MountShape = MountShape {
     filesystem: "none",
-    options: "bind,create=dir",
+    options: "rbind,create=dir",
 };
 pub(crate) const MOUNT_READONLY: MountShape = MountShape {
     filesystem: "none",

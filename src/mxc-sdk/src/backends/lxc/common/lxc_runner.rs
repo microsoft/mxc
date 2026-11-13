@@ -561,29 +561,24 @@ impl LxcScriptRunner {
             StartNetwork::FromContainerConfig
         };
 
-        let resolver = match signal_cleanup::with_container_startup(&container, || {
-            crate::lxc_common::network_startup::configure(&container, &request.policy, logger)
+        let resolver = match container.prepare_and_start(network, || {
+            let resolver =
+                crate::lxc_common::network_startup::configure(&container, &request.policy, logger)
+                    .map_err(|error| {
+                        format!("Failed to configure container network startup: {error}")
+                    })?;
+            let _ = writeln!(logger, "Starting LXC container...");
+            Ok(resolver)
         }) {
             Ok(resolver) => resolver,
             Err(error) => {
                 self.release_after_failure(&container, container_created, logger);
                 return Err(ScriptResponse::failed(
                     FailurePhase::LaunchFailed,
-                    &format!("Failed to configure container network startup: {error}"),
+                    &format!("Failed to start container: {error}"),
                 ));
             }
         };
-
-        let _ = writeln!(logger, "Starting LXC container...");
-        if let Err(e) = container.start(network) {
-            if self.destroy_on_exit || container_created {
-                let _ = container.destroy();
-            }
-            return Err(ScriptResponse::failed(
-                FailurePhase::LaunchFailed,
-                &format!("Failed to start container: {}", e),
-            ));
-        }
         let _ = writeln!(logger, "Container started successfully.");
 
         if let Some(resolver) = resolver {

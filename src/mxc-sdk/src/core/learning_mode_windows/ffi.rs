@@ -24,7 +24,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
-use windows_core::{HRESULT, PCSTR, PCWSTR};
+use windows_core::{BOOL, HRESULT, PCSTR, PCWSTR};
 
 use crate::learning_mode_windows::LearningModeError;
 
@@ -49,6 +49,9 @@ type PfnStartLearningModeTraceWithOptions = unsafe extern "system" fn(
     options: LearningModeTraceSourceOptions,
     trace_out: *mut HANDLE,
 ) -> HRESULT;
+
+type PfnIsLearningModeTraceSourceOptionSupported =
+    unsafe extern "system" fn(options: LearningModeTraceSourceOptions) -> BOOL;
 
 /// `HRESULT StartLearningModeTrace(HANDLE securityEnvironment, HLEARNINGMODE_TRACE* trace)`.
 ///
@@ -219,13 +222,13 @@ impl Drop for LearningModeTraceHandle {
 
 /// Resolved Learning Mode trace exports from `processmodel.dll`.
 ///
-/// Construct with [`LearningModeApi::load`]. Cloning is cheap (the struct holds three
-/// function pointers into the resident system DLL).
+/// Construct with [`LearningModeApi::load`].
 #[derive(Clone, Copy)]
 pub struct LearningModeApi {
     start: LearningModeStart,
     stop: PfnStopLearningModeTrace,
     close: PfnCloseLearningModeTrace,
+    source_option_support: Option<PfnIsLearningModeTraceSourceOptionSupported>,
 }
 
 impl std::fmt::Debug for LearningModeApi {
@@ -306,6 +309,7 @@ impl LearningModeApi {
             start: LearningModeStart::Legacy(start),
             stop,
             close,
+            source_option_support: None,
         }
     }
 
@@ -321,6 +325,7 @@ impl LearningModeApi {
             start: LearningModeStart::WithOptions(start),
             stop,
             close,
+            source_option_support: None,
         }
     }
 
@@ -328,6 +333,16 @@ impl LearningModeApi {
     #[must_use]
     pub fn trace_sources(&self) -> LearningModeTraceSources {
         self.start.sources()
+    }
+
+    pub(crate) fn supports_trace_sources(&self) -> bool {
+        match (self.start, self.source_option_support) {
+            (LearningModeStart::WithOptions(_), Some(query)) => {
+                // SAFETY: The resolved export accepts the C source-option bitmask.
+                unsafe { query(REQUIRED_TRACE_SOURCE_OPTIONS).as_bool() }
+            }
+            _ => true,
+        }
     }
 
     /// Start a Learning Mode trace for the sandbox identified by
@@ -492,7 +507,21 @@ unsafe fn select_learning_mode_exports(
         )?)
     };
 
-    Ok(LearningModeApi { start, stop, close })
+    let source_option_support = match start {
+        LearningModeStart::WithOptions(_) => {
+            lookup(SOURCE_OPTION_SUPPORTED_NAME).map(|proc| unsafe {
+                std::mem::transmute::<RawExport, PfnIsLearningModeTraceSourceOptionSupported>(proc)
+            })
+        }
+        LearningModeStart::Legacy(_) => None,
+    };
+
+    Ok(LearningModeApi {
+        start,
+        stop,
+        close,
+        source_option_support,
+    })
 }
 
 fn resolve_required_export(
@@ -528,6 +557,7 @@ const START_EXPORTS_DESCRIPTION: &str =
     "StartLearningModeTraceWithOptions or StartLearningModeTrace";
 const STOP_NAME: &core::ffi::CStr = c"StopLearningModeTrace";
 const CLOSE_NAME: &core::ffi::CStr = c"CloseLearningModeTrace";
+const SOURCE_OPTION_SUPPORTED_NAME: &core::ffi::CStr = c"IsLearningModeTraceSourceOptionSupported";
 
 /// Read-only capability probe for the Learning Mode trace API-set contract.
 #[must_use]
@@ -550,6 +580,9 @@ mod tests {
     static START_CALLS: AtomicUsize = AtomicUsize::new(0);
     static WRITE_START_HANDLE: AtomicBool = AtomicBool::new(true);
     static START_OPTIONS: AtomicI32 = AtomicI32::new(0);
+    static SOURCE_OPTIONS_SUPPORTED: AtomicBool = AtomicBool::new(true);
+    static SOURCE_OPTION_QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static QUERIED_SOURCE_OPTIONS: AtomicI32 = AtomicI32::new(0);
     static STOP_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
     static STOP_FAILURE_RESULT: AtomicI32 = AtomicI32::new(E_FAIL.0);
     static STOP_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
@@ -596,6 +629,14 @@ mod tests {
         HRESULT(STOP_RESULT.load(Ordering::SeqCst))
     }
 
+    unsafe extern "system" fn fake_source_option_supported(
+        options: LearningModeTraceSourceOptions,
+    ) -> windows_core::BOOL {
+        SOURCE_OPTION_QUERY_CALLS.fetch_add(1, Ordering::SeqCst);
+        QUERIED_SOURCE_OPTIONS.store(options, Ordering::SeqCst);
+        SOURCE_OPTIONS_SUPPORTED.load(Ordering::SeqCst).into()
+    }
+
     unsafe extern "system" fn fake_close(_: HANDLE) {
         CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
     }
@@ -617,6 +658,9 @@ mod tests {
         START_CALLS.store(0, Ordering::SeqCst);
         WRITE_START_HANDLE.store(true, Ordering::SeqCst);
         START_OPTIONS.store(0, Ordering::SeqCst);
+        SOURCE_OPTIONS_SUPPORTED.store(true, Ordering::SeqCst);
+        SOURCE_OPTION_QUERY_CALLS.store(0, Ordering::SeqCst);
+        QUERIED_SOURCE_OPTIONS.store(0, Ordering::SeqCst);
         STOP_RESULT.store(S_OK.0, Ordering::SeqCst);
         STOP_FAILURE_RESULT.store(E_FAIL.0, Ordering::SeqCst);
         STOP_FAILURES_REMAINING.store(0, Ordering::SeqCst);
@@ -642,6 +686,14 @@ mod tests {
                         std::mem::transmute::<PfnStopLearningModeTrace, RawExport>(fake_stop)
                     } else if name == CLOSE_NAME {
                         std::mem::transmute::<PfnCloseLearningModeTrace, RawExport>(fake_close)
+                    } else if name == c"IsLearningModeTraceSourceOptionSupported" {
+                        std::mem::transmute::<
+                            unsafe extern "system" fn(
+                                LearningModeTraceSourceOptions,
+                            )
+                                -> windows_core::BOOL,
+                            RawExport,
+                        >(fake_source_option_supported)
                     } else {
                         unreachable!("selection requests only known export names")
                     }
@@ -676,6 +728,48 @@ mod tests {
 
         assert_eq!(api.start.name(), "StartLearningModeTrace");
         assert_eq!(api.trace_sources(), LearningModeTraceSources::AccessOnly);
+    }
+
+    #[test]
+    fn option_support_is_queried_again_without_starting_a_trace() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        let api = select_from_exports(&[
+            START_WITH_OPTIONS_NAME,
+            STOP_NAME,
+            CLOSE_NAME,
+            c"IsLearningModeTraceSourceOptionSupported",
+        ])
+        .unwrap();
+
+        for supported in [false, true] {
+            SOURCE_OPTIONS_SUPPORTED.store(supported, Ordering::SeqCst);
+            assert_eq!(api.supports_trace_sources(), supported);
+            assert_eq!(QUERIED_SOURCE_OPTIONS.load(Ordering::SeqCst), 0x3);
+        }
+        assert_eq!(SOURCE_OPTION_QUERY_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn absent_query_and_legacy_start_preserve_advisory_support() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        SOURCE_OPTIONS_SUPPORTED.store(false, Ordering::SeqCst);
+        for available in [
+            vec![START_WITH_OPTIONS_NAME, STOP_NAME, CLOSE_NAME],
+            vec![
+                START_NAME,
+                STOP_NAME,
+                CLOSE_NAME,
+                c"IsLearningModeTraceSourceOptionSupported",
+            ],
+        ] {
+            let api = select_from_exports(&available).unwrap();
+            assert!(api.supports_trace_sources());
+        }
+        assert_eq!(SOURCE_OPTION_QUERY_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -945,20 +1039,31 @@ mod tests {
     #[test]
     fn failed_option_aware_start_identifies_selected_export() {
         let _guard = TEST_LOCK.lock().unwrap();
-        reset_fakes();
-        START_RESULT.store(E_FAIL.0, Ordering::SeqCst);
-        let api = fake_options_api();
+        for result in [E_FAIL, windows::Win32::Foundation::E_NOTIMPL] {
+            reset_fakes();
+            START_RESULT.store(result.0, Ordering::SeqCst);
+            let api = select_from_exports(&[
+                START_WITH_OPTIONS_NAME,
+                START_NAME,
+                STOP_NAME,
+                CLOSE_NAME,
+                c"IsLearningModeTraceSourceOptionSupported",
+            ])
+            .unwrap();
+            assert!(api.supports_trace_sources());
 
-        let error = unsafe { api.start_trace(fake_environment()).unwrap_err() };
+            let error = unsafe { api.start_trace(fake_environment()).unwrap_err() };
 
-        assert!(matches!(
-            error,
-            LearningModeError::HResultCall {
-                function: "StartLearningModeTraceWithOptions",
-                code
-            } if code == E_FAIL.0
-        ));
-        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                error,
+                LearningModeError::HResultCall {
+                    function: "StartLearningModeTraceWithOptions",
+                    code
+                } if code == result.0
+            ));
+            assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

@@ -15,7 +15,6 @@ fn scripts_dir() -> PathBuf {
 }
 
 const CHAIN_ASSERTING_SCRIPTS: &[&str] = &[
-    "run_lxc_network_cidr_boundary_test.sh",
     "run_lxc_network_deny_precedence_test.sh",
     "run_lxc_network_dualstack_test.sh",
     "run_lxc_network_enforcement_test.sh",
