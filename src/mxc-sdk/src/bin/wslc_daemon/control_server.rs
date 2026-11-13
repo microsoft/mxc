@@ -1140,6 +1140,7 @@ mod tests {
                 env_scope: crate::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
                 stdin: false,
+                network_proxy: None,
             }),
         )
         .await
@@ -1191,6 +1192,7 @@ mod tests {
                 env_scope: crate::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
                 stdin: false,
+                network_proxy: None,
             },
             permit,
         )
@@ -1227,6 +1229,7 @@ mod tests {
                 env_scope: crate::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
                 stdin: false,
+                network_proxy: None,
             },
             permit,
         ));
@@ -1455,6 +1458,7 @@ mod tests {
                 env_scope: crate::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
                 stdin: false,
+                network_proxy: None,
             }),
         )
         .await
@@ -1809,6 +1813,7 @@ mod tests {
                 network: Default::default(),
                 port_mappings: Vec::new(),
                 session_ref: None,
+                network_proxy: None,
             }),
         )
         .await

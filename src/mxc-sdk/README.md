@@ -203,6 +203,15 @@ For PowerShell startup failures, see
 
 ## Internal modules and executor binaries
 
+### Experimental W365 checkout and release
+
+Use the existing `v1::dev` JSON lifecycle APIs with `1.1.0-alpha` requests and
+`JsonOptions { experimental: true }` to provision, stop or deprovision a W365
+session. No backend Cargo feature is required. Start and exec remain unsupported.
+Failed Provision messages include a valid returned cleanup ID when available.
+See the [W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md#dev-sdk-checkout-and-release)
+for caller-environment configuration, request examples and explicit release.
+
 ### Experimental MicroVM support
 
 Enable the `microvm` Cargo feature on Windows x64 for experimental captured

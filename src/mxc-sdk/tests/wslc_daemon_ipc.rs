@@ -95,6 +95,7 @@ fn provisioned_and_started(client: &DaemonClient) -> String {
             network: Default::default(),
             port_mappings: Vec::new(),
             session_ref: None,
+            network_proxy: None,
         })
         .expect("provision");
     client
@@ -117,6 +118,7 @@ fn stamped_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
         env_scope: EnvScope::Merge,
         timeout_ms: 60_000,
         stdin: false,
+        network_proxy: None,
     }
 }
 
@@ -300,6 +302,7 @@ fn full_lifecycle_over_pipe() {
             network: Default::default(),
             port_mappings: Vec::new(),
             session_ref: None,
+            network_proxy: None,
         })
         .expect("provision");
 
@@ -320,6 +323,7 @@ fn full_lifecycle_over_pipe() {
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
             stdin: false,
+            network_proxy: None,
         })
         .expect("first exec");
     assert_eq!(result.exit_code, 0, "echo hi should exit 0");
@@ -337,6 +341,7 @@ fn full_lifecycle_over_pipe() {
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
             stdin: false,
+            network_proxy: None,
         })
         .expect("second exec");
     assert_eq!(result.exit_code, 7, "exit 7 should propagate its exit code");
