@@ -711,7 +711,23 @@ export interface Seatbelt {
    */
   captureDenials?: SeatbeltCaptureDenials;
   /**
-   * Additional Mach service global names the process may resolve.
+   * IOKit user-client classes the process may open. When present, this replaces guiAccess's IOKit grant.
+   */
+  customIoKits?: SeatbeltCustomRules;
+  /**
+   * Mach service global names the process may resolve. When present, this replaces guiAccess's Mach lookup grant.
+   */
+  customMachLookups?: SeatbeltCustomRules;
+  /**
+   * Mach service names the process may register. Each present block replaces guiAccess's registration grant for its names.
+   */
+  customMachRegisters?: SeatbeltCustomMachRegisters;
+  /**
+   * POSIX shared memory names the process may use. When present, this replaces guiAccess's shared memory grant.
+   */
+  customPosixShm?: SeatbeltCustomPosixShm;
+  /**
+   * Additional Mach service global names the process may resolve. Deprecated: use `customMachLookups.allow`.
    */
   extraMachLookups?: string[];
   /**
@@ -749,6 +765,72 @@ export interface SeatbeltCaptureDenials {
    */
   retainEtl?: boolean;
 }
+
+export type SeatbeltCustomDefault = "allow" | "deny";
+
+/**
+ * Mach service registration rules, by name scope.
+ */
+export interface SeatbeltCustomMachRegisters {
+  /**
+   * Names registered with launchd, visible to other processes.
+   */
+  global?: SeatbeltCustomRules;
+  /**
+   * Per-process names, shown as `(per-pid)` in denial reports.
+   */
+  local?: SeatbeltCustomRules;
+}
+
+/**
+ * POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. Each listed name gets exactly its list's access; a longer entry wins over a shorter prefix. `deny` entries win over every other list.
+ */
+export interface SeatbeltCustomPosixShm {
+  /**
+   * Names the process may read, write, and create.
+   */
+  create?: string[];
+  /**
+   * Access for unlisted names. Defaults to `deny`.
+   */
+  default?: SeatbeltPosixShmAccess;
+  /**
+   * Names to deny.
+   */
+  deny?: string[];
+  /**
+   * Names the process may read, write, create, and delete.
+   */
+  own?: string[];
+  /**
+   * Names the process may only read.
+   */
+  read?: string[];
+  /**
+   * Existing names the process may read and write.
+   */
+  readWrite?: string[];
+}
+
+/**
+ * Allow and deny lists for one kind of Seatbelt name. An entry ending in `*` matches every name with that prefix. `deny` entries win over `allow`.
+ */
+export interface SeatbeltCustomRules {
+  /**
+   * Names to allow.
+   */
+  allow?: string[];
+  /**
+   * Access for unlisted names. Defaults to `deny`.
+   */
+  default?: SeatbeltCustomDefault;
+  /**
+   * Names to deny, including names MXC allows by default.
+   */
+  deny?: string[];
+}
+
+export type SeatbeltPosixShmAccess = "deny" | "read" | "readWrite" | "create" | "own";
 
 export type StartPhase = "start";
 

@@ -308,8 +308,9 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision, Seatbelt `captureDenials`, and the `vm`, `microvm`, and `hyperlight`
-one-shot surfaces, are not accepted by v1.0.
+provision, Seatbelt `captureDenials`, `customMachLookups`,
+`customMachRegisters`, `customIoKits`, and `customPosixShm`, and the `vm`,
+`microvm`, and `hyperlight` one-shot surfaces, are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -355,6 +356,32 @@ field or set it to `"linux"`.
 
 This fail-closed exception applies within V1 and does not require a new
 versioned API surface.
+
+### Servicing exception: Seatbelt settings take precedence over `guiAccess`
+
+In every contract version, Seatbelt settings now take precedence over
+`seatbelt.guiAccess`, whether they are written in the config or omitted and
+left at a denying default. Previously `guiAccess` silently overrode them; this
+change is intentional.
+
+- `nestedPty: false` blocks PTY creation. `nestedPty` defaults to `true`.
+- `keychainAccess: false` or an omitted `keychainAccess` blocks the Keychain
+  servers.
+- `ui.clipboard: "none"` or an omitted `ui.clipboard` blocks every
+  `com.apple.pasteboard.` server.
+- `readonlyPaths` and `deniedPaths` entries inside `/private/tmp` and
+  `/private/var/folders` apply.
+
+In `captureDenials` `"allow"` mode, omitted settings allow and report access
+instead, so the report shows what they would block.
+
+The Seatbelt backend also rejects an `extraMachLookups` entry that names only
+a service a setting denies, written or by default, such as
+`com.apple.SecurityServer` without `keychainAccess: true`. Change that setting
+instead.
+
+This exception applies within V1 and does not require a new versioned API
+surface.
 
 ### Shipped vs Experimental
 

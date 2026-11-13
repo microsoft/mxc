@@ -421,8 +421,66 @@ pub struct Seatbelt {
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
+    /// IOKit user-client class rules (development contract only).
+    pub custom_io_kits: Option<SeatbeltCustomRules>,
+    /// Mach registration rules (development contract only).
+    pub custom_mach_registers: Option<SeatbeltCustomMachRegisters>,
+    /// Mach lookup rules (development contract only).
+    pub custom_mach_lookups: Option<SeatbeltCustomRules>,
+    /// POSIX shared memory rules (development contract only).
+    pub custom_posix_shm: Option<SeatbeltCustomPosixShm>,
     /// Seatbelt denial capture (development contract only).
     pub capture_denials: Option<SeatbeltCaptureDenials>,
+}
+
+/// Access for names that no Seatbelt custom rule entry matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeatbeltCustomDefault {
+    Allow,
+    Deny,
+}
+
+/// Seatbelt allow and deny lists for one kind of name.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomRules {
+    /// Defaults to `deny` when omitted.
+    pub default: Option<SeatbeltCustomDefault>,
+    pub allow: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
+}
+
+/// Seatbelt Mach registration rules, by name scope.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomMachRegisters {
+    pub global: Option<SeatbeltCustomRules>,
+    pub local: Option<SeatbeltCustomRules>,
+}
+
+/// Access to a Seatbelt POSIX shared memory name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SeatbeltPosixShmAccess {
+    Deny,
+    Read,
+    ReadWrite,
+    Create,
+    Own,
+}
+
+/// Seatbelt POSIX shared memory rules, by access.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomPosixShm {
+    /// Defaults to `deny` when omitted.
+    pub default: Option<SeatbeltPosixShmAccess>,
+    pub read: Option<Vec<String>>,
+    pub read_write: Option<Vec<String>>,
+    pub create: Option<Vec<String>>,
+    pub own: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
 }
 
 /// macOS Seatbelt denial-capture settings.

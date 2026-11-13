@@ -1452,8 +1452,24 @@
           "$ref": "#/definitions/SeatbeltCaptureDenials",
           "description": "Records sandbox denials to a JSON report."
         },
+        "customIoKits": {
+          "$ref": "#/definitions/SeatbeltCustomRules",
+          "description": "IOKit user-client classes the process may open. When present, this replaces guiAccess's IOKit grant."
+        },
+        "customMachLookups": {
+          "$ref": "#/definitions/SeatbeltCustomRules",
+          "description": "Mach service global names the process may resolve. When present, this replaces guiAccess's Mach lookup grant."
+        },
+        "customMachRegisters": {
+          "$ref": "#/definitions/SeatbeltCustomMachRegisters",
+          "description": "Mach service names the process may register. Each present block replaces guiAccess's registration grant for its names."
+        },
+        "customPosixShm": {
+          "$ref": "#/definitions/SeatbeltCustomPosixShm",
+          "description": "POSIX shared memory names the process may use. When present, this replaces guiAccess's shared memory grant."
+        },
         "extraMachLookups": {
-          "description": "Additional Mach service global names the process may resolve.",
+          "description": "Additional Mach service global names the process may resolve. Deprecated: use `customMachLookups.allow`.",
           "items": {
             "type": "string"
           },
@@ -1496,6 +1512,149 @@
         }
       },
       "type": "object"
+    },
+    "SeatbeltCustomDefault": {
+      "oneOf": [
+        {
+          "description": "Allow",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Deny",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SeatbeltCustomMachRegisters": {
+      "additionalProperties": false,
+      "description": "Mach service registration rules, by name scope.",
+      "properties": {
+        "global": {
+          "$ref": "#/definitions/SeatbeltCustomRules",
+          "description": "Names registered with launchd, visible to other processes."
+        },
+        "local": {
+          "$ref": "#/definitions/SeatbeltCustomRules",
+          "description": "Per-process names, shown as `(per-pid)` in denial reports."
+        }
+      },
+      "type": "object"
+    },
+    "SeatbeltCustomPosixShm": {
+      "additionalProperties": false,
+      "description": "POSIX shared memory rules, by access. An entry ending in `*` matches every name with that prefix. Each listed name gets exactly its list's access; a longer entry wins over a shorter prefix. `deny` entries win over every other list.",
+      "properties": {
+        "create": {
+          "description": "Names the process may read, write, and create.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default": {
+          "$ref": "#/definitions/SeatbeltPosixShmAccess",
+          "description": "Access for unlisted names. Defaults to `deny`."
+        },
+        "deny": {
+          "description": "Names to deny.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "own": {
+          "description": "Names the process may read, write, create, and delete.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "read": {
+          "description": "Names the process may only read.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "readWrite": {
+          "description": "Existing names the process may read and write.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SeatbeltCustomRules": {
+      "additionalProperties": false,
+      "description": "Allow and deny lists for one kind of Seatbelt name. An entry ending in `*` matches every name with that prefix. `deny` entries win over `allow`.",
+      "properties": {
+        "allow": {
+          "description": "Names to allow.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default": {
+          "$ref": "#/definitions/SeatbeltCustomDefault",
+          "description": "Access for unlisted names. Defaults to `deny`."
+        },
+        "deny": {
+          "description": "Names to deny, including names MXC allows by default.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SeatbeltPosixShmAccess": {
+      "oneOf": [
+        {
+          "description": "Deny",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "ReadWrite",
+          "enum": [
+            "readWrite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create",
+          "enum": [
+            "create"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Own",
+          "enum": [
+            "own"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StartPhase": {
       "enum": [

@@ -18,6 +18,7 @@ use crate::learning_mode_core::{
     MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use crate::seatbelt_common::profile_builder::GRANT_TAG_SUFFIX;
+use crate::seatbelt_common::seatbelt_policy::PASTEBOARD_SERVICE_PREFIX;
 
 /// Same bound as the Windows decoder.
 const MAX_UNIQUE_DENIALS: usize = 10_000;
@@ -205,7 +206,7 @@ fn is_ui_resource(operation: &str, target: &str) -> bool {
     match operation {
         "hid-control" => true,
         "mach-lookup" => {
-            target.starts_with("com.apple.pasteboard.")
+            target.starts_with(PASTEBOARD_SERVICE_PREFIX)
                 || target.starts_with("com.apple.windowserver.")
                 || target == "com.apple.coreservices.launchservicesd"
         }
@@ -233,7 +234,8 @@ fn report_signature(
     reason: CaptureVerboseLoggingOutcomeReason,
     classified: Option<(ResourceType, AccessType)>,
 ) -> CaptureVerboseLoggingSignature {
-    let target = if report.target.contains('/') {
+    // Shared memory names start with `/` but are not file paths.
+    let target = if report.target.contains('/') && !report.operation.starts_with("ipc-posix-shm") {
         REDACTED_PATH.to_string()
     } else {
         bounded_property(report.target)
@@ -588,6 +590,38 @@ mod tests {
         assert!(verbose.signatures.iter().any(|g| {
             g.signature.reason == CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
         }));
+    }
+
+    #[test]
+    fn verbose_report_keeps_shared_memory_names() {
+        let mut shm = event("Sandbox: app(7) allow ipc-posix-shm-read-data /myapp.region");
+        shm.message.push_str(GRANT_TAG_SUFFIX);
+        let analysis = analyze_events(
+            &[
+                shm,
+                event("Sandbox: cat(7) deny(1) file-read-data /Users/me/secret.txt"),
+            ],
+            false,
+        );
+        let target = |op: &str| {
+            analysis
+                .network_verbose_logging
+                .signatures
+                .iter()
+                .find(|g| g.signature.event_name.as_deref() == Some(op))
+                .and_then(|g| {
+                    g.signature
+                        .properties
+                        .iter()
+                        .find(|(key, _)| key == "target")
+                })
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            target("ipc-posix-shm-read-data").as_deref(),
+            Some("/myapp.region")
+        );
+        assert_eq!(target("file-read-data").as_deref(), Some(REDACTED_PATH));
     }
 
     #[test]

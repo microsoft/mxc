@@ -183,6 +183,10 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        custom_io_kits,
+        custom_mach_registers,
+        custom_mach_lookups,
+        custom_posix_shm,
         capture_denials,
     } = value;
     wire::Seatbelt {
@@ -191,9 +195,88 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        custom_io_kits: custom_io_kits
+            .into_option()
+            .map(convert_seatbelt_custom_rules),
+        custom_mach_registers: custom_mach_registers
+            .into_option()
+            .map(convert_seatbelt_custom_mach_registers),
+        custom_mach_lookups: custom_mach_lookups
+            .into_option()
+            .map(convert_seatbelt_custom_rules),
+        custom_posix_shm: custom_posix_shm
+            .into_option()
+            .map(convert_seatbelt_custom_posix_shm),
         capture_denials: capture_denials
             .into_option()
             .map(convert_seatbelt_capture_denials),
+    }
+}
+
+fn convert_seatbelt_custom_rules(
+    value: contract::SeatbeltCustomRules,
+) -> wire::SeatbeltCustomRules {
+    let contract::SeatbeltCustomRules {
+        default,
+        allow,
+        deny,
+    } = value;
+    wire::SeatbeltCustomRules {
+        default: default.into_option().map(convert_seatbelt_custom_default),
+        allow: allow.into_option(),
+        deny: deny.into_option(),
+    }
+}
+
+fn convert_seatbelt_custom_default(
+    value: contract::SeatbeltCustomDefault,
+) -> wire::SeatbeltCustomDefault {
+    match value {
+        contract::SeatbeltCustomDefault::Allow => wire::SeatbeltCustomDefault::Allow,
+        contract::SeatbeltCustomDefault::Deny => wire::SeatbeltCustomDefault::Deny,
+    }
+}
+
+fn convert_seatbelt_custom_posix_shm(
+    value: contract::SeatbeltCustomPosixShm,
+) -> wire::SeatbeltCustomPosixShm {
+    let contract::SeatbeltCustomPosixShm {
+        default,
+        read,
+        read_write,
+        create,
+        own,
+        deny,
+    } = value;
+    wire::SeatbeltCustomPosixShm {
+        default: default.into_option().map(convert_seatbelt_posix_shm_access),
+        read: read.into_option(),
+        read_write: read_write.into_option(),
+        create: create.into_option(),
+        own: own.into_option(),
+        deny: deny.into_option(),
+    }
+}
+
+fn convert_seatbelt_posix_shm_access(
+    value: contract::SeatbeltPosixShmAccess,
+) -> wire::SeatbeltPosixShmAccess {
+    match value {
+        contract::SeatbeltPosixShmAccess::Deny => wire::SeatbeltPosixShmAccess::Deny,
+        contract::SeatbeltPosixShmAccess::Read => wire::SeatbeltPosixShmAccess::Read,
+        contract::SeatbeltPosixShmAccess::ReadWrite => wire::SeatbeltPosixShmAccess::ReadWrite,
+        contract::SeatbeltPosixShmAccess::Create => wire::SeatbeltPosixShmAccess::Create,
+        contract::SeatbeltPosixShmAccess::Own => wire::SeatbeltPosixShmAccess::Own,
+    }
+}
+
+fn convert_seatbelt_custom_mach_registers(
+    value: contract::SeatbeltCustomMachRegisters,
+) -> wire::SeatbeltCustomMachRegisters {
+    let contract::SeatbeltCustomMachRegisters { global, local } = value;
+    wire::SeatbeltCustomMachRegisters {
+        global: global.into_option().map(convert_seatbelt_custom_rules),
+        local: local.into_option().map(convert_seatbelt_custom_rules),
     }
 }
 

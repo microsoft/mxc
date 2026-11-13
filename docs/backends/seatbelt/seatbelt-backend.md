@@ -348,7 +348,7 @@ combined with `runtimeConfig.networkProxy`.
 | Policy | Generated rule |
 |---|---|
 | `ui.disable: true` (default) | Denies mach-lookup of `com.apple.windowserver.active`, `com.apple.windowserver.session`, and `com.apple.coreservices.launchservicesd` |
-| `ui.clipboard: "none"` (default) | Denies mach-lookup of `com.apple.pasteboard.1` |
+| `ui.clipboard: "none"` (default) | Denies mach-lookup of every name starting with `com.apple.pasteboard.` |
 | `ui.injection: false` (default) | Denies `iokit-open` of `IOHIDLibUserClient` |
 
 ## Seatbelt-specific options
@@ -361,21 +361,28 @@ Set under a top-level `"seatbelt"` key.
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules, and rejects an override that contains their `com.microsoft.mxc.run.` names. Last resort. |
-| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. Names starting with `com.microsoft.mxc.run.` are rejected. |
+| `extraMachLookups` | string[] | `[]` | **Deprecated in `1.1.0-alpha`: use `customMachLookups.allow`.** Additional Mach services the sandbox may look up, as exact `global-name` values. Names starting with `com.microsoft.mxc.run.` are rejected. |
+| `customMachLookups` | object | unset | **Requires config version `1.1.0-alpha`.** Mach services the sandbox may look up. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
+| `customMachRegisters` | object | unset | **Requires config version `1.1.0-alpha`.** Mach services the sandbox may register, split into `global` and `local` names. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
+| `customIoKits` | object | unset | **Requires config version `1.1.0-alpha`.** IOKit user-client classes the sandbox may open. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
+| `customPosixShm` | object | unset | **Requires config version `1.1.0-alpha`.** POSIX shared memory regions the sandbox may read, write, or create. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
 | `captureDenials` | object | unset | **Requires config version `1.1.0-alpha`.** Records what the sandbox blocked into a JSON report. See [Learning mode](#learning-mode-capturedenials). |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
 
-All `mach-lookup` (an allowlist would be fragile — the services GUI frameworks
-need vary by macOS release), plus `mach-register`, `iokit-open` for GPU/Metal,
-`pseudo-tty` with `/dev/ptmx` and sandbox-authorized `/dev/ttys*` devices, and
-POSIX shared memory. PTY allocation remains enabled even when `nestedPty` is
-`false`.
+All `mach-lookup`, plus `mach-register`, `iokit-open` for GPU/Metal,
+and POSIX shared memory. A `customMachLookups`, `customMachRegisters`,
+`customIoKits`, or `customPosixShm` block replaces the matching grant.
 
 It also grants read **and** write across all of `/private/tmp` and
-`/private/var/folders`, regardless of your `filesystem` policy. Deny rules are
-emitted last, so a `deniedPaths` entry still overrides this grant.
+`/private/var/folders`. Your `filesystem` policy is applied after this grant, so
+`readonlyPaths` and `deniedPaths` entries inside those directories still apply.
+
+Settings always win over `guiAccess`, whether written or left at their default:
+`nestedPty` alone controls PTY creation, `keychainAccess` controls the
+Keychain, and the `ui` settings control WindowServer, the pasteboard, and HID
+input.
 
 </details>
 
@@ -413,7 +420,7 @@ the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
 
 | Field | Default | Meaning |
 |---|---|---|
-| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. This includes a written `egress` or `ingress` `default: "deny"` and custom list defaults. Settings left out of the config, such as `keychainAccess` or `ui.clipboard`, also don't block. Still enforced: `deniedPaths`, `ingress.hostLoopback: "deny"`, `nestedPty`, customMach/IoKit/POSIX `deny` entries, `customPosixShm` list levels, and explicit `keychainAccess` and `ui` settings.|
 | `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
 | `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
 
@@ -435,15 +442,16 @@ with these macOS differences:
 
 - Verbose signatures use `providerGuid` `com.apple.security.sandbox`, event
   ID `0`, and the Seatbelt operation (for example `file-read-data`) as
-  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, other
-  values are kept, and values over 256 characters are cut short. There is no
-  account-name replacement or digest.
+  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, except
+  shared memory names, which are kept so you can use them in
+  `customPosixShm`. Other values are kept, and values over 256 characters are
+  cut short. There is no account-name replacement or digest.
 
 `deniedResourcesTruncated: true` means some denials may be missing. Delete the
 report, its `.verbose.json` file, and any `.seatbelt.log` when you're done.
 
-Requests that `guiAccess` grants, such as Mach lookups and IOKit opens, aren't
-denials. They appear only in the verbose file, with `"decision": "allowGrant"`.
+**Mach, IOKit, and shared memory requests**: Names granted by `guiAccess` or a custom `default: "allow"` aren't
+denials; they appear only in the verbose file as `"decision": "allowGrant"`.
 
 `mxc-exec-mac --audit config.json` is a shortcut that runs the
 config with `captureDenials` in `"allow"` mode and writes the report to a temp
@@ -538,6 +546,85 @@ out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's
 fail with `Operation not permitted`. Grant the working directory in
 `readwritePaths` or `readonlyPaths`.
 
+## Custom Mach, IOKit, and shared memory lists
+
+These `1.1.0-alpha` settings let you grant only the Mach services, IOKit
+classes, and POSIX shared memory regions an app needs.
+
+```json
+"seatbelt": {
+    "customMachLookups": {
+        "default": "deny",
+        "allow": ["com.apple.CARenderServer", "com.apple.fonts*"],
+        "deny": []
+    },
+    "customMachRegisters": {
+        "global": { "allow": ["com.example.MyApp.*"] },
+        "local": { "default": "allow" }
+    },
+    "customIoKits": {
+        "allow": ["AGXDeviceUserClient", "IOSurfaceRootUserClient"]
+    },
+    "customPosixShm": {
+        "read": ["apple.shm.notification_center"],
+        "own": ["/com.example.MyApp.*"]
+    }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `default` | `"deny"` (default) denies names not in `allow`. MXC's built-in grants and enabled settings still apply. `"allow"` grants every name except the `deny` list; avoid it unless absolutely necessary. |
+| `allow` | Names to grant. An entry ending in `*` matches every name with that prefix. A bare `*` is rejected; use `default: "allow"`. |
+| `deny` | Names to block. Deny entries win over `allow`, over `default: "allow"`, and over MXC's built-in grants. |
+
+`customMachRegisters` has two optional blocks. `global` covers names published
+through launchd for other processes to look up. `local` covers names visible
+only inside the process; denial reports show them as `(per-pid)`.
+`customIoKits` entries must be class names (letters, digits, and `_`).
+
+`customPosixShm` replaces `allow` with four access lists. Its `default` is
+`"deny"` or one of the same access levels:
+
+| List | Grants |
+|---|---|
+| `read` | Open read-only. |
+| `readWrite` | Open read-write. Opening with `O_CREAT` needs `create`, even if the region exists. |
+| `create` | Read, write, and create. |
+| `own` | Read, write, create, and delete. |
+
+Each listed name gets exactly its list's access, even under a broader
+`default`. When entries overlap, the longer one wins: with `own: ["/app.*"]`
+and `read: ["/app.config"]`, `/app.config` is read-only. An entry can be in
+only one access list; `deny` wins over all of them. Write each name exactly as
+the app passes it to `shm_open`, including any leading `/`. Names are limited
+to 31 bytes.
+
+MXC rejects a config when:
+
+- a custom block is combined with `profileOverride`;
+- `customMachLookups` is combined with `extraMachLookups`;
+- a `customMachLookups` entry starts with `com.microsoft.mxc.run.`, which MXC
+  reserves for [process cleanup](#process-cleanup);
+- an `allow` entry names only something a setting denies, whether set or
+  omitted (for
+  example `com.apple.SecurityServer` without `keychainAccess`, or
+  `IOHIDLibUserClient` with `ui.injection: false`). Change that setting instead.
+  This check also applies to `extraMachLookups`;
+- a `deny` entry would block something an explicit setting grants (for example
+  the pasteboard with `ui.clipboard` enabled, `IOHIDLibUserClient` with
+  `ui.injection: true`, or a Keychain helper such as `com.apple.trustd` with
+  `keychainAccess: true`).
+
+To find the names an app needs, run it once with
+[`captureDenials`](#learning-mode-capturedenials) in `"allow"` mode. In that
+mode names the custom lists don't cover are allowed, so the app isn't blocked,
+while `deny` entries, `customPosixShm` list levels, and settings written in the
+config still apply. The report lists each
+name the lists don't grant, such as `mach-lookup:com.apple.CARenderServer` or
+`ipc-posix-shm-read-data:apple.shm.notification_center`. Add those names to the
+matching list.
+
 ## Process cleanup
 
 A run ends when its main process (the `/bin/sh` that runs your command) exits,
@@ -571,8 +658,9 @@ profile too.
 
 `--debug` prints these rules after the end of the generated profile, not inside
 it, so the profile can be copied into `profileOverride` without them. MXC
-rejects a `profileOverride` or `extraMachLookups` entry that uses the
-`com.microsoft.mxc.run.` prefix, because the rules MXC adds would override it.
+rejects a `profileOverride`, `extraMachLookups`, or `customMachLookups` entry
+that uses the `com.microsoft.mxc.run.` prefix, because the rules MXC adds would
+override it.
 
 MXC freezes every matching process before killing any, so a process cannot
 restart one that was just killed. It scans again until two scans in a row find

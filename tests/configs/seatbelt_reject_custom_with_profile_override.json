@@ -1,0 +1,17 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo REJECT_SHOULD_NOT_RUN",
+        "timeout": 10000
+    },
+    "seatbelt": {
+        "profileOverride": "(version 1)(allow default)",
+        "customIoKits": {
+            "allow": [
+                "IOSurfaceRootUserClient"
+            ]
+        }
+    }
+}

@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "security list-keychains > /dev/null 2>&1 && echo KEYCHAIN_OK || echo KEYCHAIN_BLOCKED",
+        "timeout": 20000,
+        "env": [
+            "HOME={{HOME}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true
+    }
+}

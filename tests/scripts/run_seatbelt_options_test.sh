@@ -102,9 +102,13 @@ pass "keychainAccess grants the user keychain directory"
 
 run_config "$(render seatbelt_opt_keychain_off.json HOME "$HOME")" --debug
 KC_OFF="$(extract "$OUT")"
-grep -qF 'com.apple.SecurityServer' <<<"$KC_OFF" &&
-    fail "the Keychain services must be absent without keychainAccess" "$KC_OFF"
+grep -qF 'keychainAccess: ' <<<"$KC_OFF" &&
+    fail "the Keychain grants must be absent without keychainAccess" "$KC_OFF"
 pass "the Keychain grants are absent without keychainAccess"
+DENY="$(tr '\n' ' ' <<<"$KC_OFF" | sed 's/  */ /g')"
+grep -qF '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name-prefix "com.apple.securityd")' <<<"$DENY" ||
+    fail "the Keychain servers are denied without keychainAccess" "$KC_OFF"
+pass "the Keychain servers are denied without keychainAccess"
 
 # extraMachLookups is passed through verbatim, so every listed service must
 # appear and nothing else may be added alongside them.

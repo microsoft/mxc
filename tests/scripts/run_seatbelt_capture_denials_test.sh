@@ -502,7 +502,9 @@ expect_collector_gone "the orphaned log stream was stopped" "$COLLECTOR"
 
 # ui.clipboard=none must survive the guiAccess blanket Mach grant, and the
 # report must attribute the blocked pasteboard to UI rather than "other".
-for scenario in allow:all block:none allow:none; do
+# Allow mode enforces only a written setting: an omitted ui.clipboard lets the
+# pasteboard through and still reports it, despite guiAccess's grant.
+for scenario in allow:all block:none allow:none allow:omitted; do
     mode="${scenario%:*}"
     clipboard="${scenario#*:}"
     config="$(render seatbelt_capture_denials_gui_clipboard_none.json OUTPUT "$TESTDIR/out/clipboard.json")"
@@ -512,25 +514,106 @@ path, mode, clipboard = sys.argv[1:]
 with open(path) as source:
     config = json.load(source)
 config["seatbelt"]["captureDenials"]["mode"] = mode
-config["ui"]["clipboard"] = clipboard
+if clipboard == "omitted":
+    del config["ui"]["clipboard"]
+else:
+    config["ui"]["clipboard"] = clipboard
 with open(path, "w") as output:
     json.dump(config, output)
 EOF
     run_config "$config"
-    if [ "$clipboard" = all ]; then
-        expect_ok "allow mode permits the pasteboard when granted under guiAccess" "CLIPBOARD_OK"
-        read_pointer "the allowed pasteboard control writes a report"
-        continue
-    fi
-    expect_ok "$mode mode keeps the pasteboard blocked under guiAccess" "CLIPBOARD_BLOCKED"
-    read_pointer "$mode mode with guiAccess writes a report"
-    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "$mode mode pasteboard denial is not reported as ui" "$(cat "$REPORT")"
+    case "$clipboard" in
+        all)
+            expect_ok "allow mode permits the pasteboard when granted under guiAccess" "CLIPBOARD_OK"
+            read_pointer "the allowed pasteboard control writes a report"
+            continue
+            ;;
+        omitted)
+            expect_ok "allow mode permits the pasteboard when ui.clipboard is omitted" "CLIPBOARD_OK"
+            ;;
+        *)
+            expect_ok "$mode mode keeps the pasteboard blocked under guiAccess" "CLIPBOARD_BLOCKED"
+            ;;
+    esac
+    read_pointer "$mode mode with clipboard $clipboard writes a report"
+    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "$mode mode with clipboard $clipboard: pasteboard is not reported as ui" "$(cat "$REPORT")"
 import json, sys
 doc = json.load(open(sys.argv[1]))
 assert any(d["resourceType"] == "ui" and "com.apple.pasteboard" in d["resource"]
            for d in doc["denials"])
 EOF
-    pass "$mode mode pasteboard denial is reported as ui"
+    pass "$mode mode with clipboard $clipboard reports the pasteboard as ui"
+done
+
+# Same for keychainAccess. HOME must be set or Security.framework fails for an
+# unrelated reason.
+for keychain in omitted false; do
+    config="$(render seatbelt_capture_denials_gui_keychain.json HOME "$HOME" OUTPUT "$TESTDIR/out/keychain.json")"
+    [ "$keychain" = false ] && edit_config "$config" 'config["seatbelt"]["keychainAccess"] = False'
+    run_config "$config"
+    if [ "$keychain" = omitted ]; then
+        expect_ok "allow mode permits the Keychain when keychainAccess is omitted" "KEYCHAIN_OK"
+    else
+        expect_ok "allow mode keeps the Keychain blocked with keychainAccess=false" "KEYCHAIN_BLOCKED"
+    fi
+    read_pointer "allow mode with keychainAccess $keychain writes a report"
+    /usr/bin/python3 - "$REPORT" <<'EOF' || fail "allow mode with keychainAccess $keychain does not report the Keychain" "$(cat "$REPORT")"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert any(d["resource"].startswith(("mach-lookup:com.apple.securityd", "mach-lookup:com.apple.SecurityServer"))
+           for d in doc["denials"])
+EOF
+    pass "allow mode with keychainAccess $keychain reports the Keychain"
+done
+
+# nestedPty defaults to true, so false is always written and stays enforced.
+run_config "$(render seatbelt_opt_nested_pty_off.json)" --audit
+expect_ok "allow mode keeps pty allocation blocked with nestedPty=false" "PTY_BLOCKED"
+read_pointer "allow mode with nestedPty=false writes a report"
+/usr/bin/python3 - "$REPORT" <<'EOF' || fail "allow mode with nestedPty=false does not report the pty" "$(cat "$REPORT")"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert any("pseudo-tty" in d["resource"] or d["resource"] == "/dev/ptmx"
+           for d in doc["denials"])
+EOF
+pass "allow mode with nestedPty=false reports the pty"
+rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+
+# Same for ui.disable, probed through CGMainDisplayID (0 when blocked).
+for disable in true omitted; do
+    config="$(render seatbelt_ui_disabled.json)"
+    [ "$disable" = omitted ] && edit_config "$config" 'del config["ui"]'
+    run_config "$config" --audit
+    expect_marker "allow mode with ui.disable $disable ran" "DISPLAY_ID="
+    if [ "$disable" = true ]; then
+        expect_ok "allow mode keeps WindowServer blocked with ui.disable=true" "DISPLAY_ID=0"
+    else
+        grep -qF "DISPLAY_ID=0" <<<"$OUT" &&
+            fail "allow mode should reach WindowServer when ui.disable is omitted" "$OUT"
+        pass "allow mode reaches WindowServer when ui.disable is omitted"
+    fi
+    read_pointer "allow mode with ui.disable $disable writes a report"
+    rm -f "$REPORT" "${REPORT%.json}.verbose.json"
+done
+
+# No HID device is guaranteed on CI hosts, so ui.injection is checked in the
+# generated profile.
+for injection in false omitted; do
+    config="$(render seatbelt_ui_disabled.json)"
+    [ "$injection" = false ] && edit_config "$config" 'config["ui"]["injection"] = False'
+    run_config "$config" --audit --debug
+    if [ "$injection" = false ]; then
+        grep -q '^(deny iokit-open .*IOHIDLibUserClient' <<<"$OUT" ||
+            fail "allow mode should deny HID input with ui.injection=false" "$OUT"
+        pass "allow mode keeps HID input denied with ui.injection=false"
+    else
+        grep -q '^(allow iokit-open (with report).*IOHIDLibUserClient' <<<"$OUT" &&
+            ! grep -q '^(deny iokit-open .*IOHIDLibUserClient' <<<"$OUT" ||
+            fail "allow mode should allow and report HID input when ui.injection is omitted" "$OUT"
+        pass "allow mode allows and reports HID input when ui.injection is omitted"
+    fi
+    read_pointer "allow mode with ui.injection $injection writes a report"
+    rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 done
 
 # --- a real GUI app: which Mach services and IOKit drivers it needs ----------
@@ -555,7 +638,7 @@ chmod -R a+rX "$TESTDIR/app"
 GUI_MACH="mach-lookup:com.apple.CARenderServer"
 GUI_IOKIT="iokit-open-user-client:IOSurfaceRootUserClient"
 
-# Assert the verbose report shows guiAccess's blanket grant serving OP TARGET.
+# Assert the verbose report shows a broad grant serving OP TARGET.
 expect_granted() {
     local label="$1" op="$2" target="$3"
     /usr/bin/python3 - "${REPORT%.json}.verbose.json" "$op" "$target" <<'EOF' ||
@@ -591,6 +674,37 @@ for resource in "$GUI_MACH" "$GUI_IOKIT"; do
     grep -qF "\"$resource\"" "$REPORT" && fail "a granted request is listed as denied: $resource" "$(cat "$REPORT")"
 done
 pass "granted requests are not listed as denials"
+
+# In allow mode, empty custom lists don't block the app; the report names what
+# the lists need to grant.
+run_config "$(render seatbelt_capture_denials_gui_app_custom_allow.json TESTDIR "$TESTDIR" OUTPUT "$TESTDIR/out/gui_custom.json")"
+expect_ok "allow mode runs the GUI app despite empty custom lists" "GUI_WINDOW_OK"
+read_pointer "the allow-mode custom-list run writes a report"
+expect_listed "allow mode lists the Core Animation lookup to grant" other "$GUI_MACH" unknown
+expect_listed "allow mode lists the IOSurface driver to grant" other "$GUI_IOKIT" unknown
+expect_listed "allow mode lists the shared memory to grant" other \
+    "ipc-posix-shm-read-data:apple.shm.notification_center" read
+
+# Shared memory names start with "/" but are not paths, so the verbose report
+# keeps them for customPosixShm. Only a `default` grant is reported, and `own`
+# lets the workload delete its region.
+SHM="mxc-capture-shm.$$"
+cat >"$TESTDIR/app/shm.py" <<'EOF'
+import sys
+from multiprocessing import shared_memory
+owner = shared_memory.SharedMemory(name=sys.argv[1], create=True, size=16)
+owner.buf[0] = 7
+reader = shared_memory.SharedMemory(name=sys.argv[1])
+print("SHM_OK" if reader.buf[0] == 7 else "SHM_FAILED")
+reader.close()
+owner.close()
+owner.unlink()
+EOF
+chmod a+r "$TESTDIR/app/shm.py"
+run_config "$(render seatbelt_capture_denials_shm_grant.json TESTDIR "$TESTDIR" SHM "$SHM" OUTPUT "$TESTDIR/out/shm.json")"
+expect_ok "the shared memory workload ran" "SHM_OK"
+read_pointer "the shared memory run writes a report"
+expect_granted "the verbose report names the shared memory it granted" ipc-posix-shm-write-create "/$SHM"
 
 # --- rejections --------------------------------------------------------------
 

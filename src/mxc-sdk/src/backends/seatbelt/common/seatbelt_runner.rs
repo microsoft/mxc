@@ -173,6 +173,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_reserved_names(request)
             .map_err(rejected_response)?;
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(request)
+            .map_err(rejected_response)?;
         // Dry runs never reach spawn, so reject unresolvable paths here too.
         prepare_profile(request).map_err(profile_error_response)?;
         prepare_capture_output_path(request).map_err(profile_error_response)?;
@@ -1370,11 +1372,7 @@ else:
 "#,
             &[
                 path.to_str().expect("UTF-8 terminal path"),
-                if nested_pty || gui_access {
-                    "allow"
-                } else {
-                    "deny"
-                },
+                if nested_pty { "allow" } else { "deny" },
             ],
             with_pty,
         );
@@ -1395,9 +1393,11 @@ else:
         assert_unrelated_terminal_denied(false, false, false);
     }
 
+    /// `nestedPty` alone controls PTY allocation; `guiAccess` does not grant it.
     #[test]
     fn gui_access_cannot_open_unrelated_host_terminals() {
         assert_unrelated_terminal_denied(false, true, false);
+        assert_unrelated_terminal_denied(true, true, false);
     }
 
     #[test]

@@ -28,14 +28,16 @@
 //! With `seatbelt.captureDenials`, every deny rule carries the run's
 //! `(with message "<tag>")` so its log entries can be attributed to this run.
 //! Allow mode swaps `(deny default)` for `(allow default (with report) ...)`,
-//! and the broad guiAccess grants report under `<tag>:grant`.
+//! reports instead of enforcing the denies of settings the request omitted,
+//! and makes the broad guiAccess grants report under `<tag>:grant`.
 
 use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     CaptureDenialsMode, ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress,
+    SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
-use crate::seatbelt_common::seatbelt_policy;
+use crate::seatbelt_common::seatbelt_policy::{self, NamePattern};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -176,6 +178,11 @@ pub(crate) fn build_profile_with_terminals(
         );
     }
 
+    // Option filesystem grants come before the filesystem policy so that
+    // readonlyPaths and deniedPaths entries inside them still apply.
+    write_keychain_rules(&mut out, request, inputs.user_keychains.as_deref())?;
+    write_gui_filesystem_rules(&mut out, request);
+
     // Policy-derived allow rules.
     let resolved = ResolvedPaths::from_inputs(inputs);
     write_filesystem_allow(&mut out, &resolved);
@@ -186,9 +193,15 @@ pub(crate) fn build_profile_with_terminals(
         capture.as_ref().is_some_and(|rules| rules.allow_mode),
     );
     write_nested_pty_rules(&mut out, request);
-    write_keychain_rules(&mut out, request, inputs.user_keychains.as_deref())?;
-    write_extra_seatbelt_rules(&mut out, request);
     write_ui_rules(&mut out, request, capture.as_ref());
+    write_extra_seatbelt_rules(&mut out, request);
+    write_custom_allows(&mut out, request, capture.as_ref());
+
+    // Setting denies follow every allow so no grant reopens them.
+    write_ui_policy_denies(&mut out, request, capture.as_ref());
+    write_keychain_denies(&mut out, request, capture.as_ref());
+    write_nested_pty_denies(&mut out, request);
+    write_custom_denies(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
     write_filesystem_deny(&mut out, &resolved);
@@ -525,10 +538,7 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest, capture: Option<
     // disabled we omit those allows (and add explicit denies for clarity).
     if !ui.disable {
         out.push_str(";; --- ui enabled: allow WindowServer + LaunchServices ---\n");
-        out.push_str("(allow mach-lookup\n");
-        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
-        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
-        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+        write_global_names(out, "allow", seatbelt_policy::UI_SERVICE_NAMES);
 
         if gui_access {
             // GUI apps need a broad set of Mach services to draw windows —
@@ -541,68 +551,170 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest, capture: Option<
             let report = capture
                 .map(CaptureRules::grant_modifier)
                 .unwrap_or_default();
-            out.push_str(";; --- guiAccess: allow all Mach IPC for GUI applications ---\n");
-            let _ = writeln!(out, "(allow mach-lookup{report})");
+            // Each custom block that is present replaces the grant for its names.
+            let seatbelt = request.seatbelt.as_ref();
+            let registers = seatbelt.and_then(|c| c.custom_mach_registers.as_ref());
+            let custom_global = registers.is_some_and(|r| r.global.is_some());
+            let custom_local = registers.is_some_and(|r| r.local.is_some());
+            if seatbelt.is_none_or(|c| c.custom_mach_lookups.is_none()) {
+                out.push_str(";; --- guiAccess: allow all Mach lookups for GUI applications ---\n");
+                let _ = writeln!(out, "(allow mach-lookup{report})");
+            }
             // GUI apps must register their own Mach services (XPC listeners)
             // to receive callbacks from WindowServer and other system agents.
-            let _ = writeln!(out, "(allow mach-register{report})");
+            let register_scope = match (custom_global, custom_local) {
+                (false, false) => Some(""),
+                (false, true) => Some(" (global-name-prefix \"\")"),
+                (true, false) => Some(" (local-name-prefix \"\")"),
+                (true, true) => None,
+            };
+            if let Some(scope) = register_scope {
+                out.push_str(
+                    ";; --- guiAccess: allow Mach registration for GUI applications ---\n",
+                );
+                let _ = writeln!(out, "(allow mach-register{report}{scope})");
+            }
 
             // IOKit user-client access for GPU / Metal rendering
-            out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
-            let _ = writeln!(out, "(allow iokit-open{report})");
+            if seatbelt.is_none_or(|c| c.custom_io_kits.is_none()) {
+                out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
+                let _ = writeln!(out, "(allow iokit-open{report})");
+            } else if ui.injection {
+                // customIoKits replaces the grant above, which covered HID.
+                out.push_str(";; --- ui.injection: allow HID input ---\n");
+                let _ = writeln!(
+                    out,
+                    "(allow iokit-open{report} (iokit-user-client-class {}))",
+                    quote_scheme(seatbelt_policy::HID_USER_CLIENT_CLASS)
+                );
+            }
 
-            // Needed for app temp files, caches, GPU shader caches
-            out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
-            out.push_str("(allow file-read* file-write*\n");
-            out.push_str("    (subpath \"/private/tmp\")\n");
-            out.push_str("    (subpath \"/private/var/folders\"))\n");
-
-            // Pseudo-TTY support — Terminal.app and other GUI apps that
-            // spawn shell sessions need to open, grant, and use PTY devices.
-            out.push_str(";; --- guiAccess: allow pseudo-TTY for shell sessions ---\n");
-            out.push_str("(allow pseudo-tty)\n");
-            out.push_str("(allow file-read* file-write* file-ioctl\n");
-            out.push_str("    (literal \"/dev/ptmx\"))\n");
-
-            // POSIX shared memory and IPC — required by Terminal.app and
-            // other apps that use notification center or shared memory.
-            out.push_str(";; --- guiAccess: allow POSIX IPC for GUI apps ---\n");
-            out.push_str("(allow ipc-posix-shm-read-data ipc-posix-shm-write-data ipc-posix-shm-write-create)\n");
+            if seatbelt.is_none_or(|c| c.custom_posix_shm.is_none()) {
+                out.push_str(";; --- guiAccess: allow POSIX shared memory ---\n");
+                let _ = writeln!(out, "(allow {GUI_POSIX_SHM_OPERATIONS}{report})");
+            }
         }
-    } else {
-        out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
-        out.push_str("(deny mach-lookup\n");
-        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
-        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
-        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
     }
 
-    // Clipboard: allow pasteboard mach service when clipboard is read,
-    // write, or all. The explicit deny when clipboard=none is redundant
-    // with `(deny default)` but documents intent.
-    let clipboard_allowed = !matches!(ui.clipboard, ClipboardPolicy::None);
-    if clipboard_allowed {
+    if !matches!(ui.clipboard, ClipboardPolicy::None) {
         out.push_str(";; --- clipboard enabled: allow pasteboard ---\n");
-        out.push_str("(allow mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
-    } else {
-        out.push_str(";; --- ui.clipboard=none: deny pasteboard ---\n");
-        out.push_str("(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
+        let _ = writeln!(
+            out,
+            "(allow mach-lookup (global-name {}))",
+            quote_scheme(seatbelt_policy::PASTEBOARD_SERVICE_NAME)
+        );
+    }
+}
+
+/// Per-user temp and cache directories that GUI apps write to (app temp
+/// files, caches, GPU shader caches).
+fn write_gui_filesystem_rules(out: &mut String, request: &ExecutionRequest) {
+    if !seatbelt_policy::gui_access_effective(request) {
+        return;
+    }
+    out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
+    out.push_str("(allow file-read* file-write*\n");
+    out.push_str("    (subpath \"/private/tmp\")\n");
+    out.push_str("    (subpath \"/private/var/folders\"))\n");
+}
+
+/// Emit one `(<action> mach-lookup (global-name …)…)` rule.
+fn write_global_names(out: &mut String, action: &str, names: &[&str]) {
+    let _ = writeln!(out, "({action} mach-lookup");
+    for name in names {
+        let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
+    }
+    out.push_str(")\n");
+}
+
+/// Opens the deny rule a setting adds for `operation`; the caller writes the
+/// filters and closes it. In allow mode, a
+/// setting the request omitted allows and reports each use instead, so the
+/// report lists it even where a broader grant such as guiAccess covers it.
+fn open_setting_rule(
+    out: &mut String,
+    field: &str,
+    comment: &str,
+    operation: &str,
+    written: bool,
+    capture: Option<&CaptureRules>,
+) {
+    match capture.filter(|rules| rules.allow_mode && !written) {
+        Some(rules) => {
+            let _ = writeln!(out, ";; --- {field} omitted: allow and report ---");
+            let _ = write!(
+                out,
+                "(allow {operation} (with report) (with message {})",
+                quote_scheme(rules.tag)
+            );
+        }
+        None => {
+            let _ = writeln!(out, ";; --- {comment} ---");
+            let _ = write!(out, "(deny {operation}");
+        }
+    }
+}
+
+/// UI settings that remove access. Emitted after every allow rule.
+fn write_ui_policy_denies(
+    out: &mut String,
+    request: &ExecutionRequest,
+    capture: Option<&CaptureRules>,
+) {
+    let ui = &request.policy.ui;
+    let written = request.policy.ui_fields_specified;
+    if ui.disable {
+        open_setting_rule(
+            out,
+            "ui.disable",
+            "ui.disable: deny WindowServer + related",
+            "mach-lookup",
+            written.disable,
+            capture,
+        );
+        for name in seatbelt_policy::UI_SERVICE_NAMES {
+            let _ = write!(out, "\n    (global-name {})", quote_scheme(name));
+        }
+        out.push_str("\n)\n");
+    }
+
+    if matches!(ui.clipboard, ClipboardPolicy::None) {
+        open_setting_rule(
+            out,
+            "ui.clipboard",
+            "ui.clipboard=none: deny pasteboard servers",
+            "mach-lookup",
+            written.clipboard,
+            capture,
+        );
+        let _ = writeln!(
+            out,
+            " (global-name-prefix {}))",
+            quote_scheme(seatbelt_policy::PASTEBOARD_SERVICE_PREFIX)
+        );
     }
 
     if !ui.injection {
-        out.push_str(";; --- ui.injection=false: deny HID iokit access ---\n");
-        out.push_str("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))\n");
+        open_setting_rule(
+            out,
+            "ui.injection",
+            "ui.injection=false: deny HID iokit access",
+            "iokit-open",
+            written.injection,
+            capture,
+        );
+        let _ = writeln!(
+            out,
+            " (iokit-user-client-class {}))",
+            quote_scheme(seatbelt_policy::HID_USER_CLIENT_CLASS)
+        );
     }
 }
 
 /// Emit rules so the inner process can call `posix_openpt()` and allocate
-/// its own pty. Skipped when `gui_access` (with UI enabled) already emits
-/// a strict superset.
+/// its own pty.
 fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
-    let sb = request.seatbelt.as_ref();
-    let enabled = sb.is_none_or(|c| c.nested_pty);
-    let gui_block_emitted = seatbelt_policy::gui_access_effective(request);
-    if !enabled || gui_block_emitted {
+    if !nested_pty_enabled(request) {
         return;
     }
     out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
@@ -610,6 +722,21 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     // TTY_ALLOW restricts secondary-device access to the kernel's PTY extension.
     out.push_str("(allow file-read* file-write* file-ioctl\n");
     out.push_str("    (literal \"/dev/ptmx\"))\n");
+}
+
+fn nested_pty_enabled(request: &ExecutionRequest) -> bool {
+    request.seatbelt.as_ref().is_none_or(|c| c.nested_pty)
+}
+
+/// `nestedPty` defaults to true, so `false` is always written in the config
+/// and stays denied even under captureDenials allow mode.
+fn write_nested_pty_denies(out: &mut String, request: &ExecutionRequest) {
+    if nested_pty_enabled(request) {
+        return;
+    }
+    out.push_str(";; --- nestedPty=false: deny pty allocation ---\n");
+    out.push_str("(deny pseudo-tty)\n");
+    out.push_str("(deny file-read* file-write* file-ioctl (literal \"/dev/ptmx\"))\n");
 }
 
 /// Emit rules so `Security.framework` / `keytar` can reach `securityd`
@@ -651,22 +778,18 @@ fn write_keychain_rules(
     })?;
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
-    out.push_str("(allow mach-lookup\n");
-    out.push_str("    (global-name \"com.apple.SecurityServer\")\n");
-    out.push_str("    (global-name \"com.apple.securityd\")\n");
-    // trustd handles SecTrustSettingsCopyTrustSettings; without it Security
-    // logs "failed to copy trust settings of system certificate-N" for every
-    // cert in the system root store on every TLS handshake.
-    out.push_str("    (global-name \"com.apple.trustd\")\n");
-    out.push_str("    (global-name \"com.apple.trustd.agent\")\n");
-    out.push_str("    (global-name \"com.apple.ocspd\")\n");
-    out.push_str("    (global-name \"com.apple.cfprefsd.daemon\")\n");
-    out.push_str("    (global-name \"com.apple.cfprefsd.agent\")\n");
-    out.push_str("    (global-name \"com.apple.xpcd\")\n");
-    // Seatbelt has no glob in (global-name); use regex for the lsd.* family
-    // (lsd.modifydb, lsd.mapdb, lsd.openurl, …). Anchored to
-    // `com.apple.lsd.` so we don't accidentally match unrelated services.
-    out.push_str("    (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n");
+    out.push_str("(allow mach-lookup");
+    for name in seatbelt_policy::KEYCHAIN_GRANTED_NAMES {
+        let _ = write!(out, "\n    (global-name {})", quote_scheme(name));
+    }
+    for prefix in seatbelt_policy::KEYCHAIN_GRANTED_PREFIXES {
+        let _ = write!(
+            out,
+            "\n    (global-name-regex #\"^{}\")",
+            prefix.replace('.', "\\.")
+        );
+    }
+    out.push_str(")\n");
 
     out.push_str(";; --- keychainAccess: MDS keychain metadata + trustd protected store ---\n");
     out.push_str("(allow file-read*\n");
@@ -679,6 +802,34 @@ fn write_keychain_rules(
     let _ = writeln!(out, "    (subpath {})", quote_scheme(user_keychains));
     out.push_str("    (subpath \"/private/var/folders\"))\n");
     Ok(())
+}
+
+/// Without `keychainAccess`, deny the Keychain servers after every allow so
+/// that no broader Mach grant reaches them.
+fn write_keychain_denies(
+    out: &mut String,
+    request: &ExecutionRequest,
+    capture: Option<&CaptureRules>,
+) {
+    let seatbelt = request.seatbelt.as_ref();
+    if seatbelt.is_some_and(|c| c.keychain_access) {
+        return;
+    }
+    open_setting_rule(
+        out,
+        "keychainAccess",
+        "keychainAccess=false: deny Keychain servers",
+        "mach-lookup",
+        seatbelt.is_some_and(|c| c.keychain_access_specified),
+        capture,
+    );
+    for name in seatbelt_policy::KEYCHAIN_SERVER_NAMES {
+        let _ = write!(out, "\n    (global-name {})", quote_scheme(name));
+    }
+    for prefix in seatbelt_policy::KEYCHAIN_SERVER_PREFIXES {
+        let _ = write!(out, "\n    (global-name-prefix {})", quote_scheme(prefix));
+    }
+    out.push_str("\n)\n");
 }
 
 /// Emit caller-provided `extraMachLookups` rules: additional Mach service
@@ -697,6 +848,230 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
         let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
     }
     out.push_str(")\n");
+}
+
+/// The Seatbelt operation and name filters for one custom rule list.
+struct CustomRuleTarget {
+    field: &'static str,
+    operation: &'static str,
+    /// Filter for every name in scope; empty for the whole operation.
+    scope: &'static str,
+    exact: &'static str,
+    prefix: &'static str,
+}
+
+const IOKIT_TARGET: CustomRuleTarget = CustomRuleTarget {
+    field: "customIoKits",
+    operation: "iokit-open",
+    scope: "",
+    exact: "iokit-user-client-class",
+    prefix: "iokit-user-client-class-regex",
+};
+const LOOKUP_TARGET: CustomRuleTarget = CustomRuleTarget {
+    field: "customMachLookups",
+    operation: "mach-lookup",
+    scope: "",
+    exact: "global-name",
+    prefix: "global-name-prefix",
+};
+const GLOBAL_REGISTER_TARGET: CustomRuleTarget = CustomRuleTarget {
+    field: "customMachRegisters.global",
+    operation: "mach-register",
+    scope: " (global-name-prefix \"\")",
+    exact: "global-name",
+    prefix: "global-name-prefix",
+};
+const LOCAL_REGISTER_TARGET: CustomRuleTarget = CustomRuleTarget {
+    field: "customMachRegisters.local",
+    operation: "mach-register",
+    scope: " (local-name-prefix \"\")",
+    exact: "local-name",
+    prefix: "local-name-prefix",
+};
+
+/// guiAccess's shared memory grant.
+const GUI_POSIX_SHM_OPERATIONS: &str =
+    "ipc-posix-shm-read-data ipc-posix-shm-write-data ipc-posix-shm-write-create";
+
+/// Each shared memory operation and the lowest access level that grants it.
+const POSIX_SHM_OPERATIONS: [(&str, SeatbeltPosixShmAccess); 5] = [
+    ("ipc-posix-shm-read-data", SeatbeltPosixShmAccess::Read),
+    ("ipc-posix-shm-read-metadata", SeatbeltPosixShmAccess::Read),
+    (
+        "ipc-posix-shm-write-data",
+        SeatbeltPosixShmAccess::ReadWrite,
+    ),
+    ("ipc-posix-shm-write-create", SeatbeltPosixShmAccess::Create),
+    ("ipc-posix-shm-write-unlink", SeatbeltPosixShmAccess::Own),
+];
+
+/// Shared memory operations whose level satisfies `include`.
+fn posix_shm_operations(include: impl Fn(SeatbeltPosixShmAccess) -> bool) -> String {
+    POSIX_SHM_OPERATIONS
+        .iter()
+        .filter(|(_, level)| include(*level))
+        .map(|(operation, _)| *operation)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const fn posix_shm_target(field: &'static str, operation: &'static str) -> CustomRuleTarget {
+    CustomRuleTarget {
+        field,
+        operation,
+        scope: "",
+        exact: "ipc-posix-name",
+        prefix: "ipc-posix-name-prefix",
+    }
+}
+
+const SHM_LIST_TARGET: CustomRuleTarget = posix_shm_target("customPosixShm", "");
+// Seatbelt prefers a rule that names an operation over a wildcard, so the
+// deny names each one to win over every other shared memory rule.
+const SHM_DENY_TARGET: CustomRuleTarget = posix_shm_target(
+    "customPosixShm.deny",
+    "ipc-posix-shm* ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
+     ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink",
+);
+
+fn custom_rule_targets(
+    request: &ExecutionRequest,
+) -> Vec<(&CustomRuleTarget, &SeatbeltCustomRules)> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Vec::new();
+    };
+    let registers = config.custom_mach_registers.as_ref();
+    [
+        (&IOKIT_TARGET, config.custom_io_kits.as_ref()),
+        (&LOOKUP_TARGET, config.custom_mach_lookups.as_ref()),
+        (
+            &GLOBAL_REGISTER_TARGET,
+            registers.and_then(|r| r.global.as_ref()),
+        ),
+        (
+            &LOCAL_REGISTER_TARGET,
+            registers.and_then(|r| r.local.as_ref()),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(target, rules)| rules.map(|rules| (target, rules)))
+    .collect()
+}
+
+/// Emit one `(<action> <operation> <filters>…)` rule for custom list entries.
+fn write_custom_rule(
+    out: &mut String,
+    action: &str,
+    target: &CustomRuleTarget,
+    entries: &[String],
+) {
+    write_name_rule(out, action, target.operation, target, entries);
+}
+
+fn write_name_rule(
+    out: &mut String,
+    action: &str,
+    operation: &str,
+    target: &CustomRuleTarget,
+    entries: &[String],
+) {
+    let _ = writeln!(out, "({action} {operation}");
+    for entry in entries {
+        let _ = match NamePattern::parse(entry) {
+            NamePattern::Exact(name) => {
+                writeln!(out, "    ({} {})", target.exact, quote_scheme(name))
+            }
+            // Validation limits IOKit class names to letters, digits, and '_'.
+            NamePattern::Prefix(prefix) if target.prefix.ends_with("-regex") => {
+                writeln!(out, "    ({} #\"^{prefix}\")", target.prefix)
+            }
+            NamePattern::Prefix(prefix) => {
+                writeln!(out, "    ({} {})", target.prefix, quote_scheme(prefix))
+            }
+        };
+    }
+    out.push_str(")\n");
+}
+
+/// Emit custom `default` grants, `allow` lists, and the shared memory access
+/// lists. Under captureDenials, a default grant reports each use like
+/// guiAccess's grants.
+fn write_custom_allows(
+    out: &mut String,
+    request: &ExecutionRequest,
+    capture: Option<&CaptureRules>,
+) {
+    let report = capture
+        .map(CaptureRules::grant_modifier)
+        .unwrap_or_default();
+    for (target, rules) in custom_rule_targets(request) {
+        if seatbelt_policy::custom_default_allows(rules) {
+            let _ = writeln!(out, ";; --- {}: default allow ---", target.field);
+            let _ = writeln!(out, "(allow {}{report}{})", target.operation, target.scope);
+        }
+        if !rules.allow.is_empty() {
+            let _ = writeln!(out, ";; --- {}.allow ---", target.field);
+            write_custom_rule(out, "allow", target, &rules.allow);
+        }
+    }
+    let Some(shm) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|c| c.custom_posix_shm.as_ref())
+    else {
+        return;
+    };
+    let default = seatbelt_policy::posix_shm_default(shm);
+    if default != SeatbeltPosixShmAccess::Deny {
+        out.push_str(";; --- customPosixShm: default grant ---\n");
+        let operations = posix_shm_operations(|level| level <= default);
+        let _ = writeln!(out, "(allow {operations}{report})");
+    }
+    write_posix_shm_access_lists(out, shm);
+}
+
+/// Give each listed shared memory name exactly its list's access. When two
+/// rules name the same operations, Seatbelt applies the later one, so
+/// broader prefixes go first and longer names override them.
+fn write_posix_shm_access_lists(out: &mut String, shm: &SeatbeltCustomPosixShm) {
+    let mut entries: Vec<_> = seatbelt_policy::posix_shm_access_lists(shm)
+        .into_iter()
+        .flat_map(|(list, level, entries)| entries.iter().map(move |e| (list, level, e)))
+        .collect();
+    entries.sort_by_key(|(_, _, entry)| match NamePattern::parse(entry) {
+        NamePattern::Prefix(prefix) => (false, prefix.len()),
+        NamePattern::Exact(_) => (true, 0),
+    });
+    for (list, level, entry) in entries {
+        let entry = std::slice::from_ref(entry);
+        let _ = writeln!(out, ";; --- customPosixShm.{list} ---");
+        let granted = posix_shm_operations(|op| op <= level);
+        write_name_rule(out, "allow", &granted, &SHM_LIST_TARGET, entry);
+        let above = posix_shm_operations(|op| op > level);
+        if !above.is_empty() {
+            write_name_rule(out, "deny", &above, &SHM_LIST_TARGET, entry);
+        }
+    }
+}
+
+/// Emit custom `deny` lists after every allow, so they also remove MXC's
+/// built-in grants.
+fn write_custom_denies(out: &mut String, request: &ExecutionRequest) {
+    for (target, rules) in custom_rule_targets(request) {
+        if !rules.deny.is_empty() {
+            let _ = writeln!(out, ";; --- {}.deny ---", target.field);
+            write_custom_rule(out, "deny", target, &rules.deny);
+        }
+    }
+    if let Some(shm) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|c| c.custom_posix_shm.as_ref())
+        .filter(|shm| !shm.deny.is_empty())
+    {
+        let _ = writeln!(out, ";; --- {} ---", SHM_DENY_TARGET.field);
+        write_custom_rule(out, "deny", &SHM_DENY_TARGET, &shm.deny);
+    }
 }
 
 /// Quote a string for use as a TinyScheme string literal, escaping
@@ -724,7 +1099,16 @@ fn escape_for_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{NetworkAction, SeatbeltConfig, UiPolicy};
+    use crate::mxc_common::models::{
+        NetworkAction, SeatbeltConfig, SeatbeltCustomDefault, SeatbeltCustomMachRegisters,
+        SeatbeltCustomPosixShm, UiPolicy,
+    };
+
+    /// Whether some shared memory operation is granted for every name.
+    fn grants_all_shm(p: &str) -> bool {
+        p.lines()
+            .any(|l| l.starts_with("(allow ipc-posix-shm") && l.ends_with(')'))
+    }
 
     fn build_profile(request: &ExecutionRequest) -> Result<String, ProfileError> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
@@ -1265,7 +1649,29 @@ mod tests {
         let r = req();
         // Default clipboard is None.
         let p = build_profile(&r).unwrap();
-        assert!(p.contains("com.apple.pasteboard.1"));
+        assert!(p.contains("(deny mach-lookup (global-name-prefix \"com.apple.pasteboard.\"))"));
+        assert!(!p.contains("(global-name \"com.apple.pasteboard.1\")"));
+    }
+
+    /// Like the Keychain denies, the pasteboard deny follows every broader
+    /// Mach grant, including custom allow lists.
+    #[test]
+    fn clipboard_deny_follows_custom_mach_grants() {
+        let mut r = req();
+        r.policy.ui.disable = false;
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            custom_mach_lookups: Some(SeatbeltCustomRules {
+                default: Some(SeatbeltCustomDefault::Allow),
+                allow: vec!["com.apple.*".into()],
+                deny: Vec::new(),
+            }),
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        let deny = p.find("ui.clipboard=none: deny").expect("pasteboard deny");
+        assert!(p.find("customMachLookups: default allow").unwrap() < deny);
+        assert!(p.find("customMachLookups.allow").unwrap() < deny);
     }
 
     #[test]
@@ -1604,40 +2010,53 @@ mod tests {
     }
 
     #[test]
-    fn nested_pty_false_omits_pty_rules() {
+    fn nested_pty_false_denies_pty_allocation_in_every_mode() {
         let mut r = req();
         r.seatbelt = Some(SeatbeltConfig {
             nested_pty: false,
             ..Default::default()
         });
         let p = build_profile(&r).unwrap();
-        assert!(!p.contains("nestedPty"));
-        assert!(!p.contains("/dev/ptmx"));
-        // pseudo-tty allow should also not be present.
-        assert!(!p.contains("(allow pseudo-tty)"));
+        assert!(!p.contains("(allow pseudo-tty)"), "{p}");
+        assert!(p.contains("(deny pseudo-tty)"), "{p}");
+
+        // Allow mode's (allow default) must not reopen a written nestedPty=false.
+        let mut r = capture_request(CaptureDenialsMode::Allow, false);
+        r.seatbelt.as_mut().unwrap().nested_pty = false;
+        let p = capture_profile(&r);
+        assert!(!p.contains("(allow pseudo-tty)"), "{p}");
+        assert!(
+            p.contains("(deny pseudo-tty (with message \"mxc-capture-test\"))\n"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "(deny file-read* file-write* file-ioctl (with message \"mxc-capture-test\") \
+                 (literal \"/dev/ptmx\"))\n"
+            ),
+            "{p}"
+        );
     }
 
     #[test]
-    fn nested_pty_skipped_when_gui_block_emitted() {
-        // gui_access + ui enabled emits a strict superset of nested_pty
-        // rules. Verify we don't double-emit.
+    fn gui_access_does_not_grant_pty_allocation() {
         let mut r = req();
         r.policy.ui = UiPolicy {
             disable: false,
             clipboard: ClipboardPolicy::None,
             injection: true,
         };
-        r.seatbelt = Some(SeatbeltConfig {
-            gui_access: true,
-            nested_pty: true,
-            ..Default::default()
-        });
-        let p = build_profile(&r).unwrap();
-        // No nestedPty comment block — gui_access block carries the rules.
-        assert!(!p.contains("nestedPty"));
-        // GUI block's broader rules should still be there.
-        assert!(p.contains("(allow iokit-open)"));
-        assert!(p.contains("(allow pseudo-tty)"));
+        for nested_pty in [true, false] {
+            r.seatbelt = Some(SeatbeltConfig {
+                gui_access: true,
+                nested_pty,
+                ..Default::default()
+            });
+            let p = build_profile(&r).unwrap();
+            assert!(p.contains("(allow iokit-open)"));
+            assert_eq!(p.contains("(allow pseudo-tty)"), nested_pty, "{p}");
+            assert_eq!(p.contains("(deny pseudo-tty)"), !nested_pty, "{p}");
+        }
     }
 
     #[test]
@@ -1661,16 +2080,65 @@ mod tests {
     }
 
     #[test]
-    fn keychain_access_default_off_omits_security_services() {
+    fn keychain_access_default_off_denies_keychain_servers() {
         let r = req();
         let p = build_profile(&r).unwrap();
-        assert!(!p.contains("keychainAccess"));
-        assert!(!p.contains("com.apple.SecurityServer"));
-        assert!(!p.contains("com.apple.securityd"));
+        assert!(!p.contains(";; --- keychainAccess: "));
+        assert!(p.contains(
+            "(deny mach-lookup\n    (global-name \"com.apple.SecurityServer\")\n    \
+             (global-name-prefix \"com.apple.securityd\")\n)"
+        ));
         assert!(!p.contains("com.apple.cfprefsd.daemon"));
         assert!(!p.contains("com.apple.lsd"));
         assert!(!p.contains("/Library/Keychains"));
         assert!(!p.contains("/private/var/db/mds"));
+    }
+
+    /// The Keychain denies follow every broader Mach grant, so neither
+    /// guiAccess nor extraMachLookups reaches the Keychain servers.
+    #[test]
+    fn keychain_denies_follow_broader_mach_grants() {
+        let mut r = req();
+        r.policy.ui.disable = false;
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            extra_mach_lookups: vec!["com.apple.SecurityServer".into()],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        let deny = p.find("keychainAccess=false: deny").expect("keychain deny");
+        assert!(p.find("(allow mach-lookup)").unwrap() < deny);
+        assert!(p.find("extraMachLookups").unwrap() < deny);
+
+        r.seatbelt.as_mut().unwrap().keychain_access = true;
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("keychainAccess=false"));
+    }
+
+    /// guiAccess's temp/cache grant precedes the filesystem policy, so a
+    /// readonlyPaths or deniedPaths entry inside it still applies.
+    #[test]
+    fn filesystem_policy_follows_option_filesystem_grants() {
+        let mut r = req();
+        r.policy.ui.disable = false;
+        r.policy.readonly_paths = vec!["/private/tmp/ro".into()];
+        r.policy.denied_paths = vec!["/private/var/folders/xy".into()];
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            keychain_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        let gui = p.find("guiAccess: allow writing").unwrap();
+        let keychain = p.find("keychainAccess: user keychain").unwrap();
+        let readonly = p
+            .find("(deny file-write* network-bind network-outbound\n    (subpath \"/private/tmp/ro\")")
+            .unwrap();
+        let denied = p.find("policy.deniedPaths").unwrap();
+        assert!(
+            gui < readonly && keychain < readonly && readonly < denied,
+            "{p}"
+        );
     }
 
     #[test]
@@ -1875,7 +2343,8 @@ mod tests {
 
     #[test]
     fn capture_allow_mode_reports_instead_of_denying_by_default() {
-        let p = capture_profile(&capture_request(CaptureDenialsMode::Allow, false));
+        let r = capture_request(CaptureDenialsMode::Allow, false);
+        let p = capture_profile(&r);
         assert!(p.starts_with(
             "(version 1)\n(allow default (with report) (with message \"mxc-capture-test\"))\n"
         ));
@@ -1883,6 +2352,29 @@ mod tests {
         // Explicit denies stay enforced.
         assert!(p.contains(
             "(deny file-read* file-read-metadata file-write* network-bind network-outbound (with message \"mxc-capture-test\")\n"
+        ));
+        // Omitted settings allow and report; only written ones are enforced.
+        let settings = [
+            ("ui.disable", "ui.disable: deny"),
+            ("ui.clipboard", "ui.clipboard=none: deny"),
+            ("ui.injection", "ui.injection=false: deny"),
+            ("keychainAccess", "keychainAccess=false: deny"),
+        ];
+        let mut written = capture_request(CaptureDenialsMode::Allow, false);
+        written.policy.ui_fields_specified.disable = true;
+        written.seatbelt.as_mut().unwrap().keychain_access_specified = true;
+        for (request, enforced) in [(&r, [false; 4]), (&written, [true, false, false, true])] {
+            let p = capture_profile(request);
+            for ((field, deny), enforced) in settings.into_iter().zip(enforced) {
+                assert_eq!(p.contains(deny), enforced, "{deny}\n{p}");
+                let report = format!(";; --- {field} omitted: allow and report ---\n");
+                assert_eq!(p.contains(&report), !enforced, "{field}\n{p}");
+            }
+        }
+        assert!(capture_profile(&written).contains(
+            ";; --- ui.clipboard omitted: allow and report ---\n\
+             (allow mach-lookup (with report) (with message \"mxc-capture-test\") \
+             (global-name-prefix \"com.apple.pasteboard.\"))\n"
         ));
     }
 
@@ -1923,7 +2415,12 @@ mod tests {
     fn capture_reports_broad_gui_grants_under_the_grant_tag() {
         let p = capture_profile(&capture_request(CaptureDenialsMode::Block, true));
         let report = " (with report) (with message \"mxc-capture-test:grant\")";
-        for op in ["mach-lookup", "mach-register", "iokit-open"] {
+        for op in [
+            "mach-lookup",
+            "mach-register",
+            "iokit-open",
+            GUI_POSIX_SHM_OPERATIONS,
+        ] {
             assert!(p.contains(&format!("(allow {op}{report})")), "{op}: {p}");
         }
     }
@@ -1948,6 +2445,289 @@ mod tests {
         );
     }
 
+    fn custom_rules(
+        default: SeatbeltCustomDefault,
+        allow: &[&str],
+        deny: &[&str],
+    ) -> SeatbeltCustomRules {
+        SeatbeltCustomRules {
+            default: Some(default),
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// guiAccess with every custom block set to `default: deny` and one
+    /// exact and one prefix entry in each list.
+    fn custom_request() -> ExecutionRequest {
+        let mut r = req();
+        r.policy.ui.disable = false;
+        let rules = |a: &str, d: &str| {
+            custom_rules(SeatbeltCustomDefault::Deny, &[a, &format!("{a}.*")], &[d])
+        };
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            custom_io_kits: Some(custom_rules(
+                SeatbeltCustomDefault::Deny,
+                &["AGXDeviceUserClient", "IOSurface*"],
+                &["AppleUSB*"],
+            )),
+            custom_mach_lookups: Some(rules("com.example.lookup", "com.example.blocked")),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                global: Some(rules("com.example.global", "com.example.global.no")),
+                local: Some(rules("com.example.local", "com.example.local.no")),
+            }),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                read: vec!["apple.shm.notification_center".into()],
+                read_write: vec!["/example.rw".into()],
+                own: vec!["/example.app.*".into()],
+                deny: vec!["/example.app.secret".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        r
+    }
+
+    #[test]
+    fn custom_rules_replace_gui_access_grants() {
+        let p = build_profile(&custom_request()).unwrap();
+        for broad in [
+            "(allow mach-lookup)",
+            "(allow mach-register)",
+            "(allow mach-register (",
+            "(allow iokit-open)",
+        ] {
+            assert!(!p.contains(broad), "{broad}: {p}");
+        }
+        assert!(!grants_all_shm(&p), "{p}");
+        for rule in [
+            "(allow iokit-open\n    (iokit-user-client-class \"AGXDeviceUserClient\")\n    \
+             (iokit-user-client-class-regex #\"^IOSurface\")\n)",
+            "(allow mach-lookup\n    (global-name \"com.example.lookup\")\n    \
+             (global-name-prefix \"com.example.lookup.\")\n)",
+            "(allow mach-register\n    (global-name \"com.example.global\")\n    \
+             (global-name-prefix \"com.example.global.\")\n)",
+            "(allow mach-register\n    (local-name \"com.example.local\")\n    \
+             (local-name-prefix \"com.example.local.\")\n)",
+            "(deny iokit-open\n    (iokit-user-client-class-regex #\"^AppleUSB\")\n)",
+            "(deny mach-lookup\n    (global-name \"com.example.blocked\")\n)",
+            "(deny mach-register\n    (local-name \"com.example.local.no\")\n)",
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata\n    \
+             (ipc-posix-name \"apple.shm.notification_center\")\n)\n\
+             (deny ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"apple.shm.notification_center\")\n)",
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data\n    \
+             (ipc-posix-name \"/example.rw\")\n)\n\
+             (deny ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"/example.rw\")\n)",
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data \
+             ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name-prefix \"/example.app.\")\n)\n;; ---",
+            "(deny ipc-posix-shm* ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
+             ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"/example.app.secret\")\n)",
+        ] {
+            assert!(p.contains(rule), "{rule}: {p}");
+        }
+        // guiAccess's filesystem grant remains.
+        assert!(p.contains("(subpath \"/private/tmp\")"));
+    }
+
+    /// Each block replaces only its own grant; register scopes are separate.
+    #[test]
+    fn omitted_custom_blocks_keep_gui_access_grants() {
+        let mut r = custom_request();
+        let config = r.seatbelt.as_mut().unwrap();
+        config.custom_io_kits = None;
+        config.custom_mach_lookups = None;
+        config.custom_posix_shm = None;
+        config.custom_mach_registers.as_mut().unwrap().global = None;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow iokit-open)"), "{p}");
+        assert!(
+            p.contains(&format!("(allow {GUI_POSIX_SHM_OPERATIONS})")),
+            "{p}"
+        );
+        assert!(p.contains("(allow mach-lookup)"), "{p}");
+        assert!(
+            p.contains("(allow mach-register (global-name-prefix \"\"))"),
+            "{p}"
+        );
+
+        let config = r.seatbelt.as_mut().unwrap();
+        config.custom_mach_registers = Some(SeatbeltCustomMachRegisters {
+            global: Some(custom_rules(SeatbeltCustomDefault::Deny, &[], &[])),
+            local: None,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(
+            p.contains("(allow mach-register (local-name-prefix \"\"))"),
+            "{p}"
+        );
+    }
+
+    /// Custom lists apply without guiAccess too, and `default` grants the
+    /// whole operation in that scope.
+    #[test]
+    fn custom_default_allow_grants_the_scope() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            custom_io_kits: Some(custom_rules(SeatbeltCustomDefault::Allow, &[], &[])),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                global: None,
+                local: Some(custom_rules(SeatbeltCustomDefault::Allow, &[], &[])),
+            }),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                default: Some(SeatbeltPosixShmAccess::Create),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow iokit-open)\n"), "{p}");
+        assert!(
+            p.contains(
+                "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata \
+                 ipc-posix-shm-write-data ipc-posix-shm-write-create)\n"
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("(allow mach-register (local-name-prefix \"\"))"),
+            "{p}"
+        );
+        assert!(!p.contains("(allow mach-lookup)"), "{p}");
+    }
+
+    /// Each shared memory entry gets exactly its list's access, and longer
+    /// names come later so they override shorter prefixes.
+    #[test]
+    fn posix_shm_entries_set_exact_levels_broadest_first() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                default: Some(SeatbeltPosixShmAccess::Own),
+                read: strings(&["/app.*"]),
+                read_write: strings(&["/app.cache"]),
+                create: strings(&["/app.c*"]),
+                own: strings(&["/a*"]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r).unwrap();
+        let p = build_profile(&r).unwrap();
+        let all = "ipc-posix-shm-read-data ipc-posix-shm-read-metadata ipc-posix-shm-write-data \
+                   ipc-posix-shm-write-create ipc-posix-shm-write-unlink";
+        let rules = [
+            format!("(allow {all})\n"),
+            format!("(allow {all}\n    (ipc-posix-name-prefix \"/a\")\n)\n;; ---"),
+            "(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata\n    \
+             (ipc-posix-name-prefix \"/app.\")\n)\n\
+             (deny ipc-posix-shm-write-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name-prefix \"/app.\")\n)\n"
+                .to_string(),
+            "(deny ipc-posix-shm-write-unlink\n    (ipc-posix-name-prefix \"/app.c\")\n)\n".to_string(),
+            "(deny ipc-posix-shm-write-create ipc-posix-shm-write-unlink\n    \
+             (ipc-posix-name \"/app.cache\")\n)\n"
+                .to_string(),
+        ];
+        let mut last = 0;
+        for rule in &rules {
+            let at = p
+                .find(rule.as_str())
+                .unwrap_or_else(|| panic!("{rule}\n{p}"));
+            assert!(at > last, "{rule}\n{p}");
+            last = at;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let output = sandbox_exec(&p, &["/usr/bin/true"]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// customIoKits replaces guiAccess's IOKit grant, but `ui.injection`
+    /// still grants HID input.
+    #[test]
+    fn custom_io_kits_keep_the_injection_hid_grant() {
+        let mut r = custom_request();
+        let hid = "(allow iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))";
+        r.policy.ui.injection = true;
+        assert!(build_profile(&r).unwrap().contains(hid));
+        r.policy.ui.injection = false;
+        assert!(!build_profile(&r).unwrap().contains(hid));
+    }
+
+    /// Custom denies follow the allows from explicit settings, and those
+    /// settings' denies follow the custom allows.
+    #[test]
+    fn custom_rules_order_around_setting_rules() {
+        let mut r = custom_request();
+        r.policy.ui.injection = false;
+        r.policy.denied_paths = vec!["/private/tmp/denied".into()];
+        let p = build_profile(&r).unwrap();
+        let custom_allow = p.find(";; --- customMachLookups.allow").unwrap();
+        let keychain_deny = p.find("keychainAccess=false: deny").unwrap();
+        let injection_deny = p.find("ui.injection=false").unwrap();
+        let custom_deny = p.find(";; --- customMachLookups.deny").unwrap();
+        let fs_deny = p.find(";; --- policy.deniedPaths").unwrap();
+        assert!(custom_allow < injection_deny && custom_allow < keychain_deny);
+        assert!(keychain_deny < custom_deny && custom_deny < fs_deny);
+        assert!(p.find("ui enabled: allow WindowServer").unwrap() < custom_deny);
+        let shm_own = p.find(";; --- customPosixShm.own").unwrap();
+        let shm_deny = p.find(";; --- customPosixShm.deny").unwrap();
+        assert!(custom_allow < shm_own && shm_own < custom_deny);
+        assert!(custom_deny < shm_deny && shm_deny < fs_deny);
+    }
+
+    #[test]
+    fn capture_reports_custom_default_allow_grants() {
+        let mut r = capture_request(CaptureDenialsMode::Block, true);
+        r.seatbelt.as_mut().unwrap().custom_mach_lookups =
+            Some(custom_rules(SeatbeltCustomDefault::Allow, &[], &[]));
+        let p = capture_profile(&r);
+        assert!(
+            p.contains(
+                ";; --- customMachLookups: default allow ---\n\
+             (allow mach-lookup (with report) (with message \"mxc-capture-test:grant\"))\n"
+            ),
+            "{p}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn custom_rule_profiles_compile_in_the_macos_sandbox() {
+        let mut allow_all = custom_request();
+        let config = allow_all.seatbelt.as_mut().unwrap();
+        config.gui_access = false;
+        let allow = Some(SeatbeltCustomDefault::Allow);
+        config.custom_io_kits.as_mut().unwrap().default = allow;
+        let registers = config.custom_mach_registers.as_mut().unwrap();
+        registers.global.as_mut().unwrap().default = allow;
+        registers.local.as_mut().unwrap().default = allow;
+        config.custom_posix_shm.as_mut().unwrap().default = Some(SeatbeltPosixShmAccess::Own);
+        for request in [custom_request(), allow_all] {
+            let profile = build_profile(&request).unwrap();
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/usr/bin/true"])
+                .output()
+                .expect("sandbox-exec runs");
+            assert!(
+                output.status.success(),
+                "{}\n{profile}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn capture_profiles_compile_in_the_macos_sandbox() {
@@ -1965,6 +2745,415 @@ mod tests {
             assert!(
                 output.status.success(),
                 "{mode:?}/{gui_access}: {}\n{profile}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sandbox_exec(profile: &str, program: &[&str]) -> std::process::Output {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", profile])
+            .args(program)
+            .output()
+            .expect("sandbox-exec runs")
+    }
+
+    /// Every custom block, with each default, mixed with every setting
+    /// (written or omitted) and capture mode: the profile compiles, guiAccess
+    /// never adds back a grant a block replaced, settings' denies and custom
+    /// denies follow all custom allows, and allow mode reports rather than
+    /// enforces the denies of omitted settings.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn custom_rules_hold_across_setting_combinations() {
+        let custom_lines = |p: &str, deny: bool| -> Vec<usize> {
+            p.match_indices(";; --- custom")
+                .filter(|(at, _)| p[*at..].lines().next().unwrap().contains(".deny ") == deny)
+                .map(|(at, _)| at)
+                .collect()
+        };
+        let captures = [
+            None,
+            Some(CaptureDenialsMode::Block),
+            Some(CaptureDenialsMode::Allow),
+        ];
+        let mut combinations = 0;
+        for written in [false, true] {
+            for gui_access in [false, true] {
+                for keychain_access in [false, true] {
+                    for clipboard in [ClipboardPolicy::None, ClipboardPolicy::All] {
+                        for injection in [false, true] {
+                            for capture in captures {
+                                for default in [None, Some(SeatbeltCustomDefault::Allow)] {
+                                    let mut r = custom_request();
+                                    r.policy.ui.clipboard = clipboard.clone();
+                                    r.policy.ui.injection = injection;
+                                    r.policy.ui_fields_specified =
+                                        crate::mxc_common::models::UiFieldsSpecified {
+                                            disable: written,
+                                            clipboard: written,
+                                            injection: written,
+                                        };
+                                    let config = r.seatbelt.as_mut().unwrap();
+                                    config.gui_access = gui_access;
+                                    config.keychain_access = keychain_access;
+                                    config.keychain_access_specified = written;
+                                    config.capture_denials = capture.map(|mode| {
+                                        crate::mxc_common::models::CaptureDenialsConfig {
+                                            mode,
+                                            ..Default::default()
+                                        }
+                                    });
+                                    config.custom_io_kits.as_mut().unwrap().default = default;
+                                    config.custom_mach_lookups.as_mut().unwrap().default = default;
+                                    let registers = config.custom_mach_registers.as_mut().unwrap();
+                                    registers.global.as_mut().unwrap().default = default;
+                                    registers.local.as_mut().unwrap().default = default;
+                                    config.custom_posix_shm.as_mut().unwrap().default =
+                                        default.map(|_| SeatbeltPosixShmAccess::Own);
+                                    let label = format!(
+                                    "written={written} gui={gui_access} keychain={keychain_access} \
+                                     clipboard={clipboard:?} injection={injection} \
+                                     capture={capture:?} default={default:?}"
+                                );
+                                    crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r)
+                                    .unwrap_or_else(|e| panic!("{label}: {e}"));
+                                    let inputs = ProfileInputs {
+                                        capture_tag: Some("mxc-capture-test".into()),
+                                        user_keychains: keychain_access.then(|| {
+                                            "/Users/profile-test/Library/Keychains".into()
+                                        }),
+                                        ..Default::default()
+                                    };
+                                    let p = super::build_profile_with_proxy(&r, None, &inputs)
+                                        .unwrap_or_else(|e| panic!("{label}: {e}"));
+
+                                    if default.is_none() {
+                                        for op in ["mach-lookup", "iokit-open"] {
+                                            for broad in [
+                                                format!("(allow {op})"),
+                                                format!(
+                                                    "(allow {op} (with report) (with message \
+                                                     \"mxc-capture-test{GRANT_TAG_SUFFIX}\"))\n"
+                                                ),
+                                            ] {
+                                                assert!(
+                                                    !p.contains(&broad),
+                                                    "{label}: {broad}\n{p}"
+                                                );
+                                            }
+                                        }
+                                        assert!(
+                                            !p.contains("(allow mach-register ("),
+                                            "{label}\n{p}"
+                                        );
+                                        assert!(!grants_all_shm(&p), "{label}\n{p}");
+                                    }
+                                    let last_allow = *custom_lines(&p, false).last().unwrap();
+                                    let denies = custom_lines(&p, true);
+                                    assert_eq!(denies.len(), 5, "{label}\n{p}");
+                                    assert!(denies[0] > last_allow, "{label}\n{p}");
+                                    let enforced =
+                                        written || capture != Some(CaptureDenialsMode::Allow);
+                                    for (on, deny, field) in [
+                                        (
+                                            !keychain_access,
+                                            "keychainAccess=false: deny",
+                                            "keychainAccess",
+                                        ),
+                                        (
+                                            clipboard == ClipboardPolicy::None,
+                                            "ui.clipboard=none",
+                                            "ui.clipboard",
+                                        ),
+                                        (!injection, "ui.injection=false", "ui.injection"),
+                                    ] {
+                                        let report = format!("{field} omitted: allow and report");
+                                        for (marker, expected) in [
+                                            (deny, on && enforced),
+                                            (report.as_str(), on && !enforced),
+                                        ] {
+                                            let at = p.find(marker);
+                                            assert_eq!(
+                                                at.is_some(),
+                                                expected,
+                                                "{label}: {marker}\n{p}"
+                                            );
+                                            if let Some(at) = at {
+                                                assert!(
+                                                    last_allow < at && at < denies[0],
+                                                    "{label}: {marker}\n{p}"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    let output = sandbox_exec(&p, &["/usr/bin/true"]);
+                                    assert!(
+                                        output.status.success(),
+                                        "{label}: {}\n{p}",
+                                        String::from_utf8_lossy(&output.stderr)
+                                    );
+                                    combinations += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(combinations, 192);
+    }
+
+    /// Quotes, backslashes, parentheses, and newlines in names stay inside
+    /// their string literal instead of adding rules to the profile.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn custom_entries_cannot_add_profile_rules() {
+        let hostile = [
+            "x\") (allow default) (\"",
+            "x\\\") (allow default) ;",
+            "x)\n(allow default)\n(",
+        ];
+        let names: Vec<String> = hostile.iter().map(|s| s.to_string()).collect();
+        let rules = || custom_rules(SeatbeltCustomDefault::Deny, &hostile, &hostile);
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            custom_mach_lookups: Some(rules()),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                global: Some(rules()),
+                local: Some(rules()),
+            }),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                read: names.clone(),
+                deny: names,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r).unwrap();
+        let hostile_profile = build_profile(&r).unwrap();
+        let control = build_profile(&req()).unwrap();
+
+        // `id -un` needs a Mach lookup the baseline denies, so it prints the
+        // numeric uid unless something allowed every operation.
+        let uid = String::from_utf8(
+            std::process::Command::new("/usr/bin/id")
+                .arg("-u")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        for profile in [&control, &hostile_profile] {
+            let output = sandbox_exec(profile, &["/usr/bin/id", "-un"]);
+            assert!(
+                output.status.success(),
+                "{}\n{profile}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout), uid, "{profile}");
+        }
+    }
+
+    fn strings(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every list of every custom block holds several exact and prefix
+    /// entries; each one lands, in order, in its own list's rule.
+    #[test]
+    fn every_list_emits_each_of_several_entries() {
+        let mut r = req();
+        r.policy.ui.disable = false;
+        let mach = |scope: &str| {
+            custom_rules(
+                SeatbeltCustomDefault::Deny,
+                &[
+                    &format!("com.example.{scope}.one"),
+                    &format!("com.example.{scope}.two"),
+                    &format!("com.example.{scope}.app.*"),
+                    &format!("org.other.{scope}.*"),
+                ],
+                &[
+                    &format!("com.example.{scope}.app.no"),
+                    &format!("com.example.{scope}.app.secret.*"),
+                    &format!("org.other.{scope}.no"),
+                ],
+            )
+        };
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            custom_io_kits: Some(custom_rules(
+                SeatbeltCustomDefault::Deny,
+                &[
+                    "AGXDeviceUserClient",
+                    "IOSurfaceRootUserClient",
+                    "IOAccel*",
+                    "AppleM2*",
+                ],
+                &["IOAccelBad", "AppleM2Scaler*", "AppleUSB*"],
+            )),
+            custom_mach_lookups: Some(mach("lookup")),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                global: Some(mach("global")),
+                local: Some(mach("local")),
+            }),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                deny: strings(&["/o.pre.no", "/w.pre.no", "/d.pre.*"]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r).unwrap();
+        let p = build_profile(&r).unwrap();
+
+        let mut expected = vec![
+            "(allow iokit-open\n    (iokit-user-client-class \"AGXDeviceUserClient\")\n    \
+             (iokit-user-client-class \"IOSurfaceRootUserClient\")\n    \
+             (iokit-user-client-class-regex #\"^IOAccel\")\n    \
+             (iokit-user-client-class-regex #\"^AppleM2\")\n)\n"
+                .to_string(),
+            "(deny iokit-open\n    (iokit-user-client-class \"IOAccelBad\")\n    \
+             (iokit-user-client-class-regex #\"^AppleM2Scaler\")\n    \
+             (iokit-user-client-class-regex #\"^AppleUSB\")\n)\n"
+                .to_string(),
+        ];
+        for (scope, op, exact, prefix) in [
+            ("lookup", "mach-lookup", "global-name", "global-name-prefix"),
+            (
+                "global",
+                "mach-register",
+                "global-name",
+                "global-name-prefix",
+            ),
+            ("local", "mach-register", "local-name", "local-name-prefix"),
+        ] {
+            expected.push(format!(
+                "(allow {op}\n    ({exact} \"com.example.{scope}.one\")\n    \
+                 ({exact} \"com.example.{scope}.two\")\n    \
+                 ({prefix} \"com.example.{scope}.app.\")\n    \
+                 ({prefix} \"org.other.{scope}.\")\n)\n"
+            ));
+            expected.push(format!(
+                "(deny {op}\n    ({exact} \"com.example.{scope}.app.no\")\n    \
+                 ({prefix} \"com.example.{scope}.app.secret.\")\n    \
+                 ({exact} \"org.other.{scope}.no\")\n)\n"
+            ));
+        }
+        expected.push(format!(
+            "(deny {}\n    (ipc-posix-name \"/o.pre.no\")\n    (ipc-posix-name \"/w.pre.no\")\n    \
+             (ipc-posix-name-prefix \"/d.pre.\")\n)\n",
+            SHM_DENY_TARGET.operation
+        ));
+        let mut last_allow = 0;
+        let mut first_deny = usize::MAX;
+        for rule in &expected {
+            assert_eq!(p.matches(rule.as_str()).count(), 1, "{rule}\n{p}");
+            let at = p.find(rule.as_str()).unwrap();
+            if rule.starts_with("(allow") {
+                last_allow = last_allow.max(at);
+            } else {
+                first_deny = first_deny.min(at);
+            }
+        }
+        assert!(last_allow < first_deny, "{p}");
+
+        #[cfg(target_os = "macos")]
+        {
+            let output = sandbox_exec(&p, &["/usr/bin/true"]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// Duplicates, nested prefixes, and a name in both allow and deny are
+    /// accepted as written. Allows add up, and each deny rule follows every
+    /// allow so it wins.
+    #[test]
+    fn overlapping_and_duplicate_entries_are_kept_and_deny_comes_last() {
+        let overlap = || {
+            custom_rules(
+                SeatbeltCustomDefault::Deny,
+                &[
+                    "com.example.a",
+                    "com.example.a",
+                    "com.example.*",
+                    "com.example.a.*",
+                ],
+                &["com.example.a", "com.example.a", "com.example.a.b.*"],
+            )
+        };
+        let mut r = req();
+        r.policy.ui.disable = false;
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            custom_io_kits: Some(custom_rules(
+                SeatbeltCustomDefault::Allow,
+                &[
+                    "IOSurface*",
+                    "IOSurfaceRootUserClient",
+                    "IOSurfaceRootUserClient",
+                ],
+                &["IOSurfaceRootUserClient", "IOSurface*"],
+            )),
+            custom_mach_lookups: Some(overlap()),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                global: Some(overlap()),
+                local: Some(overlap()),
+            }),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                default: Some(SeatbeltPosixShmAccess::Create),
+                read: strings(&["/x.a", "/x.a"]),
+                own: strings(&["/x.*"]),
+                deny: strings(&["/x.a", "/x.a"]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_custom_rules(&r).unwrap();
+        let p = build_profile(&r).unwrap();
+
+        let allows: Vec<usize> = p.match_indices("\n(allow ").map(|(at, _)| at).collect();
+        let denies: Vec<usize> = p
+            .match_indices(";; --- custom")
+            .filter(|(at, _)| p[*at..].lines().next().unwrap().contains(".deny "))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(denies.len(), 5, "{p}");
+        assert!(allows.last().unwrap() < &denies[0], "{p}");
+        // Duplicates are emitted as written; Seatbelt treats them as one.
+        assert_eq!(
+            p.matches("(global-name \"com.example.a\")").count(),
+            2 * 2 * 2,
+            "{p}"
+        );
+        assert_eq!(
+            p.matches("(local-name \"com.example.a\")").count(),
+            2 * 2,
+            "{p}"
+        );
+        // Each read entry gets an allow and a deny rule.
+        assert_eq!(
+            p.matches("(ipc-posix-name \"/x.a\")").count(),
+            2 * 2 + 2,
+            "{p}"
+        );
+        assert!(p.contains(
+            "(deny iokit-open\n    (iokit-user-client-class \"IOSurfaceRootUserClient\")\n    \
+             (iokit-user-client-class-regex #\"^IOSurface\")\n)\n"
+        ));
+
+        #[cfg(target_os = "macos")]
+        {
+            let output = sandbox_exec(&p, &["/usr/bin/true"]);
+            assert!(
+                output.status.success(),
+                "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }

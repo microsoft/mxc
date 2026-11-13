@@ -381,11 +381,116 @@ pub struct Seatbelt {
     #[serde(default)]
     pub keychain_access: OptionalField<bool>,
     /// Additional Mach service global names the process may resolve.
+    /// Deprecated: use `customMachLookups.allow`.
     #[serde(default)]
     pub extra_mach_lookups: OptionalField<Vec<String>>,
+    /// IOKit user-client classes the process may open. When present, this
+    /// replaces guiAccess's IOKit grant.
+    #[serde(default)]
+    pub custom_io_kits: OptionalField<SeatbeltCustomRules>,
+    /// Mach service names the process may register. Each present block
+    /// replaces guiAccess's registration grant for its names.
+    #[serde(default)]
+    pub custom_mach_registers: OptionalField<SeatbeltCustomMachRegisters>,
+    /// Mach service global names the process may resolve. When present, this
+    /// replaces guiAccess's Mach lookup grant.
+    #[serde(default)]
+    pub custom_mach_lookups: OptionalField<SeatbeltCustomRules>,
+    /// POSIX shared memory names the process may use. When present, this
+    /// replaces guiAccess's shared memory grant.
+    #[serde(default)]
+    pub custom_posix_shm: OptionalField<SeatbeltCustomPosixShm>,
     /// Records sandbox denials to a JSON report.
     #[serde(default)]
     pub capture_denials: OptionalField<SeatbeltCaptureDenials>,
+}
+
+string_enum! {
+    /// Access for names that no `allow` or `deny` entry matches.
+    #[derive(Debug)]
+    pub enum SeatbeltCustomDefault {
+        /// Allow every name not denied. Use only for compatibility.
+        Allow => ["allow"],
+        /// Deny unlisted names. MXC's built-in grants and enabled settings
+        /// still apply.
+        Deny => ["deny"],
+    }
+}
+
+string_enum! {
+    /// Access to a POSIX shared memory name. Each level includes the ones
+    /// before it.
+    #[derive(Debug)]
+    pub enum SeatbeltPosixShmAccess {
+        /// No access.
+        Deny => ["deny"],
+        /// Open and read existing regions.
+        Read => ["read"],
+        /// Also write existing regions.
+        ReadWrite => ["readWrite"],
+        /// Also create regions.
+        Create => ["create"],
+        /// Also delete regions.
+        Own => ["own"],
+    }
+}
+
+/// Allow and deny lists for one kind of Seatbelt name. An entry ending in `*`
+/// matches every name with that prefix. `deny` entries win over `allow`.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomRules {
+    /// Access for unlisted names. Defaults to `deny`.
+    #[serde(default)]
+    pub default: OptionalField<SeatbeltCustomDefault>,
+    /// Names to allow.
+    #[serde(default)]
+    pub allow: OptionalField<Vec<String>>,
+    /// Names to deny, including names MXC allows by default.
+    #[serde(default)]
+    pub deny: OptionalField<Vec<String>>,
+}
+
+/// Mach service registration rules, by name scope.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomMachRegisters {
+    /// Names registered with launchd, visible to other processes.
+    #[serde(default)]
+    pub global: OptionalField<SeatbeltCustomRules>,
+    /// Per-process names, shown as `(per-pid)` in denial reports.
+    #[serde(default)]
+    pub local: OptionalField<SeatbeltCustomRules>,
+}
+
+/// POSIX shared memory rules, by access. An entry ending in `*` matches every
+/// name with that prefix. Each listed name gets exactly its list's access; a
+/// longer entry wins over a shorter prefix. `deny` entries win over every
+/// other list.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCustomPosixShm {
+    /// Access for unlisted names. Defaults to `deny`.
+    #[serde(default)]
+    pub default: OptionalField<SeatbeltPosixShmAccess>,
+    /// Names the process may only read.
+    #[serde(default)]
+    pub read: OptionalField<Vec<String>>,
+    /// Existing names the process may read and write.
+    #[serde(default)]
+    pub read_write: OptionalField<Vec<String>>,
+    /// Names the process may read, write, and create.
+    #[serde(default)]
+    pub create: OptionalField<Vec<String>>,
+    /// Names the process may read, write, create, and delete.
+    #[serde(default)]
+    pub own: OptionalField<Vec<String>>,
+    /// Names to deny.
+    #[serde(default)]
+    pub deny: OptionalField<Vec<String>>,
 }
 
 /// macOS Seatbelt denial-capture settings.

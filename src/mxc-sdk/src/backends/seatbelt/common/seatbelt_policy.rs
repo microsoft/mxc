@@ -11,7 +11,10 @@
 //! `ScriptResponse`.
 
 use crate::mxc_common::host_is_canonical_loopback;
-use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkAction};
+use crate::mxc_common::models::{
+    ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkAction, SeatbeltConfig,
+    SeatbeltCustomDefault, SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
+};
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
 /// policy leaves UI enabled, since every GUI grant is emitted alongside the
@@ -45,6 +48,416 @@ pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), Str
 /// Mach name prefix reserved for MXC's per-run process cleanup rules.
 pub const RUN_MARKER_NAME_PREFIX: &str = "com.microsoft.mxc.run.";
 
+/// Keychain servers, denied unless `keychainAccess` is set. `SecurityServer`
+/// serves file-based keychains; the `com.apple.securityd` family serves the
+/// data-protection keychain.
+pub const KEYCHAIN_SERVER_NAMES: &[&str] = &["com.apple.SecurityServer"];
+pub const KEYCHAIN_SERVER_PREFIXES: &[&str] = &["com.apple.securityd"];
+/// Mach services that `keychainAccess: true` grants by name. `trustd` copies
+/// system trust settings; without it every TLS handshake logs a failure per
+/// root certificate.
+pub const KEYCHAIN_GRANTED_NAMES: &[&str] = &[
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.trustd",
+    "com.apple.trustd.agent",
+    "com.apple.ocspd",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+    "com.apple.xpcd",
+];
+/// Mach service prefixes that `keychainAccess: true` grants (LaunchServices).
+pub const KEYCHAIN_GRANTED_PREFIXES: &[&str] = &["com.apple.lsd."];
+/// Mach services controlled by `ui.disable`.
+pub const UI_SERVICE_NAMES: &[&str] = &[
+    "com.apple.windowserver.active",
+    "com.apple.windowserver.session",
+    "com.apple.coreservices.launchservicesd",
+];
+/// Pasteboard server that a permitting `ui.clipboard` grants.
+pub const PASTEBOARD_SERVICE_NAME: &str = "com.apple.pasteboard.1";
+/// Pasteboard servers, denied when `ui.clipboard` is `"none"`.
+pub const PASTEBOARD_SERVICE_PREFIX: &str = "com.apple.pasteboard.";
+/// IOKit user-client class controlled by `ui.injection`.
+pub const HID_USER_CLIENT_CLASS: &str = "IOHIDLibUserClient";
+/// Longest POSIX shared memory name macOS accepts (`PSHMNAMLEN`).
+const POSIX_SHM_NAME_MAX: usize = 31;
+
+/// Whether a custom list allows names it does not list. An omitted
+/// `default` denies them.
+pub fn custom_default_allows(rules: &SeatbeltCustomRules) -> bool {
+    rules.default == Some(SeatbeltCustomDefault::Allow)
+}
+
+/// Access for shared memory names no entry lists. An omitted `default`
+/// denies them.
+pub fn posix_shm_default(shm: &SeatbeltCustomPosixShm) -> SeatbeltPosixShmAccess {
+    shm.default.unwrap_or(SeatbeltPosixShmAccess::Deny)
+}
+
+/// The `customPosixShm` lists that grant access, with their JSON names.
+pub fn posix_shm_access_lists(
+    shm: &SeatbeltCustomPosixShm,
+) -> [(&'static str, SeatbeltPosixShmAccess, &[String]); 4] {
+    [
+        ("read", SeatbeltPosixShmAccess::Read, &shm.read),
+        (
+            "readWrite",
+            SeatbeltPosixShmAccess::ReadWrite,
+            &shm.read_write,
+        ),
+        ("create", SeatbeltPosixShmAccess::Create, &shm.create),
+        ("own", SeatbeltPosixShmAccess::Own, &shm.own),
+    ]
+}
+
+/// One entry of a Seatbelt custom rule list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamePattern<'a> {
+    Exact(&'a str),
+    /// An entry ending in `*`, stored without it.
+    Prefix(&'a str),
+}
+
+impl<'a> NamePattern<'a> {
+    pub fn parse(entry: &'a str) -> Self {
+        match entry.strip_suffix('*') {
+            Some(prefix) => Self::Prefix(prefix),
+            None => Self::Exact(entry),
+        }
+    }
+
+    fn text(self) -> &'a str {
+        match self {
+            Self::Exact(text) | Self::Prefix(text) => text,
+        }
+    }
+
+    /// Whether every name this pattern matches also matches `other`.
+    fn within(self, other: NamePattern<'_>) -> bool {
+        match (self, other) {
+            (NamePattern::Exact(name), NamePattern::Exact(other)) => name == other,
+            (_, NamePattern::Prefix(other)) => self.text().starts_with(other),
+            (NamePattern::Prefix(_), NamePattern::Exact(_)) => false,
+        }
+    }
+
+    /// Whether some name matches both patterns.
+    fn overlaps(self, other: NamePattern<'_>) -> bool {
+        self.within(other) || other.within(self)
+    }
+}
+
+/// Every custom rule list with its JSON name, and whether its entries are
+/// IOKit class names.
+fn custom_rule_sets(
+    config: &SeatbeltConfig,
+) -> Vec<(&'static str, &SeatbeltCustomRules, CustomNameKind)> {
+    let registers = config.custom_mach_registers.as_ref();
+    [
+        (
+            "customIoKits",
+            config.custom_io_kits.as_ref(),
+            CustomNameKind::IoKit,
+        ),
+        (
+            "customMachLookups",
+            config.custom_mach_lookups.as_ref(),
+            CustomNameKind::MachLookup,
+        ),
+        (
+            "customMachRegisters.global",
+            registers.and_then(|r| r.global.as_ref()),
+            CustomNameKind::MachRegister,
+        ),
+        (
+            "customMachRegisters.local",
+            registers.and_then(|r| r.local.as_ref()),
+            CustomNameKind::MachRegister,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, rules, kind)| rules.map(|rules| (field, rules, kind)))
+    .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomNameKind {
+    IoKit,
+    MachLookup,
+    MachRegister,
+    PosixShm,
+}
+
+/// Names that an explicit setting allows or denies.
+struct SettingNames {
+    patterns: Vec<NamePattern<'static>>,
+    description: &'static str,
+    setting: &'static str,
+}
+
+/// Names that explicit settings deny and grant, for one kind of name.
+fn setting_names(
+    request: &ExecutionRequest,
+    kind: CustomNameKind,
+) -> (Vec<SettingNames>, Vec<SettingNames>) {
+    let ui = &request.policy.ui;
+    let mut denied = Vec::new();
+    let mut granted = Vec::new();
+    match kind {
+        CustomNameKind::MachLookup => {
+            let keychain = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
+            let (target, patterns) = if keychain {
+                (
+                    &mut granted,
+                    KEYCHAIN_GRANTED_NAMES
+                        .iter()
+                        .map(|n| NamePattern::Exact(n))
+                        .chain(
+                            KEYCHAIN_GRANTED_PREFIXES
+                                .iter()
+                                .map(|p| NamePattern::Prefix(p)),
+                        )
+                        .collect(),
+                )
+            } else {
+                (
+                    &mut denied,
+                    KEYCHAIN_SERVER_NAMES
+                        .iter()
+                        .map(|n| NamePattern::Exact(n))
+                        .chain(
+                            KEYCHAIN_SERVER_PREFIXES
+                                .iter()
+                                .map(|p| NamePattern::Prefix(p)),
+                        )
+                        .collect(),
+                )
+            };
+            target.push(SettingNames {
+                patterns,
+                description: "a Keychain server",
+                setting: "seatbelt.keychainAccess",
+            });
+            let (target, pattern) = if matches!(ui.clipboard, ClipboardPolicy::None) {
+                (&mut denied, NamePattern::Prefix(PASTEBOARD_SERVICE_PREFIX))
+            } else {
+                (&mut granted, NamePattern::Exact(PASTEBOARD_SERVICE_NAME))
+            };
+            target.push(SettingNames {
+                patterns: vec![pattern],
+                description: "a pasteboard server",
+                setting: "ui.clipboard",
+            });
+            let target = if ui.disable {
+                &mut denied
+            } else {
+                &mut granted
+            };
+            target.push(SettingNames {
+                patterns: UI_SERVICE_NAMES
+                    .iter()
+                    .map(|n| NamePattern::Exact(n))
+                    .collect(),
+                description: "a WindowServer or LaunchServices service",
+                setting: "ui.disable",
+            });
+        }
+        CustomNameKind::IoKit => {
+            let target = if ui.injection {
+                &mut granted
+            } else {
+                &mut denied
+            };
+            target.push(SettingNames {
+                patterns: vec![NamePattern::Exact(HID_USER_CLIENT_CLASS)],
+                description: "the HID input client",
+                setting: "ui.injection",
+            });
+        }
+        CustomNameKind::MachRegister | CustomNameKind::PosixShm => {}
+    }
+    (denied, granted)
+}
+
+/// Reject allow entries that only name what a setting denies, and deny
+/// entries that would remove what a setting grants.
+fn check_setting_conflicts(
+    request: &ExecutionRequest,
+    kind: CustomNameKind,
+    (allow_list, allow): (&str, &[String]),
+    (deny_list, deny): (&str, &[String]),
+) -> Result<(), String> {
+    let (denied, granted) = setting_names(request, kind);
+    for entry in allow {
+        let pattern = NamePattern::parse(entry);
+        if let Some(names) = denied
+            .iter()
+            .find(|names| names.patterns.iter().any(|d| pattern.within(*d)))
+        {
+            return Err(format!(
+                "Seatbelt: {allow_list} entry '{entry}' names {}, which the current {} \
+                 setting denies. Change {} instead.",
+                names.description, names.setting, names.setting
+            ));
+        }
+    }
+    for entry in deny {
+        let pattern = NamePattern::parse(entry);
+        if let Some(names) = granted
+            .iter()
+            .find(|names| names.patterns.iter().any(|g| pattern.overlaps(*g)))
+        {
+            return Err(format!(
+                "Seatbelt: {deny_list} entry '{entry}' would deny {}, which the current {} \
+                 setting allows. Change {} instead.",
+                names.description, names.setting, names.setting
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate one list entry. `all_names` says how to cover every name, for
+/// the error on a bare `*`.
+fn validate_custom_entry(
+    list: &str,
+    entry: &str,
+    kind: CustomNameKind,
+    all_names: &str,
+) -> Result<(), String> {
+    let name = match NamePattern::parse(entry) {
+        NamePattern::Exact(name) | NamePattern::Prefix(name) => name,
+    };
+    if name.is_empty() {
+        return Err(format!(
+            "Seatbelt: {list} entries must be non-empty names; a bare '*' is not \
+             supported. {all_names}"
+        ));
+    }
+    if name.contains('*') {
+        return Err(format!(
+            "Seatbelt: {list} entry '{entry}' has a '*' that is not at the end. \
+             Only a single trailing '*' (prefix match) is supported."
+        ));
+    }
+    let is_class_name = |name: &str| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if kind == CustomNameKind::IoKit && !is_class_name(name) {
+        return Err(format!(
+            "Seatbelt: {list} entry '{entry}' is not an IOKit user-client class name \
+             (letters, digits, and '_', optionally ending in '*')."
+        ));
+    }
+    if kind == CustomNameKind::PosixShm && name.len() > POSIX_SHM_NAME_MAX {
+        return Err(format!(
+            "Seatbelt: {list} entry '{entry}' is longer than {POSIX_SHM_NAME_MAX} bytes, \
+             the longest POSIX shared memory name macOS accepts."
+        ));
+    }
+    Ok(())
+}
+
+/// Validate `customIoKits`, `customMachLookups`, `customMachRegisters`,
+/// `customPosixShm`, and the `extraMachLookups` entries they interact with.
+pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    let sets = custom_rule_sets(config);
+    let has_custom = !sets.is_empty()
+        || config.custom_mach_registers.is_some()
+        || config.custom_posix_shm.is_some();
+    if has_custom && config.profile_override.is_some() {
+        return Err(
+            "Seatbelt: seatbelt.profileOverride replaces the generated profile, so \
+                    it cannot be combined with customIoKits, customMachLookups, \
+                    customMachRegisters, or customPosixShm. Remove profileOverride, or \
+                    write those rules into the override."
+                .to_string(),
+        );
+    }
+    if config.custom_mach_lookups.is_some() && !config.extra_mach_lookups.is_empty() {
+        return Err(
+            "Seatbelt: seatbelt.extraMachLookups cannot be combined with \
+                    seatbelt.customMachLookups. Move the extraMachLookups entries into \
+                    customMachLookups.allow."
+                .to_string(),
+        );
+    }
+    check_setting_conflicts(
+        request,
+        CustomNameKind::MachLookup,
+        ("seatbelt.extraMachLookups", &config.extra_mach_lookups),
+        ("", &[]),
+    )?;
+    for (field, rules, kind) in sets {
+        let allow_list = format!("seatbelt.{field}.allow");
+        let deny_list = format!("seatbelt.{field}.deny");
+        for entry in &rules.allow {
+            validate_custom_entry(
+                &allow_list,
+                entry,
+                kind,
+                "Set 'default' to \"allow\" to allow every name.",
+            )?;
+        }
+        for entry in &rules.deny {
+            validate_custom_entry(
+                &deny_list,
+                entry,
+                kind,
+                "Names not in 'allow' are already denied unless 'default' is \"allow\".",
+            )?;
+        }
+        check_setting_conflicts(
+            request,
+            kind,
+            (&allow_list, &rules.allow),
+            (&deny_list, &rules.deny),
+        )?;
+    }
+    if let Some(shm) = config.custom_posix_shm.as_ref() {
+        validate_posix_shm_rules(shm)?;
+    }
+    Ok(())
+}
+
+fn validate_posix_shm_rules(shm: &SeatbeltCustomPosixShm) -> Result<(), String> {
+    let lists = posix_shm_access_lists(shm);
+    for (list, _, entries) in lists {
+        let field = format!("seatbelt.customPosixShm.{list}");
+        let all_names = format!("Set 'default' to \"{list}\" to give every name this access.");
+        for entry in entries {
+            validate_custom_entry(&field, entry, CustomNameKind::PosixShm, &all_names)?;
+        }
+    }
+    for entry in &shm.deny {
+        validate_custom_entry(
+            "seatbelt.customPosixShm.deny",
+            entry,
+            CustomNameKind::PosixShm,
+            "Names no other list names are already denied unless 'default' grants them.",
+        )?;
+    }
+    // Each name needs one access level; deny entries override any level.
+    for (i, (list, _, entries)) in lists.iter().enumerate() {
+        for (other, _, other_entries) in &lists[i + 1..] {
+            if let Some(entry) = entries.iter().find(|e| other_entries.contains(e)) {
+                return Err(format!(
+                    "Seatbelt: seatbelt.customPosixShm entry '{entry}' is in both '{list}' \
+                     and '{other}'. List each name once, with the access it needs."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reject caller-supplied names in the reserved cleanup prefix. The rules MXC
 /// appends to every profile override them, so they could never take effect.
 pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<(), String> {
@@ -62,15 +475,32 @@ pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<()
              specific to the run that printed them); MXC adds this run's own."
         ));
     }
-    if let Some(name) = config
-        .extra_mach_lookups
-        .iter()
-        .find(|name| name.starts_with(RUN_MARKER_NAME_PREFIX))
-    {
-        return Err(format!(
-            "Seatbelt: seatbelt.extraMachLookups entry '{name}' uses the prefix \
-             '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules."
-        ));
+    let custom_lookups = config.custom_mach_lookups.as_ref();
+    let lookup_lists = [
+        (
+            "seatbelt.extraMachLookups",
+            Some(&config.extra_mach_lookups),
+        ),
+        (
+            "seatbelt.customMachLookups.allow",
+            custom_lookups.map(|rules| &rules.allow),
+        ),
+        (
+            "seatbelt.customMachLookups.deny",
+            custom_lookups.map(|rules| &rules.deny),
+        ),
+    ];
+    for (list, entries) in lookup_lists {
+        if let Some(name) = entries
+            .into_iter()
+            .flatten()
+            .find(|name| name.starts_with(RUN_MARKER_NAME_PREFIX))
+        {
+            return Err(format!(
+                "Seatbelt: {list} entry '{name}' uses the prefix \
+                 '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules."
+            ));
+        }
     }
     Ok(())
 }
@@ -176,7 +606,10 @@ pub fn validate_seatbelt_capture_denials(request: &ExecutionRequest) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{ProxyAddress, ProxyConfig, SeatbeltConfig};
+    use crate::mxc_common::models::{
+        ProxyAddress, ProxyConfig, SeatbeltConfig, SeatbeltCustomMachRegisters,
+        SeatbeltCustomPosixShm,
+    };
 
     #[test]
     fn omitted_host_loopback_defaults_to_deny() {
@@ -335,6 +768,300 @@ mod tests {
             ..Default::default()
         });
         assert!(validate_seatbelt_reserved_names(&request).is_ok());
+    }
+
+    fn lookups(allow: &[&str], deny: &[&str]) -> SeatbeltConfig {
+        SeatbeltConfig {
+            custom_mach_lookups: Some(SeatbeltCustomRules {
+                allow: allow.iter().map(|s| s.to_string()).collect(),
+                deny: deny.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn custom_error(config: SeatbeltConfig) -> String {
+        validate_seatbelt_custom_rules(&seatbelt_request(config)).unwrap_err()
+    }
+
+    #[test]
+    fn rejects_malformed_custom_entries() {
+        for (entry, expected) in [
+            ("*", "bare '*'"),
+            ("", "non-empty"),
+            ("com.*.service", "not at the end"),
+            ("com.example**", "not at the end"),
+        ] {
+            let msg = custom_error(lookups(&[entry], &[]));
+            assert!(msg.contains("customMachLookups.allow"), "{entry}: {msg}");
+            assert!(msg.contains(expected), "{entry}: {msg}");
+        }
+        for entry in ["com.apple.Foo", "9Class", "IO-Surface*"] {
+            let msg = custom_error(SeatbeltConfig {
+                custom_io_kits: Some(SeatbeltCustomRules {
+                    deny: vec![entry.into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            assert!(msg.contains("customIoKits.deny"), "{entry}: {msg}");
+            assert!(msg.contains("IOKit user-client class"), "{entry}: {msg}");
+        }
+        for (scope, entry) in [("global", "*"), ("local", "com.*.x")] {
+            let rules = Some(SeatbeltCustomRules {
+                allow: vec![entry.into()],
+                ..Default::default()
+            });
+            let registers = if scope == "global" {
+                SeatbeltCustomMachRegisters {
+                    global: rules,
+                    local: None,
+                }
+            } else {
+                SeatbeltCustomMachRegisters {
+                    global: None,
+                    local: rules,
+                }
+            };
+            let msg = custom_error(SeatbeltConfig {
+                custom_mach_registers: Some(registers),
+                ..Default::default()
+            });
+            let list = format!("customMachRegisters.{scope}.allow");
+            assert!(msg.contains(&list), "{entry}: {msg}");
+        }
+
+        let shm = |list: &str, entry: &str| {
+            let mut shm = SeatbeltCustomPosixShm::default();
+            let target = match list {
+                "read" => &mut shm.read,
+                "readWrite" => &mut shm.read_write,
+                "create" => &mut shm.create,
+                "own" => &mut shm.own,
+                _ => &mut shm.deny,
+            };
+            target.push(entry.into());
+            seatbelt_request(SeatbeltConfig {
+                custom_posix_shm: Some(shm),
+                ..Default::default()
+            })
+        };
+        // The limit counts bytes, not characters; a trailing '*' is not part
+        // of the name.
+        let longest = format!("/{}", "a".repeat(30));
+        let multibyte = format!("/{}", "\u{e9}".repeat(15));
+        for entry in [longest.clone(), format!("{longest}*"), multibyte.clone()] {
+            validate_seatbelt_custom_rules(&shm("own", &entry)).unwrap();
+        }
+        for (list, entry, expected) in [
+            ("read", format!("{longest}b"), "longer than 31 bytes"),
+            (
+                "readWrite",
+                format!("{multibyte}\u{e9}"),
+                "longer than 31 bytes",
+            ),
+            ("own", "*".to_string(), "Set 'default' to \"own\""),
+            ("create", "*".to_string(), "Set 'default' to \"create\""),
+            ("deny", "*".to_string(), "already denied"),
+            ("deny", "/app*.x".to_string(), "not at the end"),
+        ] {
+            let msg = validate_seatbelt_custom_rules(&shm(list, &entry)).unwrap_err();
+            assert!(
+                msg.contains(&format!("customPosixShm.{list}")),
+                "{entry}: {msg}"
+            );
+            assert!(msg.contains(expected), "{entry}: {msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_posix_shm_name_in_two_access_lists() {
+        let msg = custom_error(SeatbeltConfig {
+            custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                read: vec!["/app.*".into()],
+                own: vec!["/app.*".into()],
+                deny: vec!["/app.*".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(
+            msg.contains("'/app.*' is in both 'read' and 'own'"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_custom_rules_that_cannot_apply() {
+        let msg = custom_error(SeatbeltConfig {
+            profile_override: Some("(version 1)".into()),
+            ..lookups(&["com.example.a"], &[])
+        });
+        assert!(msg.contains("profileOverride"), "{msg}");
+
+        let msg = custom_error(SeatbeltConfig {
+            profile_override: Some("(version 1)".into()),
+            custom_posix_shm: Some(SeatbeltCustomPosixShm::default()),
+            ..Default::default()
+        });
+        assert!(msg.contains("profileOverride"), "{msg}");
+
+        let msg = custom_error(SeatbeltConfig {
+            profile_override: Some("(version 1)".into()),
+            custom_mach_registers: Some(SeatbeltCustomMachRegisters::default()),
+            ..Default::default()
+        });
+        assert!(msg.contains("profileOverride"), "{msg}");
+
+        let msg = custom_error(SeatbeltConfig {
+            extra_mach_lookups: vec!["com.example.a".into()],
+            ..lookups(&[], &[])
+        });
+        assert!(msg.contains("customMachLookups.allow"), "{msg}");
+    }
+
+    /// Explicit settings decide their own names; custom lists cannot
+    /// contradict them.
+    #[test]
+    fn rejects_custom_entries_that_contradict_settings() {
+        for (config, list, setting) in [
+            (
+                lookups(&["com.apple.SecurityServer"], &[]),
+                "customMachLookups.allow",
+                "keychainAccess",
+            ),
+            (
+                lookups(&["com.apple.securityd.xpc*"], &[]),
+                "customMachLookups.allow",
+                "keychainAccess",
+            ),
+            (
+                SeatbeltConfig {
+                    extra_mach_lookups: vec!["com.apple.securityd".into()],
+                    ..Default::default()
+                },
+                "extraMachLookups",
+                "keychainAccess",
+            ),
+            (
+                SeatbeltConfig {
+                    keychain_access: true,
+                    ..lookups(&[], &["com.apple.Security*"])
+                },
+                "customMachLookups.deny",
+                "keychainAccess",
+            ),
+            (
+                lookups(&["com.apple.pasteboard.1"], &[]),
+                "customMachLookups.allow",
+                "ui.clipboard",
+            ),
+            (
+                lookups(&["com.apple.pasteboard.*"], &[]),
+                "customMachLookups.allow",
+                "ui.clipboard",
+            ),
+            (
+                SeatbeltConfig {
+                    extra_mach_lookups: vec!["com.apple.pasteboard.2".into()],
+                    ..Default::default()
+                },
+                "extraMachLookups",
+                "ui.clipboard",
+            ),
+            (
+                lookups(&["com.apple.windowserver.active"], &[]),
+                "customMachLookups.allow",
+                "ui.disable",
+            ),
+            (
+                SeatbeltConfig {
+                    custom_io_kits: Some(SeatbeltCustomRules {
+                        allow: vec!["IOHIDLibUserClient".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                "customIoKits.allow",
+                "ui.injection",
+            ),
+        ] {
+            let mut request = seatbelt_request(config);
+            request.policy.ui.injection = false;
+            let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
+            assert!(msg.contains(list), "{list}: {msg}");
+            assert!(msg.contains(setting), "{list}: {msg}");
+        }
+
+        let mut request = seatbelt_request(lookups(&[], &["com.apple.windowserver.*"]));
+        request.policy.ui.disable = false;
+        let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
+        assert!(msg.contains("ui.disable"), "{msg}");
+
+        let mut request = seatbelt_request(lookups(&[], &["com.apple.pasteboard.*"]));
+        request.policy.ui.clipboard = ClipboardPolicy::All;
+        let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
+        assert!(msg.contains("ui.clipboard"), "{msg}");
+
+        // Every name keychainAccess grants, not only the Keychain servers.
+        for entry in [
+            "com.apple.trustd",
+            "com.apple.xpcd",
+            "com.apple.cfprefsd.*",
+            "com.apple.lsd.mapdb",
+            "com.apple.lsd.*",
+        ] {
+            let msg = custom_error(SeatbeltConfig {
+                keychain_access: true,
+                ..lookups(&[], &[entry])
+            });
+            assert!(msg.contains("customMachLookups.deny"), "{entry}: {msg}");
+            assert!(msg.contains("keychainAccess"), "{entry}: {msg}");
+        }
+
+        let mut request = seatbelt_request(SeatbeltConfig {
+            custom_io_kits: Some(SeatbeltCustomRules {
+                deny: vec!["IOHID*".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        request.policy.ui.injection = true;
+        let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
+        assert!(msg.contains("customIoKits.deny"), "{msg}");
+        assert!(msg.contains("ui.injection"), "{msg}");
+    }
+
+    #[test]
+    fn accepts_custom_entries_consistent_with_settings() {
+        // A broad prefix may cover a denied name; the setting's deny wins.
+        let mut request = seatbelt_request(lookups(
+            &["com.apple.*", "com.example.service"],
+            &["com.apple.windowserver.*", "com.apple.pasteboard.1"],
+        ));
+        request.policy.ui.injection = false;
+        request.seatbelt.as_mut().unwrap().custom_io_kits = Some(SeatbeltCustomRules {
+            allow: vec!["AGXDeviceUserClient".into(), "IO*".into()],
+            deny: vec!["IOHIDLibUserClient".into()],
+            ..Default::default()
+        });
+        validate_seatbelt_custom_rules(&request).unwrap();
+        validate_seatbelt_custom_rules(&seatbelt_request(SeatbeltConfig {
+            keychain_access: true,
+            ..lookups(&["com.apple.SecurityServer"], &[])
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_reserved_names_in_custom_lookups() {
+        let msg = validate_seatbelt_reserved_names(&seatbelt_request(lookups(
+            &[],
+            &["com.microsoft.mxc.run.*"],
+        )))
+        .unwrap_err();
+        assert!(msg.contains("customMachLookups.deny"), "{msg}");
     }
 
     #[test]

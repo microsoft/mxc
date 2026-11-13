@@ -47,6 +47,10 @@
 //! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
 //! `windowsSandbox` root keys.
 //!
+//! In Seatbelt `captureDenials` `"allow"` mode, the hash also covers whether
+//! `keychainAccess` and each `ui` field were written, because an omitted
+//! setting reports access instead of denying it.
+//!
 //! `ContainerPolicy::network_proxy` is `#[serde(skip)]`, so the proxy's
 //! credential-bearing URL cannot reach the hash through the blanket policy
 //! serialization even by accident; the enforcement-relevant parts (enabled,
@@ -330,6 +334,20 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         if let Some(Value::Object(cd)) = seatbelt_map.get_mut("captureDenials") {
             cd.remove("output_path");
         }
+        hash_omitted_custom_defaults_as_deny(seatbelt_map);
+        // In allow mode, an omitted setting reports instead of denying.
+        if seatbelt_capture_allows(seatbelt) {
+            let ui = policy.ui_fields_specified;
+            seatbelt_map.insert(
+                "settingsWritten".into(),
+                serde_json::json!({
+                    "keychainAccess": seatbelt.as_ref().is_some_and(|c| c.keychain_access_specified),
+                    "uiDisable": ui.disable,
+                    "uiClipboard": ui.clipboard,
+                    "uiInjection": ui.injection,
+                }),
+            );
+        }
     }
     root.insert("seatbelt".into(), seatbelt_value);
     root.insert(
@@ -352,6 +370,34 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     }
 
     Value::Object(root)
+}
+
+/// An omitted Seatbelt custom-list `default` denies, so hash it like `"deny"`.
+fn hash_omitted_custom_defaults_as_deny(seatbelt: &mut serde_json::Map<String, Value>) {
+    let mut blocks = Vec::new();
+    for (key, value) in seatbelt.iter_mut() {
+        match key.as_str() {
+            "customIoKits" | "customMachLookups" | "customPosixShm" => blocks.push(value),
+            "customMachRegisters" => {
+                if let Some(scopes) = value.as_object_mut() {
+                    blocks.extend(scopes.values_mut());
+                }
+            }
+            _ => {}
+        }
+    }
+    for block in blocks {
+        if let Some(default) = block.get_mut("default").filter(|d| d.is_null()) {
+            *default = Value::from("Deny");
+        }
+    }
+}
+
+fn seatbelt_capture_allows(seatbelt: &Option<crate::mxc_common::models::SeatbeltConfig>) -> bool {
+    seatbelt
+        .as_ref()
+        .and_then(|c| c.capture_denials.as_ref())
+        .is_some_and(|cd| cd.mode == crate::mxc_common::models::CaptureDenialsMode::Allow)
 }
 
 /// The enforcement-relevant, non-credential parts of the proxy configuration:
@@ -777,6 +823,67 @@ mod tests {
             with_path(Some("/tmp/denials.json"), CaptureDenialsMode::Block)
         );
         assert_ne!(base, with_path(None, CaptureDenialsMode::Allow));
+    }
+
+    #[test]
+    fn seatbelt_allow_mode_hashes_whether_settings_were_written() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode, SeatbeltConfig};
+
+        let hash = |mode, keychain: bool, clipboard: bool| {
+            let mut r = request();
+            r.policy.ui_fields_specified.clipboard = clipboard;
+            r.seatbelt = Some(SeatbeltConfig {
+                keychain_access_specified: keychain,
+                capture_denials: Some(CaptureDenialsConfig {
+                    mode,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let omitted = hash(CaptureDenialsMode::Allow, false, false);
+        assert_ne!(omitted, hash(CaptureDenialsMode::Allow, true, false));
+        assert_ne!(omitted, hash(CaptureDenialsMode::Allow, false, true));
+        assert_eq!(
+            hash(CaptureDenialsMode::Block, false, false),
+            hash(CaptureDenialsMode::Block, true, true)
+        );
+    }
+
+    #[test]
+    fn seatbelt_omitted_custom_default_hashes_like_deny() {
+        use crate::mxc_common::models::{
+            SeatbeltConfig, SeatbeltCustomDefault, SeatbeltCustomMachRegisters,
+            SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
+        };
+
+        let hash = |rules: Option<SeatbeltCustomDefault>, shm| {
+            let rules = SeatbeltCustomRules {
+                default: rules,
+                ..Default::default()
+            };
+            let mut r = request();
+            r.seatbelt = Some(SeatbeltConfig {
+                custom_io_kits: Some(rules.clone()),
+                custom_mach_lookups: Some(rules.clone()),
+                custom_mach_registers: Some(SeatbeltCustomMachRegisters {
+                    global: Some(rules.clone()),
+                    local: Some(rules),
+                }),
+                custom_posix_shm: Some(SeatbeltCustomPosixShm {
+                    default: shm,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let omitted = hash(None, None);
+        let deny = Some(SeatbeltCustomDefault::Deny);
+        assert_eq!(omitted, hash(deny, Some(SeatbeltPosixShmAccess::Deny)));
+        assert_ne!(omitted, hash(Some(SeatbeltCustomDefault::Allow), None));
+        assert_ne!(omitted, hash(None, Some(SeatbeltPosixShmAccess::Read)));
     }
 
     #[test]

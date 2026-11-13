@@ -64,4 +64,38 @@ expect_rejected "guiAccess=true with no ui section is refused" \
     "seatbelt_reject_gui_without_ui_section.json" \
     "guiAccess=true cannot be combined with ui.disable=true" "$S"
 
+# --- Custom Mach, IOKit, and shared memory lists -----------------------------
+
+expect_rejected "a bare '*' custom entry is refused" \
+    "seatbelt_reject_custom_bare_star.json" \
+    "a bare '*' is not supported" "$S"
+
+expect_rejected "custom lists with profileOverride are refused" \
+    "seatbelt_reject_custom_with_profile_override.json" \
+    "it cannot be combined with customIoKits" "$S"
+
+expect_rejected "customMachLookups with extraMachLookups is refused" \
+    "seatbelt_reject_custom_with_extra_mach_lookups.json" \
+    "cannot be combined with seatbelt.customMachLookups" "$S"
+
+expect_rejected "a custom entry in MXC's cleanup prefix is refused" \
+    "seatbelt_reject_custom_reserved_name.json" \
+    "which MXC reserves for its process cleanup rules" "$S"
+
+expect_rejected "an allow entry a setting denies is refused" \
+    "seatbelt_reject_custom_allow_denied_by_setting.json" \
+    "which the current ui.injection setting denies" "$S"
+
+expect_rejected "a deny entry a setting grants is refused" \
+    "seatbelt_reject_custom_deny_granted_by_setting.json" \
+    "which the current ui.clipboard setting allows" "$S"
+
+expect_rejected "a shared memory name in two access lists is refused" \
+    "seatbelt_reject_shm_name_in_two_lists.json" \
+    "is in both 'read' and 'own'" "$S"
+
+expect_rejected "a shared memory name over 31 bytes is refused" \
+    "seatbelt_reject_shm_name_too_long.json" \
+    "longer than 31 bytes" "$S"
+
 summary "Seatbelt rejections"
