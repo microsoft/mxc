@@ -153,7 +153,9 @@ export function verifyPackagedRuntime(options: PackagedRuntimeTestOptions): void
           recursive: true, filter: entry => path.basename(entry) !== 'node_modules',
         });
         const archive = path.join(archives, `${name.replace(/[^a-z0-9-]/gi, '-')}.tgz`);
-        const packed = spawnSync('tar', ['-czf', archive, '-C', staging, 'package'], { encoding: 'utf8', timeout: 60_000 });
+        const packed = spawnSync('tar', ['-czf', path.basename(archive), '-C', staging, 'package'], {
+          cwd: archives, encoding: 'utf8', timeout: 60_000,
+        });
         assert.ifError(packed.error);
         assert.equal(packed.status, 0, packed.stdout + packed.stderr);
         return archive;
