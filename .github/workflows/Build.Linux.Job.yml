@@ -271,7 +271,7 @@ jobs:
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
           run_pinned "Probe coverage" -p mxc-sdk --lib mxc_engine::probe
           run_pinned "Backend registry" -p mxc-sdk --lib mxc_engine::backend_registry
-          run_pinned "WSLC gateway" --features wslc-gateway -p mxc-sdk --bin mxc-wslc-gateway
+          run_pinned "WSLC gateway" -p mxc-wslc-gateway
           run_pinned "WSLC gateway image" -p mxc-sdk --test wslc_gateway_image
 
           # Hyperlight is a Linux backend only on x64, and the probe reports it
@@ -292,8 +292,7 @@ jobs:
           target="${{ matrix.target }}"
           target="${target%-gnu}-musl"
           rustup target add "$target"
-          cargo test --locked --release --target "$target" \
-            --features wslc-gateway -p mxc-sdk --bin mxc-wslc-gateway
+          cargo test --locked --release --target "$target" -p mxc-wslc-gateway
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.

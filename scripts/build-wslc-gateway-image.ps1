@@ -10,7 +10,7 @@
     and toolchain always give the same image ID. `mxc-sdk`'s build script reads
     the image ID from the committed tar and stages the tar beside the binary.
 
-    Run this after changing the gateway (`src/mxc-sdk/src/bin/wslc_gateway/`,
+    Run this after changing the gateway (`src/tools/wslc_gateway/`,
     `src/mxc-sdk/src/backends/wslc/gateway_policy.rs`), its dependencies or
     `$gatewayToolchain`, and commit the updated tars.
 
@@ -152,7 +152,7 @@ try {
         $envTriple = $triple.ToUpperInvariant().Replace('-', '_')
         Set-Item "env:CARGO_TARGET_${envTriple}_LINKER" 'rust-lld'
         cargo build --locked --profile $profileName --target $triple --target-dir $targetDir `
-            -p mxc-sdk --bin mxc-wslc-gateway --features wslc-gateway
+            -p mxc-wslc-gateway
         if ($LASTEXITCODE -ne 0) { throw "cargo build for $triple failed ($LASTEXITCODE)" }
 
         $binaryPath = Join-Path $targetDir "$triple\$profileName\mxc-wslc-gateway"

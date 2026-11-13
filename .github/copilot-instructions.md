@@ -49,8 +49,8 @@ ordinary Cargo binary targets. Workspace builds compile the targets whose
 `required-features` are enabled; do not invoke Cargo recursively from
 `mxc-sdk/build.rs`. Build a sidecar directly with
 `cargo build -p mxc-sdk --bin <target>`. The `wxc-wslc-daemon` target requires
-`--features wslc`. The `mxc-wslc-gateway` target requires
-`--features wslc-gateway` and ships as committed Linux images; see
+`--features wslc`. The WSLC gateway is a separate, unpublished
+`src/tools/wslc_gateway` crate that ships as committed Linux images; see
 `docs/development/build-and-test/wslc-gateway-image.md`. Keep version-resource generation and dependency staging in
 the package build script, and keep artifact copying/signing in the repository
 build and CI entry points.

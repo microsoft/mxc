@@ -35,17 +35,10 @@ name = "wxc-wslc-daemon"
 path = "src/bin/wslc_daemon/main.rs"
 required-features = ["wslc"]
 
-# Built for Linux musl by scripts/build-wslc-gateway-image.ps1.
-[[bin]]
-name = "mxc-wslc-gateway"
-path = "src/bin/wslc_gateway/main.rs"
-required-features = ["wslc-gateway"]
-
 [features]
 default = []
 wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
-wslc-gateway = []
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
 test-support = []
 microvm = ["dep:aci_edge_sandboxes", "dep:libloading"]

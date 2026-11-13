@@ -1701,6 +1701,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc-wslc-gateway"
+version = "1.0.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mxc_darwin"
 version = "1.0.1"
 dependencies = [

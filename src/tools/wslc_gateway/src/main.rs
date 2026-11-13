@@ -15,11 +15,10 @@
 mod logger;
 #[cfg(target_os = "linux")]
 mod dns;
-// Compiled in rather than imported from mxc_sdk, so the image changes only
-// when the gateway's own sources do. The backend uses the rest.
+// Shared with the WSLC backend; the gateway doesn't link mxc_sdk.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
-#[path = "../../backends/wslc/gateway_policy.rs"]
+#[path = "../../../mxc-sdk/src/backends/wslc/gateway_policy.rs"]
 mod gateway_policy;
 #[cfg(target_os = "linux")]
 mod netlink;

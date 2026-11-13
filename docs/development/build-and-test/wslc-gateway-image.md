@@ -15,14 +15,14 @@ A Windows `--features wslc` build reads the tar for the target architecture,
 checks that its image ID and layer match its config, compiles the ID into
 `mxc-sdk` as `MXC_WSLC_GATEWAY_IMAGE_ID`, and stages the tar as
 `mxc-wslc-gateway.tar` beside `wslcsdk.dll`. Every package that ships
-`wslcsdk.dll` also ships the tar. Normal builds don't compile the gateway.
+`wslcsdk.dll` also ships the tar.
 
 ## Sources
 
 | Path | Role |
 |---|---|
-| `src/mxc-sdk/src/bin/wslc_gateway/` | The gateway binary. Linux only. |
-| `src/mxc-sdk/src/backends/wslc/gateway_policy.rs` | The policy the backend passes to the gateway and the egress rule check. The gateway compiles this file in directly and doesn't link the rest of `mxc-sdk`. |
+| `src/tools/wslc_gateway/` | The gateway binary. Linux only. An unpublished workspace crate, so `mxc-sdk`'s dependencies never reach the image build. |
+| `src/mxc-sdk/src/backends/wslc/gateway_policy.rs` | The policy the backend passes to the gateway and the egress rule check. The gateway compiles this file in directly and doesn't link `mxc-sdk`. |
 | `[profile.wslc-gateway]` in `src/Cargo.toml` | Size-optimized release profile used for the image. |
 | `scripts/build-wslc-gateway-image.ps1` | Builds both binaries and writes the image tars. |
 | `src/mxc-sdk/build/build_wslc_gateway_image.rs` | Verifies and stages the committed tar. |
@@ -75,7 +75,7 @@ stable, the script:
   committed tars:
 
   ```text
-  cargo test -p mxc-sdk --features wslc-gateway --bin mxc-wslc-gateway
+  cargo test -p mxc-wslc-gateway
   cargo test -p mxc-sdk --test wslc_gateway_image
   ```
 

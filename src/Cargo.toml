@@ -10,6 +10,7 @@ members = [
     "tools/mxc_darwin",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "tools/wslc_gateway",
     "tools/wxc",
 ]
 exclude = ["testing/fuzz"]
