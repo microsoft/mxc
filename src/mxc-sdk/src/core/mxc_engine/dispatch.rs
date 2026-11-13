@@ -85,6 +85,12 @@ pub fn spawn_runner(
         ContainmentBackend::Wslc => spawn_wslc(request, logger, stdin),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
         ContainmentBackend::MicroVm => spawn_microvm(request, logger, stdin),
+        ContainmentBackend::W365Agents => {
+            use crate::mxc_common::sandbox_process::SandboxBackend;
+            crate::backend_modules::W365AgentsRunner
+                .spawn(request, logger, StdioMode::Pipes)
+                .map_err(map_spawn_error)
+        }
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
