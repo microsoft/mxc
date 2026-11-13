@@ -12,10 +12,10 @@ per architecture, committed under `src/mxc-sdk/assets/`:
 | `mxc-wslc-gateway-aarch64.tar` | arm64 |
 
 A Windows `--features wslc` build reads the tar for the target architecture,
-checks that its image ID matches its config, compiles the ID into `mxc-sdk` as
-`MXC_WSLC_GATEWAY_IMAGE_ID`, and stages the tar as `mxc-wslc-gateway.tar`
-beside `wslcsdk.dll`. Every package that ships `wslcsdk.dll` also ships the tar.
-Normal builds don't compile the gateway.
+checks that its image ID and layer match its config, compiles the ID into
+`mxc-sdk` as `MXC_WSLC_GATEWAY_IMAGE_ID`, and stages the tar as
+`mxc-wslc-gateway.tar` beside `wslcsdk.dll`. Every package that ships
+`wslcsdk.dll` also ships the tar. Normal builds don't compile the gateway.
 
 ## Sources
 
@@ -30,8 +30,9 @@ Normal builds don't compile the gateway.
 ## Regenerating the images
 
 Regenerate both tars after changing any of the sources above, a dependency in
-`Cargo.lock` that the gateway uses, or the Rust channel in
-`src/rust-toolchain.toml`. Commit the tars in the same change.
+`Cargo.lock` that the gateway uses, or `$gatewayToolchain` in the script.
+Commit the tars in the same change. When the channel in
+`src/rust-toolchain.toml` changes, move `$gatewayToolchain` to a release on it.
 
 On Windows, from the repository root:
 
@@ -39,15 +40,18 @@ On Windows, from the repository root:
 .\scripts\build-wslc-gateway-image.ps1
 ```
 
-The script installs the x64 Windows host toolchain for the pinned channel, with
-the musl targets and `rust-src`, and links with the bundled `rust-lld`. It
-prints each image ID.
+The script installs the x64 Windows host toolchain for `$gatewayToolchain`, an
+exact Rust release, with the musl targets and `rust-src`, and links with the
+bundled `rust-lld`. It prints each image ID.
 
 The same source and toolchain always give the same image IDs. To keep them
 stable, the script:
 
 - **Runs on Windows.** Panic messages embed source paths, and Windows and Linux
   paths differ.
+
+- **Pins the exact compiler.** A new patch release of the workspace channel
+  would change the binary.
 
 - **Uses the x64 host toolchain, even on ARM64.** Cargo hashes the host into
   build script units and so into dependent crates' symbols. ARM64 Windows runs
@@ -66,11 +70,14 @@ stable, the script:
   directory and fails if a committed tar differs. The `wslc-gateway-image-check`
   pull request job runs it on Windows x64.
 
-- The Linux build job runs the gateway and policy unit tests:
+- The Linux build job runs the gateway and policy unit tests, for both the gnu
+  and the shipped musl target, and the image integrity checks against the
+  committed tars:
 
   ```text
   cargo test -p mxc-sdk --features wslc-gateway --bin mxc-wslc-gateway
+  cargo test -p mxc-sdk --test wslc_gateway_image
   ```
 
-- A Windows `--features wslc` build fails if the committed tar is corrupt or
-  missing.
+- A Windows `--features wslc` build fails if the committed tar is missing, or
+  its config or layer doesn't match its digests.

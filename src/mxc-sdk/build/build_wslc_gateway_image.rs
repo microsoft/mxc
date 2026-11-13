@@ -4,7 +4,8 @@
 //! Stages the committed WSLC gateway image for the WSLC backend.
 //!
 //! Reads `assets/mxc-wslc-gateway-<arch>.tar`, checks that its image ID is
-//! the SHA-256 of its config, compiles that ID in as
+//! the SHA-256 of its config and its layers match the config, compiles that
+//! ID in as
 //! `MXC_WSLC_GATEWAY_IMAGE_ID`, and copies the tar next to the final binary
 //! as `mxc-wslc-gateway.tar`. `scripts/build-wslc-gateway-image.ps1`
 //! regenerates the tars.
@@ -49,8 +50,9 @@ pub(crate) fn run() -> Result<(), String> {
 }
 
 /// Returns the image ID from a single-image `docker save` tar, after checking
-/// that it is the SHA-256 of the image config.
-fn image_id(tar: &[u8]) -> Result<String, String> {
+/// that it is the SHA-256 of the image config and that each layer matches the
+/// config's diff ID.
+pub(crate) fn image_id(tar: &[u8]) -> Result<String, String> {
     let entries = tar_entries(tar)?;
     let find = |name: &str| {
         entries
@@ -61,21 +63,43 @@ fn image_id(tar: &[u8]) -> Result<String, String> {
     };
     let manifest: serde_json::Value = serde_json::from_slice(find("manifest.json")?)
         .map_err(|e| format!("manifest.json: {e}"))?;
-    let config_name = match manifest.as_array().map(Vec::as_slice) {
-        Some([image]) => image["Config"]
-            .as_str()
-            .ok_or("manifest.json has no Config")?,
+    let image = match manifest.as_array().map(Vec::as_slice) {
+        Some([image]) => image,
         _ => return Err("manifest.json must list exactly one image".into()),
     };
-    let id = hex(&Sha256::digest(find(config_name)?));
+    let config_name = image["Config"]
+        .as_str()
+        .ok_or("manifest.json has no Config")?;
+    let config = find(config_name)?;
+    let id = hex(&Sha256::digest(config));
     if config_name != format!("{id}.json") {
         return Err(format!("config {config_name} has SHA-256 {id}"));
+    }
+
+    let config: serde_json::Value =
+        serde_json::from_slice(config).map_err(|e| format!("{config_name}: {e}"))?;
+    let layers = strings(&image["Layers"], "manifest.json Layers")?;
+    let diff_ids = strings(&config["rootfs"]["diff_ids"], "config rootfs.diff_ids")?;
+    if layers.len() != diff_ids.len() {
+        return Err(format!(
+            "{} layers but {} diff IDs",
+            layers.len(),
+            diff_ids.len()
+        ));
+    }
+    for (layer, diff_id) in layers.into_iter().zip(diff_ids) {
+        let actual = format!("sha256:{}", hex(&Sha256::digest(find(layer)?)));
+        if actual != diff_id {
+            return Err(format!(
+                "layer {layer} has {actual}, config expects {diff_id}"
+            ));
+        }
     }
     Ok(id)
 }
 
 /// Splits a USTAR archive into regular-file entries.
-fn tar_entries(tar: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
+pub(crate) fn tar_entries(tar: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
     let mut entries = Vec::new();
     let mut offset = 0;
     while let Some(header) = tar.get(offset..offset + 512) {
@@ -100,6 +124,13 @@ fn tar_entries(tar: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
         offset = start + size.div_ceil(512) * 512;
     }
     Err("tar has no end-of-archive marker".into())
+}
+
+fn strings<'a>(value: &'a serde_json::Value, what: &str) -> Result<Vec<&'a str>, String> {
+    value
+        .as_array()
+        .and_then(|a| a.iter().map(|v| v.as_str()).collect())
+        .ok_or_else(|| format!("{what} must be a list of strings"))
 }
 
 fn hex(bytes: &[u8]) -> String {

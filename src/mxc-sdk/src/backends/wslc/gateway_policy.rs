@@ -220,6 +220,16 @@ impl Rule {
     }
 }
 
+impl Policy {
+    /// Rejects policies whose listeners would collide.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.proxy_port == 53 {
+            return Err("proxy port 53 is reserved for the gateway's DNS".into());
+        }
+        Ok(())
+    }
+}
+
 impl Egress {
     /// Deny rules win over allow rules; `default` applies when no rule
     /// matches. Returns the decision and what made it.
@@ -396,5 +406,12 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value["extra"] = true.into();
         assert!(serde_json::from_value::<Policy>(value).is_err());
+
+        assert_eq!(policy.validate(), Ok(()));
+        let dns_port = Policy {
+            proxy_port: 53,
+            ..policy
+        };
+        assert!(dns_port.validate().is_err());
     }
 }

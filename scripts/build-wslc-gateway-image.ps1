@@ -12,7 +12,7 @@
 
     Run this after changing the gateway (`src/mxc-sdk/src/bin/wslc_gateway/`,
     `src/mxc-sdk/src/backends/wslc/gateway_policy.rs`), its dependencies or
-    the Rust toolchain, and commit the updated tars.
+    `$gatewayToolchain`, and commit the updated tars.
 
     Run it on Windows: panic locations embed source paths, and Windows paths
     differ from Linux paths, so a Linux build gives different image IDs. The
@@ -21,9 +21,9 @@
     ARM64 Windows runs it under emulation.
 
 .PREREQUISITES
-    rustup. The script installs the x64 Windows host toolchain for the channel
-    in `src/rust-toolchain.toml` with the musl targets and `rust-src`, and
-    links with the bundled `rust-lld`.
+    rustup. The script installs the x64 Windows host toolchain for
+    `$gatewayToolchain` with the musl targets and `rust-src`, and links with
+    the bundled `rust-lld`.
 #>
 [CmdletBinding()]
 param(
@@ -38,6 +38,9 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 $srcDir = Join-Path $repoRoot 'src'
 $assetsDir = Join-Path $srcDir 'mxc-sdk\assets'
 $profileName = 'wslc-gateway'
+# Exact compiler for the committed images, so a new patch release of the
+# workspace channel can't change their bytes. Keep it on that channel.
+$gatewayToolchain = '1.93.1'
 $targets = [ordered]@{
     'x86_64'  = @{ Triple = 'x86_64-unknown-linux-musl'; ImageArch = 'amd64' }
     'aarch64' = @{ Triple = 'aarch64-unknown-linux-musl'; ImageArch = 'arm64' }
@@ -116,8 +119,7 @@ foreach ($name in 'RUSTUP_TOOLCHAIN', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'C
 
 Push-Location $srcDir
 try {
-    $channel = (Select-String -Path 'rust-toolchain.toml' '^channel\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-    $env:RUSTUP_TOOLCHAIN = "$channel-x86_64-pc-windows-msvc"
+    $env:RUSTUP_TOOLCHAIN = "$gatewayToolchain-x86_64-pc-windows-msvc"
     $triples = @($targets.Values | ForEach-Object { $_.Triple })
     # With rust-src installed, rustc records std paths under the local
     # toolchain instead of /rustc/<commit>; require it and map it back.

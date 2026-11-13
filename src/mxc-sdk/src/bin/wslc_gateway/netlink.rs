@@ -224,8 +224,11 @@ impl Socket {
         Ok(())
     }
 
-    // Waits for `expected` acknowledgements; any netlink error fails the whole setup.
-    fn acks(&self, expected: usize) -> io::Result<()> {
+    /// Sends `messages` and waits for an acknowledgement of each one that
+    /// requests it. Any netlink error fails the whole setup.
+    fn request(&self, messages: &[u8]) -> io::Result<()> {
+        self.send(messages)?;
+        let expected = acks_requested(messages);
         let mut buf = vec![0u8; 65536];
         let mut got = 0;
         while got < expected {
@@ -233,33 +236,60 @@ impl Socket {
             if n < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let n = n as usize;
-            let mut off = 0;
-            while off + 16 <= n {
-                let len = u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-                let ty = u16::from_ne_bytes(buf[off + 4..off + 6].try_into().unwrap());
-                if len < 16 {
-                    break;
-                }
-                if ty == NLMSG_ERROR {
-                    let errno = i32::from_ne_bytes(buf[off + 16..off + 20].try_into().unwrap());
-                    if errno != 0 {
-                        return Err(io::Error::from_raw_os_error(-errno));
-                    }
-                    got += 1;
-                }
-                off += (len + 3) & !3;
-            }
+            got += read_acks(&buf[..n as usize])?;
         }
         Ok(())
     }
 }
 
+/// Splits concatenated netlink messages into (type, flags, whole message).
+fn messages(buf: &[u8]) -> impl Iterator<Item = (u16, u16, &[u8])> {
+    let mut off = 0;
+    std::iter::from_fn(move || {
+        let header = buf.get(off..off + 16)?;
+        let len = u32::from_ne_bytes(header[0..4].try_into().unwrap()) as usize;
+        let message = buf.get(off..off + len).filter(|_| len >= 16)?;
+        off += (len + 3) & !3;
+        Some((
+            u16::from_ne_bytes(header[4..6].try_into().unwrap()),
+            u16::from_ne_bytes(header[6..8].try_into().unwrap()),
+            message,
+        ))
+    })
+}
+
+fn acks_requested(batch: &[u8]) -> usize {
+    messages(batch)
+        .filter(|(_, flags, _)| flags & NLM_F_ACK != 0)
+        .count()
+}
+
+/// Counts the acknowledgements in a netlink reply, or returns the first error.
+fn read_acks(buf: &[u8]) -> io::Result<usize> {
+    let mut acks = 0;
+    for (ty, _, message) in messages(buf) {
+        if ty != NLMSG_ERROR {
+            continue;
+        }
+        let errno = message
+            .get(16..20)
+            .map(|b| i32::from_ne_bytes(b.try_into().unwrap()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "short netlink error"))?;
+        if errno != 0 {
+            return Err(io::Error::from_raw_os_error(-errno));
+        }
+        acks += 1;
+    }
+    Ok(acks)
+}
+
 pub fn interface_with_address(ip: Ipv4Addr) -> io::Result<u32> {
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut list) } < 0 {
+    let mut list = std::mem::MaybeUninit::<*mut libc::ifaddrs>::uninit();
+    if unsafe { libc::getifaddrs(list.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: getifaddrs succeeded, so it set the list head.
+    let list = unsafe { list.assume_init() };
     let mut found = None;
     let mut cur = list;
     while !cur.is_null() {
@@ -295,14 +325,16 @@ pub fn add_address(ifindex: u32, ip: Ipv4Addr, prefix: u8) -> io::Result<()> {
     m.raw(&ifindex.to_ne_bytes());
     m.attr(IFA_LOCAL, &ip.octets());
     m.attr(IFA_ADDRESS, &ip.octets());
-    sock.send(&m.finish())?;
-    sock.acks(1)
+    sock.request(&m.finish())
 }
 
 /// `table ip mxc { chain relay { type nat hook prerouting priority dstnat;
 ///   ip daddr <relay> meta l4proto tcp redirect to :<port> } }`
 pub fn redirect_to_relay(relay: Ipv4Addr, port: u16) -> io::Result<()> {
-    let sock = Socket::open(NETLINK_NETFILTER)?;
+    Socket::open(NETLINK_NETFILTER)?.request(&redirect_batch(relay, port))
+}
+
+fn redirect_batch(relay: Ipv4Addr, port: u16) -> Vec<u8> {
     let create = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
     let mut batch = Msg::nft(
         NFNL_MSG_BATCH_BEGIN,
@@ -369,8 +401,7 @@ pub fn redirect_to_relay(relay: Ipv4Addr, port: u16) -> io::Result<()> {
         )
         .finish(),
     );
-    sock.send(&batch)?;
-    sock.acks(3)
+    batch
 }
 
 /// Destination before the nftables redirect (`SO_ORIGINAL_DST`).
@@ -394,4 +425,71 @@ pub fn original_destination(fd: i32) -> io::Result<(Ipv4Addr, u16)> {
         Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
         u16::from_be(addr.sin_port),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn error_message(errno: i32) -> Vec<u8> {
+        let mut m = Msg::new(NLMSG_ERROR, 0, 1);
+        m.raw(&errno.to_ne_bytes());
+        m.raw(&[0u8; 16]);
+        m.finish()
+    }
+
+    #[test]
+    fn redirect_batch_is_one_transaction_with_three_acked_messages() {
+        let relay = Ipv4Addr::new(10, 231, 1, 3);
+        let batch = redirect_batch(relay, 41234);
+        let parsed: Vec<_> = messages(&batch).collect();
+        let types: Vec<u16> = parsed.iter().map(|(ty, _, _)| *ty).collect();
+        let nft = NFNL_SUBSYS_NFTABLES << 8;
+        assert_eq!(
+            types,
+            [
+                NFNL_MSG_BATCH_BEGIN,
+                nft | NFT_MSG_NEWTABLE,
+                nft | NFT_MSG_NEWCHAIN,
+                nft | NFT_MSG_NEWRULE,
+                NFNL_MSG_BATCH_END,
+            ]
+        );
+        let seqs: Vec<u32> = parsed
+            .iter()
+            .map(|(_, _, m)| u32::from_ne_bytes(m[8..12].try_into().unwrap()))
+            .collect();
+        assert_eq!(seqs, [1, 2, 3, 4, 5]);
+        let consumed: usize = parsed.iter().map(|(_, _, m)| (m.len() + 3) & !3).sum();
+        assert_eq!(consumed, batch.len());
+        assert_eq!(acks_requested(&batch), 3);
+
+        let rule = parsed[3].2;
+        assert!(contains(rule, &relay.octets()));
+        assert!(contains(rule, &41234u16.to_be_bytes()));
+    }
+
+    #[test]
+    fn read_acks_counts_acks_and_reports_errors() {
+        let mut reply = error_message(0);
+        reply.extend(Msg::new(3, 0, 2).finish());
+        reply.extend(error_message(0));
+        assert_eq!(read_acks(&reply).unwrap(), 2);
+
+        let mut reply = error_message(0);
+        reply.extend(error_message(-libc::EEXIST));
+        let error = read_acks(&reply).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+
+        let short = Msg::new(NLMSG_ERROR, 0, 1).finish();
+        assert_eq!(
+            read_acks(&short).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(read_acks(&[0u8; 10]).unwrap(), 0);
+    }
 }

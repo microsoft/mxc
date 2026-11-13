@@ -102,22 +102,26 @@ async fn serve_udp(socket: UdpSocket, resolver: Arc<Resolver>) -> Result<(), Str
     }
 }
 
-/// Answers length-prefixed queries in order until the client goes idle.
 async fn serve_tcp(listener: TcpListener, resolver: Arc<Resolver>) -> Result<(), String> {
-    accept_loop(listener, "DNS", move |mut client, _| {
+    accept_loop(listener, "DNS", move |client, _| {
         let resolver = resolver.clone();
-        async move {
-            while let Some(query) = read_message(&mut client).await {
-                let Some(reply) = resolver.answer(&query, Transport::Tcp).await else {
-                    break;
-                };
-                if write_message(&mut client, &reply).await.is_err() {
-                    break;
-                }
-            }
-        }
+        async move { answer_stream(client, &resolver).await }
     })
     .await
+}
+
+/// Answers length-prefixed queries in order until the client goes idle or
+/// stops reading replies.
+async fn answer_stream(mut stream: impl AsyncRead + AsyncWrite + Unpin, resolver: &Resolver) {
+    while let Some(query) = read_message(&mut stream).await {
+        let Some(reply) = resolver.answer(&query, Transport::Tcp).await else {
+            break;
+        };
+        let written = tokio::time::timeout(TCP_IDLE_TIMEOUT, write_message(&mut stream, &reply));
+        if !matches!(written.await, Ok(Ok(()))) {
+            break;
+        }
+    }
 }
 
 async fn read_message(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
@@ -151,26 +155,22 @@ fn decide(policy: &Policy, query: &[u8], upstream: Option<SocketAddrV4>) -> Opti
     let custom_proxy_name = policy.custom_proxy.as_ref().and_then(|p| p.name.as_deref());
     let local = if name.eq_ignore_ascii_case(HOST_LOOPBACK_NAME) {
         Some(policy.host_loopback.map(|h| h.relay_address))
-    } else if custom_proxy_name.is_some_and(|n| n.eq_ignore_ascii_case(&name)) {
+    } else if custom_proxy_name
+        .is_some_and(|n| n.strip_suffix('.').unwrap_or(n).eq_ignore_ascii_case(&name))
+    {
         Some(Some(policy.workload_address))
     } else {
         None
     };
     let answer = match (local, upstream) {
-        (Some(Some(ip)), _) => {
-            println!("DNS  {name} -> {ip} (local)");
-            reply(query, question_end, 0, (qtype == TYPE_A).then_some(ip))
-        }
+        (Some(Some(ip)), _) => reply(query, question_end, 0, (qtype == TYPE_A).then_some(ip)),
         (Some(None), _) => {
-            println!("DNS  {name} refused (host loopback denied)");
+            log!("DNS  {name:?} refused (host loopback denied)");
             reply(query, question_end, RCODE_REFUSED, None)
         }
-        (None, Some(upstream)) if policy.forward_dns => {
-            println!("DNS  {name} forwarded");
-            return Some(Answer::Forward(upstream));
-        }
+        (None, Some(upstream)) if policy.forward_dns => return Some(Answer::Forward(upstream)),
         (None, _) => {
-            println!("DNS  {name} refused");
+            log!("DNS  {name:?} refused");
             reply(query, question_end, RCODE_REFUSED, None)
         }
     };
@@ -320,8 +320,10 @@ mod tests {
     #[test]
     fn the_custom_proxy_name_resolves_to_the_gateway() {
         let q = query("proxy.corp", TYPE_A);
-        let r = reply_of(decide(&policy(false, false, Some("proxy.corp")), &q, None));
-        assert_eq!(&r[r.len() - 4..], &[10, 231, 1, 2]);
+        for name in ["proxy.corp", "Proxy.Corp."] {
+            let r = reply_of(decide(&policy(false, false, Some(name)), &q, None));
+            assert_eq!(&r[r.len() - 4..], &[10, 231, 1, 2]);
+        }
         let aaaa = reply_of(decide(
             &policy(false, false, Some("proxy.corp")),
             &query("proxy.corp", 28),
@@ -397,5 +399,56 @@ mod tests {
         write_message(&mut client, &q).await.unwrap();
         let forwarded = read_message(&mut client).await.unwrap();
         assert_eq!((forwarded[2] & 0x80, &forwarded[12..]), (0x80, &q[12..]));
+    }
+
+    #[tokio::test]
+    async fn udp_gets_local_and_forwarded_answers() {
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let std::net::SocketAddr::V4(upstream_address) = upstream.local_addr().unwrap() else {
+            unreachable!()
+        };
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, peer) = upstream.recv_from(&mut buf).await.unwrap();
+            buf[2] |= 0x80;
+            upstream.send_to(&buf[..n], peer).await.unwrap();
+        });
+
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let resolver = Arc::new(Resolver {
+            policy: Arc::new(policy(true, true, None)),
+            upstream: Some(upstream_address),
+        });
+        tokio::spawn(serve_udp(server, resolver));
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(address).await.unwrap();
+        let mut buf = [0u8; 512];
+        client
+            .send(&query("host.wslc.internal", TYPE_A))
+            .await
+            .unwrap();
+        let n = client.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[n - 4..n], &[10, 231, 1, 3]);
+
+        let q = query("example.com", TYPE_A);
+        client.send(&q).await.unwrap();
+        let n = client.recv(&mut buf).await.unwrap();
+        assert_eq!((buf[2] & 0x80, &buf[12..n]), (0x80, &q[12..]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tcp_client_that_stops_reading_is_disconnected() {
+        let (server, mut client) = tokio::io::duplex(64);
+        let resolver = Resolver {
+            policy: Arc::new(policy(false, true, None)),
+            upstream: None,
+        };
+        let q = query("host.wslc.internal", TYPE_A);
+        tokio::spawn(async move { while write_message(&mut client, &q).await.is_ok() {} });
+        tokio::time::timeout(3 * TCP_IDLE_TIMEOUT, answer_stream(server, &resolver))
+            .await
+            .expect("the stalled connection is closed");
     }
 }
