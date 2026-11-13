@@ -212,6 +212,33 @@ fn prepare_pipe_io(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn wait_for_output(_pipe: &impl std::os::windows::io::AsRawHandle) -> io::Result<()> {
+    thread::sleep(POLL);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_output(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: pipe.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // Wake as soon as the caller drains space, but bound the wait for cancellation.
+    // SAFETY: descriptor is initialized and its fd remains owned by this worker.
+    let result = unsafe { libc::poll(&mut descriptor, 1, POLL.as_millis() as i32) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    } else if descriptor.revents & libc::POLLNVAL != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    Ok(())
+}
+
 fn output_worker(
     pipe: io::PipeWriter,
     mut source: StreamReader,
@@ -235,7 +262,7 @@ fn output_worker(
                         Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
                         Ok(count) => pending = &pending[count..],
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(POLL)
+                            wait_for_output(pipe)?
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                         Err(error) => return Err(error),

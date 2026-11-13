@@ -138,6 +138,10 @@ Native streams preserve binary stdin/stdout/stderr. Closing every stdin writer,
 including the backend's original, sends StdinClose after Started; it does not
 close the output connection. Drain stdout and stderr concurrently. Each pending
 output queue has an 8 MiB ceiling, excluding one pump chunk and the OS pipe.
+Unix output pumps wait for pipe writability and resume as soon as callers drain
+space, with bounded waits so local cancellation remains effective.
+Native stdio transfer preserves the caller-facing output pipes' original blocking
+mode rather than exporting the cancellable reader's nonblocking mode.
 The transport reads output while stdin sends are backpressured. One pending
 stdin frame and at most 128 KiB of encrypted send data are buffered locally;
 socket writes are nonblocking, so cancellation and the client deadline remain

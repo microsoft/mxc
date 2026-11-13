@@ -513,6 +513,7 @@ fn native_execution_failure_and_disposal_fixture() {
     }
     fixture.script(|stream| {
         started(stream);
+        assert!(eof(stream).is_empty());
         send(stream, 0x12, b"partial capture is not success");
         send(
             stream,
@@ -525,7 +526,7 @@ fn native_execution_failure_and_disposal_fixture() {
         mxc_sdk::v1::dev::JsonOptions { experimental: true },
     )
     .unwrap_err();
-    assert!(error.message.contains("remote_exec_error"));
+    assert!(error.message.contains("remote_exec_error"), "{error}");
     let (release, released) = mpsc::channel();
     fixture.script(move |stream| {
         limit_receive_buffer(&stream.sock);
