@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::w365_agents;
-use crate::mxc_common::common_request_ir::CommonRequestIR;
 use crate::mxc_common::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
@@ -204,13 +202,6 @@ pub(super) fn provision_into_input(
 fn w365_agents_provision_into_input(
     request: contract::W365AgentsProvisionRequest,
 ) -> Result<StateAwareInput, WxcError> {
-    let (_, input) = w365_agents_contract_into_input(request);
-    Err(input.unavailable())
-}
-
-pub(super) fn w365_agents_contract_into_input(
-    request: contract::W365AgentsProvisionRequest,
-) -> (CommonRequestIR, w365_agents::Input) {
     let contract::W365AgentsProvisionRequest {
         schema,
         comment,
@@ -220,13 +211,13 @@ pub(super) fn w365_agents_contract_into_input(
         telemetry,
         w365_agents,
     } = request;
-    (
+    StateAwareInput::new(
         state_aware_common(schema, comment, version, telemetry),
-        w365_agents::Input::Provision(
+        StateAwareOperation::Provision(StateAwareProvision::W365Agents(
             w365_agents
                 .into_option()
                 .map(|wrapper| wrapper.provision.into_option().map(Into::into)),
-        ),
+        )),
     )
 }
 

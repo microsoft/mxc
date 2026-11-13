@@ -28,6 +28,15 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
 
+The development contract accepts experimental W365 provision settings
+`w365Agents.provision.poolId`, optional `userType` (`"Local"`, `"HumanUser"`, or `"Agentic"`) and
+optional `userObjectId`. Service configuration is environment-only; later
+lifecycle phases reject `w365Agents`. The
+[W365 backend guide](backends/w365agents/w365agents-backend.md) describes
+Phase 2 checkout/release, unavailable execution modes, cleanup identities
+and experimental Dev SDK JSON access. Acceptance by the development
+schema alone does not authorize execution or establish live-service compatibility.
+
 ### "MXC request JSON"
 
 "MXC request JSON" is a versioned request object defined by the
