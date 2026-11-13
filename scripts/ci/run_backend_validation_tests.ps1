@@ -112,6 +112,7 @@ function Invoke-ProcessContainerTests {
     }
     Write-Host $output
     Invoke-ProcessContainerStreamingTests
+    Invoke-ProcessContainerPsecLifetimeTests
     Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_base_container_network_tests.ps1') `
         -Arguments @{ BinDir = $binaryDirectoryPath }
     $finalPathProbe = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-final-path-probe.exe'
@@ -178,6 +179,21 @@ function Invoke-ScriptSuite {
     } | Out-Host
     if ($LASTEXITCODE -ne 0) { return "exited $LASTEXITCODE" }
     $skipped
+}
+
+# --nocapture keeps the PSEC-OBSERVATION lines in the job log.
+function Invoke-ProcessContainerPsecLifetimeTests {
+    $rustTests = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-sdk-process-container-psec-lifetime-tests.exe'
+    Assert-File -Path $rustTests
+
+    foreach ($rustCase in 'psec_handle_serves_sequential_launches', 'psec_handle_serves_concurrent_launches',
+        'psec_handle_close_with_running_and_terminated_children',
+        'psec_failures_leave_no_profile_and_do_not_poison_the_handle') {
+        $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-psec-lifetime-$rustCase.log" `
+            -ArgumentList @('--ignored', '--exact', $rustCase, '--nocapture', '--test-threads=1')
+        $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+        if ($failure) { throw "ProcessContainer PSEC lifetime: $failure" }
+    }
 }
 
 function Invoke-ProcessContainerStreamingTests {

@@ -105,7 +105,7 @@ if (-not $WxcExecPath) {
 }
 $testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @(
     '--test', 'isolation_session', '--test', 'sdk_helpers',
-    '--test', 'streaming_processcontainer', '--no-run'))
+    '--test', 'streaming_processcontainer', '--test', 'process_container_psec_lifetime', '--no-run'))
 $probeArtifacts = Invoke-CargoBuild (@('build') + $sdkPackage + @('--example', 'sta_probe'))
 $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session,wslc') |
     Where-Object { $_.target.name -eq 'mxc_ffi' } |
@@ -161,6 +161,7 @@ Invoke-Checked 'Building the native final-path fixture' {
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'isolation_session') -Destination (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'sdk_helpers') -Destination (Join-Path $inproc 'mxc-sdk-helpers-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'streaming_processcontainer') -Destination (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe')
+Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'process_container_psec_lifetime') -Destination (Join-Path $inproc 'mxc-sdk-process-container-psec-lifetime-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $probeArtifacts 'sta_probe') -Destination (Join-Path $inproc 'sta_probe.exe')
 
 $nodeExe = (Get-Command node -CommandType Application | Select-Object -First 1).Source
@@ -212,6 +213,7 @@ $required = @(
     'inproc\mxc-sdk-isolation-session-tests.exe',
     'inproc\mxc-sdk-helpers-tests.exe',
     'inproc\mxc-sdk-process-container-streaming-tests.exe',
+    'inproc\mxc-sdk-process-container-psec-lifetime-tests.exe',
     'inproc\mxc-final-path-probe.exe',
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
@@ -271,6 +273,11 @@ Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
 foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
     Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
         & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
+    }
+}
+foreach ($test in 'psec_handle_serves_sequential_launches', 'psec_handle_serves_concurrent_launches', 'psec_handle_close_with_running_and_terminated_children', 'psec_failures_leave_no_profile_and_do_not_poison_the_handle') {
+    Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
+        & (Join-Path $inproc 'mxc-sdk-process-container-psec-lifetime-tests.exe') --list --ignored --exact $test
     }
 }
 Assert-Discovery '.NET tests' 'Microsoft\.Mxc\.Sdk\.Tests' {
