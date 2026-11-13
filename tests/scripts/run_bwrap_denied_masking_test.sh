@@ -171,9 +171,8 @@ else
 fi
 
 # --- Broken denied symlinks ------------------------------------------------------
-# Unresolvable deniedPaths must stop startup; otherwise `..` after a broken link
-# could move the mask onto an unrelated path. The successful launches above are
-# the controls for this fixture tree.
+# Broken links and paths containing `..` must both stop startup. Parent
+# components are rejected before symlink resolution.
 sudo ln -s "$SYMBASE/missing_target" "$SYMBASE/dangling"
 sudo ln -s "$SYMBASE/loop" "$SYMBASE/loop"
 sudo chown -h "$(id -u):$(id -g)" "$SYMBASE/dangling" "$SYMBASE/loop"
@@ -183,6 +182,11 @@ for denied in \
     "$SYMBASE/dangling/../real_file.txt" \
     "$SYMBASE/loop" \
     "$SYMBASE/loop/../real_file.txt"; do
+    if [[ "$denied" == *"/../"* ]]; then
+        expected_error="contains a '..' segment"
+    else
+        expected_error="could not be resolved"
+    fi
     config=$(printf '{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"echo BROKEN_LINK_RAN"},"filesystem":{"readwritePaths":["%s"],"deniedPaths":["%s"]}}' \
         "$SYMBASE" "$denied")
     echo "Running Bubblewrap broken denied symlink test: $denied"
@@ -194,7 +198,7 @@ for denied in \
     fi
     if [ "$BROKEN_EXIT" -ne 0 ] \
         && ! echo "$BROKEN_OUT" | grep -q "BROKEN_LINK_RAN" \
-        && echo "$BROKEN_OUT" | grep -q "could not be resolved" \
+        && echo "$BROKEN_OUT" | grep -qF "$expected_error" \
         && echo "$BROKEN_OUT" | grep -qF "$denied"; then
         echo "PASS: broken denied symlink rejected before launch: $denied"
     else

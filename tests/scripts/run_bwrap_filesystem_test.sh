@@ -43,6 +43,17 @@ trap 'rm -rf -- "$POLICY_DIR"' EXIT
 mkdir -p "$POLICY_DIR/work/secret" "$POLICY_DIR/work/a" "$POLICY_DIR/work/b"
 CANARY="$POLICY_DIR/work/secret/canary.txt"
 echo HOST_ORIGINAL > "$CANARY"
+DIRECT_CANARY="$POLICY_DIR/work/canary.txt"
+echo HOST_ORIGINAL > "$DIRECT_CANARY"
+VISIBLE="$POLICY_DIR/work/a/visible.txt"
+echo VISIBLE_ORIGINAL > "$VISIBLE"
+# Denying the resolver target skips its extra mount sort, which could otherwise
+# hide a regression in the shared ordering of `.` paths.
+RESOLVER_TARGET=$(readlink -f /etc/resolv.conf)
+if [[ ! -f "$RESOLVER_TARGET" ]]; then
+    echo "FAIL: the resolver fixture must resolve to an existing file."
+    exit 1
+fi
 
 run_policy() {
     local filesystem="$1"
@@ -51,7 +62,7 @@ run_policy() {
   "version": "1.0.0",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "echo WORKLOAD_STARTED; cat $CANARY; echo MODIFIED > $CANARY",
+    "commandLine": "echo WORKLOAD_STARTED; cat $VISIBLE; cat $CANARY; echo MODIFIED > $CANARY",
     "timeout": 30000
   },
   "filesystem": {$filesystem}
@@ -59,18 +70,27 @@ run_policy() {
 EOF
 }
 
-for path in "$POLICY_DIR/work" "$POLICY_DIR/work/././"; do
-    OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$POLICY_DIR/work/secret\"]" 2>&1 || true)
-    if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
-        grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
-        [[ $(cat "$CANARY") != HOST_ORIGINAL ]]; then
-        echo "FAIL: parent grant $path must preserve its child's deny."
-        echo "$OUTPUT"
-        exit 1
+for denied in "$DIRECT_CANARY" "$POLICY_DIR/work/secret"; do
+    if [[ "$denied" == "$DIRECT_CANARY" ]]; then
+        CANARY="$DIRECT_CANARY"
+    else
+        CANARY="$denied/canary.txt"
     fi
-    echo "PASS: parent grant $path preserves its child's deny."
+    for path in "$POLICY_DIR/work" "$POLICY_DIR/work/././"; do
+        OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$denied\",\"$RESOLVER_TARGET\"]" 2>&1 || true)
+        if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
+            ! grep -q VISIBLE_ORIGINAL <<< "$OUTPUT" ||
+            grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
+            [[ $(cat "$CANARY") != HOST_ORIGINAL ]]; then
+            echo "FAIL: parent grant $path must preserve the deny for $denied."
+            echo "$OUTPUT"
+            exit 1
+        fi
+        echo "PASS: parent grant $path preserves the deny for $denied."
+    done
 done
 
+CANARY="$POLICY_DIR/work/secret/canary.txt"
 for path in "$POLICY_DIR/work/secret" "$POLICY_DIR/work/./secret"; do
     OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$POLICY_DIR/work\"]" 2>&1)
     if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
