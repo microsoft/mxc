@@ -430,7 +430,7 @@ function Run-StdinRoutingTest {
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
 # Setup for isolation_session_hello.json: cwd must exist before agent start.
-# Removed first — the same idiom the concurrent dirs below use — because a run
+# Removed first — the same idiom the concurrent dir below uses — because a run
 # that dies before the scratch cleanup leaves this behind, and a stale directory
 # must not outlive the run that created it.
 Remove-Item -Recurse -Force 'C:\mxc_workdir_test' -ErrorAction SilentlyContinue
@@ -544,220 +544,222 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_r
 
 # ---------------- Concurrent one-shot test ----------------
 #
-# Three wxc-exec processes (A, B, C) run a per-agent PowerShell script
-# from a shared host directory that grants Authenticated Users write access.
-# Each script writes timestamped lines to its own X.log file: "X-started",
-# "X-still-alive-1" .. "X-still-alive-N", "X-done", with one second
-# between iterations. After all three wxc-execs exit, the test reads each
-# agent's log file and asserts (a) the wxc-exec exited 0, (b) the log
-# contains start / final-still-alive / done markers, (c) timestamps are
-# monotonic. If any isolation session is torn down mid-run its log is
-# truncated, and if cleanup fails its wxc-exec exit code is non-zero. A
-# fresh fourth process (D) then proves subsequent sandboxes still work.
+# Overlapping one-shot sessions must each run to completion: one session's
+# start-up or teardown must not cut a sibling short.
 #
-# Each launch is gated on the previously-launched agent's "X-started"
-# line appearing in its log file. Polling the log file (not wxc-exec's
-# stdout) avoids matching the --debug Logger's command-line echo. The
-# barrier prevents the OS-side per-StartSessionAsync setup race where
-# two StartSessionAsync calls landing within ~1-2s of each other leave
-# the second isolation session unusable.
+# Each workload (isolation_session_concurrent_A/B/C.json) prints "X-started",
+# waits in `set /p` for a line on stdin, and echoes it as "X-released-<line>".
+# A, B and C start one at a time, each after the previous one has printed
+# "X-started", so every start-up happens while the earlier sessions are
+# running. The harness then releases B, A and C in turn, waiting for each
+# wxc-exec to exit before the next release. wxc-exec returns only after its
+# session's stop and account removal have completed, so A runs through B's
+# whole teardown, and C through B's and A's.
+#
+# A session passes when it printed "X-started", outlived every session released
+# before it, echoed its own release token "PROCEED-X" exactly, and its wxc-exec
+# exited 0, so a token delivered to the wrong session fails that session. The
+# exit code reports the workload, not the teardown: an account left behind
+# fails the account check around the isolation-session suites in
+# scripts/ci/run_backend_validation_tests.ps1.
+#
+# Markers are matched as whole lines because --debug echoes the command line,
+# which contains them. On any failure, every session still held is sent ABORT:
+# closing its stdin does not release it (see
+# a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops in
+# src/mxc-sdk/tests/isolation_session.rs).
 
 Write-Host ""
 Write-Host "--- Concurrent one-shot ---" -ForegroundColor Cyan
-
-# Shared host directory the three agent PS1 scripts and X.log files live in.
-# The backend does not accept filesystem policy, so grant write access at
-# the host ACL layer to Authenticated Users (S-1-5-11). Agent users are local
-# accounts and are members of that group.
-$concurrentLogDir = 'C:\mxc_concurrent_log'
-Remove-Item -Recurse -Force $concurrentLogDir -ErrorAction SilentlyContinue
-New-Item -Path $concurrentLogDir -ItemType Directory -Force | Out-Null
-$aclOutput = & icacls $concurrentLogDir /grant '*S-1-5-11:(OI)(CI)M' 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to grant Authenticated Users write access to ${concurrentLogDir}: $aclOutput"
-}
 
 # wxc-exec stdout/stderr capture dir. Cleared at the start of every run, and
 # removed again at the end of a green one; a failing run leaves it for inspection.
 $concurrentTempRoot = Join-Path $env:TEMP 'mxc_concurrent_oneshot'
 Remove-Item -Recurse -Force $concurrentTempRoot -ErrorAction SilentlyContinue
 New-Item -Path $concurrentTempRoot -ItemType Directory -Force | Out-Null
-$stdoutA = Join-Path $concurrentTempRoot 'A.stdout.txt'
-$stderrA = Join-Path $concurrentTempRoot 'A.stderr.txt'
-$stdoutB = Join-Path $concurrentTempRoot 'B.stdout.txt'
-$stderrB = Join-Path $concurrentTempRoot 'B.stderr.txt'
-$stdoutC = Join-Path $concurrentTempRoot 'C.stdout.txt'
-$stderrC = Join-Path $concurrentTempRoot 'C.stderr.txt'
 
-# Generate one PS1 script per agent. Each writes timestamped lines to
-# its own X.log file. Backtick-escaped expressions (`$(Get-Date), `$_)
-# survive this here-string verbatim so they're evaluated by the inner
-# PowerShell when the agent runs the script.
-function Write-AgentScript {
-    param([string]$Label, [int]$IterCount)
-    $logPath = Join-Path $concurrentLogDir "$Label.log"
-    $body = @"
-Add-Content -Path '$logPath' -Value "`$(Get-Date -Format 'HH:mm:ss.fff') $Label-started"
-1..$IterCount | ForEach-Object {
-    Add-Content -Path '$logPath' -Value "`$(Get-Date -Format 'HH:mm:ss.fff') $Label-still-alive-`$_"
-    Start-Sleep -Seconds 1
-}
-Add-Content -Path '$logPath' -Value "`$(Get-Date -Format 'HH:mm:ss.fff') $Label-done"
-"@
-    Set-Content -Path (Join-Path $concurrentLogDir "$Label.ps1") -Value $body -Encoding UTF8
-}
+# The A, B and C configs' process.timeout must stay above 120 s, the longest
+# these waits can hold a session.
+$concurrentStartWaitSec = 30
+$concurrentExitWaitSec = 60
 
-Write-AgentScript -Label 'A' -IterCount 15
-Write-AgentScript -Label 'B' -IterCount 5
-Write-AgentScript -Label 'C' -IterCount 30
-
-# Launch helper: route wxc-exec through `cmd /c` with cmd-managed shell
-# redirects (`1>` / `2>`). PowerShell's Start-Process -RedirectStandardOutput
-# combined with -NoNewWindow has known issues under concurrent launches.
-# -WindowStyle Hidden gives each cmd.exe its own (invisible) console
-# session. --debug routes wxc-exec's Logger to stdout so the per-process
-# "agent user = <name>" line lands in the capture file (otherwise the
-# Logger buffer is silently dropped on one-shot exit).
-function Start-ConcurrentWxc {
-    param([string]$Exec, [string]$ConfigPath, [string]$StdoutFile, [string]$StderrFile)
-    $cmdLine = "/c $Exec --debug $ConfigPath 1>$StdoutFile 2>$StderrFile"
-    Start-Process -FilePath cmd.exe -ArgumentList $cmdLine -WindowStyle Hidden -PassThru
-}
-
-# Block until "X-started" appears in $LogPath (the agent's own log file,
-# not the wxc-exec stdout capture), peeking while the agent's PowerShell
-# still holds the file open for Add-Content.
-function Wait-AgentLogStart {
-    param([string]$Label, [string]$LogPath, [int]$TimeoutSeconds = 30)
-    $pattern = [regex]::new("\b$Label-started\b")
-    $start = Get-Date
-    while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
-        if ($pattern.IsMatch((Read-LiveFile $LogPath))) {
-            $elapsed = ((Get-Date) - $start).TotalMilliseconds
-            Write-Host "  $Label-started in log after $([int]$elapsed) ms" -ForegroundColor DarkGray
-            return $true
-        }
-        Start-Sleep -Milliseconds 100
+# Start-Process does not pass this script's stdout and stderr on to cmd.exe, as
+# Process.Start with a redirected stream does, so a wxc-exec left running after
+# a timeout cannot keep the script's output open. Stdin therefore comes from a
+# named pipe, buffered so that a write returns without waiting for wxc-exec to
+# read it.
+function Start-HeldSession {
+    param([string]$Label)
+    $stdout = Join-Path $concurrentTempRoot "$Label.stdout.txt"
+    $stderr = Join-Path $concurrentTempRoot "$Label.stderr.txt"
+    $config = Join-Path $ConfigDir "isolation_session_concurrent_$Label.json"
+    $pipeName = "mxc-concurrent-$PID-$Label"
+    $stdin = New-Object System.IO.Pipes.NamedPipeServerStream($pipeName, [System.IO.Pipes.PipeDirection]::Out, 1,
+        [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous, 0, 4096)
+    $command = '/d /s /c ""{0}" --debug "{1}" 0<"\\.\pipe\{2}" 1>"{3}" 2>"{4}""' -f $WxcExec, $config, $pipeName, $stdout, $stderr
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $process = Start-Process -FilePath $env:ComSpec -ArgumentList $command -WindowStyle Hidden -PassThru
+    $connecting = $stdin.BeginWaitForConnection($null, $null)
+    $held = $connecting.AsyncWaitHandle.WaitOne($concurrentStartWaitSec * 1000)
+    if ($held) { $stdin.EndWaitForConnection($connecting) } else { $stdin.Dispose() }
+    return @{
+        Label = $Label; Process = $process; Stdin = $stdin; Clock = $clock
+        Held = $held; Passed = $false; Failure = ''; Stdout = $stdout; Stderr = $stderr
     }
-    Write-Host "  WARN: $Label-started did not appear in log within ${TimeoutSeconds}s -- launching next anyway" -ForegroundColor Yellow
+}
+
+function Test-CaptureLine {
+    param([string]$Path, [string]$Line)
+    foreach ($captured in ((Read-LiveFile $Path) -split "`r?`n")) {
+        if ($captured.Trim() -ceq $Line) { return $true }
+    }
     return $false
 }
 
-$pA = $null; $pB = $null; $pC = $null
+# Milliseconds from launch until the session printed "X-started", or -1 if it
+# did not within the start wait.
+function Wait-SessionStarted {
+    param($Session)
+    $marker = "$($Session.Label)-started"
+    $clock = $Session.Clock
+    while ($clock.Elapsed.TotalSeconds -lt $concurrentStartWaitSec -and -not $Session.Process.HasExited) {
+        if (Test-CaptureLine $Session.Stdout $marker) { return [int]$clock.Elapsed.TotalMilliseconds }
+        Start-Sleep -Milliseconds 100
+    }
+    if (Test-CaptureLine $Session.Stdout $marker) { return [int]$clock.Elapsed.TotalMilliseconds }
+    return -1
+}
+
+function Send-SessionLine {
+    param($Session, [string]$Line)
+    if (-not $Session.Held) { return }
+    $Session.Held = $false
+    try {
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes("$Line`r`n")
+        $Session.Stdin.Write($bytes, 0, $bytes.Length)
+        $Session.Stdin.Flush()
+    } catch {
+        # Writing fails if the session has ended; its checks report that.
+    }
+    try { $Session.Stdin.Close() } catch { }
+}
+
+# On timeout this kills cmd.exe but leaves wxc-exec running: killing wxc-exec
+# would skip the teardown that removes the session's account.
+function Wait-SessionExit {
+    param($Session)
+    if ($Session.Process.WaitForExit($concurrentExitWaitSec * 1000)) { return $true }
+    try { $Session.Process.Kill() } catch { }
+    return $false
+}
+
+# The digest is capped so that the summary's failure lines stay short for
+# runners that keep only the tail of the output.
+function Get-SessionDigest {
+    param($Session)
+    $stdout = @((Read-LiveFile $Session.Stdout) -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 5)
+    $stderr = @((Read-LiveFile $Session.Stderr) -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2)
+    $digest = (@($stdout + $stderr) | ForEach-Object { $_.Trim() }) -join ' | '
+    if ($digest.Length -gt 400) { $digest = $digest.Substring(0, 397) + '...' }
+    return $digest
+}
 
 # Scratch directories this script creates that must not outlive the run.
 # Removal of each is attempted quietly, since an already-absent directory is the
 # normal case, then asserted — a directory held by a scanner or blocked by an
 # ACL would otherwise survive a green run, which is the state this cleanup
-# exists to prevent. Declared here so the cleanup in the finally below and the
-# post-summary cleanup both record into it.
+# exists to prevent.
 $scratchLeft = @()
 
+$concurrentSessions = [ordered]@{}
+$concurrentAbort = ''
 try {
-    Write-Host "  starting A (15 still-alive iters), B (5), C (30) with log-file barriers..." -ForegroundColor Gray
-    $pA = Start-ConcurrentWxc -Exec $WxcExec `
-        -ConfigPath (Join-Path $ConfigDir 'isolation_session_concurrent_A.json') `
-        -StdoutFile $stdoutA -StderrFile $stderrA
-    [void](Wait-AgentLogStart -Label 'A' -LogPath (Join-Path $concurrentLogDir 'A.log'))
-    $pB = Start-ConcurrentWxc -Exec $WxcExec `
-        -ConfigPath (Join-Path $ConfigDir 'isolation_session_concurrent_B.json') `
-        -StdoutFile $stdoutB -StderrFile $stderrB
-    [void](Wait-AgentLogStart -Label 'B' -LogPath (Join-Path $concurrentLogDir 'B.log'))
-    $pC = Start-ConcurrentWxc -Exec $WxcExec `
-        -ConfigPath (Join-Path $ConfigDir 'isolation_session_concurrent_C.json') `
-        -StdoutFile $stdoutC -StderrFile $stderrC
-    [void](Wait-AgentLogStart -Label 'C' -LogPath (Join-Path $concurrentLogDir 'C.log'))
-
-    # Wait for all three to exit. Generous per-process timeout because
-    # OS-side teardown can take tens of seconds.
-    Write-Host "  waiting for all three wxc-execs to exit..." -ForegroundColor Gray
-    $aFinished = $pA.WaitForExit(120000)
-    $bFinished = $pB.WaitForExit(120000)
-    $cFinished = $pC.WaitForExit(120000)
-    Write-Host "  A finished=$aFinished exit=$($pA.ExitCode)" -ForegroundColor Gray
-    Write-Host "  B finished=$bFinished exit=$($pB.ExitCode)" -ForegroundColor Gray
-    Write-Host "  C finished=$cFinished exit=$($pC.ExitCode)" -ForegroundColor Gray
-
-    # Agent-user-name extraction (from wxc-exec --debug stdout) for leak
-    # attribution if any deprovision silently fails downstream.
-    foreach ($pair in @(
-            @{ Label = 'A'; Stdout = $stdoutA; Stderr = $stderrA },
-            @{ Label = 'B'; Stdout = $stdoutB; Stderr = $stderrB },
-            @{ Label = 'C'; Stdout = $stdoutC; Stderr = $stderrC }
-        )) {
-        $combined = ''
-        if (Test-Path $pair.Stdout) { $combined += [string](Get-Content $pair.Stdout -Raw) }
-        if (Test-Path $pair.Stderr) { $combined += [string](Get-Content $pair.Stderr -Raw) }
-        $m = [regex]::Match($combined, 'Isolation Session: agent user = (\S+)')
-        $agentName = if ($m.Success) { $m.Groups[1].Value } else { '<not found>' }
-        Write-Host "  $($pair.Label) agent: $agentName" -ForegroundColor DarkGray
+    foreach ($label in 'A', 'B', 'C') {
+        $session = Start-HeldSession $label
+        $concurrentSessions[$label] = $session
+        if (-not $session.Held) {
+            $session.Failure = "$label's cmd.exe did not open its stdin pipe within $concurrentStartWaitSec s"
+        } else {
+            $startedMs = Wait-SessionStarted $session
+            if ($startedMs -lt 0) { $session.Failure = "no $label-started line within $concurrentStartWaitSec s" }
+        }
+        if ($session.Failure) {
+            $concurrentAbort = $session.Failure
+            break
+        }
+        Write-Host "  $label started after $startedMs ms" -ForegroundColor DarkGray
     }
 
-    # Per-agent assertions from log file. Each X.log line is prefixed
-    # with HH:mm:ss.fff so we can also check monotonicity.
-    $tsPattern = [regex]::new('^(\d\d):(\d\d):(\d\d)\.(\d\d\d)\s')
-    foreach ($spec in @(
-            @{ Label = 'A'; Process = $pA; Iters = 15 },
-            @{ Label = 'B'; Process = $pB; Iters = 5 },
-            @{ Label = 'C'; Process = $pC; Iters = 30 }
-        )) {
-        $label = $spec.Label
-        $proc = $spec.Process
-        $iters = $spec.Iters
-        $logPath = Join-Path $concurrentLogDir "$label.log"
-        $log = if (Test-Path $logPath) { [string](Get-Content $logPath -Raw) } else { '' }
-        if ($null -eq $log) { $log = '' }
+    $releaseOrder = @('B', 'A', 'C')
+    for ($i = 0; $i -lt $releaseOrder.Count -and -not $concurrentAbort; $i++) {
+        $session = $concurrentSessions[$releaseOrder[$i]]
+        $label = $session.Label
+        $token = "PROCEED-$label"
+        $clock = [System.Diagnostics.Stopwatch]::StartNew()
+        Send-SessionLine $session $token
+        if (-not (Wait-SessionExit $session)) {
+            $session.Failure = "still running $concurrentExitWaitSec s after its release"
+            $concurrentAbort = "$label $($session.Failure)"
+            break
+        }
+        $exitCode = $session.Process.ExitCode
+        Write-Host "  $label released; wxc-exec exited $exitCode after $([int]$clock.Elapsed.TotalMilliseconds) ms" -ForegroundColor DarkGray
 
-        $reasons = New-Object System.Collections.ArrayList
-        if ($proc.ExitCode -ne 0) { [void]$reasons.Add("wxc-exec exit=$($proc.ExitCode)") }
-        if (-not ($log -match "\b$label-started\b")) { [void]$reasons.Add("$label-started missing") }
-        if (-not ($log -match "\b$label-still-alive-$iters\b")) { [void]$reasons.Add("$label-still-alive-$iters missing (truncated?)") }
-        if (-not ($log -match "\b$label-done\b")) { [void]$reasons.Add("$label-done missing") }
-
-        # Monotonicity check: every line is "HH:mm:ss.fff <message>";
-        # successive timestamps must not regress. Cheap defense against
-        # pathological scheduling weirdness inside the isolation session.
-        $prevTicks = [int64]-1
-        $lineNum = 0
-        foreach ($line in ($log -split "`r?`n")) {
-            $lineNum++
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $m = $tsPattern.Match($line)
-            if (-not $m.Success) { continue }
-            $ticks = ([int]$m.Groups[1].Value * 3600000) +
-                     ([int]$m.Groups[2].Value * 60000) +
-                     ([int]$m.Groups[3].Value * 1000) +
-                     ([int]$m.Groups[4].Value)
-            if ($prevTicks -ge 0 -and $ticks -lt $prevTicks) {
-                [void]$reasons.Add("timestamp regression at line $lineNum")
-                break
+        $problems = @()
+        if ($exitCode -ne 0) { $problems += "wxc-exec exit $exitCode" }
+        if (-not (Test-CaptureLine $session.Stdout "$label-released-$token")) {
+            $problems += "no $label-released-$token line"
+        }
+        if ($problems.Count -gt 0) {
+            $session.Failure = $problems -join '; '
+            $concurrentAbort = "$label failed its checks"
+        } else {
+            $session.Passed = $true
+        }
+        # Every session released later must have outlived this one's teardown.
+        for ($j = $i + 1; $j -lt $releaseOrder.Count; $j++) {
+            $later = $concurrentSessions[$releaseOrder[$j]]
+            if ($later.Process.HasExited) {
+                $later.Failure = "not running after $label's wxc-exec exited"
+                if (-not $concurrentAbort) { $concurrentAbort = "$($later.Label) ended early" }
             }
-            $prevTicks = $ticks
         }
-
-        $pass = ($reasons.Count -eq 0)
-        $reasonStr = ($reasons -join '; ')
-        Write-Host "  concurrent: $label ran full sequence ... $(if ($pass) { 'PASS' } else { 'FAIL: ' + $reasonStr })" `
-            -ForegroundColor $(if ($pass) { 'Green' } else { 'Red' })
-        $null = $results.Add(@{ Name = "concurrent: $label ran full sequence"; Pass = $pass; Skipped = $false; Reason = $reasonStr })
     }
-
-    # Fresh D after A/B/C: verifies the leak does not poison subsequent
-    # sandboxes. D uses the original ping-based simple form (no shared log
-    # dir), exercising the unmodified one-shot path.
-    $null = $results.Add((Run-IsolationSessionTest "isolation_session_concurrent_D.json" `
-        -OutputContains @("D-start", "D-done")))
+} catch {
+    $concurrentAbort = "harness error: $($_.Exception.Message)"
 } finally {
-    foreach ($p in @($pA, $pB, $pC)) {
-        if ($null -ne $p -and -not $p.HasExited) {
-            try { $p.Kill() } catch { }
+    foreach ($session in $concurrentSessions.Values) { Send-SessionLine $session 'ABORT' }
+    foreach ($session in $concurrentSessions.Values) {
+        if (-not $session.Process.HasExited -and -not (Wait-SessionExit $session)) {
+            if (-not $session.Failure) { $session.Failure = "aborted: $concurrentAbort" }
+            $session.Failure += "; still running $concurrentExitWaitSec s after ABORT"
         }
     }
-    # Clean up the shared agent log dir. The wxc-exec stdout/stderr capture
-    # dir is handled after the summary, where the pass/fail outcome is known.
-    Remove-Item -Recurse -Force $concurrentLogDir -ErrorAction SilentlyContinue
-    if (Test-Path $concurrentLogDir) { $scratchLeft += $concurrentLogDir }
 }
+
+$concurrentNames = [ordered]@{
+    A = "concurrent: A held across B's and C's starts and B's teardown"
+    B = "concurrent: B held across C's start"
+    C = "concurrent: C held across B's and A's teardowns"
+}
+foreach ($label in $concurrentNames.Keys) {
+    $session = $concurrentSessions[$label]
+    $reason = ''
+    if ($null -ne $session -and $session.Failure) {
+        $digest = Get-SessionDigest $session
+        $reason = if ($digest) { "$($session.Failure); last output: $digest" } else { $session.Failure }
+    } elseif ($null -eq $session -or -not $session.Passed) {
+        $reason = "aborted: $concurrentAbort"
+    }
+    $pass = ($reason -eq '')
+    Write-Host "  $($concurrentNames[$label]) ... $(if ($pass) { 'PASS' } else { 'FAIL: ' + $reason })" `
+        -ForegroundColor $(if ($pass) { 'Green' } else { 'Red' })
+    $null = $results.Add(@{ Name = $concurrentNames[$label]; Pass = $pass; Skipped = $false; Reason = $reason })
+}
+
+# A session started after A, B and C have ended must still work.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_concurrent_D.json" `
+    -OutputContains @("D-start", "D-done")))
 
 
 # ---------------- Positive network oracle ----------------
