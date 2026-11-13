@@ -165,6 +165,11 @@ fn persist(sandbox_id: &str, root: &str) {
 /// Directory holding one record per live sandbox lifecycle. Uses the same
 /// per-user root resolution as the telemetry consent store.
 fn store_dir() -> Option<PathBuf> {
+    // Unit tests that install no `StoreDirGuard` must not read, write or sweep
+    // the developer's real store.
+    if cfg!(test) {
+        return None;
+    }
     store_dir_from_local_app_data(super::consent::local_app_data_dir())
 }
 
@@ -490,12 +495,18 @@ impl CorrelationStore for FilesystemCorrelationStore {
 
 #[cfg(any(test, feature = "test-support", debug_assertions))]
 pub mod test_support {
+    use std::cell::RefCell;
     use std::path::Path;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use super::{CorrelationStore, FilesystemCorrelationStore};
 
-    static STORE_OVERRIDE: Mutex<Option<Arc<dyn CorrelationStore>>> = Mutex::new(None);
+    thread_local! {
+        // Per thread, so a concurrent test that dispatches without a guard
+        // cannot sweep or write another test's store.
+        static STORE_OVERRIDE: RefCell<Option<Arc<dyn CorrelationStore>>> =
+            const { RefCell::new(None) };
+    }
     static OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
     pub(crate) fn lock_test_environment() -> MutexGuard<'static, ()> {
@@ -503,18 +514,12 @@ pub mod test_support {
     }
 
     pub(crate) fn store_override() -> Option<Arc<dyn CorrelationStore>> {
-        STORE_OVERRIDE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        STORE_OVERRIDE.with(|current| current.borrow().clone())
     }
 
     pub(crate) fn replace_store(store: Arc<dyn CorrelationStore>) -> StoreGuard {
         let lock = lock_test_environment();
-        let previous = STORE_OVERRIDE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(store);
+        let previous = STORE_OVERRIDE.with(|current| current.replace(Some(store)));
         StoreGuard {
             previous,
             _lock: lock,
@@ -528,10 +533,13 @@ pub mod test_support {
 
     impl Drop for StoreGuard {
         fn drop(&mut self) {
-            *STORE_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = self.previous.take();
+            let previous = self.previous.take();
+            STORE_OVERRIDE.with(|current| *current.borrow_mut() = previous);
         }
     }
 
+    /// Redirects correlation storage to a directory for the calling thread
+    /// until dropped.
     pub struct StoreDirGuard {
         _guard: StoreGuard,
     }
@@ -874,14 +882,15 @@ mod tests {
     #[test]
     fn concurrent_persists_for_distinct_ids_do_not_collide_on_temp_names() {
         let tmp = tempfile::tempdir().unwrap();
-        let _guard = StoreDirGuard::set(tmp.path());
 
         std::thread::scope(|scope| {
             for i in 0..8 {
+                let dir = tmp.path().to_path_buf();
                 scope.spawn(move || {
+                    let store = FilesystemCorrelationStore::from_store_root(dir);
                     let id = format!("wsb:{i:08x}");
-                    with_store(|store| store.persist(&id, &seed()));
-                    assert!(with_store(|store| store.load(&id)).is_some());
+                    store.persist(&id, &seed());
+                    assert!(store.load(&id).is_some());
                 });
             }
         });
@@ -1055,6 +1064,25 @@ mod tests {
             })
             .count();
         assert_eq!(remaining_records, 10);
+    }
+
+    #[test]
+    fn unguarded_thread_does_not_sweep_another_threads_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let path = tmp.path().join(format!("stale.{RECORD_EXTENSION}"));
+        fs::write(&path, seed()).unwrap();
+        let stale_time = SystemTime::now() - STALE_RECORD_MAX_AGE - Duration::from_secs(1);
+        filetime::set_file_mtime(&path, FileTime::from_system_time(stale_time)).unwrap();
+
+        std::thread::spawn(|| pre_dispatch_vector(true, Phase::Provision, None))
+            .join()
+            .unwrap();
+
+        assert!(
+            path.exists(),
+            "a dispatch without its own guard must not sweep this store"
+        );
     }
 
     #[test]
