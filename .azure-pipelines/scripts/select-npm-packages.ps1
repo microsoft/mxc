@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# Validate and stage the selected npm packages for the release pipeline.
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -15,6 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Selection
 if ([string]::IsNullOrWhiteSpace($PackageSelection)) {
     throw 'Select at least one npm package to publish.'
 }
@@ -36,11 +39,13 @@ $packages = @(
         @{ Name = 'nvx'; Id = '@microsoft/mxc-sdk-nvx-runtime-win32-x64'; Directory = (Join-Path $PayloadDirectory 'nvx') }
     }
 )
+
+# Validate all selected packages before staging any files.
 foreach ($package in $packages) {
     if (-not (Test-Path -LiteralPath $package.Directory -PathType Container)) {
         throw "Missing package directory: $($package.Directory)"
     }
-    $files = @(Get-ChildItem -LiteralPath $package.Directory -Filter '*.tgz' -File -ErrorAction Stop)
+    $files = @(Get-ChildItem -LiteralPath $package.Directory -Filter '*.tgz' -File)
     if ($files.Count -ne 1) {
         throw "Expected exactly one $($package.Id) package in $($package.Directory), found $($files.Count)"
     }
@@ -49,7 +54,7 @@ foreach ($package in $packages) {
     if ($LASTEXITCODE -ne 0) {
         throw "Cannot read package/package.json from $($package.File.Name)"
     }
-    $manifest = ($manifestJson -join "`n") | ConvertFrom-Json -ErrorAction Stop
+    $manifest = ($manifestJson -join "`n") | ConvertFrom-Json
     if ($manifest.name -cne $package.Id) {
         throw "Invalid package identity in $($package.File.Name)"
     }
@@ -63,8 +68,10 @@ foreach ($package in $packages) {
 if ($packages.Count -eq 2 -and $packages[0].Version -cne $packages[1].Version) {
     throw 'SDK and NVX runtime package versions do not match.'
 }
+
+# Release staging
 foreach ($package in $packages) {
     $directory = Join-Path $ReleaseDirectory $package.Name
-    New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
-    Copy-Item -LiteralPath $package.File.FullName -Destination $directory -ErrorAction Stop
+    New-Item -ItemType Directory -Path $directory | Out-Null
+    Copy-Item -LiteralPath $package.File.FullName -Destination $directory
 }

@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# Exercise NuGet release selection and rejection without publishing packages.
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -53,27 +55,35 @@ function Assert-Failure {
 }
 
 try {
-    $payload = Join-Path $root 'both'
-    $nvx = Join-Path $payload 'nvx'
-    New-TestPackage $payload 'Microsoft.Mxc.Sdk.1.2.3.nupkg' 'Microsoft.Mxc.Sdk' '1.2.3'
-    New-TestPackage $nvx 'Microsoft.Mxc.Sdk.Nvx.Runtime.1.2.3.nupkg' 'Microsoft.Mxc.Sdk.Nvx.Runtime' '1.2.3'
-    Copy-Item -LiteralPath $selector -Destination $payload
-    $selector = Join-Path $payload 'select-dotnet-nuget-packages.ps1'
-    $release = Join-Path $root 'both-release'
-    $output = @(& $selector -PayloadDirectory $payload -ReleaseDirectory $release `
-        -PackageSelection 'publish-nvx-runtime,publish-sdk' 6>&1 | ForEach-Object { "$_" })
-    foreach ($package in @(
-        @{ Name = 'sdk'; File = 'Microsoft.Mxc.Sdk.1.2.3.nupkg'; Source = $payload }
-        @{ Name = 'nvx'; File = 'Microsoft.Mxc.Sdk.Nvx.Runtime.1.2.3.nupkg'; Source = $nvx }
+    $artifact = Join-Path $root 'artifact'
+    New-Item -ItemType Directory -Path $artifact | Out-Null
+    Copy-Item -LiteralPath $selector -Destination $artifact
+    $selector = Join-Path $artifact 'select-dotnet-nuget-packages.ps1'
+    foreach ($variant in @(
+        @{ Name = 'public'; Version = '1.2.3' }
+        @{ Name = 'internal'; Version = '1.2.3-internal-build123' }
     )) {
-        $staged = Join-Path (Join-Path $release $package.Name) $package.File
-        if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) { throw "Missing $staged" }
-        if ((Get-FileHash -LiteralPath $staged).Hash -ne
-            (Get-FileHash -LiteralPath (Join-Path $package.Source $package.File)).Hash) {
-            throw "Staged package differs from input: $staged"
-        }
-        if (-not ($output -contains "##vso[task.setvariable variable=NuGetPackagePath_$($package.Name)]$staged")) {
-            throw "Missing pipeline variable for $($package.Name): $output"
+        $payload = Join-Path $artifact $variant.Name
+        $nvx = Join-Path $payload 'nvx'
+        $version = $variant.Version
+        New-TestPackage $payload "Microsoft.Mxc.Sdk.$version.nupkg" 'Microsoft.Mxc.Sdk' $version
+        New-TestPackage $nvx "Microsoft.Mxc.Sdk.Nvx.Runtime.$version.nupkg" 'Microsoft.Mxc.Sdk.Nvx.Runtime' $version
+        $release = Join-Path $root "$($variant.Name)-release"
+        $output = @(& $selector -PayloadDirectory $payload -ReleaseDirectory $release `
+            -PackageSelection 'publish-nvx-runtime,publish-sdk' 6>&1 | ForEach-Object { "$_" })
+        foreach ($package in @(
+            @{ Name = 'sdk'; File = "Microsoft.Mxc.Sdk.$version.nupkg"; Source = $payload }
+            @{ Name = 'nvx'; File = "Microsoft.Mxc.Sdk.Nvx.Runtime.$version.nupkg"; Source = $nvx }
+        )) {
+            $staged = Join-Path (Join-Path $release $package.Name) $package.File
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) { throw "Missing $staged" }
+            if ((Get-FileHash -LiteralPath $staged).Hash -ne
+                (Get-FileHash -LiteralPath (Join-Path $package.Source $package.File)).Hash) {
+                throw "Staged package differs from input: $staged"
+            }
+            if (-not ($output -contains "##vso[task.setvariable variable=NuGetPackagePath_$($package.Name)]$staged")) {
+                throw "Missing pipeline variable for $($package.Name): $output"
+            }
         }
     }
 

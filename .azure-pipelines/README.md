@@ -44,14 +44,6 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   When retrying a partial release, select only the unpublished package from
   the same build and version.
 
-When both packages are selected, the NVX runtime is published first. A failed
-runtime publication prevents the SDK task from starting. A failed SDK publication
-does not undo a successful runtime publication.
-
-Release artifacts include their package-selection scripts, so release jobs
-do not need a repository checkout. Choose a build artifact containing the
-appropriate selector script.
-
 ### Rust crates.io release
 
 `1ES.Release.Crates.yml` is a manual pipeline. `dryRun` defaults to `true` and
