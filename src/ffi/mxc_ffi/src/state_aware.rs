@@ -19,7 +19,9 @@
 //!   process, returning the same opaque [`crate::MxcSandbox`] handle
 //!   as [`mxc_spawn_json`](crate::mxc_spawn_json) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
-//!   [`mxc_exec_state_aware_with_stdin_json`] does the same with a writable stdin.
+//! - [`mxc_exec_state_aware_for_run_json`] returns that same handle for a
+//!   caller that runs the workload to completion; a WSLC workload reads
+//!   end-of-file on stdin.
 //! - [`mxc_state_aware_exec_pty`] returns that same lifecycle handle with merged
 //!   PTY output and caller-driven input and resize.
 //! - [`mxc_run_state_aware_exec_json`] blocks until exec finishes and returns
@@ -38,7 +40,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::__ffi::{
-    execute_lifecycle_capture_json, execute_lifecycle_json, execute_lifecycle_with_stdin_json,
+    execute_lifecycle_capture_json, execute_lifecycle_for_run_json, execute_lifecycle_json,
     run_lifecycle_json as run_state_aware_json, spawn_in_container_with_pty_json,
 };
 use mxc_sdk::v1::MxcPtySize;
@@ -223,9 +225,9 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
     unsafe {
         exec_streaming(
             "mxc_exec_state_aware_json",
+            execute_lifecycle_json,
             request_json_utf8,
             experimental,
-            execute_lifecycle_json,
             out_handle,
             out_error,
         )
@@ -250,22 +252,23 @@ pub unsafe extern "C" fn mxc_exec_state_aware_capture_json(
     unsafe {
         exec_streaming(
             "mxc_exec_state_aware_capture_json",
+            execute_lifecycle_capture_json,
             request_json_utf8,
             experimental,
-            execute_lifecycle_capture_json,
             out_handle,
             out_error,
         )
     }
 }
 
-/// [`mxc_exec_state_aware_json`] with a writable stdin, which a WSLC process
-/// started there does not get.
+/// Run the `exec` phase as a live streaming process for a run-to-completion
+/// helper: like [`mxc_exec_state_aware_json`], but a WSLC workload reads
+/// end-of-file on stdin.
 ///
 /// # Safety
 /// As for [`mxc_exec_state_aware_json`].
 #[no_mangle]
-pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
+pub unsafe extern "C" fn mxc_exec_state_aware_for_run_json(
     request_json_utf8: *const c_char,
     experimental: i32,
     out_handle: *mut *mut MxcSandbox,
@@ -274,10 +277,10 @@ pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
     // SAFETY: forwarded under this function's own contract.
     unsafe {
         exec_streaming(
-            "mxc_exec_state_aware_with_stdin_json",
+            "mxc_exec_state_aware_for_run_json",
+            execute_lifecycle_for_run_json,
             request_json_utf8,
             experimental,
-            execute_lifecycle_with_stdin_json,
             out_handle,
             out_error,
         )
@@ -288,9 +291,9 @@ pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
 /// As for [`mxc_exec_state_aware_json`].
 unsafe fn exec_streaming(
     entry_point: &str,
+    execute: fn(&str, bool) -> Result<mxc_sdk::v1::MxcProcess, mxc_sdk::v1::Error>,
     request_json_utf8: *const c_char,
     experimental: i32,
-    execute: fn(&str, bool) -> Result<mxc_sdk::v1::MxcProcess, mxc_sdk::v1::Error>,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -1287,10 +1290,8 @@ mod tests {
     fn exec_null_out_handle_is_null_argument() {
         let j =
             CString::new(r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
-        for entry_point in [
-            mxc_exec_state_aware_json,
-            mxc_exec_state_aware_with_stdin_json,
-        ] {
+
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
             // SAFETY: valid string, deliberately-null out_handle.
             let status = unsafe { entry_point(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
             assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
@@ -1303,15 +1304,17 @@ mod tests {
             r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
         )
         .unwrap();
-        let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err = MxcErrorDetail::none();
-        // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_exec_state_aware_json(j.as_ptr(), 0, &mut handle, &mut err) };
-        assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
-        assert!(handle.is_null());
-        assert!(!err.message_utf8.is_null());
-        // SAFETY: `err` was filled by `mxc_exec_state_aware_json` and not yet freed.
-        unsafe { crate::mxc_error_detail_free(&mut err) };
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
+            let mut handle: *mut MxcSandbox = ptr::null_mut();
+            let mut err = MxcErrorDetail::none();
+            // SAFETY: valid string and out pointers.
+            let status = unsafe { entry_point(j.as_ptr(), 0, &mut handle, &mut err) };
+            assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
+            assert!(handle.is_null());
+            assert!(!err.message_utf8.is_null());
+            // SAFETY: `err` was filled by the entry point and not yet freed.
+            unsafe { crate::mxc_error_detail_free(&mut err) };
+        }
     }
 
     /// Without the opt-in the C ABI refuses an experimental backend, and the
@@ -1363,10 +1366,7 @@ mod tests {
         )
         .unwrap();
 
-        for entry_point in [
-            mxc_exec_state_aware_json,
-            mxc_exec_state_aware_with_stdin_json,
-        ] {
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
             for (experimental, expect_refused) in [(0, true), (1, false)] {
                 let mut handle: *mut MxcSandbox = ptr::null_mut();
                 let mut err = MxcErrorDetail::none();

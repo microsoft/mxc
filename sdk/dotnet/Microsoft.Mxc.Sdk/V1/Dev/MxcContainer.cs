@@ -64,6 +64,7 @@ public static class MxcContainer
     public static MxcProcess SpawnJson(string json, JsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnJson));
+        var waitClosesUntakenStdin = DevJsonRequest.TargetsWslc(request);
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -83,7 +84,10 @@ public static class MxcContainer
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    timeout,
+                    waitClosesUntakenStdin);
             }
         }
     }
@@ -131,6 +135,7 @@ public static class MxcContainer
         SpawnExtendedJsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithExtendedOptionsJson));
+        var waitClosesUntakenStdin = DevJsonRequest.TargetsWslc(request);
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -155,7 +160,10 @@ public static class MxcContainer
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    timeout,
+                    waitClosesUntakenStdin);
             }
         }
     }

@@ -182,7 +182,7 @@ it('state-aware execution captures streams and preserves container ownership', a
     return proc;
   });
   const output = await dev.runInContainerJson(json, { experimental: true });
-  assert.deepStrictEqual(received, [json, true, 250, false, 'capture']);
+  assert.deepStrictEqual(received, [json, true, 250, true, 'capture']);
   assert.deepStrictEqual(output, {
     stdout: 'out', stderr: 'err', exitCode: 7, timedOut: false, warnings: ['warning'],
   });

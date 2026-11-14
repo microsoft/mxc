@@ -67,3 +67,11 @@ stdin, stdout, and stderr and supports ProcessContainer, Bubblewrap, and Seatbel
 
 Captured existing-container execution closes unused stdin automatically.
 With live execution, drop any stdin writer you take when the workload needs EOF.
+
+On WSLC, a process from `spawn_json`, `spawn_with_extended_options_json` with
+`SpawnStdio::Pipes`, or `spawn_in_container_json` has a writable stdin.
+Dropping it, or waiting without taking it, gives the process end-of-file;
+`run_json` and `run_in_container_json` give the process end-of-file. Killing a
+`spawn_in_container_json` process that is still running, or reaching its
+timeout, deletes its container about a minute later, because MXC does not
+signal a WSLC process that has stdin.

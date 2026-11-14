@@ -5,9 +5,6 @@
 # to `main` and on PRs via the unsigned 1ES PipelineTemplate, delegating the
 # stage list to `1ES.Build.Stages.yml`.
 #
-# The `main` push trigger populates the Azure Pipelines target-dir and
-# CARGO_HOME cache scopes for the default branch so PR builds can read them
-# as a fallback; without it, every PR runs a cold cargo compile.
 trigger:
   branches:
     include:

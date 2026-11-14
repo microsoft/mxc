@@ -54,9 +54,8 @@ class FakeNative implements StreamingNativeFacade {
   stderrHandle: number | bigint = 13;
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
-  stateAwareWithStdin = false;
+  stateAwareForRunCount = 0;
   stateAwareCapture = false;
-  spawnWithStdinCount = 0;
   spawnWithInheritedStdioCount = 0;
 
   spawnSync(
@@ -103,17 +102,6 @@ class FakeNative implements StreamingNativeFacade {
     pending.completion(null, this.spawnStatus);
   }
 
-  spawnWithStdin(
-    request: string,
-    experimental: number,
-    outHandle: unknown[],
-    error: unknown,
-    completion: (error: Error | null, status: number) => void,
-  ): void {
-    this.spawnWithStdinCount += 1;
-    this.spawn(request, experimental, outHandle, error, completion);
-  }
-
   spawnWithInheritedStdio(
     request: string,
     experimental: number,
@@ -137,6 +125,17 @@ class FakeNative implements StreamingNativeFacade {
     this.spawn(request, experimental, outHandle, error, completion);
   }
 
+  stateAwareExecForRunAsync(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.stateAwareForRunCount += 1;
+    this.stateAwareExecAsync(request, experimental, outHandle, error, completion);
+  }
+
   stateAwareExecCaptureAsync(
     request: string,
     experimental: number,
@@ -158,17 +157,6 @@ class FakeNative implements StreamingNativeFacade {
     this.stateAwareExperimental = experimental;
     outHandle[0] = this.handle;
     return this.spawnStatus;
-  }
-
-  stateAwareExecWithStdinAsync(
-    request: string,
-    experimental: number,
-    outHandle: unknown[],
-    error: unknown,
-    completion: (error: Error | null, status: number) => void,
-  ): void {
-    this.stateAwareWithStdin = true;
-    this.stateAwareExecAsync(request, experimental, outHandle, error, completion);
   }
 
   id(): number {
@@ -301,11 +289,12 @@ describe('native streaming binding ownership', () => {
     const native = new FakeNative();
     native.deferSpawn = true;
     const requestJson = '{"phase":"exec","sandboxId":"iso:abc"}';
+    const streams = new FakeStreams();
     const pending = createStateAwareStreamingDriverAsync(
       requestJson,
       true,
       native,
-      new FakeStreams(),
+      streams,
     );
 
     assert.strictEqual(native.pendingSpawns.length, 1);
@@ -315,15 +304,15 @@ describe('native streaming binding ownership', () => {
 
     const driver = await pending;
     assert.strictEqual(driver.id, 23);
-    assert.strictEqual(native.stateAwareWithStdin, false);
+    assert.deepStrictEqual(streams.writableHandles, [11]);
     await driver.free();
     assert.strictEqual(native.freeCount, 1);
+    assert.strictEqual(native.stateAwareForRunCount, 0);
   });
 
-  it('dispatches a state-aware exec with stdin through its own native entry point', async () => {
+  it('starts a captured state-aware exec through the for-run entry point', async () => {
     const native = new FakeNative();
     const requestJson = '{"phase":"exec","sandboxId":"wslc:abc"}';
-
     const driver = await createStateAwareStreamingDriverAsync(
       requestJson,
       false,
@@ -332,7 +321,7 @@ describe('native streaming binding ownership', () => {
       true,
     );
 
-    assert.strictEqual(native.stateAwareWithStdin, true);
+    assert.strictEqual(native.stateAwareForRunCount, 1);
     assert.strictEqual(native.stateAwareRequest, requestJson);
     assert.strictEqual(native.stateAwareExperimental, 0);
     await driver.free();
@@ -362,39 +351,17 @@ describe('native streaming binding ownership', () => {
       process: { commandLine: 'echo exact-json' },
     };
 
+    const streams = new FakeStreams();
     const driver = await createStreamingDriver(
       request,
       native,
-      new FakeStreams(),
+      streams,
     );
 
     assert.strictEqual(native.spawnRequest, JSON.stringify(request));
     assert.strictEqual(native.spawnExperimental, 0);
     assert.strictEqual(native.spawnCount, 1);
-    assert.strictEqual(native.spawnWithStdinCount, 0);
-    await driver.free();
-  });
-
-  it('dispatches a one-shot spawn with stdin through its own native entry point', async () => {
-    const native = new FakeNative();
-    const request = {
-      version: '1.0.0' as const,
-      containment: 'wslc' as const,
-      sandboxId: 'node-exact-spawn-stdin',
-      process: { commandLine: 'cat' },
-    };
-
-    const driver = await createStreamingDriver(
-      request,
-      native,
-      new FakeStreams(),
-      false,
-      true,
-    );
-
-    assert.strictEqual(native.spawnWithStdinCount, 1);
-    assert.strictEqual(native.spawnRequest, JSON.stringify(request));
-    assert.strictEqual(native.spawnExperimental, 0);
+    assert.deepStrictEqual(streams.writableHandles, [11]);
     await driver.free();
   });
 
@@ -410,7 +377,6 @@ describe('native streaming binding ownership', () => {
     );
 
     assert.strictEqual(native.spawnWithInheritedStdioCount, 1);
-    assert.strictEqual(native.spawnWithStdinCount, 0);
     assert.strictEqual(native.spawnRequest, requestJson);
     assert.strictEqual(native.spawnExperimental, 1);
     assert.strictEqual(driver.standardInput, null);

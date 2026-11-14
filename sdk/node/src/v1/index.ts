@@ -58,7 +58,6 @@ export type {
 
 export {
   spawn,
-  spawnWithStdin,
   spawnWithPty,
   spawnWithExtendedOptions,
   run,
@@ -88,7 +87,6 @@ export type { ProcessNetworkConfig } from './lifecycle-types.js';
 
 export {
   spawnInContainer,
-  spawnInContainerWithStdin,
   provisionContainer,
   startContainer,
   spawnInContainerWithPty,

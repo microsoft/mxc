@@ -38,7 +38,7 @@ parameters:
 jobs:
 - job: package_iso_test_bundle_${{ parameters.packageName }}
   displayName: 'Package Isolation Session Test Bundle (${{ parameters.packageName }}, x64)'
-  timeoutInMinutes: 60
+  timeoutInMinutes: 240
   variables:
     triplet: x86_64-pc-windows-msvc
     CARGO_TARGET_DIR: c:/t/target
@@ -60,8 +60,8 @@ jobs:
       installOptions:
         configFile: $(configTomlPath)
       cacheOptions:
-        enabled: true
-        enableTargetCache: true
+        enabled: false
+        enableTargetCache: false
       artifactOptions:
         suffix: ${{ parameters.packageName }} 
  
