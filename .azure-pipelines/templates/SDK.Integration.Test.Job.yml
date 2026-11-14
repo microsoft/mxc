@@ -133,7 +133,7 @@ jobs:
 
         - script: |
             set -euo pipefail
-            backup_dir="$(Agent.TempDirectory)/mxc-node-lxc-$(Build.BuildId)-$(System.JobAttempt)"
+            backup_dir="$(Agent.TempDirectory)/mxc-lxc-$(Build.BuildId)-$(System.JobAttempt)"
             mkdir -m 700 "$backup_dir"
             for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
               if sudo test -e "$file" || sudo test -L "$file"; then
@@ -164,7 +164,7 @@ jobs:
 
         - script: |
             set -euo pipefail
-            backup_dir="$(Agent.TempDirectory)/mxc-node-lxc-$(Build.BuildId)-$(System.JobAttempt)"
+            backup_dir="$(Agent.TempDirectory)/mxc-lxc-$(Build.BuildId)-$(System.JobAttempt)"
             if [ -f "$backup_dir/complete" ]; then
               status=0
               for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do

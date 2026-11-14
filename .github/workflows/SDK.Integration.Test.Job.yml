@@ -207,7 +207,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          backup_dir="$RUNNER_TEMP/mxc-node-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
           mkdir -m 700 "$backup_dir"
           for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
             if sudo test -e "$file" || sudo test -L "$file"; then
@@ -267,7 +267,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          backup_dir="$RUNNER_TEMP/mxc-node-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
           if [ -f "$backup_dir/complete" ]; then
             status=0
             for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do

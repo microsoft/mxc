@@ -102,23 +102,36 @@ jobs:
             sleep 5
           done
           sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
-            lxc lxc-templates busybox-static iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates iptables debootstrap uidmap bridge-utils
 
       - name: Configure unprivileged LXC
         if: matrix.os_label == 'linux'
         shell: bash
         run: |
           set -euo pipefail
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -m 700 "$backup_dir"
           for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
-            sudo cp -a "$file" "$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
+            if sudo test -e "$file" || sudo test -L "$file"; then
+              sudo cp -a "$file" "$backup_dir/$(basename "$file")"
+            fi
           done
-          sudo bash -c 'echo "root:100000:65536" >> /etc/subuid'
-          sudo bash -c 'echo "root:100000:65536" >> /etc/subgid'
+          touch "$backup_dir/complete"
 
-          # Remove existing mappings before adding the test-only UID/GID range.
-          sudo sed -i '/idmap/d' /etc/lxc/default.conf
-          sudo bash -c 'echo "lxc.idmap = u 0 100000 65536" >> /etc/lxc/default.conf'
-          sudo bash -c 'echo "lxc.idmap = g 0 100000 65536" >> /etc/lxc/default.conf'
+          for file in /etc/subuid /etc/subgid; do
+            sudo touch "$file"
+            if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
+              printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
+            fi
+          done
+
+          sudo touch /etc/lxc/default.conf
+
+          # Remove active mappings before adding the test-only UID/GID range.
+          sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
+          printf '%s\n' \
+            'lxc.idmap = u 0 100000 65536' \
+            'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
 
       # The policy these tests use permits no network, so the container starts
       # with no interface and the runner's Docker-set FORWARD policy cannot
@@ -160,12 +173,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
-            backup="$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
-            if [ -f "$backup" ]; then
-              sudo mv "$backup" "$file"
-            fi
-          done
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          if [ -f "$backup_dir/complete" ]; then
+            status=0
+            for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+              backup="$backup_dir/$(basename "$file")"
+              if sudo test -e "$backup" || sudo test -L "$backup"; then
+                sudo cp -a --remove-destination "$backup" "$file" || status=1
+              else
+                sudo rm -f "$file" || status=1
+              fi
+            done
+            exit "$status"
+          fi
 
       # This regression requires Linux and a usable Bubblewrap. Install it in
       # the Linux lane and make an unavailable backend fail instead of skip.

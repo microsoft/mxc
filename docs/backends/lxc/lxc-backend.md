@@ -24,7 +24,7 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc` for runtime)
-- BusyBox with the `udhcpc` applet for MXC-managed IPv4 address reservations
+- BusyBox with the `udhcpc` applet only for MXC-managed IPv4 address reservations
 - Root privileges, or [unprivileged LXC](#running-without-root) for a policy
   that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
@@ -34,12 +34,12 @@ Creates an LXC container to provide:
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install lxc liblxc-dev busybox-static
+sudo apt install lxc liblxc-dev
 ```
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install lxc lxc-templates dnsmasq lxc-devel busybox
+sudo dnf install lxc lxc-templates dnsmasq lxc-devel
 ```
 RHEL needs EPEL enabled first — see
 [Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup).
@@ -70,6 +70,10 @@ still applies before the workload starts.
 Containers without configured addresses require a local `lxc-net` bridge with
 dnsmasq serving its DHCP pool for networked runs.  Refer to your distribution's
 manual to configure it.
+
+This DHCP reservation path also needs BusyBox with `udhcpc`: install
+`busybox-static` on Debian/Ubuntu or `busybox` on Fedora/RHEL.  Runs without
+networking and existing containers with configured addresses do not need BusyBox.
 
 For these containers, MXC reuses the container's reservation or
 reserves one free IPv4 address from the existing `lxc-net` DHCP pool.

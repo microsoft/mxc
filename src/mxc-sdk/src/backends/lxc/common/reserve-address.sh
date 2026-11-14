@@ -336,7 +336,7 @@ ip link set dev "$veth_peer" up
 acquire()
 {
     # Leave the finite lease active while the reservation is being installed.
-    if ! timeout --signal=TERM --kill-after=2 15 busybox udhcpc \
+    if ! busybox udhcpc \
         -i "$veth_peer" -f -q -n -t 3 -T 2 -a -B -O search \
         -s "$directory/dhcp-event.sh" > "$directory/client.log" 2>&1 ||
         ! test -s "$directory/address"; then
