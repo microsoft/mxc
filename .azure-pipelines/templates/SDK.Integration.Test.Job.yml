@@ -50,6 +50,7 @@ jobs:
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/node/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
+      npm_config_cache: $(Pipeline.Workspace)/.npm
 
     steps:
       - checkout: self
@@ -58,6 +59,14 @@ jobs:
         displayName: Use Node.js ${{ target.nodeVersion }}
         inputs:
           version: ${{ target.nodeVersion }}
+
+      - task: Cache@2
+        displayName: Cache npm
+        inputs:
+          key: 'npm | "$(Agent.OS)" | sdk/node/tests/integration/package-lock.json'
+          restoreKeys: |
+            npm | "$(Agent.OS)"
+          path: $(npm_config_cache)
 
       - task: DownloadPipelineArtifact@2
         displayName: Download SDK package
