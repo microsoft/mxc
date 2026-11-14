@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Limits concurrent workers with deadline-bounded waits for available capacity.
+//! Dropping a permit releases capacity. The gate does not set operation timeouts
+//! or cancel work that has already started.
+
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
