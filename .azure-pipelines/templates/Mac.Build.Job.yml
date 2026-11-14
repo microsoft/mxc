@@ -18,7 +18,7 @@ parameters:
 jobs:
 - job: 'build_arm64_MAC'
   displayName: 'Build (arm64 MAC)'
-  timeoutInMinutes: 120
+  timeoutInMinutes: 240
 
   pool:
     name: Azure Pipelines
@@ -50,8 +50,8 @@ jobs:
         installOptions:
           configFile: $(configTomlPath)
         cacheOptions:
-          enabled: true
-          enableTargetCache: true
+          enabled: false
+          enableTargetCache: false
         setupOptions:
           setupPython: true
           pythonArtifactFeeds: Dart/Mxc-Azure-Feed
