@@ -312,6 +312,13 @@ jobs:
           throw "Unstaged .nupkg files remain in the release artifact directory"
         }
 
+  - task: CopyFiles@2
+    displayName: Copy NuGet release selector
+    inputs:
+      sourceFolder: $(Build.SourcesDirectory)\.azure-pipelines\scripts
+      contents: select-dotnet-nuget-packages.ps1
+      targetFolder: $(packageOutput)
+
   - task: 1ES.PublishPipelineArtifact@1
     displayName: Publish NuGet release payload
     inputs:
