@@ -196,6 +196,10 @@ wrong-nesting cases are rejected as `malformed_request`.
 top-level wire envelope (`commandLine`, `cwd`, `env`, `inheritDefaultEnv`,
 `timeout`).
 
+`commandLine` uses the same
+[command-line quoting rules](../../../../schema.md#isolationsession-command-line-quoting)
+as create-and-run execution.
+
 **Output.** Stdout is the agent process's live-streamed output; the dispatcher
 never emits a JSON envelope on stdout for a non-dry-run exec, so a failure's
 `{error}` envelope goes to stderr instead. The wxc-exec process exit code is the
