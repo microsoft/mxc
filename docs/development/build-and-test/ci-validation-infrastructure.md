@@ -418,6 +418,20 @@ stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
 required cases fail the job even when the runner exits successfully.
 
+### ProcessContainer PSEC lifetime probe
+
+Every scheduled `process` job also runs the ignored Rust tests in
+`src/mxc-sdk/tests/process_container_psec_lifetime.rs`. They call the process
+security environment (PSEC) API directly and record what one environment handle
+supports: sequential launches, concurrent launches, closing with a running or
+terminated child, and creation or launch failures. The tests print
+`PSEC-OBSERVATION key=value` lines and assert the behavior they observed, so
+the job log is the evidence for any decision about reusing a handle.
+
+The tests do not change how MXC creates or closes environments, and they never
+delete a container profile; they only watch whether the profile disappears
+after the handle closes.
+
 ### IsolationSession lifecycle telemetry
 
 Every scheduled `isolation-session` job runs
