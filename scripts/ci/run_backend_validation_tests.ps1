@@ -181,7 +181,9 @@ function Invoke-ScriptSuite {
     $skipped
 }
 
-# --nocapture keeps the PSEC-OBSERVATION lines in the job log.
+# --nocapture keeps the PSEC-OBSERVATION lines in the job log. It also splits
+# the libtest "test <name> ... ok" line, so --exact plus the pass/fail summary
+# proves that the named case passed.
 function Invoke-ProcessContainerPsecLifetimeTests {
     $rustTests = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-sdk-process-container-psec-lifetime-tests.exe'
     Assert-File -Path $rustTests
@@ -192,7 +194,7 @@ function Invoke-ProcessContainerPsecLifetimeTests {
         'psec_failures_leave_no_profile_and_do_not_poison_the_handle') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-psec-lifetime-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--nocapture', '--test-threads=1')
-        $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+        $failure = Get-LibtestFailure -Run $run
         if ($failure) { "${rustCase}: $failure" }
     }
     if ($failures) { throw "ProcessContainer PSEC lifetime: $($failures -join '; ')" }

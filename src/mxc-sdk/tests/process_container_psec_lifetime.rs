@@ -708,7 +708,9 @@ fn psec_handle_close_with_running_and_terminated_children() {
             false
         }
     };
+    observe("running_child_profile_at_close", profile.exists());
     let child_exit_after_close = sleeper.wait(Duration::from_secs(10));
+    observe("running_child_profile_after_wait", profile.exists());
     match child_exit_after_close {
         Some(code) => observe("running_child_exit_after_close", code),
         None => {
@@ -745,13 +747,14 @@ fn psec_handle_close_with_running_and_terminated_children() {
     );
     let terminated_removal = observe_removal("terminated_child", &profile);
 
+    assert!(close_returned, "close blocked while a child was running");
     assert!(
-        child_exit_after_close.is_some(),
-        "the long-running child outlived the environment close"
+        child_exit_after_close.is_none(),
+        "closing the environment ended the running child"
     );
     assert!(
         running_removal.is_some(),
-        "profile was not removed after closing with a running child"
+        "profile was not removed after close and the running child ended"
     );
     assert!(terminated_exit.is_some(), "terminated child did not exit");
     assert!(
