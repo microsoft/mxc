@@ -10,7 +10,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, PipeReader, PipeWriter, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -140,9 +140,10 @@ fn write_is_ready(fd: RawFd) -> bool {
 /// Writes all of `data`, giving up when `wake` has data or the write fails.
 ///
 /// Waits for room before each write and writes at most `PIPE_BUF` bytes, which
-/// then cannot block. So `sink` can be left blocking, as a stream shared with
-/// this process's parent must be, and a full pipe nobody reads cannot trap the
-/// thread.
+/// then cannot block on a pipe. So a pipe can be left blocking, as a stream
+/// shared with this process's parent must be, and a full pipe nobody reads
+/// cannot trap the thread. A terminal sink must be non-blocking; see
+/// [`output_sink`].
 fn write_until_woken(sink: &mut (impl Write + AsRawFd), wake: RawFd, mut data: &[u8]) -> bool {
     while !data.is_empty() {
         match poll_or_wake(sink.as_raw_fd(), libc::POLLOUT, wake) {
@@ -166,6 +167,22 @@ fn write_until_woken(sink: &mut (impl Write + AsRawFd), wake: RawFd, mut data: &
         }
     }
     true
+}
+
+/// A sink for one of this process's own output streams. A terminal gets its own
+/// non-blocking open, since its writes can wait after `POLLOUT`.
+pub(crate) fn output_sink(stream: BorrowedFd<'_>) -> io::Result<File> {
+    // SAFETY: `isatty` only reads the descriptor's type.
+    if unsafe { libc::isatty(stream.as_raw_fd()) } == 1 {
+        let reopened = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+            .open(format!("/proc/self/fd/{}", stream.as_raw_fd()));
+        if let Ok(file) = reopened {
+            return Ok(file);
+        }
+    }
+    stream.try_clone_to_owned().map(File::from)
 }
 
 /// Moves bytes from `source` to `sink` until `source` ends, a write fails, or
@@ -748,6 +765,58 @@ mod tests {
         assert_stops_with_a_full_sink(pump, feed, || queued(&consumer));
         // SAFETY: `sink` is open; F_GETFL only reads its flags.
         let flags = unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "the shared stream was changed");
+    }
+
+    /// The reader of a terminal stops draining it. With a little room left
+    /// `POLLOUT` is set, but a blocking write of `PIPE_BUF` bytes would wait.
+    #[test]
+    fn a_pump_stuck_on_a_full_terminal_stops_when_asked_and_leaves_it_blocking() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let slave = pty.slave.as_raw_fd();
+        let set_nonblocking = |on: bool| {
+            let flags = if on { libc::O_NONBLOCK } else { 0 };
+            // SAFETY: `slave` is open; F_SETFL changes only its status flags.
+            unsafe { libc::fcntl(slave, libc::F_SETFL, flags) };
+        };
+        // Fill the terminal, then drain a little so some room is left.
+        set_nonblocking(true);
+        let chunk = [b'x'; 64];
+        // SAFETY: the buffer is valid for its length.
+        while unsafe { libc::write(slave, chunk.as_ptr().cast(), chunk.len()) } > 0 {}
+        let mut drained = [0u8; 100];
+        // SAFETY: the buffer is valid for its length.
+        let read = unsafe {
+            libc::read(
+                pty.master.as_raw_fd(),
+                drained.as_mut_ptr().cast(),
+                drained.len(),
+            )
+        };
+        assert!(read > 0);
+        set_nonblocking(false);
+
+        let sink = output_sink(pty.slave.as_fd()).unwrap();
+        let (source, feed) = io::pipe().unwrap();
+        let pump = Pump::start(source, sink).unwrap();
+        let feeder = std::thread::spawn(move || {
+            let mut feed = feed;
+            feed.write_all(&vec![b'y'; libc::PIPE_BUF])
+        });
+        feeder.join().unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let (stopped, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            pump.stop();
+            let _ = stopped.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "stop waited on a terminal write"
+        );
+        // SAFETY: the slave is open; F_GETFL only reads its flags.
+        let flags = unsafe { libc::fcntl(slave, libc::F_GETFL) };
         assert_eq!(flags & libc::O_NONBLOCK, 0, "the shared stream was changed");
     }
 

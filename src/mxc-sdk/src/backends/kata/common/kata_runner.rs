@@ -10,13 +10,14 @@
 //! streams. Either way the sandbox is stopped and released when the handle
 //! finishes or is dropped.
 
-use std::fs::File;
 use std::io::{self, PipeWriter, Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use crate::kata_common::error::KataError;
-use crate::kata_common::execution::{Execution, ExitOutcome, KillScope, Pump, StdinWriter};
+use crate::kata_common::execution::{
+    output_sink, Execution, ExitOutcome, KillScope, Pump, StdinWriter,
+};
 use crate::kata_common::host::{self, Install};
 use crate::kata_common::policy::{self, Plan};
 use crate::kata_common::sandbox::Ephemeral;
@@ -94,12 +95,6 @@ impl SandboxBackend for KataBackend {
             .map_err(KataError::into_response)?;
         Ok(Box::new(process))
     }
-}
-
-fn duplicate_standard_stream(fd: i32) -> io::Result<File> {
-    // SAFETY: the standard descriptors are valid for the borrow's duration.
-    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-    borrowed.try_clone_to_owned().map(File::from)
 }
 
 /// The sandboxed process of one create-and-run request.
@@ -203,8 +198,9 @@ impl KataProcess {
             StdioMode::Inherit => {
                 for (source, standard, name) in [(stdout, 1, "stdout"), (stderr, 2, "stderr")] {
                     if let Some(source) = source {
-                        let target =
-                            duplicate_standard_stream(standard).map_err(|e| io_error(name, e))?;
+                        // SAFETY: the standard descriptors are valid for the borrow's duration.
+                        let target = output_sink(unsafe { BorrowedFd::borrow_raw(standard) })
+                            .map_err(|e| io_error(name, e))?;
                         self.output_pumps
                             .push(Pump::start(source, target).map_err(|e| io_error(name, e))?);
                     }
