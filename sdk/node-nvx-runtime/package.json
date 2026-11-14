@@ -1,6 +1,6 @@
 {
   "name": "@microsoft/mxc-sdk-nvx-runtime-win32-x64",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Windows x64 NVX MicroVM runtime assets for @microsoft/mxc-sdk",
   "os": [
     "win32"
@@ -17,7 +17,7 @@
     "README.md"
   ],
   "peerDependencies": {
-    "@microsoft/mxc-sdk": "1.0.1"
+    "@microsoft/mxc-sdk": "1.1.0"
   },
   "author": "Microsoft Corporation",
   "license": "MIT",
