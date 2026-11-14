@@ -6,9 +6,12 @@
 //!
 //! Supported Windows builds expose a privileged, per-client learning-mode
 //! ETW trace behind flat C exports in `processmodel.dll`. MXC prefers the
-//! option-aware start export and falls back to the legacy access-only start:
+//! option-aware start export when the source support probe confirms NETWORK
+//! support, and otherwise falls back to the legacy access-only start:
 //!
 //! ```c
+//! BOOL IsLearningModeTraceSourceOptionSupported(
+//!     LEARNING_MODE_TRACE_SOURCE_OPTIONS option);
 //! HRESULT StartLearningModeTraceWithOptions(
 //!     HPROCESS_SECURITY_ENVIRONMENT environment,
 //!     LEARNING_MODE_TRACE_SOURCE_OPTIONS options,
