@@ -404,7 +404,10 @@ impl Fixture {
                 let mut stream = match handshake {
                     Ok(stream) => stream,
                     // Trust and hostname rejection probes deliberately fail the handshake.
-                    Err(_) => continue,
+                    Err(error) => {
+                        eprintln!("W365 loopback fixture server TLS handshake failed: {error:?}");
+                        continue;
+                    }
                 };
                 let mut data = Vec::new();
                 let mut buf = [0; 1024];

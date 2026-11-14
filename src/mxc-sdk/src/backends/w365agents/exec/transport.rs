@@ -243,6 +243,20 @@ fn transport_error(deadline: Instant) -> MxcError {
     })
 }
 
+#[cfg(feature = "test-support")]
+fn fixture_transport_diagnostic(
+    target: &UpgradeTarget,
+    stage: &str,
+    source: &dyn std::fmt::Display,
+) {
+    if target.host == "localhost"
+        && std::env::var_os("MXC_W365_TEST_CA").is_some()
+        && std::env::var_os("MXC_W365_TEST_PORT").is_some()
+    {
+        eprintln!("W365 loopback fixture {stage} failed: {source}");
+    }
+}
+
 fn connect_exec_inner(
     target: &UpgradeTarget,
     deadline: Instant,
@@ -310,7 +324,20 @@ fn connect_exec_inner(
                 deadline: Some(deadline),
             },
         )
-        .map_err(|_| transport_error(deadline))?;
+        .map_err(|source| {
+            #[cfg(feature = "test-support")]
+            match &source {
+                native_tls::HandshakeError::Failure(error) => {
+                    fixture_transport_diagnostic(target, "TLS handshake", error);
+                }
+                native_tls::HandshakeError::WouldBlock(_) => {
+                    fixture_transport_diagnostic(target, "TLS handshake", &"would block");
+                }
+            }
+            #[cfg(not(feature = "test-support"))]
+            let _ = source;
+            transport_error(deadline)
+        })?;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(error("exec_upgrade_timeout"));
@@ -328,7 +355,13 @@ fn connect_exec_inner(
     stream
         .write_all(request.as_bytes())
         .and_then(|()| stream.flush())
-        .map_err(|_| transport_error(deadline))?;
+        .map_err(|source| {
+            #[cfg(feature = "test-support")]
+            fixture_transport_diagnostic(target, "upgrade request write", &source);
+            #[cfg(not(feature = "test-support"))]
+            let _ = source;
+            transport_error(deadline)
+        })?;
     let mut header = Vec::new();
     let mut byte = [0];
     while !header.ends_with(b"\r\n\r\n") {
@@ -339,9 +372,13 @@ fn connect_exec_inner(
         if header.len() >= 32768 {
             return Err(error("exec_upgrade_headers"));
         }
-        stream
-            .read_exact(&mut byte)
-            .map_err(|_| transport_error(deadline))?;
+        stream.read_exact(&mut byte).map_err(|source| {
+            #[cfg(feature = "test-support")]
+            fixture_transport_diagnostic(target, "upgrade response read", &source);
+            #[cfg(not(feature = "test-support"))]
+            let _ = source;
+            transport_error(deadline)
+        })?;
         header.push(byte[0]);
     }
     let text = std::str::from_utf8(&header).map_err(|_| error("exec_upgrade_headers"))?;
