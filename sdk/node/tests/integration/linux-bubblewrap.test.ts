@@ -6,6 +6,7 @@ import assert from 'node:assert';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import {
@@ -16,7 +17,6 @@ import {
   runConfigForTest,
   startUnixTestProxy,
   getSdkBinDir,
-  getTestBinDir,
   getSdkPackageRoot,
   NETWORK_TEST_URL,
 } from './test-helpers.js';
@@ -215,20 +215,20 @@ describe('lxc-exec --available-backends contract', {
     : undefined,
 }, () => {
   /** Raw stdout of the real CLI, and the array it parses to. */
-  async function runAvailableBackends(): Promise<{ stdout: string; backends: Record<string, unknown>[] }> {
-    const lxcExec = path.join(getTestBinDir(), 'lxc-exec');
+  function runAvailableBackends(): { stdout: string; backends: Record<string, unknown>[] } {
+    const lxcExec = path.join(getSdkBinDir(), 'lxc-exec');
     assert.ok(fs.existsSync(lxcExec), `lxc-exec not found at ${lxcExec}`);
-    const platform = await import(
-      pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'v1', 'platform.js')).href
-    ) as { _runLinuxProbe(executable: string): string };
-    const stdout = platform._runLinuxProbe(lxcExec);
+    const stdout = execFileSync(lxcExec, ['--available-backends'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     const parsed = JSON.parse(stdout);
     assert.ok(Array.isArray(parsed), `--available-backends must emit a JSON array, got: ${stdout}`);
     return { stdout, backends: parsed };
   }
 
-  it('emits the array shape the SDK parser consumes', async () => {
-    const { stdout, backends } = await runAvailableBackends();
+  it('emits the array shape the SDK parser consumes', () => {
+    const { stdout, backends } = runAvailableBackends();
 
     for (const entry of backends) {
       assert.strictEqual(
@@ -252,8 +252,8 @@ describe('lxc-exec --available-backends contract', {
   // proves a `bwrap` file is on PATH; both probes additionally require it to run
   // and be >= MIN_BWRAP_VERSION. Those two version floors live in different
   // languages, so pin that they agree instead of trusting either.
-  it('agrees with getPlatformSupport on whether bubblewrap is usable', async () => {
-    const { stdout, backends } = await runAvailableBackends();
+  it('agrees with getPlatformSupport on whether bubblewrap is usable', () => {
+    const { stdout, backends } = runAvailableBackends();
 
     const nativeReportsBubblewrap = backends.some((entry) => entry.backend === 'bubblewrap');
     const sdkReportsBubblewrap = sdk.getPlatformSupport().availableMethods.includes('bubblewrap');
@@ -267,19 +267,8 @@ describe('lxc-exec --available-backends contract', {
     );
   });
 
-  it('discovers network capabilities without a packaged executor', () => {
-    assert.strictEqual(fs.existsSync(path.join(getSdkBinDir(), 'lxc-exec')), false);
-    const support = sdk.getPlatformSupport();
-    if (support.availableMethods.includes('bubblewrap')) {
-      assert.ok(support.bubblewrapNetwork);
-      for (const warning of support.bubblewrapNetwork.warnings) {
-        assert.doesNotMatch(warning, /lxc-exec not found/);
-      }
-    }
-  });
-
   it('projects the native payload into PlatformSupport.bubblewrapNetwork', async (t) => {
-    const { stdout, backends } = await runAvailableBackends();
+    const { stdout, backends } = runAvailableBackends();
     const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap');
     if (!bubblewrap) {
       // A `bwrap` on PATH can still be too old or not executable, in which case

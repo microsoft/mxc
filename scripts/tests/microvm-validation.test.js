@@ -14,7 +14,7 @@ const {
   writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { delimiter, dirname, join, resolve } = require("node:path");
+const { delimiter, join, resolve } = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
@@ -405,141 +405,7 @@ test("Azure release artifact recursively copies the NVX bundle unchanged", () =>
   assert.deepEqual(fileDigests(join(extracted, "x64", "aci-edge-sandboxes")), expected);
 });
 
-test("ADO integration installation preserves lockfile settings and stops on npm failures", () => {
-  const pipeline = readFileSync(
-    join(root, ".azure-pipelines", "templates", "SDK.Integration.Test.Job.yml"),
-    "utf8"
-  );
-  const match = pipeline.match(
-    /      - pwsh: \|\r?\n((?:          .*\r?\n)+)        workingDirectory: .*?\r?\n        displayName: Install dependencies and SDK from artifact/
-  );
-  assert.ok(match, "the packed SDK installation step must be present");
-  const directory = mkdtempSync(join(scratch, "azure-npm-"));
-  writeFileSync(join(directory, "sdk.tgz"), "fixture");
-  const script = join(directory, "install.ps1");
-  const mock = `
-function npm {
-    if ($args[0] -eq 'ci') {
-        if ($args -notcontains '--install-links') { throw 'npm ci must match the packed file dependency lockfile' }
-        $global:LASTEXITCODE = [int]$env:MXC_CI_NPM_EXIT
-    } elseif ($args[0] -eq 'install') {
-        Write-Output SDK_INSTALLED
-        $global:LASTEXITCODE = [int]$env:MXC_CI_NPM_INSTALL_EXIT
-    } else { throw 'Unexpected npm command' }
-}
-`;
-  writeFileSync(script, mock + match[1].replace(/^          /gm, "")
-    .replaceAll("$(sdkPkgDirectory)", directory.replaceAll("'", "''")));
-  for (const [ciExit, installExit] of [[0, 0], [17, 0], [0, 19]]) {
-    const result = runScript(script, [], {
-      MXC_CI_NPM_EXIT: String(ciExit),
-      MXC_CI_NPM_INSTALL_EXIT: String(installExit),
-    });
-    assert.equal(result.status, ciExit || installExit, result.output);
-    assert.equal(result.output.includes("SDK_INSTALLED"), ciExit === 0, result.output);
-  }
-});
-
-test("ADO Linux integration keeps the selected Node toolchain through sudo", () => {
-  const pipeline = readFileSync(
-    join(root, ".azure-pipelines", "templates", "SDK.Integration.Test.Job.yml"),
-    "utf8"
-  );
-  const match = pipeline.match(
-    /        - script: (.*(?:\r?\n            .*)*)\r?\n          workingDirectory: .*?\r?\n          displayName: npm test \(sudo, with LXC\)/
-  );
-  assert.ok(match, "the Linux integration step must be present");
-  const script = match[1].replace(/^\|\r?\n/, "").replace(/^            /gm, "")
-    .replaceAll("$(MXC_TEST_BIN_DIR)", "/test-tools")
-    .replaceAll("${{ parameters.debug }}", "false");
-  const mock = `
-set -euo pipefail
-selected="$(mktemp -d)"
-trap 'rm -f "$selected/npm"; rmdir "$selected"' EXIT
-printf '%s\\n' '#!/bin/sh' 'test "$1" = test && test "$MXC_TEST_BIN_DIR" = /test-tools && test "$MXC_SKIP_LXC_NETWORK_TESTS" = 1 && test "$MXC_DEBUG" = false && echo SELECTED_NODE_TOOLCHAIN' > "$selected/npm"
-chmod +x "$selected/npm"
-export PATH="$selected:$PATH"
-sudo() {
-  [[ "$1" == env ]] || { echo 'sudo must explicitly preserve the selected PATH' >&2; return 91; }
-  /usr/bin/env PATH=/usr/bin:/bin "$@"
-}
-`;
-  const bash = process.platform === "win32"
-    ? join(process.env.ProgramFiles, "Git", "bin", "bash.exe")
-    : "bash";
-  const result = spawnSync(bash, ["-s"], {
-    input: mock + script + "\n",
-    encoding: "utf8",
-    timeout: 10_000,
-  });
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /SELECTED_NODE_TOOLCHAIN/);
-});
-
-test("ADO ARM64 dependency setup respects network isolation and propagates update failures", () => {
-  const pipeline = readFileSync(
-    join(root, ".azure-pipelines", "templates", "Rust.Build.Job.yml"),
-    "utf8"
-  );
-  const match = pipeline.match(
-    /      - script: \|\r?\n((?:          .*\r?\n)+)        displayName: Install ARM64 toolchain and target OpenSSL/
-  );
-  assert.ok(match, "the ARM64 setup step must be present");
-  const script = match[1].replace(/^          /gm, "");
-  const bash = process.platform === "win32"
-    ? join(process.env.ProgramFiles, "Git", "bin", "bash.exe")
-    : "bash";
-  const mock = `
-function . {
-  [[ "$1" == /etc/os-release ]] || return 91
-  VERSION_CODENAME=jammy
-}
-sudo() {
-  case "$*" in
-    "apt-get install -y gcc-aarch64-linux-gnu") return 0 ;;
-    "dpkg --add-architecture arm64") return 0 ;;
-  esac
-  [[ "$1" == apt-get ]] || return 92
-  shift
-  local sources=
-  for arg in "$@"; do
-    case "$arg" in Dir::Etc::sourcelist=*) sources="\${arg#*=}" ;; esac
-  done
-  [[ -f "$sources" && " $* " == *" Dir::Etc::sourceparts=- "* ]] || return 93
-  if [[ "\${!#}" == update ]]; then
-    while IFS= read -r line; do
-      case "$line" in
-        "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://azure.archive.ubuntu.com/ubuntu "*) ;;
-        "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports "*) ;;
-        *) echo "Network isolation or signature policy rejected: $line" >&2; return 100 ;;
-      esac
-      echo "SOURCE $line"
-    done < "$sources"
-    [[ "$FIXTURE_FAIL_UPDATE" != 1 ]] || return 100
-  elif [[ " $* " == *" install -y --no-install-recommends libssl-dev:arm64 " ]]; then
-    echo ARM64_OPENSSL_INSTALLED
-  else
-    return 94
-  fi
-}
-`;
-  for (const failUpdate of ["0", "1"]) {
-    const result = spawnSync(bash, ["-s"], {
-      input: mock + script,
-      env: { ...process.env, FIXTURE_FAIL_UPDATE: failUpdate },
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    assert.ifError(result.error);
-    const output = result.stdout + result.stderr;
-    assert.equal(result.status, failUpdate === "1" ? 100 : 0, output);
-    assert.equal(result.stdout.includes("ARM64_OPENSSL_INSTALLED"), failUpdate === "0", output);
-    assert.equal((result.stdout.match(/^SOURCE /gm) ?? []).length, 6, output);
-  }
-});
-
-test("npm pack excludes test, diagnostic, and symbol payloads without removing supported SDK binaries", () => {
+test("npm pack excludes NVX runtime and validation payloads without removing supported SDK binaries", () => {
   const result = azureBundleFixture();
   assert.equal(result.status, 0, result.output);
   const packageRoot = join(result.directory, "node-sdk");
@@ -548,47 +414,19 @@ test("npm pack excludes test, diagnostic, and symbol payloads without removing s
   mkdirSync(x64, { recursive: true });
   copyFileSync(join(root, "sdk", "node", "package.json"), join(packageRoot, "package.json"));
   copyFileSync(join(root, "sdk", "node", "bin", ".npmignore"), join(binaryRoot, ".npmignore"));
-  const runtimeBinaries = ["x64", "arm64"].flatMap((arch) =>
-    [
-      "wxc-exec.exe",
-      "mxc_ffi.dll",
-      "wxc-wslc-daemon.exe",
-      "wslcsdk.dll",
-      "libmxc_ffi.so",
-      "libmxc_ffi.dylib",
-    ].map((name) => ({ arch, name }))
-  );
-  for (const { arch, name } of runtimeBinaries) {
-    const directory = join(binaryRoot, arch);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, name), "SDK runtime fixture");
-  }
+  writeFileSync(join(x64, "wxc-exec.exe"), "executor fixture");
+  writeFileSync(join(x64, "mxc_ffi.dll"), "SDK library fixture");
   const validationSuite = Buffer.from("nightly validation executable");
   const artifactSuite = join(result.outputDirectory, result.triplet, "nvx-e2e-tests.exe");
   writeFileSync(artifactSuite, validationSuite);
   writeFileSync(join(x64, "nvx-e2e-tests.exe"), validationSuite);
-  const excludedFiles = ["x64", "arm64"].flatMap((arch) =>
-    [
-      "mxc-filesystem-probe-tests",
-      "mxc-filesystem-probe-tests.exe",
-      "wxc-test-driver.exe",
-      "wxc-ui-probe.exe",
-      "wxc-test-proxy.exe",
-      "unix-test-proxy",
-      "mxc-diagnostic-console.exe",
-      "lxc-exec",
-      "mxc-exec-mac",
-      "wxc-windows-sandbox-daemon.exe",
-      "wxc-windows-sandbox-guest.exe",
-      "mxc_ffi.pdb",
-      "lxc-exec.dwp",
-      "symbols/mxc_ffi.dll",
-    ].map((name) => ({ arch, name }))
+  const probeSuites = ["x64", "arm64"].flatMap((arch) =>
+    ["mxc-filesystem-probe-tests", "mxc-filesystem-probe-tests.exe"].map((name) => ({ arch, name }))
   );
-  for (const { arch, name } of excludedFiles) {
-    const file = join(binaryRoot, arch, name);
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, validationSuite);
+  for (const { arch, name } of probeSuites) {
+    const directory = join(binaryRoot, arch);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, name), validationSuite);
   }
   const script = join(result.directory, "npm-artifact.ps1");
   const quote = (path) => `'${path.replaceAll("'", "''")}'`;
@@ -607,16 +445,13 @@ test("npm pack excludes test, diagnostic, and symbol payloads without removing s
   assert.ifError(packed.error);
   assert.equal(packed.status, 0, packed.stdout + packed.stderr);
   const files = JSON.parse(packed.stdout)[0].files.map(({ path }) => path).sort();
-  assert.deepEqual(
-    files,
-    [...runtimeBinaries.map(({ arch, name }) => `bin/${arch}/${name}`), "package.json"].sort()
-  );
+  assert.deepEqual(files, ["bin/x64/mxc_ffi.dll", "bin/x64/wxc-exec.exe", "package.json"]);
   const expected = fileDigests(result.bundle);
   assert.deepEqual(fileDigests(join(x64, "aci-edge-sandboxes")), expected);
   assert.deepEqual(fileDigests(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes")), expected);
   assert.deepEqual(readFileSync(artifactSuite), validationSuite);
   assert.deepEqual(readFileSync(join(x64, "nvx-e2e-tests.exe")), validationSuite);
-  for (const { arch, name } of excludedFiles) {
+  for (const { arch, name } of probeSuites) {
     assert.deepEqual(readFileSync(join(binaryRoot, arch, name)), validationSuite);
   }
 
@@ -631,7 +466,7 @@ test("npm pack excludes test, diagnostic, and symbol payloads without removing s
   assert.equal(unfiltered.status, 0, unfiltered.stdout + unfiltered.stderr);
   const unfilteredFiles = JSON.parse(unfiltered.stdout)[0].files.map(({ path }) => path);
   assert.ok(unfilteredFiles.includes("bin/x64/nvx-e2e-tests.exe"));
-  for (const { arch, name } of excludedFiles) {
+  for (const { arch, name } of probeSuites) {
     assert.ok(unfilteredFiles.includes(`bin/${arch}/${name}`));
   }
   assert.deepEqual(

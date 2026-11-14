@@ -138,11 +138,6 @@ in the checkout. Test-only private type imports must resolve from the installed
 package, matching the runtime helpers. The isolated check prevents local
 checkout build output from hiding missing package imports.
 
-The npm package excludes native test tools and Linux/macOS executors. Integration
-jobs stage test proxies and the Linux CLI separately in `MXC_TEST_BIN_DIR`.
-For local tests, set that variable to the directory containing those binaries;
-otherwise the helpers use the SDK's platform binary directory.
-
 ### Linux LXC dispatch coverage
 
 The primary Linux build runs pinned LXC discovery, engine dispatch, exact-JSON
@@ -181,7 +176,7 @@ Set `MXC_TEST_PROXY_ORIGIN_URL` to an HTTP origin reachable by the proxy and
 `MXC_TEST_PROXY_EXPECTED_BODY` to a nonempty substring of its response. Use a
 non-loopback origin for this WinHTTP scenario. Set
 `MXC_ENABLE_PROCESSCONTAINER_PROXY_TESTS=1` for Node and .NET. Node starts the
-staged `wxc-test-proxy.exe`; .NET and Rust require an already-running proxy at
+package's `wxc-test-proxy.exe`; .NET and Rust require an already-running proxy at
 `MXC_TEST_PROXY_URL`. Keep that proxy alive until both suites finish.
 
 | Directory | Selector |
