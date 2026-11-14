@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           target: ${{ matrix.target }}
           override: false
@@ -36,13 +36,13 @@ jobs:
       - name: Point cargo at the MxcDependencies feed
         uses: ./.github/actions/setup-cargo-feed
 
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: 10.0.x
 
       # The bundle ships this Node, which must meet the SDK's Windows
       # native-stdio requirement.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.21.0
 
@@ -64,7 +64,7 @@ jobs:
             -BuildId $env:BUNDLE_BUILD_ID
 
       - name: Upload bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sdk-test-bundle-${{ matrix.target }}
           path: ${{ runner.temp }}/windows-sdk-bundle
