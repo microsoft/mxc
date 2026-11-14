@@ -24,6 +24,11 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   payload keeps the project version; the internal-test payload includes the
   unique Azure Pipelines build ID in its prerelease version so repeated
   publications do not collide.
+- The .NET packaging job configures Cargo's dependency mirror for SBOM
+  generation: the authenticated internal feed in official builds and the public
+  mirror in unofficial builds. Official SBOM errors and timeouts fail the job
+  before the NuGet artifact is uploaded. Public release validation requires
+  the generated `_manifest` directory in `mxc-dotnet-sdk-nuget`.
 - A fast .NET pipeline validation stage runs in parallel with the Rust builds.
   It verifies the .NET 10 SDK/runtime setup and packs both NuGet variants with
   synthetic native inputs so pipeline and package-contract failures surface
