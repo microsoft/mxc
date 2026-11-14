@@ -538,7 +538,11 @@ impl BaseContainerRunner {
         }
 
         if let Some(addr) = request.policy.network_proxy.address.as_ref() {
-            let _ = writeln!(logger, "effective proxy: {}", addr.to_url());
+            let _ = writeln!(
+                logger,
+                "effective proxy: {}",
+                crate::mxc_common::proxy_env::redact_proxy_url(&addr.to_url())
+            );
             let _ = writeln!(
                 logger,
                 "warning: proxy support on Windows is best-effort -- only scripts that use \
