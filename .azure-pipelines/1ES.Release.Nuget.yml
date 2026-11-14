@@ -82,13 +82,11 @@ extends:
             targetPath: '$(Pipeline.Workspace)/packages'
 
         steps:
-        - checkout: self
-
         - task: PowerShell@2
           displayName: Select NuGet packages
           inputs:
             targetType: filePath
-            filePath: '$(Build.SourcesDirectory)/.azure-pipelines/scripts/select-dotnet-nuget-packages.ps1'
+            filePath: '$(Pipeline.Workspace)/packages/select-dotnet-nuget-packages.ps1'
             arguments: >-
               -PayloadDirectory "$(Pipeline.Workspace)\packages\$(NuGetPayloadKind)"
               -ReleaseDirectory "$(Pipeline.Workspace)\nuget-release"

@@ -57,6 +57,8 @@ try {
     $nvx = Join-Path $payload 'nvx'
     New-TestPackage $payload 'Microsoft.Mxc.Sdk.1.2.3.nupkg' 'Microsoft.Mxc.Sdk' '1.2.3'
     New-TestPackage $nvx 'Microsoft.Mxc.Sdk.Nvx.Runtime.1.2.3.nupkg' 'Microsoft.Mxc.Sdk.Nvx.Runtime' '1.2.3'
+    Copy-Item -LiteralPath $selector -Destination $payload
+    $selector = Join-Path $payload 'select-dotnet-nuget-packages.ps1'
     $release = Join-Path $root 'both-release'
     $output = @(& $selector -PayloadDirectory $payload -ReleaseDirectory $release `
         -PackageSelection 'publish-nvx-runtime,publish-sdk' 6>&1 | ForEach-Object { "$_" })
@@ -132,7 +134,6 @@ try {
     foreach ($required in @(
         'name: nugetPackages',
         'type: stringList',
-        'checkout: self',
         'select-dotnet-nuget-packages.ps1',
         "MXC_NUGET_PACKAGES: `${{ join(',', parameters.nugetPackages) }}"
     )) {

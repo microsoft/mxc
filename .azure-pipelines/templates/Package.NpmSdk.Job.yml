@@ -131,6 +131,13 @@ jobs:
         contents: '*.tgz'
         targetFolder: '$(outputDirectory)/packages/nvx'
 
+    - task: CopyFiles@2
+      displayName: Copy npm release selector
+      inputs:
+        sourceFolder: $(Build.SourcesDirectory)/.azure-pipelines/scripts
+        contents: select-npm-packages.ps1
+        targetFolder: '$(outputDirectory)/packages'
+
     - task: 1ES.PublishPipelineArtifact@1
       displayName: Upload SDK as pipeline artifact
       inputs:

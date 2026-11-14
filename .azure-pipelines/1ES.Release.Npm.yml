@@ -65,13 +65,11 @@ extends:
 
         displayName: Publish npm packages
         steps:
-        - checkout: self
-
         - task: PowerShell@2
           displayName: Select npm packages
           inputs:
             targetType: filePath
-            filePath: '$(Build.SourcesDirectory)/.azure-pipelines/scripts/select-npm-packages.ps1'
+            filePath: '$(Pipeline.Workspace)/packages/select-npm-packages.ps1'
             arguments: >-
               -PayloadDirectory "$(Pipeline.Workspace)\packages"
               -ReleaseDirectory "$(Pipeline.Workspace)\npm-release"

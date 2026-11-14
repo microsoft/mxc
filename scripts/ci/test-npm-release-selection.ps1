@@ -44,6 +44,8 @@ try {
     $payload = Join-Path $root 'both'
     New-TestPackage $payload $sdkFile $sdkId '1.2.3'
     New-TestPackage (Join-Path $payload 'nvx') $nvxFile $nvxId '1.2.3'
+    Copy-Item -LiteralPath $selector -Destination $payload
+    $selector = Join-Path $payload 'select-npm-packages.ps1'
     $release = Join-Path $root 'both-release'
     & $selector -PayloadDirectory $payload -ReleaseDirectory $release `
         -PackageSelection 'publish-nvx-runtime,publish-sdk'
