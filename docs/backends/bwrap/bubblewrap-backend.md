@@ -40,11 +40,16 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add bubblewrap
   ```
-  The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
-  environment is built with `--clearenv` (bwrap 0.5.0+). The address-family
-  filter uses `--seccomp FD`, which predates that release, so **bwrap 0.5.0 or
-  newer** remains the requirement. Platform detection probes `bwrap --version`
+  The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
+  additionally require **bwrap 0.11.0+** and unprivileged OverlayFS support.
+  When an overlay is needed, execution rejects a setuid `bwrap` before launch.
+  If the host kernel or source filesystem does not support unprivileged
+  OverlayFS, Bubblewrap can fail with an overlay-mount error such as
+  `Invalid argument`; use a kernel and filesystem that support unprivileged
+  OverlayFS. A missing denied target beneath a read-only source with nested
+  host mounts is rejected before launch because the overlay cannot preserve
+  those mounts. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -356,7 +361,7 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
-| `readonlyPaths` | `--ro-bind <real path> <real path>` | Explicit read-only bind mount |
+| `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
 | `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
@@ -367,6 +372,14 @@ tmpfs would replace it with an empty *directory*, changing its type). Paths that
 cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
 The masks are remounted after policy mounts are created, so a more specific
 allowed child remains accessible with its own permissions.
+
+When a missing denied path needs a private overlay, the executor masks the
+overlay backing directory at its normal path and at any writable bind-mount
+alias found in `/proc/self/mountinfo`. The mount list is read with the
+filesystem-probe deadline and bounded to 1 MiB and 4096 entries; startup fails
+closed if it cannot be read or parsed. If the read-only source contains a
+nested host mount, startup also fails before the workload starts rather than
+exposing the directory underneath that mount.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

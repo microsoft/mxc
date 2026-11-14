@@ -153,7 +153,7 @@ jobs:
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version missing_denials; do
             cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
