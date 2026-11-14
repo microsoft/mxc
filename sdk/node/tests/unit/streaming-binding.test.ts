@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import {
   createStateAwareStreamingDriver,
   createStateAwareStreamingDriverAsync,
+  createInheritedStdioDriverFromJson,
   createStreamingDriver,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
@@ -54,6 +55,7 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
   stateAwareForRunCount = 0;
+  spawnWithInheritedStdioCount = 0;
 
   spawnSync(
     _request: string,
@@ -97,6 +99,17 @@ class FakeNative implements StreamingNativeFacade {
     this.pendingSpawns.splice(index, 1);
     pending.outHandle[0] = handle;
     pending.completion(null, this.spawnStatus);
+  }
+
+  spawnWithInheritedStdio(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.spawnWithInheritedStdioCount += 1;
+    this.spawn(request, experimental, outHandle, error, completion);
   }
 
   stateAwareExecAsync(
@@ -337,6 +350,26 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.spawnExperimental, 0);
     assert.strictEqual(native.spawnCount, 1);
     assert.deepStrictEqual(streams.writableHandles, [11]);
+    await driver.free();
+  });
+
+  it('dispatches an inherited-stdio spawn through its own native entry point', async () => {
+    const native = new FakeNative();
+    native.takeStatus = 4;
+    const requestJson = '{"version":"1.1.0-alpha","process":{"commandLine":"exit 0"}}';
+
+    const driver = await createInheritedStdioDriverFromJson(
+      requestJson,
+      native,
+      true,
+    );
+
+    assert.strictEqual(native.spawnWithInheritedStdioCount, 1);
+    assert.strictEqual(native.spawnRequest, requestJson);
+    assert.strictEqual(native.spawnExperimental, 1);
+    assert.strictEqual(driver.standardInput, null);
+    assert.strictEqual(driver.standardOutput, null);
+    assert.strictEqual(driver.standardError, null);
     await driver.free();
   });
 

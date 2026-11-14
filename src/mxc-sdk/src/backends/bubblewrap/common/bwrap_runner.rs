@@ -39,7 +39,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, lifetime_spawner, network_rules,
+    bwrap_version, lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::{self, ResolverFile},
@@ -122,6 +122,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        let caller_stdio = crate::mxc_common::sandbox_process::open_caller_stdio();
         validate_common(request)?;
         let launch = self.validate_prepared(request)?;
         if let Some(plan) = launch.egress_plan.as_ref() {
@@ -204,6 +205,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             launch,
             logger,
             stdio,
+            caller_stdio,
         )?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
@@ -215,6 +217,8 @@ impl SandboxBackend for BubblewrapScriptRunner {
 struct ValidatedLaunch {
     egress_plan: Option<network_rules::EgressPlan>,
     bwrap: PathBuf,
+    bwrap_version: bwrap_version::BwrapVersion,
+    bwrap_is_setuid: bool,
     network_tools: Option<proxy_network::NetworkTools>,
 }
 
@@ -378,6 +382,8 @@ impl BubblewrapScriptRunner {
         Ok(ValidatedLaunch {
             egress_plan,
             bwrap: bwrap.path,
+            bwrap_version: bwrap.version,
+            bwrap_is_setuid: bwrap.is_setuid,
             network_tools,
         })
     }
@@ -518,10 +524,13 @@ impl BubblewrapScriptRunner {
         launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
+        caller_stdio: [bool; 3],
     ) -> Result<BwrapChild, ScriptResponse> {
         let ValidatedLaunch {
             egress_plan,
             bwrap,
+            bwrap_version,
+            bwrap_is_setuid,
             network_tools,
         } = launch;
         let checked_network_tools = || {
@@ -551,6 +560,9 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
+        let deny_mountpoints =
+            missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
+                .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -700,6 +712,10 @@ impl BubblewrapScriptRunner {
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit());
+                crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(
+                    &mut command,
+                    caller_stdio,
+                );
                 None
             }
             StdioMode::Pty(size) => match LivePty::attach(
@@ -727,7 +743,7 @@ impl BubblewrapScriptRunner {
 
         // Keep namespace init in the killable group before parent-death cleanup is armed.
         // SAFETY: setsid is async-signal-safe and runs only in the forked child.
-        if stdio == StdioMode::Pipes {
+        if stdio == StdioMode::Pipes || (stdio == StdioMode::Inherit && network_startup.is_some()) {
             unsafe {
                 command.pre_exec(|| {
                     nix::unistd::setsid()
@@ -764,7 +780,7 @@ impl BubblewrapScriptRunner {
                 network.userns_handed_off();
             }
             let startup_result = startup
-                .child_pid(&mut child)
+                .child_pid(&child)
                 .map_err(|error| {
                     format!(
                         "{error}. If Bubblewrap cannot create a network namespace, \
@@ -779,9 +795,20 @@ impl BubblewrapScriptRunner {
                     network.check_alive()
                 })
                 .and_then(|()| startup.release());
-            if let Err(error) = startup_result {
-                let _ = child.kill();
-                let _ = child.wait();
+
+            // Closing --block-fd releases the child before --die-with-parent is armed.
+            if let Err(mut error) = startup_result {
+                if let Err(cleanup_error) = group_kill(&mut child) {
+                    error.push_str(&format!(
+                        "; failed to terminate Bubblewrap startup: {cleanup_error}"
+                    ));
+                }
+                if let Err(cleanup_error) = child.wait() {
+                    error.push_str(&format!(
+                        "; failed to reap Bubblewrap startup: {cleanup_error}"
+                    ));
+                }
+                drop(startup);
                 let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
                     Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
                     Ok(_) => error,
@@ -853,6 +880,7 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
+            _deny_mountpoints: deny_mountpoints,
         })
     }
 }
@@ -860,6 +888,7 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
+    _deny_mountpoints: Option<tempfile::TempDir>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -871,9 +900,8 @@ struct BwrapChild {
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
     pty: Option<LivePty>,
-    /// `true` when bwrap leads its own process group (`Pipes` or `Pty`), so
-    /// termination signals the whole group; `false` for `Inherit` mode, where
-    /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
+
+    /// Whether the running workload stays in Bubblewrap's process group.
     group: bool,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     monitor: Option<ProviderMonitor>,
@@ -1141,14 +1169,8 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             return Ok(());
         }
         if self.inner.group {
-            // Pipes and PTY modes give bwrap its own process group.
             group_kill(&mut child)
         } else {
-            // Inherit mode: bwrap shares the executor's group (no
-            // `process_group(0)`), so a group-kill would hit the executor.
-            // Killing bwrap alone suffices because `--die-with-parent` makes
-            // the sandbox die with it — bwrap is *not* pid 1 of the namespace
-            // (it forks), so without that flag descendants would survive.
             child.kill()
         }
     }
@@ -1625,10 +1647,13 @@ mod tests {
                 ValidatedLaunch {
                     egress_plan: None,
                     bwrap: PathBuf::from("/usr/bin/bwrap"),
+                    bwrap_version: bwrap_version::BwrapVersion::new(0, 11, 0),
+                    bwrap_is_setuid: false,
                     network_tools: None,
                 },
                 &mut Logger::new(Mode::Buffer),
                 StdioMode::Pipes,
+                [true; 3],
             )
             .err()
         else {

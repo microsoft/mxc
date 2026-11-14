@@ -10,6 +10,8 @@ unknown fields, and malformed JSON.
 `JsonOptions { experimental: bool }` authorizes experimental backends
 independently of the JSON version. `PtyJsonOptions` also carries
 `size: MxcPtySize` (24 rows by 80 columns by default).
+`SpawnExtendedJsonOptions` carries `experimental` and `stdio: SpawnStdio`;
+like `SpawnExtendedOptions`, it is `#[non_exhaustive]`.
 Result and process types belong to `mxc_sdk::v1`.
 
 `run_json` and `run_in_container_json` return byte-preserving
@@ -26,6 +28,8 @@ pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Err
 pub fn spawn_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error>;
 pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions)
     -> Result<MxcPtyProcess, Error>;
+pub fn spawn_with_extended_options_json(json: &str, options: SpawnExtendedJsonOptions)
+    -> Result<MxcProcess, Error>;
 
 pub fn run_in_container_json(json: &str, options: JsonOptions)
     -> Result<ExecutionResult, Error>;
@@ -57,11 +61,14 @@ for the 64 MiB capture limit, caller-owned streams, and sensitive
 
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail
-rather than switching to another I/O mode.
+rather than switching to another I/O mode. `spawn_with_extended_options_json`
+with `SpawnStdio::Inherit` attaches the workload to the calling process's
+stdin, stdout, and stderr and supports ProcessContainer, Bubblewrap, and Seatbelt.
 
-On WSLC, a process from `spawn_json` or `spawn_in_container_json` has a
-writable stdin. Dropping it, or waiting without taking it, gives the process
-end-of-file; `run_json` and `run_in_container_json` give the process
-end-of-file. Killing a `spawn_in_container_json` process that is still
-running, or reaching its timeout, deletes its container about a minute later,
-because MXC does not signal a WSLC process that has stdin.
+On WSLC, a process from `spawn_json`, `spawn_with_extended_options_json` with
+`SpawnStdio::Pipes`, or `spawn_in_container_json` has a writable stdin.
+Dropping it, or waiting without taking it, gives the process end-of-file;
+`run_json` and `run_in_container_json` give the process end-of-file. Killing a
+`spawn_in_container_json` process that is still running, or reaching its
+timeout, deletes its container about a minute later, because MXC does not
+signal a WSLC process that has stdin.

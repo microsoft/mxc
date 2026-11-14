@@ -19,3 +19,13 @@ public sealed class PtyJsonOptions
     /// <summary>Initial terminal dimensions; defaults to 24 rows by 80 columns.</summary>
     public MxcPtySize? Size { get; set; }
 }
+
+/// <summary>Invocation controls for SpawnWithExtendedOptionsJson.</summary>
+public sealed class SpawnExtendedJsonOptions
+{
+    /// <summary>Authorize experimental backends independently of the JSON version.</summary>
+    public bool Experimental { get; set; }
+
+    /// <summary>How the workload's standard streams are connected; defaults to <see cref="SpawnStdio.Pipes"/>.</summary>
+    public SpawnStdio Stdio { get; set; }
+}

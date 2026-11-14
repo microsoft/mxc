@@ -168,7 +168,7 @@ fn run_with_client(
 ) -> Result<CapturedRun, MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let protect = |operation, error| protect_native_error(error, operation, sensitive_proxy);
-    let prepared = prepare_and_provision(client, request, cancellation);
+    let prepared = prepare_and_provision(client, request, cancellation, logger);
     let (sandbox_id, exec) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -193,9 +193,7 @@ fn run_with_client(
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
-        client
-            .start(&sandbox_id)
-            .map_err(|error| start_error(client, &sandbox_id, error, sensitive_proxy))?;
+        start_sandbox(client, &sandbox_id, sensitive_proxy, logger)?;
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
@@ -220,6 +218,24 @@ fn run_with_client(
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+/// Starts the sandbox and logs how it booted: as a clone of a platform snapshot template, or cold,
+/// and why.
+pub(super) fn start_sandbox(
+    client: &impl SandboxClient,
+    sandbox_id: &super::runtime::SandboxId,
+    sensitive_proxy: bool,
+    logger: &mut Logger,
+) -> Result<(), MxcError> {
+    let started = client
+        .start(sandbox_id)
+        .map_err(|error| start_error(client, sandbox_id, error, sensitive_proxy))?;
+    logger.log_diagnostic_line(&format!(
+        "NVX sandbox started: {}",
+        serde_json::Value::Object(started.metadata.unwrap_or_default())
+    ));
+    Ok(())
 }
 
 fn start_error(
@@ -247,12 +263,27 @@ fn start_error(
 }
 
 fn prepare_and_provision(
-    client: &impl SandboxClient,
+    client: &mut impl SandboxClient,
     request: &ExecutionRequest,
     cancellation: Option<&RunCancellation>,
+    logger: &mut Logger,
 ) -> Result<(super::runtime::SandboxId, NativeExecRequest), MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let (input, exec) = prepare_request(client, request)?;
+    prepare_execution(client, sensitive_proxy, cancellation, logger)?;
+    let sandbox_id = client
+        .provision(&input)
+        .map_err(|error| protect_native_error(error, "provision", sensitive_proxy))?
+        .sandbox_id;
+    Ok((sandbox_id, exec))
+}
+
+pub(super) fn prepare_execution(
+    client: &mut impl SandboxClient,
+    sensitive_proxy: bool,
+    cancellation: Option<&RunCancellation>,
+    logger: &mut Logger,
+) -> Result<(), MxcError> {
     if let Some(cancellation) = cancellation {
         cancellation.check()?;
     }
@@ -262,11 +293,20 @@ fn prepare_and_provision(
     if let Some(cancellation) = cancellation {
         cancellation.check()?;
     }
-    let sandbox_id = client
-        .provision(&input)
-        .map_err(|error| protect_native_error(error, "provision", sensitive_proxy))?
-        .sandbox_id;
-    Ok((sandbox_id, exec))
+    // Opening the execution host can capture templates, so validation and probing must precede it.
+    if let Some(error) = client
+        .open_execution_host()
+        .map_err(|error| protect_native_error(error, "platform_snapshots", sensitive_proxy))?
+    {
+        logger.warning_line(&format!(
+            "NVX platform snapshots are unavailable, so sandboxes cold boot: {}",
+            protect_native_error(error, "platform_snapshots", sensitive_proxy)
+        ));
+    }
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
+    Ok(())
 }
 
 struct StreamingSandbox {
@@ -396,7 +436,7 @@ pub(crate) fn spawn_streaming(
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let (state_root, mut client) = open_client()?;
-    let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
+    let (sandbox_id, exec) = match prepare_and_provision(&mut client, request, None, logger) {
         Ok(prepared) => prepared,
         Err(error) => {
             let mut cleanup = Vec::new();
@@ -412,16 +452,13 @@ pub(crate) fn spawn_streaming(
             .str("backend", "microvm")
             .str("runtime", "signed-bundled-agent"),
     );
-    let started = client
-        .start(&sandbox_id)
-        .map_err(|error| start_error(&client, &sandbox_id, error, sensitive_proxy))
-        .and_then(|()| {
-            let execution_started = Instant::now();
-            client
-                .start_execution(&sandbox_id, &exec)
-                .map(|execution| (execution, execution_started))
-                .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))
-        });
+    let started = start_sandbox(&client, &sandbox_id, sensitive_proxy, logger).and_then(|()| {
+        let execution_started = Instant::now();
+        client
+            .start_execution(&sandbox_id, &exec)
+            .map(|execution| (execution, execution_started))
+            .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))
+    });
     let (execution, execution_started) = match started {
         Ok(execution) => execution,
         Err(error) => {
@@ -908,6 +945,7 @@ mod tests {
     use super::super::runtime::{ExecOutput, ProvisionOutput, SandboxId};
     use super::*;
     use aci_edge_sandboxes::agent::SandboxDiagnostics;
+    use aci_edge_sandboxes::{BootMode, ColdReason, StartResult};
 
     fn test_capabilities() -> Capabilities {
         let mut capabilities = Capabilities::default();
@@ -1147,9 +1185,10 @@ mod tests {
         capabilities_res: Result<Capabilities, MxcError>,
         validate_provision_res: Result<(), MxcError>,
         validate_res: Result<(), MxcError>,
+        platform_snapshots_res: Result<Option<MxcError>, MxcError>,
         probe_res: Result<(), MxcError>,
         provision_res: Result<SandboxId, MxcError>,
-        start_res: Result<(), MxcError>,
+        start_res: Result<StartResult, MxcError>,
         diagnostics_res: Result<SandboxDiagnostics, MxcError>,
         exec_res: Result<ExecOutput, MxcError>,
         stop_res: Result<(), MxcError>,
@@ -1169,10 +1208,11 @@ mod tests {
                 capabilities_res: Ok(test_capabilities()),
                 validate_provision_res: Ok(()),
                 validate_res: Ok(()),
+                platform_snapshots_res: Ok(None),
                 probe_res: Ok(()),
                 provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef")
                     .map_err(super::super::runtime::map_error),
-                start_res: Ok(()),
+                start_res: Ok(StartResult::default().with_boot_mode(BootMode::Clone)),
                 diagnostics_res: Err(MxcError::backend_error("diagnostics unavailable")),
                 exec_res: Ok(ExecOutput {
                     outcome: ExecOutcome::Exited(0),
@@ -1214,6 +1254,11 @@ mod tests {
             self.validate_res.clone()
         }
 
+        fn open_execution_host(&mut self) -> Result<Option<MxcError>, MxcError> {
+            self.record("platform_snapshots");
+            self.platform_snapshots_res.clone()
+        }
+
         fn probe(&self) -> Result<(), MxcError> {
             self.record("probe");
             self.probe_res.clone()
@@ -1230,7 +1275,7 @@ mod tests {
                 })
         }
 
-        fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+        fn start(&self, _sandbox_id: &SandboxId) -> Result<StartResult, MxcError> {
             self.record("start");
             self.start_res.clone()
         }
@@ -1431,6 +1476,7 @@ mod tests {
             "validate_provision",
             "validate_exec",
             "probe",
+            "platform_snapshots",
             "provision",
             "start",
             "exec",
@@ -1453,6 +1499,7 @@ mod tests {
                 "capabilities" => client.capabilities_res = Err(failure),
                 "validate_provision" => client.validate_provision_res = Err(failure),
                 "validate_exec" => client.validate_res = Err(failure),
+                "platform_snapshots" => client.platform_snapshots_res = Err(failure),
                 "probe" => client.probe_res = Err(failure),
                 "provision" => client.provision_res = Err(failure),
                 "start" => client.start_res = Err(failure),
@@ -1676,7 +1723,14 @@ mod tests {
 
     #[test]
     fn cancellation_during_startup_or_execution_runs_ordered_teardown() {
-        for phase in ["validate", "probe", "provision", "start", "exec"] {
+        for phase in [
+            "validate",
+            "probe",
+            "platform_snapshots",
+            "provision",
+            "start",
+            "exec",
+        ] {
             for cleanup_fails in [false, true] {
                 let cancellation = RunCancellation::default();
                 let mut client = MockClient::ok();
@@ -1699,9 +1753,11 @@ mod tests {
                 let expected: &[&str] = match phase {
                     "validate" => &["validate", "close"],
                     "probe" => &["validate", "probe", "close"],
+                    "platform_snapshots" => &["validate", "probe", "platform_snapshots", "close"],
                     "provision" => &[
                         "validate",
                         "probe",
+                        "platform_snapshots",
                         "provision",
                         "stop",
                         "deprovision",
@@ -1710,6 +1766,7 @@ mod tests {
                     "start" => &[
                         "validate",
                         "probe",
+                        "platform_snapshots",
                         "provision",
                         "start",
                         "stop",
@@ -1719,6 +1776,7 @@ mod tests {
                     _ => &[
                         "validate",
                         "probe",
+                        "platform_snapshots",
                         "provision",
                         "start",
                         "exec",
@@ -1772,6 +1830,7 @@ mod tests {
                 "validate_provision",
                 "validate",
                 "probe",
+                "platform_snapshots",
                 "provision",
                 "start",
                 "diagnostics",
@@ -1832,6 +1891,7 @@ mod tests {
                     "validate_provision",
                     "validate",
                     "probe",
+                    "platform_snapshots",
                     "provision",
                     "start",
                     "diagnostics",
@@ -1892,6 +1952,7 @@ mod tests {
                 "validate_provision",
                 "validate",
                 "probe",
+                "platform_snapshots",
                 "provision",
                 "start",
                 "diagnostics",
@@ -1992,6 +2053,7 @@ mod tests {
                     "validate_provision",
                     "validate",
                     "probe",
+                    "platform_snapshots",
                     "provision",
                     "start",
                     "exec",
@@ -2001,6 +2063,69 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn snapshot_fallback_warns_without_exposing_proxy_credentials() {
+        for sensitive in [false, true] {
+            let mut client = MockClient::ok();
+            client
+                .capabilities_res
+                .as_mut()
+                .unwrap()
+                .network
+                .network_proxy = true;
+            client.platform_snapshots_res = Ok(Some(MxcError::backend_unavailable(
+                "synthetic capture failure with synthetic@secret",
+            )));
+            let request = if sensitive {
+                request_with_proxy("http://synthetic:synthetic%40secret@localhost:3128")
+            } else {
+                test_request()
+            };
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            let result =
+                run_with_client(&mut client, Path::new("state"), &request, &mut logger, None)
+                    .unwrap();
+            assert_eq!(result.outcome, CapturedOutcome::Exited(0));
+            let warnings = logger.take_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("platform snapshots are unavailable"));
+            if sensitive {
+                assert!(warnings[0].contains("withheld"), "{warnings:?}");
+                assert!(!warnings[0].contains("synthetic"), "{warnings:?}");
+            } else {
+                assert!(
+                    warnings[0].contains("synthetic capture failure"),
+                    "{warnings:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn start_logs_how_the_sandbox_booted() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("diagnostics.log");
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        logger.enable_file_sink(&log_path).unwrap();
+        let request = ExecutionRequest {
+            script_code: "printf ok".to_owned(),
+            ..test_request()
+        };
+        let mut client = MockClient::ok();
+        client.start_res = Ok(StartResult::default()
+            .with_boot_mode(BootMode::Cold)
+            .with_cold_reason(ColdReason::MemoryAboveCapacity));
+        run_with_client(&mut client, directory.path(), &request, &mut logger, None).unwrap();
+        drop(logger);
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains(
+                r#"NVX sandbox started: {"bootMode":"cold","coldReason":"memory-above-capacity"}"#
+            ),
+            "{log}"
+        );
     }
 
     #[test]
@@ -2039,6 +2164,7 @@ mod tests {
                     "validate_provision",
                     "validate",
                     "probe",
+                    "platform_snapshots",
                     "provision",
                     "start",
                     "exec",

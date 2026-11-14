@@ -234,6 +234,7 @@ impl std::error::Error for BwrapUnavailable {}
 pub(crate) struct ProbedBwrap {
     pub(crate) path: PathBuf,
     pub(crate) version: BwrapVersion,
+    pub(crate) is_setuid: bool,
 }
 
 /// Probe the host for a usable `bwrap`.
@@ -312,9 +313,9 @@ fn probe_bwrap_uncached_until(
 
 fn probe_bwrap_uncached_with<F>(run: F) -> Result<ProbedBwrap, BwrapUnavailable>
 where
-    F: FnOnce() -> Result<(PathBuf, ProbeOutput), BwrapUnavailable>,
+    F: FnOnce() -> Result<(PathBuf, ProbeOutput, bool), BwrapUnavailable>,
 {
-    let (path, output) = run()?;
+    let (path, output, is_setuid) = run()?;
     let version = check_probe_output(output)?;
     if version < MIN_BWRAP_VERSION {
         return Err(BwrapUnavailable::TooOld {
@@ -322,7 +323,11 @@ where
             path,
         });
     }
-    Ok(ProbedBwrap { path, version })
+    Ok(ProbedBwrap {
+        path,
+        version,
+        is_setuid,
+    })
 }
 
 #[derive(Debug)]
@@ -336,7 +341,7 @@ struct ProbeOutput {
 fn run_bwrap_version_until(
     deadline: Instant,
     timeout: Duration,
-) -> Result<(PathBuf, ProbeOutput), BwrapUnavailable> {
+) -> Result<(PathBuf, ProbeOutput, bool), BwrapUnavailable> {
     let gate = probe_gate();
     let Some(gate_permit) = gate.acquire_permit_until(deadline) else {
         return Err(probe_timeout(timeout));
@@ -353,8 +358,9 @@ fn run_bwrap_version_until(
             let result = host_tools::find("bwrap")
                 .map_err(lookup_failure)
                 .and_then(|path| {
+                    let is_setuid = bwrap_is_setuid(&path)?;
                     run_version_command_until(&path, &["--version"], deadline, timeout)
-                        .map(|output| (path, output))
+                        .map(|output| (path, output, is_setuid))
                 });
             let _ = sender.send(result);
         });
@@ -372,6 +378,26 @@ fn run_bwrap_version_until(
             "`bwrap --version` probe worker disconnected",
         )),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_is_setuid(path: &Path) -> Result<bool, BwrapUnavailable> {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.mode() & 0o4000 != 0)
+        .map_err(|error| BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: format!(
+                "could not inspect Bubblewrap at '{}': {error}",
+                path.display()
+            ),
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bwrap_is_setuid(_path: &Path) -> Result<bool, BwrapUnavailable> {
+    Ok(false)
 }
 
 fn probe_timeout(timeout: Duration) -> BwrapUnavailable {
@@ -575,6 +601,19 @@ fn leading_number(component: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setuid_mode_is_reported_from_the_selected_bwrap_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("bwrap");
+        std::fs::write(&executable, "bwrap").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o4755)).unwrap();
+
+        assert!(bwrap_is_setuid(&executable).unwrap());
+    }
+
     const TEST_BWRAP: &str = "/usr/bin/bwrap";
 
     fn probe_with_banner(banner: &str) -> Result<ProbedBwrap, BwrapUnavailable> {
@@ -587,6 +626,7 @@ mod tests {
                     stdout: banner.as_bytes().to_vec(),
                     stderr: Vec::new(),
                 },
+                false,
             ))
         })
     }
@@ -1084,6 +1124,7 @@ mod tests {
                     stdout: b"bubblewrap 0.5.0\n".to_vec(),
                     stderr: Vec::new(),
                 },
+                false,
             ))
         })
         .unwrap();
@@ -1092,6 +1133,7 @@ mod tests {
             ProbedBwrap {
                 path: PathBuf::from("/usr/sbin/bwrap"),
                 version: MIN_BWRAP_VERSION,
+                is_setuid: false,
             }
         );
 

@@ -353,6 +353,45 @@ public static class MxcContainer
         }
     }
 
+    /// <summary>Spawn a container request with stdio and other controls chosen in the options.</summary>
+    public static MxcProcess SpawnWithExtendedOptions(
+        ContainerRequest request,
+        SpawnExtendedOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_extended_json(
+                    requestPtr, 0, (int)(options?.Stdio ?? SpawnStdio.Pipes), &handle, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning sandbox with extended options failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    request.TimeoutMs,
+                    waitClosesUntakenStdin: request.Containment is Containment.Wslc);
+            }
+        }
+    }
+
     private static byte[] ToNullTerminatedUtf8(string value)
     {
         var byteCount = Encoding.UTF8.GetByteCount(value);

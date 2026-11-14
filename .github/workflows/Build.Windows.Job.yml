@@ -236,6 +236,7 @@ jobs:
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/mxc_ffi.dll
             src/target/${{ matrix.target }}/release/wslcsdk.dll
+            src/target/${{ matrix.target }}/release/mxc-wslc-gateway.tar
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
             src/target/${{ matrix.target }}/release/nvx-e2e-tests.exe

@@ -165,6 +165,13 @@ backend availability gate turns a missing Bubblewrap prerequisite into a
 failure, and the exact-method filter plus result-count check ensures the
 regression itself ran and passed.
 
+### WSLC gateway image
+
+`wslc-gateway-image-check` rebuilds the committed WSLC gateway images on
+Windows x64 and fails if they don't match the source. Regenerate them with
+`scripts/build-wslc-gateway-image.ps1`; see
+[WSLC gateway image](wslc-gateway-image.md).
+
 ### Local Windows SDK proxy checks
 
 The Node, .NET, and Rust SDK tests can exercise ProcessContainer with an external

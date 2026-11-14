@@ -6,7 +6,7 @@
 use crate::mxc_engine::Error;
 use crate::sandbox::{ExecutionResult, MxcProcess, MxcPtyProcess};
 
-use super::{JsonOptions, PtyJsonOptions};
+use super::{JsonOptions, PtyJsonOptions, SpawnExtendedJsonOptions};
 
 /// Run a caller-authored exact-version one-shot request to completion and capture its output.
 ///
@@ -32,6 +32,14 @@ pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions) -> Result<MxcPty
     crate::__ffi::spawn_with_pty_json(json, options.experimental, options.size)
 }
 
+/// Spawn a caller-authored exact-version one-shot request with stdio chosen in `options`.
+pub fn spawn_with_extended_options_json(
+    json: &str,
+    options: SpawnExtendedJsonOptions,
+) -> Result<MxcProcess, Error> {
+    crate::__ffi::spawn_with_extended_options_json(json, options.experimental, options.stdio)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,6 +60,19 @@ mod tests {
         };
         assert_eq!(pipe_error.code, ErrorCode::MalformedRequest);
         assert_eq!(pty_error.code, ErrorCode::MalformedRequest);
+        for stdio in [
+            crate::options::SpawnStdio::Pipes,
+            crate::options::SpawnStdio::Inherit,
+        ] {
+            let options = SpawnExtendedJsonOptions {
+                stdio,
+                ..Default::default()
+            };
+            match spawn_with_extended_options_json(json, options) {
+                Err(error) => assert_eq!(error.code, ErrorCode::MalformedRequest),
+                Ok(_) => panic!("missing version must fail"),
+            }
+        }
     }
 
     #[test]

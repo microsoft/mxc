@@ -14,6 +14,7 @@ Callers do not supply JSON or a schema version.
 | Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
+| The caller's own standard input, output, and error | `spawnWithExtendedOptions` with `stdio: 'inherit'` | — | `Promise<MxcProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
@@ -22,7 +23,11 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console launch API. Typed V1 does
+ownership. `spawnWithExtendedOptions` takes extensible options; its default
+`stdio: 'pipes'` behaves like `spawn`. `stdio: 'inherit'` instead attaches the
+workload to whatever this Node.js process's standard streams already are, such
+as a console, pseudo-console, or pipes set up by the parent; it supports
+ProcessContainer, Bubblewrap, and Seatbelt. Typed V1 does
 not accept ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
 [V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
 accepts caller-authored requests separately.
@@ -155,6 +160,8 @@ export async function provisionContainer<C extends LifecycleContainmentKind>(req
 ## `@microsoft/mxc-sdk/v1::getTelemetryConsentStatus`
 
 Read persisted/effective consent and policy without blocking the event loop.
+This state and consent-management operations do not control Required collection
+for supported contracts. See [Telemetry](../../../telemetry.md).
 
 ```typescript
 export async function getTelemetryConsentStatus(): Promise<TelemetryConsentStatus>;
@@ -230,6 +237,18 @@ Create a container request attached to an MXC-owned pseudo-terminal.
 
 ```typescript
 export async function spawnWithPty(request: ContainerRequest, options: SpawnWithPtyOptions = {}): Promise<MxcPtyProcess>;
+```
+
+
+## `@microsoft/mxc-sdk/v1::spawnWithExtendedOptions`
+
+Create a container request with stdio and other controls chosen in the options.
+With `stdio: 'inherit'` the returned process has no streams to take, and
+backends other than ProcessContainer, Bubblewrap, and Seatbelt reject with
+`unsupported_containment`.
+
+```typescript
+export async function spawnWithExtendedOptions(request: ContainerRequest, options: SpawnExtendedOptions = {}): Promise<MxcProcess>;
 ```
 
 
