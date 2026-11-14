@@ -19,7 +19,9 @@
 //!   process, returning the same opaque [`crate::MxcSandbox`] handle
 //!   as [`mxc_spawn_json`](crate::mxc_spawn_json) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
-//!   [`mxc_exec_state_aware_with_stdin_json`] does the same with a writable stdin.
+//! - [`mxc_exec_state_aware_for_run_json`] returns that same handle for a
+//!   caller that runs the workload to completion; a WSLC workload reads
+//!   end-of-file on stdin.
 //! - [`mxc_state_aware_exec_pty`] returns that same lifecycle handle with merged
 //!   PTY output and caller-driven input and resize.
 //! - [`mxc_run_state_aware_exec_json`] blocks until exec finishes and returns
@@ -38,7 +40,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::__ffi::{
-    execute_lifecycle_capture_json, execute_lifecycle_json, execute_lifecycle_with_stdin_json,
+    execute_lifecycle_capture_json, execute_lifecycle_for_run_json, execute_lifecycle_json,
     run_lifecycle_json as run_state_aware_json, spawn_in_container_with_pty_json,
 };
 use mxc_sdk::v1::MxcPtySize;
@@ -223,22 +225,24 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
     unsafe {
         exec_streaming(
             "mxc_exec_state_aware_json",
+            execute_lifecycle_json,
             request_json_utf8,
             experimental,
-            execute_lifecycle_json,
             out_handle,
             out_error,
         )
     }
 }
 
-/// [`mxc_exec_state_aware_json`] with a writable stdin, which a WSLC process
-/// started there does not get.
+/// Execute for captured output while retaining a cancellable process handle.
+///
+/// Applies the backend's capture limits without changing live-streaming calls.
+/// Drive and release the returned handle as for [`mxc_exec_state_aware_json`].
 ///
 /// # Safety
 /// As for [`mxc_exec_state_aware_json`].
 #[no_mangle]
-pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
+pub unsafe extern "C" fn mxc_exec_state_aware_capture_json(
     request_json_utf8: *const c_char,
     experimental: i32,
     out_handle: *mut *mut MxcSandbox,
@@ -247,10 +251,36 @@ pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
     // SAFETY: forwarded under this function's own contract.
     unsafe {
         exec_streaming(
-            "mxc_exec_state_aware_with_stdin_json",
+            "mxc_exec_state_aware_capture_json",
+            execute_lifecycle_capture_json,
             request_json_utf8,
             experimental,
-            execute_lifecycle_with_stdin_json,
+            out_handle,
+            out_error,
+        )
+    }
+}
+
+/// Run the `exec` phase as a live streaming process for a run-to-completion
+/// helper: like [`mxc_exec_state_aware_json`], but a WSLC workload reads
+/// end-of-file on stdin.
+///
+/// # Safety
+/// As for [`mxc_exec_state_aware_json`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_exec_state_aware_for_run_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    // SAFETY: forwarded under this function's own contract.
+    unsafe {
+        exec_streaming(
+            "mxc_exec_state_aware_for_run_json",
+            execute_lifecycle_for_run_json,
+            request_json_utf8,
+            experimental,
             out_handle,
             out_error,
         )
@@ -261,9 +291,9 @@ pub unsafe extern "C" fn mxc_exec_state_aware_with_stdin_json(
 /// As for [`mxc_exec_state_aware_json`].
 unsafe fn exec_streaming(
     entry_point: &str,
+    execute: fn(&str, bool) -> Result<mxc_sdk::v1::MxcProcess, mxc_sdk::v1::Error>,
     request_json_utf8: *const c_char,
     experimental: i32,
-    execute: fn(&str, bool) -> Result<mxc_sdk::v1::MxcProcess, mxc_sdk::v1::Error>,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -590,6 +620,186 @@ mod tests {
     const WINDOWS_SANDBOX_PROVISION_REQUEST: &str =
         r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
 
+    #[cfg(target_os = "windows")]
+    const MICROVM_PROVISION_REQUEST: &str = concat!(
+        r#"{"version":"1.1.0-alpha","phase":"provision","containment":"microvm","#,
+        r#""microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"}}"#,
+    );
+
+    #[test]
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    fn microvm_low_stack_exec_reaches_client() {
+        const CHILD: &str = "MXC_TEST_LOW_STACK_EXEC";
+        fn assert_kernel_digest_error(mode: &str, message: &str) {
+            assert!(
+                message.contains("guest kernel")
+                    && message.contains(r"guest\vmlinux")
+                    && message.contains("does not match the approved SHA-256"),
+                "{mode}: {message}"
+            );
+        }
+        if let Ok(mode) = std::env::var(CHILD) {
+            let stack_size = std::env::var("MXC_TEST_STACK_BYTES")
+                .unwrap_or_else(|_| (128 * 1024).to_string())
+                .parse()
+                .unwrap();
+            std::thread::Builder::new()
+                .stack_size(stack_size)
+                .spawn(move || {
+                    let request = if mode.starts_with("once-") {
+                        CString::new(concat!(
+                            r#"{"version":"1.1.0-alpha","containment":"microvm","#,
+                            r#""microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"#,
+                            r#""process":{"commandLine":"true","timeout":30000}}"#,
+                        ))
+                    } else {
+                        CString::new(concat!(
+                            r#"{"version":"1.1.0-alpha","phase":"exec","#,
+                            r#""sandboxId":"microvm:0123456789abcdef0123456789abcdef","#,
+                            r#""process":{"commandLine":"true","timeout":30000}}"#,
+                        ))
+                    }
+                    .unwrap();
+                    if mode == "once-capture" {
+                        let mut result = crate::MxcRunResult::empty();
+                        // SAFETY: the C string and output storage remain live through the call.
+                        let status =
+                            unsafe { crate::mxc_run_json(request.as_ptr(), 1, &mut result) };
+                        let message = if result.error.message_utf8.is_null() {
+                            String::new()
+                        } else {
+                            // SAFETY: the result owns a NUL-terminated message.
+                            unsafe { std::ffi::CStr::from_ptr(result.error.message_utf8) }
+                                .to_string_lossy()
+                                .into_owned()
+                        };
+                        // SAFETY: the result was populated by this FFI call.
+                        unsafe { crate::mxc_run_result_free(&mut result) };
+                        assert_eq!(
+                            status,
+                            crate::MXC_STATUS_BACKEND_UNAVAILABLE,
+                            "{mode}: {message}"
+                        );
+                        assert_kernel_digest_error(&mode, &message);
+                        return;
+                    }
+                    let mut handle = ptr::null_mut();
+                    let mut error = MxcErrorDetail::none();
+                    let execute = if mode == "capture" {
+                        mxc_exec_state_aware_capture_json
+                    } else if mode == "once-stream" {
+                        crate::mxc_spawn_json
+                    } else {
+                        mxc_exec_state_aware_json
+                    };
+                    // SAFETY: the C string and output storage remain live until the call returns.
+                    let status = unsafe { execute(request.as_ptr(), 1, &mut handle, &mut error) };
+                    let message = if error.message_utf8.is_null() {
+                        String::new()
+                    } else {
+                        // SAFETY: populated error owns a NUL-terminated message.
+                        unsafe { std::ffi::CStr::from_ptr(error.message_utf8) }
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    if !handle.is_null() {
+                        // SAFETY: a successful call returned the owned handle.
+                        unsafe { crate::mxc_sandbox_free(handle) };
+                    }
+                    // SAFETY: error was populated by this FFI call.
+                    unsafe { crate::mxc_error_detail_free(&mut error) };
+                    if mode == "once-stream" {
+                        assert_eq!(
+                            status,
+                            crate::MXC_STATUS_BACKEND_UNAVAILABLE,
+                            "{mode}: {message}"
+                        );
+                        assert_kernel_digest_error(&mode, &message);
+                    } else {
+                        assert_eq!(status, crate::MXC_STATUS_STALE_ID, "{mode}: {message}");
+                    }
+                    eprintln!("{mode}: status={status}, message={message}");
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            return;
+        }
+
+        let exe = std::env::current_exe().unwrap();
+        let bundle = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("aci-edge-sandboxes");
+        assert!(
+            bundle.join("SHA256SUMS").is_file(),
+            "missing staged NVX bundle"
+        );
+        fn copy_directory(source: &std::path::Path, target: &std::path::Path) {
+            std::fs::create_dir_all(target).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let destination = target.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_directory(&entry.path(), &destination);
+                } else {
+                    std::fs::copy(entry.path(), destination).unwrap();
+                }
+            }
+        }
+        let invalid = tempfile::tempdir().unwrap();
+        copy_directory(&bundle, invalid.path());
+        std::fs::write(invalid.path().join("guest/vmlinux"), b"modified").unwrap();
+        let mut failures = Vec::new();
+        for mode in ["stream", "capture", "once-stream", "once-capture"] {
+            let state = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "state_aware::tests::microvm_low_stack_exec_reaches_client",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .env("LOCALAPPDATA", state.path())
+                .env(
+                    "ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR",
+                    if mode.starts_with("once-") {
+                        invalid.path()
+                    } else {
+                        &bundle
+                    },
+                )
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while child.try_wait().unwrap().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    panic!(
+                        "{mode} timed out: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let output = child.wait_with_output().unwrap();
+            if !output.status.success() {
+                failures.push(format!(
+                    "{mode}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     fn captured_exec_rejects_null_output_before_reading_request() {
         // SAFETY: both null arguments are explicitly supported.
@@ -641,6 +851,192 @@ mod tests {
         };
         assert_eq!(status, out.status);
         out
+    }
+
+    #[cfg(target_os = "windows")]
+    mod impersonation_tests {
+        use super::*;
+
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn ImpersonateSelf(level: i32) -> i32;
+            fn RevertToSelf() -> i32;
+            fn OpenThreadToken(
+                thread: isize,
+                access: u32,
+                open_as_self: i32,
+                token: *mut isize,
+            ) -> i32;
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn CloseHandle(handle: isize) -> i32;
+        }
+        struct Impersonation;
+        impl Impersonation {
+            fn enter(level: i32) -> Self {
+                // SAFETY: impersonation is reverted by Drop on the same thread.
+                assert_ne!(
+                    unsafe { ImpersonateSelf(level) },
+                    0,
+                    "ImpersonateSelf({level}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                Self
+            }
+        }
+        impl Drop for Impersonation {
+            fn drop(&mut self) {
+                // SAFETY: balances the successful call to ImpersonateSelf.
+                assert_ne!(
+                    unsafe { RevertToSelf() },
+                    0,
+                    "RevertToSelf failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        #[test]
+        fn worker_inherits_impersonation() {
+            let _guard = Impersonation::enter(2); // SecurityImpersonation
+            let context = mxc_sdk::__ffi::LifecycleThreadContext::capture().unwrap();
+            let present = std::thread::spawn(move || {
+                context
+                    .run(|| {
+                        let mut token = 0;
+                        // SAFETY: the token out-parameter is writable and handles are closed below.
+                        let opened =
+                            unsafe { OpenThreadToken(GetCurrentThread(), 8, 1, &mut token) };
+                        if opened != 0 {
+                            unsafe { CloseHandle(token) };
+                        }
+                        opened != 0
+                    })
+                    .unwrap()
+            })
+            .join()
+            .unwrap();
+            assert!(present, "lifecycle worker lost the caller's impersonation");
+        }
+
+        #[test]
+        fn identification_preserves_validation_errors_before_worker_dispatch() {
+            std::thread::Builder::new()
+                .stack_size(512 * 1024)
+                .spawn(|| {
+                    let mut baseline = call_opt(WINDOWS_SANDBOX_PROVISION_REQUEST, true, true);
+                    let non_microvm_status = baseline.status;
+                    unsafe { mxc_state_aware_result_free(&mut baseline) };
+                    let _guard = Impersonation::enter(1); // SecurityIdentification
+                    let non_microvm = CString::new(WINDOWS_SANDBOX_PROVISION_REQUEST).unwrap();
+                    let invalid_utf8 = [0xffu8, 0];
+                    let malformed = CString::new("{}").unwrap();
+                    let unknown = CString::new(
+                        r#"{"version":"1.0.0","phase":"start","sandboxId":"nosuchbackend:abc"}"#,
+                    )
+                    .unwrap();
+                    let microvm = CString::new(MICROVM_PROVISION_REQUEST).unwrap();
+                    for (request, experimental, expected) in [
+                        (ptr::null(), 0, crate::MXC_STATUS_NULL_ARGUMENT),
+                        (
+                            invalid_utf8.as_ptr().cast(),
+                            0,
+                            crate::MXC_STATUS_INVALID_UTF8,
+                        ),
+                        (malformed.as_ptr(), 0, crate::MXC_STATUS_MALFORMED_REQUEST),
+                        (
+                            unknown.as_ptr(),
+                            0,
+                            crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT,
+                        ),
+                        (microvm.as_ptr(), 0, crate::MXC_STATUS_BACKEND_UNAVAILABLE),
+                        (non_microvm.as_ptr(), 1, non_microvm_status),
+                    ] {
+                        let mut out = MxcStateAwareResult::empty();
+                        // SAFETY: request is null or a valid C string and out is writable.
+                        let status =
+                            unsafe { mxc_run_state_aware_json(request, 1, experimental, &mut out) };
+                        assert_eq!(status, expected);
+                        unsafe { mxc_state_aware_result_free(&mut out) };
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let bad_id = CString::new(
+                            r#"{"version":"1.0.0","phase":"start","sandboxId":"microvm:bad"}"#,
+                        )
+                        .unwrap();
+                        let mut bad = MxcStateAwareResult::empty();
+                        // SAFETY: the C string and output are valid for the duration of the call.
+                        let status =
+                            unsafe { mxc_run_state_aware_json(bad_id.as_ptr(), 1, 1, &mut bad) };
+                        assert_eq!(status, crate::MXC_STATUS_MALFORMED_ID);
+                        unsafe { mxc_state_aware_result_free(&mut bad) };
+                        let bad_exec_id = CString::new(concat!(
+                            r#"{"version":"1.0.0","phase":"exec","#,
+                            r#""sandboxId":"microvm:bad","process":{"commandLine":"true"}}"#,
+                        ))
+                        .unwrap();
+                        let mut handle = ptr::null_mut();
+                        let mut error = MxcErrorDetail::none();
+                        // SAFETY: the C string and output storage remain live through the call.
+                        let status = unsafe {
+                            mxc_exec_state_aware_json(
+                                bad_exec_id.as_ptr(),
+                                1,
+                                &mut handle,
+                                &mut error,
+                            )
+                        };
+                        assert_eq!(status, crate::MXC_STATUS_MALFORMED_ID);
+                        assert!(handle.is_null());
+                        unsafe { crate::mxc_error_detail_free(&mut error) };
+                        let bad_policy = CString::new(concat!(
+                            r#"{"version":"1.1.0-alpha","phase":"exec","#,
+                            r#""sandboxId":"microvm:0123456789abcdef0123456789abcdef","#,
+                            r#""process":{"commandLine":"echo test","cwd":"relative"}}"#,
+                        ))
+                        .unwrap();
+                        let mut rejected = MxcStateAwareResult::empty();
+                        // SAFETY: the C string and output are valid for the duration of the call.
+                        let status = unsafe {
+                            mxc_run_state_aware_json(bad_policy.as_ptr(), 1, 1, &mut rejected)
+                        };
+                        assert_eq!(status, crate::MXC_STATUS_POLICY_VALIDATION);
+                        unsafe { mxc_state_aware_result_free(&mut rejected) };
+                        let mut error = MxcErrorDetail::none();
+                        // SAFETY: the C string and output storage remain live through the call.
+                        let status = unsafe {
+                            mxc_exec_state_aware_json(
+                                bad_policy.as_ptr(),
+                                1,
+                                &mut handle,
+                                &mut error,
+                            )
+                        };
+                        assert_eq!(status, crate::MXC_STATUS_POLICY_VALIDATION);
+                        assert!(handle.is_null());
+                        unsafe { crate::mxc_error_detail_free(&mut error) };
+                        let mut out = MxcStateAwareResult::empty();
+                        // SAFETY: request and out remain valid during the call.
+                        let status =
+                            unsafe { mxc_run_state_aware_json(microvm.as_ptr(), 1, 1, &mut out) };
+                        assert_eq!(status, crate::MXC_STATUS_BACKEND_ERROR);
+                        let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
+                            .to_str()
+                            .unwrap();
+                        assert!(
+                            message.contains("calling thread's impersonation"),
+                            "{message}"
+                        );
+                        unsafe { mxc_state_aware_result_free(&mut out) };
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
     }
 
     #[test]
@@ -706,6 +1102,9 @@ mod tests {
         error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
         error.native_code = Some("0x80070490".to_string());
         error.remediation = Some("Re-provision the sandbox.".to_string());
+        error.details = Some(Box::new(serde_json::json!({
+            "nvxRecovery": { "sandboxId": "microvm:private", "state": "provisioned" }
+        })));
 
         let mut result = MxcStateAwareResult::from_sdk_error(&error);
         assert_eq!(result.status, crate::MXC_STATUS_STALE_ID);
@@ -713,6 +1112,12 @@ mod tests {
 
         // SAFETY: every pointer was produced by `alloc_cstring` just above.
         unsafe {
+            assert_eq!(
+                std::ffi::CStr::from_ptr(result.error.message_utf8)
+                    .to_str()
+                    .unwrap(),
+                "The provision was not found."
+            );
             assert_eq!(
                 std::ffi::CStr::from_ptr(result.error.operation_utf8)
                     .to_str()
@@ -887,10 +1292,8 @@ mod tests {
     fn exec_null_out_handle_is_null_argument() {
         let j =
             CString::new(r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
-        for entry_point in [
-            mxc_exec_state_aware_json,
-            mxc_exec_state_aware_with_stdin_json,
-        ] {
+
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
             // SAFETY: valid string, deliberately-null out_handle.
             let status = unsafe { entry_point(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
             assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
@@ -903,15 +1306,17 @@ mod tests {
             r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
         )
         .unwrap();
-        let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err = MxcErrorDetail::none();
-        // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_exec_state_aware_json(j.as_ptr(), 0, &mut handle, &mut err) };
-        assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
-        assert!(handle.is_null());
-        assert!(!err.message_utf8.is_null());
-        // SAFETY: `err` was filled by `mxc_exec_state_aware_json` and not yet freed.
-        unsafe { crate::mxc_error_detail_free(&mut err) };
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
+            let mut handle: *mut MxcSandbox = ptr::null_mut();
+            let mut err = MxcErrorDetail::none();
+            // SAFETY: valid string and out pointers.
+            let status = unsafe { entry_point(j.as_ptr(), 0, &mut handle, &mut err) };
+            assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
+            assert!(handle.is_null());
+            assert!(!err.message_utf8.is_null());
+            // SAFETY: `err` was filled by the entry point and not yet freed.
+            unsafe { crate::mxc_error_detail_free(&mut err) };
+        }
     }
 
     /// Without the opt-in the C ABI refuses an experimental backend, and the
@@ -963,10 +1368,7 @@ mod tests {
         )
         .unwrap();
 
-        for entry_point in [
-            mxc_exec_state_aware_json,
-            mxc_exec_state_aware_with_stdin_json,
-        ] {
+        for entry_point in [mxc_exec_state_aware_json, mxc_exec_state_aware_for_run_json] {
             for (experimental, expect_refused) in [(0, true), (1, false)] {
                 let mut handle: *mut MxcSandbox = ptr::null_mut();
                 let mut err = MxcErrorDetail::none();

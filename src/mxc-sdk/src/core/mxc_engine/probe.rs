@@ -249,7 +249,7 @@ struct WindowsHostAvailability {
 }
 
 #[cfg(target_os = "windows")]
-fn microvm_host_available() -> bool {
+pub(super) fn microvm_host_available() -> bool {
     #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
     {
         crate::backend_modules::nvx::is_available()

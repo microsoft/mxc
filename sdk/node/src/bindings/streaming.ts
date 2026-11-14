@@ -86,13 +86,6 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
     error: AbiErrorDetail,
     completion: NativeSpawnCompletion,
   ): void;
-  spawnWithStdin(
-    request: string,
-    experimental: number,
-    outHandle: Pointer[],
-    error: AbiErrorDetail,
-    completion: NativeSpawnCompletion,
-  ): void;
   spawnWithInheritedStdio(
     request: string,
     experimental: number,
@@ -113,7 +106,14 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
     error: AbiErrorDetail,
     completion: NativeSpawnCompletion,
   ): void;
-  stateAwareExecWithStdinAsync(
+  stateAwareExecCaptureAsync(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+    completion: NativeSpawnCompletion,
+  ): void;
+  stateAwareExecForRunAsync(
     request: string,
     experimental: number,
     outHandle: Pointer[],
@@ -152,22 +152,6 @@ function bindStreamingNativeFacade(
     error: AbiErrorDetail,
   ) => number>>(handle, {
     symbol: 'mxc_spawn_json',
-    result: 'int32_t',
-    parameters: [
-      'const char *',
-      'int32_t',
-      koffi.out(koffi.pointer(AbiSandbox, 2)),
-      koffi.out(koffi.pointer(AbiErrorDetailType)),
-    ],
-  });
-
-  const spawnWithStdinBinding = bindNativeFunction<KoffiFunc<(
-    request: string,
-    experimental: number,
-    outHandle: Pointer[],
-    error: AbiErrorDetail,
-  ) => number>>(handle, {
-    symbol: 'mxc_spawn_with_stdin_json',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -225,13 +209,16 @@ function bindStreamingNativeFacade(
     ],
   });
 
-  const stateAwareExecWithStdinBinding = bindNativeFunction<KoffiFunc<(
+  let stateAwareExecCaptureBinding: typeof stateAwareExecBinding | undefined;
+
+  // For run-to-completion helpers: a WSLC workload reads end-of-file on stdin.
+  const stateAwareExecForRunBinding = bindNativeFunction<KoffiFunc<(
     request: string,
     experimental: number,
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_exec_state_aware_with_stdin_json',
+    symbol: 'mxc_exec_state_aware_for_run_json',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -250,10 +237,6 @@ function bindStreamingNativeFacade(
       spawnAsyncBinding.async(request, experimental, outHandle, error, completion);
     },
 
-    spawnWithStdin(request, experimental, outHandle, error, completion) {
-      spawnWithStdinBinding.async(request, experimental, outHandle, error, completion);
-    },
-
     spawnWithInheritedStdio(request, experimental, outHandle, error, completion) {
       spawnExtendedBinding.async(
         request,
@@ -269,14 +252,26 @@ function bindStreamingNativeFacade(
     stateAwareExecAsync(request, experimental, outHandle, error, completion) {
       stateAwareExecBinding.async(request, experimental, outHandle, error, completion);
     },
-    stateAwareExecWithStdinAsync(request, experimental, outHandle, error, completion) {
-      stateAwareExecWithStdinBinding.async(
-        request,
-        experimental,
-        outHandle,
-        error,
-        completion,
-      );
+    stateAwareExecForRunAsync(request, experimental, outHandle, error, completion) {
+      stateAwareExecForRunBinding.async(request, experimental, outHandle, error, completion);
+    },
+    stateAwareExecCaptureAsync(request, experimental, outHandle, error, completion) {
+      stateAwareExecCaptureBinding ??= bindNativeFunction<KoffiFunc<(
+        request: string,
+        experimental: number,
+        outHandle: Pointer[],
+        error: AbiErrorDetail,
+      ) => number>>(handle, {
+        symbol: 'mxc_exec_state_aware_capture_json',
+        result: 'int32_t',
+        parameters: [
+          'const char *',
+          'int32_t',
+          koffi.out(koffi.pointer(AbiSandbox, 2)),
+          koffi.out(koffi.pointer(AbiErrorDetailType)),
+        ],
+      });
+      stateAwareExecCaptureBinding.async(request, experimental, outHandle, error, completion);
     },
     id: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_id',
@@ -361,14 +356,14 @@ function bindStreamingNativeFacade(
 }
 
 let sharedNative: StreamingNativeFacade | undefined;
-let stateAwareSandboxProcessFactory:
-  | ((
-      requestJson: string,
-      experimental: boolean,
-      timeoutMs?: number,
-      stdin?: boolean,
-    ) => MxcProcess)
-  | undefined;
+type StateAwareSandboxProcessFactory = (
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs: number | undefined,
+  forRun: boolean,
+  output: 'stream' | 'capture',
+) => MxcProcess;
+let stateAwareSandboxProcessFactory: StateAwareSandboxProcessFactory | undefined;
 let oneShotSyncProcessFactory:
   | ((request: OneShotRequest, experimental: boolean) => MxcProcess)
   | undefined;
@@ -376,7 +371,6 @@ let oneShotAsyncProcessFactory:
   | ((
       request: OneShotRequest,
       experimental: boolean,
-      stdin: boolean,
     ) => Promise<MxcProcess>)
   | undefined;
 
@@ -583,14 +577,12 @@ export async function createStreamingDriver(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
   experimental = false,
-  stdin = false,
 ): Promise<NativeLifecycleDriver> {
   return createStreamingDriverFromJson(
     JSON.stringify(request),
     native,
     factory,
     experimental,
-    stdin,
   );
 }
 
@@ -600,14 +592,13 @@ export async function createStreamingDriverFromJson(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
   experimental = false,
-  stdin = false,
 ): Promise<NativeLifecycleDriver> {
   return createStreamingDriverWith(
     requestJson,
     native,
     factory,
     experimental,
-    stdin ? native.spawnWithStdin.bind(native) : native.spawn.bind(native),
+    native.spawn.bind(native),
   );
 }
 
@@ -696,7 +687,6 @@ function ensureSupportedNodeVersion(): void {
 function spawnDriver(
   request: OneShotRequest,
   experimental: boolean,
-  stdin: boolean,
 ): Promise<NativeLifecycleDriver> {
   ensureSupportedNodeVersion();
   return createStreamingDriver(
@@ -704,19 +694,17 @@ function spawnDriver(
     getStreamingNative(),
     nodeStreamFactory,
     experimental,
-    stdin,
   );
 }
 
 export async function spawnBindingSandboxProcess(
   request: OneShotRequest,
   experimental = false,
-  stdin = false,
 ): Promise<MxcProcess> {
   if (oneShotAsyncProcessFactory !== undefined) {
-    return oneShotAsyncProcessFactory(request, experimental, stdin);
+    return oneShotAsyncProcessFactory(request, experimental);
   }
-  const driver = await spawnDriver(request, experimental, stdin);
+  const driver = await spawnDriver(request, experimental);
   return createSandboxProcess(driver, request.process.timeout);
 }
 
@@ -800,7 +788,6 @@ export function _setBindingSandboxProcessFactories(
   asyncFactory?: (
     request: OneShotRequest,
     experimental: boolean,
-    stdin: boolean,
   ) => Promise<MxcProcess>,
 ): void {
   oneShotSyncProcessFactory = syncFactory;
@@ -843,12 +830,7 @@ function createSandboxProcess(
 }
 
 export function _setStateAwareBindingSandboxProcessFactory(
-  factory?: (
-    requestJson: string,
-    experimental: boolean,
-    timeoutMs?: number,
-    stdin?: boolean,
-  ) => MxcProcess,
+  factory?: StateAwareSandboxProcessFactory,
 ): void {
   stateAwareSandboxProcessFactory = factory;
 }
@@ -863,6 +845,8 @@ export function spawnStateAwareBindingSandboxProcess(
       requestJson,
       experimental,
       timeoutMs,
+      false,
+      'stream',
     );
   }
 
@@ -882,13 +866,16 @@ export async function createStateAwareStreamingDriverAsync(
   experimental: boolean,
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
-  stdin = false,
+  forRun = false,
+  output: 'stream' | 'capture' = 'stream',
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
-  const exec = stdin
-    ? native.stateAwareExecWithStdinAsync.bind(native)
-    : native.stateAwareExecAsync.bind(native);
+  const exec = output === 'capture'
+    ? native.stateAwareExecCaptureAsync.bind(native)
+    : forRun
+      ? native.stateAwareExecForRunAsync.bind(native)
+      : native.stateAwareExecAsync.bind(native);
   const status = await new Promise<number>((resolve, reject) => {
     exec(
       requestJson,
@@ -905,14 +892,16 @@ export async function createStateAwareStreamingDriverAsync(
   );
 }
 
+/** `forRun` starts the workload with the run-to-completion settings. */
 export async function spawnStateAwareBindingSandboxProcessAsync(
   requestJson: string,
   experimental: boolean,
   timeoutMs?: number,
-  stdin = false,
+  forRun = false,
+  output: 'stream' | 'capture' = 'stream',
 ): Promise<MxcProcess> {
   if (stateAwareSandboxProcessFactory !== undefined) {
-    return stateAwareSandboxProcessFactory(requestJson, experimental, timeoutMs, stdin);
+    return stateAwareSandboxProcessFactory(requestJson, experimental, timeoutMs, forRun, output);
   }
   ensureSupportedNodeVersion();
   const driver = await createStateAwareStreamingDriverAsync(
@@ -920,7 +909,8 @@ export async function spawnStateAwareBindingSandboxProcessAsync(
     experimental,
     getStreamingNative(),
     nodeStreamFactory,
-    stdin,
+    forRun,
+    output,
   );
   return createSandboxProcess(driver, timeoutMs);
 }

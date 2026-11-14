@@ -325,9 +325,30 @@ function Invoke-NamedSuites {
 
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
-    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
+    $rustTests = Join-Path $bundle 'inproc\mxc-sdk-wslc-streaming-tests.exe'
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js', 'inproc\mxc-sdk-wslc-streaming-tests.exe') {
         Assert-File -Path (Join-Path $bundle $file)
     }
+    $nodeLifecycleTests = @(
+        'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership',
+        'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior')
+    $nodeCreateAndRunTests = @(
+        'should forward every stdin byte to a spawned command',
+        'should give a spawned command end-of-file when wait ends an untaken stdin',
+        'should let output be read to the end before waiting once stdin is ended',
+        'should give a command run to completion end-of-file on stdin',
+        'should reject an unsupported targetOs before starting a container')
+    $dotnetMethods = @(
+        'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership',
+        'SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput',
+        'SpawnInContainer_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook',
+        'SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook',
+        'RunInContainer_GivesACommandThatReadsStdinEndOfFile',
+        'Spawn_ForwardsEveryByteAndClosingStdinEndsInput',
+        'Spawn_WaitClosesAnUntakenStdin',
+        'Spawn_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
+        'Run_GivesACommandThatReadsStdinEndOfFile')
 
     # The SDK suites skip unless asked to run, and a skip is reported as a
     # failure below.
@@ -352,9 +373,17 @@ function Invoke-WslcSuites {
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
+        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests $nodeLifecycleTests }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests $nodeCreateAndRunTests }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods $dotnetMethods }
+        'Rust' = {
+            foreach ($case in 'streaming_wslc_spawn_forwards_stdin', 'streaming_wslc_run_reads_end_of_file', 'streaming_wslc_lifecycle_stdin') {
+                $run = Invoke-LoggedNative -FilePath $rustTests -LogName "wslc-rust-$case.log" `
+                    -ArgumentList @('--ignored', '--exact', $case, '--test-threads=1')
+                $failure = Get-LibtestFailure -Run $run -RequiredTests $case
+                if ($failure) { throw "${case}: $failure" }
+            }
+        }
     })
 }
 
@@ -446,10 +475,23 @@ function Invoke-MicroVmTests {
     }
     $tests = Join-Path $binaryDirectoryPath 'nvx-e2e-tests.exe'
     Assert-File -Path $tests
-    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
-    $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
-        '--include-ignored', '--nocapture', '--test-threads=1'
-    )
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\nvx-json.test.js',
+        'dotnet\aci-edge-sandboxes\bundle-manifest.json', 'dotnet\aci-edge-sandboxes\bin\aci_edge_agent.dll',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\package.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bundle-manifest.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bin\aci_edge_agent.dll') {
+        Assert-File -Path (Join-Path $bundle $file)
+    }
+    $previousAgent = $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR
+    try {
+        $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
+        $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
+            '--include-ignored', '--nocapture', '--test-threads=1'
+        )
+    } finally {
+        [Environment]::SetEnvironmentVariable('ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR', $previousAgent)
+    }
     $failure = Get-LibtestFailure -Run $run
     if ($failure) {
         throw "MicroVM SDK tests $failure."
@@ -483,6 +525,32 @@ function Invoke-MicroVmTests {
         if (-not $output.Contains($scenarios[$scenario])) {
             throw "MicroVM SDK validation did not execute the $scenario VM scenario."
         }
+    }
+    $previousNvx = $env:MXC_ENABLE_NVX_TESTS
+    $previousFfi = $env:MXC_FFI_DIR
+    try {
+        $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = ''
+        $env:MXC_FFI_DIR = ''
+        $env:MXC_ENABLE_NVX_TESTS = '1'
+        $failure = Invoke-XunitClasses -Bundle $bundle -Name 'microvm-json' -Classes 'MxcLifecycleNvxE2ETests' -RequiredMethods 'DevJson_NvxLifecycleCaptureAndLiveStreams'
+        if ($failure) { throw ".NET NVX JSON: $failure" }
+        # Explicit Node reporters can crash native NVX execution when the image is cached.
+        Push-Location (Join-Path $bundle 'sdk-integration')
+        try {
+            $nodeRun = Invoke-LoggedNative -FilePath (Join-Path $bundle 'node\node.exe') -LogName 'microvm-json-node.log' -ArgumentList @('--test', '--test-force-exit', 'dist\nvx-json.test.js')
+        } finally { Pop-Location }
+        $nodeOutput = Get-Content -LiteralPath $nodeRun.Log -Raw
+        if ($nodeRun.ExitCode -ne 0 -or
+            $nodeOutput -notmatch '(?m)^\s*✔ V1\.Dev NVX JSON lifecycle capture, live streams and overflow recovery \(' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ pass 1\s*$' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ fail 0\s*$' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ skipped 0\s*$') {
+            throw 'Node NVX JSON test did not pass without skips.'
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('MXC_ENABLE_NVX_TESTS', $previousNvx)
+        [Environment]::SetEnvironmentVariable('MXC_FFI_DIR', $previousFfi)
+        [Environment]::SetEnvironmentVariable('ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR', $previousAgent)
     }
 }
 

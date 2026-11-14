@@ -35,6 +35,7 @@ jobs:
 - ${{ each item in parameters.matrix }}:
   - job: 'lint_${{ item.name }}'
     displayName: 'Lint (${{ item.component }} ${{ item.os }})'
+    timeoutInMinutes: 240
 
     pool:
       ${{ if eq(item.os, 'macos') }}:
@@ -56,8 +57,6 @@ jobs:
         workingDirectory: src
       ${{ if eq(item.os, 'linux') }}:
         CARGO_TARGET_DIR: /tmp/target
-        # LXC build job uses src/tools/lxc as cwd; mirror it so the cargo
-        # target-dir cache key matches and we benefit from any shared cache.
         workingDirectory: $(Build.SourcesDirectory)/src/tools/lxc
       ${{ if eq(item.os, 'macos') }}:
         CARGO_TARGET_DIR: $(Agent.TempDirectory)/target

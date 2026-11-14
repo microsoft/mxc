@@ -428,11 +428,7 @@ function toExecutionResult(result: BindingRunResult): ExecutionResult {
   return output;
 }
 
-/**
- * Create a container request and asynchronously return its live process. A
- * WSLC command reads end-of-file on stdin; use {@link spawnWithStdin} to give
- * it input.
- */
+/** Create a container request and asynchronously return its live process. */
 export async function spawn(
   request: ContainerRequest,
   options: SpawnOptions = {},
@@ -441,22 +437,6 @@ export async function spawn(
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
     false,
-  );
-}
-
-/**
- * {@link spawn} with a writable `standardInput` whose end gives the command
- * end-of-file.
- */
-export async function spawnWithStdin(
-  request: ContainerRequest,
-  options: SpawnOptions = {},
-): Promise<MxcProcess> {
-  validateOperationOptions('spawnWithStdin', options, false);
-  return spawnBindingSandboxProcess(
-    prepareContainerRequest(request, options.telemetry),
-    false,
-    true,
   );
 }
 

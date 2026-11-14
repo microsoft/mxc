@@ -17,7 +17,6 @@ Attached execution in an existing container is not exposed by the V1 SDK.
 |---|---|---|---|
 | Capture stdout and stderr | `v1::run` | `v1::container::run_in_container` | `ExecutionResult` |
 | Live standard pipes | `v1::spawn` | `v1::container::spawn_in_container` | `MxcProcess` |
-| Live standard pipes with a writable WSLC stdin | `v1::spawn_with_stdin` | `v1::container::spawn_in_container_with_stdin` | `MxcProcess` |
 | Interactive terminal | `v1::spawn_with_pty` | `v1::container::spawn_in_container_with_pty` | `MxcPtyProcess` |
 | The caller's own stdin, stdout, and stderr | `v1::spawn_with_extended_options` with `SpawnStdio::Inherit` | — | `MxcProcess` |
 
@@ -204,6 +203,8 @@ Detect MXC support on the current host.
 
 On Windows, ProcessContainer requires native PSEC support. Other supported
 backends are detected independently; the host is unsupported when none are available.
+MicroVM is reported when available, but execution requires the development
+JSON API; typed V1 requests cannot select it. Availability is advisory.
 
 ```rust
 pub fn platform_support() -> PlatformSupport;
@@ -243,45 +244,25 @@ options: RunInContainerOptions,
 
 ## `mxc_sdk::v1::spawn`
 
-Spawn a [ContainerRequest] and return its live process. A WSLC workload reads
-end-of-file on stdin.
+Spawn a [ContainerRequest] and return its live process. On WSLC,
+`MxcProcess::take_stdin` returns a writable stdin. Close or drop it to give the
+workload end-of-file. Waiting closes an untaken stdin.
 
 ```rust
 pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error>;
 ```
 
 
-## `mxc_sdk::v1::spawn_with_stdin`
-
-Spawn a [ContainerRequest] with a writable stdin, which `MxcProcess::take_stdin`
-returns.
-
-```rust
-pub fn spawn_with_stdin(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error>;
-```
-
-
 ## `mxc_sdk::v1::container::spawn_in_container`
 
-Spawn a workload in an existing container and return its live process. A WSLC
-workload reads end-of-file on stdin.
+Spawn a workload in an existing container and return its live process. On WSLC,
+`MxcProcess::take_stdin` returns a writable stdin. Close or drop it to give the
+workload end-of-file. Waiting closes an untaken stdin. Killing a WSLC process
+that is still running, or reaching its timeout, deletes its container about a
+minute later, because MXC does not signal a WSLC process that has stdin.
 
 ```rust
 pub fn spawn_in_container(
-container_id: &ContainerId,
-request: ExecutionRequest,
-options: SpawnInContainerOptions,
-) -> Result<MxcProcess, Error>;
-```
-
-
-## `mxc_sdk::v1::container::spawn_in_container_with_stdin`
-
-Spawn a workload in an existing container with a writable stdin, which
-`MxcProcess::take_stdin` returns.
-
-```rust
-pub fn spawn_in_container_with_stdin(
 container_id: &ContainerId,
 request: ExecutionRequest,
 options: SpawnInContainerOptions,

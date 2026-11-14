@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>Microsoft.Mxc.Sdk.Nvx.Runtime</id>
+    <version>$version$</version>
+    <authors>Microsoft</authors>
+    <owners>Microsoft</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="file">LICENSE.md</license>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/microsoft/mxc</projectUrl>
+    <repository type="git" url="https://github.com/microsoft/mxc" />
+    <description>Windows x64 NVX MicroVM runtime assets for Microsoft.Mxc.Sdk.</description>
+    <dependencies>
+      <group targetFramework="net8.0"><dependency id="Microsoft.Mxc.Sdk" version="[$version$]" /></group>
+      <group targetFramework="net10.0"><dependency id="Microsoft.Mxc.Sdk" version="[$version$]" /></group>
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="$nvxRuntime$\**" target="runtimes\win-x64\aci-edge-sandboxes" />
+    <file src="buildTransitive\Microsoft.Mxc.Sdk.Nvx.Runtime.targets" target="buildTransitive" />
+    <file src="buildTransitive\Microsoft.Mxc.Sdk.Nvx.Runtime.targets" target="build" />
+    <file src="$repositoryRoot$\LICENSE.md" target="" />
+    <file src="$repositoryRoot$\sdk\dotnet\README.md" target="" />
+  </files>
+</package>

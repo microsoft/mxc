@@ -21,6 +21,22 @@ Node.js 24 or later is required. On Windows, native stdio transfer requires
 Node.js 24.21.0 or later within the Node.js 24 release line, or Node.js 26.8.0
 or later.
 
+## MicroVM JSON requests
+
+On Windows x64 with Windows Hypervisor Platform enabled, install the optional
+`@microsoft/mxc-sdk-nvx-runtime-win32-x64` package at the same version as this SDK. Then:
+
+```typescript
+import { runJson } from '@microsoft/mxc-sdk/v1/dev';
+
+const result = await runJson(JSON.stringify({
+  version: '1.1.0-alpha', containment: 'microvm',
+  microvm: { image: 'mcr.microsoft.com/azurelinux/base/core:3.0' },
+  process: { commandLine: "printf 'hello\\n'", timeout: 30000 },
+}), { experimental: true });
+console.log(result.stdout);
+```
+
 ## Run to completion
 
 ```typescript
@@ -48,7 +64,10 @@ console.log(output.stdout, output.exitCode);
 the workload exit code, timeout state, warnings, and optional output metadata.
 
 On Windows, `getPlatformSupport` reports ProcessContainer only when native PSEC
-is available; other backends are detected independently. `probe(request)` from
+is available; other backends are detected independently. It reports available
+MicroVM support for the development JSON APIs, not typed V1 requests. Windows
+native backend availability is refreshed on each call and remains advisory.
+`probe(request)` from
 `@microsoft/mxc-sdk/v1` checks request compatibility without creating a container.
 If native ProcessContainer cannot serve the request, `tier` is omitted and
 `error` explains why; `probes` still contains host capability facts.
@@ -80,10 +99,10 @@ try {
 ```
 
 `spawn` returns a `Promise<MxcProcess>` with standard pipes, wait, termination,
-and disposal operations. A WSLC command started by `spawn` reads end-of-file on
-stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
-streams before awaiting completion; any untaken streams are drained internally
-to avoid pipe-buffer deadlocks.
+and disposal operations. On WSLC, `standardInput` is writable; end it to give
+the command end-of-file. Waiting ends an untaken stdin. Access output streams
+before awaiting completion; any untaken streams are drained internally to
+avoid pipe-buffer deadlocks. `run` gives a WSLC command end-of-file.
 Each operation accepts its own optional options type: `RunOptions`,
 `SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`.
 Execution options do not support `dryRun`.
@@ -200,8 +219,8 @@ try {
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
 On timeout, it returns partial captured text without waiting for a
 descendant-held output stream to close.
-A WSLC command started by `spawnInContainer` reads end-of-file on stdin;
-`spawnInContainerWithStdin` gives it a writable `standardInput`.
+On WSLC, `spawnInContainer` exposes a writable `standardInput`; ending it gives
+the command end-of-file. `runInContainer` gives a WSLC command end-of-file.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults
