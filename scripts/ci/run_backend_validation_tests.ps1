@@ -190,7 +190,8 @@ function Invoke-ProcessContainerStreamingTests {
         Assert-File -Path $file
     }
 
-    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes',
+        'inherited_stdio_processcontainer_uses_caller_stdio') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
         $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
@@ -211,7 +212,8 @@ function Invoke-ProcessContainerStreamingTests {
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
-                'DevJson_CapturesOutputAndStreamsInput')
+                'DevJson_CapturesOutputAndStreamsInput',
+                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
@@ -222,7 +224,9 @@ function Invoke-ProcessContainerStreamingTests {
             'public tool discovery allows tool reads but denies sibling private files',
             'V1.Dev runJson captures output and exit status',
             'V1.Dev spawnJson supports bidirectional pipes',
-            'V1.Dev spawnWithPtyJson supports an interactive terminal'
+            'V1.Dev spawnWithPtyJson supports an interactive terminal',
+            'spawnWithExtendedOptions with inherited stdio uses the calling process stdio',
+            'V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio'
         )
         Push-Location $nodeSuiteRoot
         try {
@@ -442,10 +446,23 @@ function Invoke-MicroVmTests {
     }
     $tests = Join-Path $binaryDirectoryPath 'nvx-e2e-tests.exe'
     Assert-File -Path $tests
-    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
-    $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
-        '--include-ignored', '--nocapture', '--test-threads=1'
-    )
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\nvx-json.test.js',
+        'dotnet\aci-edge-sandboxes\bundle-manifest.json', 'dotnet\aci-edge-sandboxes\bin\aci_edge_agent.dll',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\package.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bundle-manifest.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bin\aci_edge_agent.dll') {
+        Assert-File -Path (Join-Path $bundle $file)
+    }
+    $previousAgent = $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR
+    try {
+        $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
+        $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
+            '--include-ignored', '--nocapture', '--test-threads=1'
+        )
+    } finally {
+        [Environment]::SetEnvironmentVariable('ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR', $previousAgent)
+    }
     $failure = Get-LibtestFailure -Run $run
     if ($failure) {
         throw "MicroVM SDK tests $failure."
@@ -479,6 +496,32 @@ function Invoke-MicroVmTests {
         if (-not $output.Contains($scenarios[$scenario])) {
             throw "MicroVM SDK validation did not execute the $scenario VM scenario."
         }
+    }
+    $previousNvx = $env:MXC_ENABLE_NVX_TESTS
+    $previousFfi = $env:MXC_FFI_DIR
+    try {
+        $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = ''
+        $env:MXC_FFI_DIR = ''
+        $env:MXC_ENABLE_NVX_TESTS = '1'
+        $failure = Invoke-XunitClasses -Bundle $bundle -Name 'microvm-json' -Classes 'MxcLifecycleNvxE2ETests' -RequiredMethods 'DevJson_NvxLifecycleCaptureAndLiveStreams'
+        if ($failure) { throw ".NET NVX JSON: $failure" }
+        # Explicit Node reporters can crash native NVX execution when the image is cached.
+        Push-Location (Join-Path $bundle 'sdk-integration')
+        try {
+            $nodeRun = Invoke-LoggedNative -FilePath (Join-Path $bundle 'node\node.exe') -LogName 'microvm-json-node.log' -ArgumentList @('--test', '--test-force-exit', 'dist\nvx-json.test.js')
+        } finally { Pop-Location }
+        $nodeOutput = Get-Content -LiteralPath $nodeRun.Log -Raw
+        if ($nodeRun.ExitCode -ne 0 -or
+            $nodeOutput -notmatch '(?m)^\s*✔ V1\.Dev NVX JSON lifecycle capture, live streams and overflow recovery \(' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ pass 1\s*$' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ fail 0\s*$' -or
+            $nodeOutput -notmatch '(?m)^\s*ℹ skipped 0\s*$') {
+            throw 'Node NVX JSON test did not pass without skips.'
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('MXC_ENABLE_NVX_TESTS', $previousNvx)
+        [Environment]::SetEnvironmentVariable('MXC_FFI_DIR', $previousFfi)
+        [Environment]::SetEnvironmentVariable('ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR', $previousAgent)
     }
 }
 

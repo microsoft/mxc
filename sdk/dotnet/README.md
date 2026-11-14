@@ -28,6 +28,20 @@ require the runtime for their application target; self-contained applications
 include their runtime.
 Backend-specific operating-system requirements still apply.
 
+## MicroVM JSON requests
+
+On Windows x64 with Windows Hypervisor Platform enabled, install the optional
+`Microsoft.Mxc.Sdk.Nvx.Runtime` package at the same version as the SDK. Then:
+
+```csharp
+using Microsoft.Mxc.Sdk.V1.Dev;
+
+var result = await MxcContainer.RunJsonAsync(
+    """{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"process":{"commandLine":"echo hello","timeout":30000}}""",
+    new JsonOptions { Experimental = true });
+Console.WriteLine(result.Stdout);
+```
+
 ## Run to completion
 
 ```csharp
@@ -82,8 +96,9 @@ SDK-owned nested choice such as `Containment.Process` (the default),
 `Containment.ProcessContainer`, or `Containment.Wslc`. Backend semantics are
 validated by the native engine.
 
-Creation methods accept their own `RunOptions`, `SpawnOptions`, or
-`SpawnWithPtyOptions` after the request. Set `SpawnWithPtyOptions.Size` to
+Creation methods accept their own `RunOptions`, `SpawnOptions`,
+`SpawnWithPtyOptions`, or `SpawnExtendedOptions` after the request.
+Set `SpawnWithPtyOptions.Size` to
 choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellation
 tokens come last.
 
@@ -129,6 +144,24 @@ PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
 canonical mode; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
+
+## Spawn with the caller's own console
+
+`SpawnWithExtendedOptions` takes extensible options; its default
+`SpawnStdio.Pipes` behaves like `Spawn`. With `SpawnStdio.Inherit` it attaches
+the workload to the calling process's standard input, output, and error, such
+as a console, pseudo-console, or pipes the caller already set up. MXC
+allocates no pipes or PTY, and the returned `MxcProcess` has no streams to
+take. ProcessContainer, Bubblewrap, and Seatbelt support inherited stdio.
+
+```csharp
+using Microsoft.Mxc.Sdk.V1;
+
+using var process = MxcContainer.SpawnWithExtendedOptions(
+    new ContainerRequest("cmd.exe /c echo hello") { TimeoutMs = 30_000 },
+    new SpawnExtendedOptions { Stdio = SpawnStdio.Inherit });
+WaitResult result = process.Wait();
+```
 
 ## Lifecycle API
 
@@ -265,13 +298,16 @@ host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
 On Windows, ProcessContainer is reported only when native PSEC is available;
-other backends are detected independently. `MxcContainer.Probe(request)` checks
+other backends are detected independently. Available MicroVM support is
+reported for the development JSON APIs; typed V1 requests cannot select it.
+`MxcContainer.Probe(request)` checks
 request compatibility without creating a container. If native ProcessContainer
 cannot serve the request, `Tier` is null and `Error` explains why; `Probes`
 still contains host capability facts.
 
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. These
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`, not on
+`ContainerRequest`. These
 preferences remain accepted but do not control the four Required events.
 On eligible Windows builds, all supported request contracts collect Required
 events regardless of omission, `Enabled = false`, consent, or policy.

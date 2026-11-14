@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import {
   createStateAwareStreamingDriver,
   createStateAwareStreamingDriverAsync,
+  createInheritedStdioDriverFromJson,
   createStreamingDriver,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
@@ -54,7 +55,9 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
   stateAwareWithStdin = false;
+  stateAwareCapture = false;
   spawnWithStdinCount = 0;
+  spawnWithInheritedStdioCount = 0;
 
   spawnSync(
     _request: string,
@@ -111,6 +114,17 @@ class FakeNative implements StreamingNativeFacade {
     this.spawn(request, experimental, outHandle, error, completion);
   }
 
+  spawnWithInheritedStdio(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.spawnWithInheritedStdioCount += 1;
+    this.spawn(request, experimental, outHandle, error, completion);
+  }
+
   stateAwareExecAsync(
     request: string,
     experimental: number,
@@ -121,6 +135,17 @@ class FakeNative implements StreamingNativeFacade {
     this.stateAwareRequest = request;
     this.stateAwareExperimental = experimental;
     this.spawn(request, experimental, outHandle, error, completion);
+  }
+
+  stateAwareExecCaptureAsync(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.stateAwareCapture = true;
+    this.stateAwareExecAsync(request, experimental, outHandle, error, completion);
   }
 
   stateAwareExec(
@@ -373,6 +398,27 @@ describe('native streaming binding ownership', () => {
     await driver.free();
   });
 
+  it('dispatches an inherited-stdio spawn through its own native entry point', async () => {
+    const native = new FakeNative();
+    native.takeStatus = 4;
+    const requestJson = '{"version":"1.1.0-alpha","process":{"commandLine":"exit 0"}}';
+
+    const driver = await createInheritedStdioDriverFromJson(
+      requestJson,
+      native,
+      true,
+    );
+
+    assert.strictEqual(native.spawnWithInheritedStdioCount, 1);
+    assert.strictEqual(native.spawnWithStdinCount, 0);
+    assert.strictEqual(native.spawnRequest, requestJson);
+    assert.strictEqual(native.spawnExperimental, 1);
+    assert.strictEqual(driver.standardInput, null);
+    assert.strictEqual(driver.standardOutput, null);
+    assert.strictEqual(driver.standardError, null);
+    await driver.free();
+  });
+
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
@@ -392,6 +438,14 @@ describe('native streaming binding ownership', () => {
     assert.deepStrictEqual(streams.readableHandles, [12, 13]);
     await driver.free();
     assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('dispatches captured lifecycle execution to the capture entry point', async () => {
+    const native = new FakeNative();
+    const factory = new FakeStreams();
+    const driver = await createStateAwareStreamingDriverAsync('request', false, native, factory, false, 'capture');
+    assert.strictEqual(native.stateAwareCapture, true);
+    await driver.free();
   });
 
   it('passes disabled experimental authorization as zero', async () => {

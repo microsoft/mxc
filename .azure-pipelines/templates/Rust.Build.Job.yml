@@ -286,12 +286,14 @@ jobs:
             $(signPattern)
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy wslcsdk.dll
+      # The WSLC SDK library and gateway image aren't signed here.
       - task: CopyFiles@2
-        displayName: Copy wslcsdk.dll
+        displayName: Copy WSLC runtime files
         inputs:
           sourceFolder: $(targetTripleDir)
-          contents: wslcsdk.dll
+          contents: |
+            wslcsdk.dll
+            mxc-wslc-gateway.tar
           targetFolder: $(outputDirectory)/$(targetTriple)
 
       # The NVX release is already signed and hash-pinned; copy it without re-signing.

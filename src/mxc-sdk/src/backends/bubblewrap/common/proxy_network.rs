@@ -3404,6 +3404,7 @@ mod tests {
                 source: "/run/resolvconf/resolv.conf".into(),
                 destination,
                 intent,
+                readonly_overlay: None,
             }];
             let mut logger = buffer_logger();
             let pin = ResolverPin::from_resolver(

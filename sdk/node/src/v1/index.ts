@@ -45,6 +45,8 @@ export type {
   RunOptions,
   SpawnOptions,
   SpawnWithPtyOptions,
+  SpawnStdio,
+  SpawnExtendedOptions,
   ProvisionOptions,
   StartOptions,
   StopOptions,
@@ -58,6 +60,7 @@ export {
   spawn,
   spawnWithStdin,
   spawnWithPty,
+  spawnWithExtendedOptions,
   run,
 } from './container.js';
 export { MxcProcess } from './container-process.js';

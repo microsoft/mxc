@@ -2,15 +2,73 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { it } from 'node:test';
 import { runJson, spawnJson, spawnWithPtyJson, validateProcessJson } from '@microsoft/mxc-sdk/v1/dev';
 import { MxcError } from '@microsoft/mxc-sdk/v1';
 import { isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { verifyPackagedRuntime } from './packaged-runtime-test.js';
 
 const windows = process.platform === 'win32';
 const creationSkip = windows ? sandboxSkipReason
   : process.platform === 'linux' ? (isLinuxRoot ? undefined : 'Bubblewrap requires root')
   : process.platform === 'darwin' ? undefined : 'Unsupported host';
+
+const inheritedStdioInput = 'INHERITED_STDIN_LINE';
+const inheritedStdioCommand = windows
+  ? 'cmd.exe /v:on /c "set /p L= & echo INHERITED_OUT:!L! & echo INHERITED_ERR 1>&2 & exit /b 7"'
+  : "IFS= read -r line; printf 'INHERITED_OUT:%s\\n' \"$line\"; printf 'INHERITED_ERR\\n' >&2; exit 7";
+
+const inheritedStdioScript = `
+import { spawnWithExtendedOptions } from '@microsoft/mxc-sdk/v1';
+import { spawnWithExtendedOptionsJson } from '@microsoft/mxc-sdk/v1/dev';
+const request = process.env.MXC_INHERITED_REQUEST;
+const proc = process.env.MXC_INHERITED_API === 'typed'
+  ? await spawnWithExtendedOptions({ command: request }, { stdio: 'inherit' })
+  : await spawnWithExtendedOptionsJson(request, { stdio: 'inherit' });
+try {
+  if (proc.standardInput || proc.standardOutput || proc.standardError) process.exit(90);
+  process.exitCode = (await proc.wait()).exitCode;
+} finally {
+  proc.dispose();
+}
+`;
+
+function runInheritedStdioHost(
+  api: 'typed' | 'dev',
+  request: string,
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      process.execPath,
+      ['--input-type=module', '-e', inheritedStdioScript],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: { ...process.env, MXC_INHERITED_API: api, MXC_INHERITED_REQUEST: request },
+        timeout: 60000,
+      },
+      (error, stdout, stderr) => {
+        const exitCode = error === null ? 0 : typeof error.code === 'number' ? error.code : null;
+        resolve({ exitCode, stdout, stderr });
+      },
+    );
+    child.stdin?.end(`${inheritedStdioInput}${windows ? '\r\n' : '\n'}`);
+  });
+}
+
+function assertUsedCallerStdio(result: { exitCode: number | null; stdout: string; stderr: string }) {
+  assert.equal(result.exitCode, 7, result.stderr);
+  assert.ok(result.stdout.includes(`INHERITED_OUT:${inheritedStdioInput}`), result.stdout);
+  assert.ok(result.stderr.includes('INHERITED_ERR'), result.stderr);
+}
+
+it('spawnWithExtendedOptions with inherited stdio uses the calling process stdio', { skip: creationSkip }, async () => {
+  assertUsedCallerStdio(await runInheritedStdioHost('typed', inheritedStdioCommand));
+});
 
 async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   let text = '';
@@ -58,6 +116,10 @@ for (const version of ['1.0.0', '1.1.0-alpha']) {
     }
   });
 
+  it(`V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio (${version})`, { skip: creationSkip }, async () => {
+    assertUsedCallerStdio(await runInheritedStdioHost('dev', request(inheritedStdioCommand)));
+  });
+
   it(`V1.Dev spawnWithPtyJson supports an interactive terminal (${version})`, { skip: creationSkip }, async () => {
     const command = windows ? 'cmd.exe'
       : 'test -t 0 && test -t 1 || exit 12; IFS= read -r value; '
@@ -97,4 +159,53 @@ it('V1.Dev rejects unknown fields and unregistered exact versions through native
     validateProcessJson(unknownField),
     (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
   );
+});
+
+
+it('V1.Dev installs both npm packages and discovers NVX without overrides', {
+  skip: process.platform !== 'win32' || process.arch !== 'x64',
+  timeout: 300_000,
+}, () => {
+  const require = createRequire(import.meta.url);
+  const installedSdk = path.dirname(require.resolve('@microsoft/mxc-sdk/package.json'));
+  const integrationRoot = process.cwd();
+  const sdkSource = path.resolve(integrationRoot, '..', '..');
+  const inCheckout = fs.existsSync(path.join(sdkSource, 'package.json')) &&
+    fs.existsSync(path.join(sdkSource, '..', 'node-nvx-runtime', 'package.json'));
+  const repoRoot = inCheckout ? path.resolve(sdkSource, '..', '..') : undefined;
+  const packageDir = process.env.MXC_SDK_PACKAGE_DIR;
+  const runtimeDir = process.env.MXC_NVX_PACKAGE_DIR;
+  const singleTarball = (directory: string | undefined): string | undefined => {
+    if (!directory) return undefined;
+    const files = fs.readdirSync(directory).filter(file => file.endsWith('.tgz'));
+    assert.equal(files.length, 1, `expected exactly one package in ${directory}`);
+    return path.resolve(directory, files[0]);
+  };
+  const candidates = [
+    ...(process.env.MXC_NVX_TEST_DLL ? [path.resolve(process.env.MXC_NVX_TEST_DLL)] : []),
+    path.join(installedSdk, 'bin', 'x64', 'mxc_ffi.dll'),
+  ];
+  if (repoRoot) candidates.push(
+    path.join(repoRoot, 'src', 'target', 'debug', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'release', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'debug', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'release', 'mxc_ffi.dll'),
+  );
+  const library = candidates.find(file => fs.existsSync(file));
+  assert.ok(library, 'Windows x64 integration requires a built mxc_ffi.dll');
+  const runtimeRoot = runtimeDir ? runtimeDir : inCheckout
+    ? path.join(sdkSource, '..', 'node-nvx-runtime')
+    : path.dirname(require.resolve('@microsoft/mxc-sdk-nvx-runtime-win32-x64/package.json'));
+  verifyPackagedRuntime({
+    sdkRoot: inCheckout && !packageDir ? sdkSource : installedSdk,
+    runtimeRoot,
+    library,
+    dependencyRoots: [path.join(installedSdk, 'node_modules'), path.join(integrationRoot, 'node_modules'),
+      ...(inCheckout ? [path.join(sdkSource, 'node_modules')] : [])],
+    fixtureParent: integrationRoot,
+    inventoryFile: repoRoot ? path.join(repoRoot, 'src', 'mxc-sdk', 'src', 'backends', 'nvx', 'crate_runtime.rs') : undefined,
+    buildSdk: inCheckout && !packageDir,
+    baseTarball: singleTarball(packageDir),
+    runtimeTarball: singleTarball(runtimeDir),
+  });
 });

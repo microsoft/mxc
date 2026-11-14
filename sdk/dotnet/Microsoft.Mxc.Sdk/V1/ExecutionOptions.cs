@@ -27,6 +27,26 @@ public sealed class SpawnWithPtyOptions
     public MxcPtySize? Size { get; set; }
 }
 
+/// <summary>How SpawnWithExtendedOptions connects the workload's standard streams.</summary>
+public enum SpawnStdio
+{
+    /// <summary>New pipes the caller reads and writes through <see cref="MxcProcess"/>, as with Spawn.</summary>
+    Pipes = 0,
+
+    /// <summary>The calling process's own standard input, output, and error.</summary>
+    Inherit = 1,
+}
+
+/// <summary>Invocation controls for SpawnWithExtendedOptions.</summary>
+public sealed class SpawnExtendedOptions
+{
+    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    public TelemetryConfig? Telemetry { get; set; }
+
+    /// <summary>How the workload's standard streams are connected; defaults to <see cref="SpawnStdio.Pipes"/>.</summary>
+    public SpawnStdio Stdio { get; set; }
+}
+
 /// <summary>Invocation controls for spawning a workload in an existing container.</summary>
 public sealed class SpawnInContainerOptions
 {

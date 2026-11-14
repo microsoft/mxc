@@ -1,0 +1,27 @@
+{
+  "name": "@microsoft/mxc-sdk-nvx-runtime-win32-x64",
+  "version": "1.0.1",
+  "description": "Windows x64 NVX MicroVM runtime assets for @microsoft/mxc-sdk",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "aci-edge-sandboxes/",
+    "LICENSE.md",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@microsoft/mxc-sdk": "1.0.1"
+  },
+  "author": "Microsoft Corporation",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

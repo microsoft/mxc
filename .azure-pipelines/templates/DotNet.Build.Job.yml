@@ -176,6 +176,7 @@ jobs:
         mxc_ffi.dll
         wxc-wslc-daemon.exe
         wslcsdk.dll
+        mxc-wslc-gateway.tar
       targetFolder: $(packageRoot)\runtimes\win-x64\native
 
   - task: CopyFiles@2
@@ -186,6 +187,7 @@ jobs:
         mxc_ffi.dll
         wxc-wslc-daemon.exe
         wslcsdk.dll
+        mxc-wslc-gateway.tar
       targetFolder: $(packageRoot)\runtimes\win-arm64\native
 
   - task: CopyFiles@2
@@ -219,6 +221,23 @@ jobs:
         versioningScheme: off
         buildProperties: version=${{ package.version }};managedOutput=$(packageRoot)\managed;x64Native=$(packageRoot)\runtimes\win-x64\native;arm64Native=$(packageRoot)\runtimes\win-arm64\native;linuxX64Native=$(packageRoot)\runtimes\linux-x64\native;linuxArm64Native=$(packageRoot)\runtimes\linux-arm64\native;macArm64Native=$(packageRoot)\runtimes\osx-arm64\native;repositoryRoot=$(Build.SourcesDirectory)
 
+    - task: NuGetCommand@2
+      displayName: Pack NVX runtime for ${{ package.displayName }}
+      inputs:
+        command: pack
+        packagesToPack: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk.Nvx.Runtime.Package\Microsoft.Mxc.Sdk.Nvx.Runtime.nuspec
+        packDestination: $(packageOutput)
+        versioningScheme: off
+        buildProperties: version=${{ package.version }};nvxRuntime=$(x64NativeDir)\aci-edge-sandboxes;repositoryRoot=$(Build.SourcesDirectory)
+
+    - task: PowerShell@2
+      displayName: Verify ${{ package.displayName }} NVX runtime package
+      inputs:
+        filePath: $(Build.SourcesDirectory)\.azure-pipelines\scripts\verify-dotnet-nuget-package.ps1
+        arguments: >-
+          -PackagePath "$(packageOutput)\Microsoft.Mxc.Sdk.Nvx.Runtime.${{ package.version }}.nupkg"
+          -VerifyNvxRuntime
+
     - task: PowerShell@2
       displayName: Verify ${{ package.displayName }} package contents
       inputs:
@@ -239,7 +258,7 @@ jobs:
           AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
           AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
           FolderPath: $(packageOutput)
-          Pattern: Microsoft.Mxc.Sdk.${{ package.version }}.nupkg
+          Pattern: Microsoft.Mxc.Sdk*.${{ package.version }}.nupkg
           UseMinimatch: true
           SessionTimeout: '90'
           MaxConcurrency: '25'
@@ -268,18 +287,20 @@ jobs:
       inputs:
         targetType: inline
         script: |
-          $packagePath = "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
           $releaseDirectory = "$(packageOutput)\${{ package.transportKind }}"
-          $releasePath = Join-Path $releaseDirectory "Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
-
-          if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
-            throw "NuGet package was not found: $packagePath"
-          }
-          if (Test-Path -LiteralPath $releasePath) {
-            throw "Release package path already exists: $releasePath"
-          }
           New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-          Move-Item -LiteralPath $packagePath -Destination $releasePath
+          foreach ($id in @('Microsoft.Mxc.Sdk', 'Microsoft.Mxc.Sdk.Nvx.Runtime')) {
+            $name = "$id.${{ package.version }}.nupkg"
+            $packagePath = Join-Path "$(packageOutput)" $name
+            # The existing release pipeline selects exactly one package in the root.
+            # Keep the optional add-on available in the artifact without breaking it.
+            $destinationDirectory = if ($id -eq 'Microsoft.Mxc.Sdk') { $releaseDirectory } else { Join-Path $releaseDirectory 'nvx' }
+            New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+            $releasePath = Join-Path $destinationDirectory $name
+            if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) { throw "NuGet package was not found: $packagePath" }
+            if (Test-Path -LiteralPath $releasePath) { throw "Release package path already exists: $releasePath" }
+            Move-Item -LiteralPath $packagePath -Destination $releasePath
+          }
 
   - task: PowerShell@2
     displayName: Verify release transport directory

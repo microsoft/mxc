@@ -768,6 +768,37 @@ pub struct SpawnWithPtyOptions {
 ```
 
 
+## `mxc_sdk::v1::SpawnStdio`
+
+How `spawn_with_extended_options` connects the workload's stdin, stdout, and stderr.
+
+This enum is `#[non_exhaustive]` so it can gain modes in V1.
+
+```rust
+#[non_exhaustive]
+pub enum SpawnStdio {
+  Pipes, // default
+  Inherit,
+}
+```
+
+
+## `mxc_sdk::v1::SpawnExtendedOptions`
+
+Invocation controls for `spawn_with_extended_options`.
+
+This struct is `#[non_exhaustive]` so it can gain fields in V1. Construct it
+from `Default::default()` and assign fields rather than using a struct literal.
+
+```rust
+#[non_exhaustive]
+pub struct SpawnExtendedOptions {
+  pub telemetry: Option<TelemetryConfig>,
+  pub stdio: SpawnStdio,
+}
+```
+
+
 ## `mxc_sdk::v1::StartOptions`
 
 Invocation controls for starting a container.

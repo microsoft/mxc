@@ -46,4 +46,6 @@ pub mod windows_sandbox {
 pub mod wslc {
     #[cfg(feature = "wslc")]
     pub mod common;
+    #[cfg(feature = "wslc")]
+    pub mod gateway_policy;
 }
