@@ -85,6 +85,16 @@ pub(super) fn poll(
             return Err(error);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
+        let budget_limits_request = remaining <= Duration::from_secs(30);
+        let error_code = |error: &ureq::Error, fallback| {
+            if Instant::now() >= deadline
+                || (budget_limits_request && matches!(error, ureq::Error::Timeout(_)))
+            {
+                "attach_timeout"
+            } else {
+                fallback
+            }
+        };
         let (agent, base) = client.agent(remaining.min(Duration::from_secs(30)))?;
         let url = format!(
             "{base}/computers/{}/status?api-version=1.0",
@@ -96,9 +106,9 @@ pub(super) fn poll(
             .header("x-ms-computerId", &identity.session_id)
             .header("x-ms-client-request-id", &request_id)
             .call()
-            .map_err(|_| {
+            .map_err(|error| {
                 failure(
-                    "status_transport",
+                    error_code(&error, "status_transport"),
                     "start",
                     None,
                     &request_id,
@@ -132,7 +142,7 @@ pub(super) fn poll(
             .with_config()
             .limit(1024 * 1024)
             .read_to_string()
-            .map_err(|_| reject("status_response"))?;
+            .map_err(|error| reject(error_code(&error, "status_response")))?;
         let body: Value = serde_json::from_str(&body).map_err(|_| reject("unparsable_response"))?;
         let state = body
             .get("status")

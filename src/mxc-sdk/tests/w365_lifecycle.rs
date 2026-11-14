@@ -83,13 +83,42 @@ fn readiness_contract_fixture() {
     let error = invoke(&request("start", A), true).unwrap_err();
     assert_eq!(error.details.unwrap()["code"], "attach_timeout");
     assert_eq!(fixture.count(), n, "zero budget must not dial");
-    env.set("MXC_W365_TEST_READY_BUDGET_MS", "100");
+    env.set("MXC_W365_TEST_READY_BUDGET_MS", "1000");
     fixture.reply(200, r#"{"status":"Waiting"}"#);
     let began = Instant::now();
     let error = invoke(&request("start", A), true).unwrap_err();
-    assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+    let details = error.details.unwrap();
+    assert_eq!(details["code"], "attach_timeout");
+    assert_eq!(details["lastState"], "Waiting");
     assert!(began.elapsed() < Duration::from_secs(2));
     assert_eq!(fixture.count(), n + 1);
+    for prefix in [
+        "",
+        "HTTP/1.1 200 Fixture\r\nContent-Length: 1000\r\nx-ms-request-id: fixture-request\r\n\r\n{\"status\":\"Waiting\"",
+    ] {
+        env.set("MXC_W365_TEST_READY_BUDGET_MS", "2000");
+        let before = fixture.count();
+        let error = std::thread::scope(|scope| {
+            let held = fixture.hold_reply(prefix);
+            let (completed, result) = mpsc::channel();
+            let client = scope.spawn(move || {
+                completed.send(invoke(&request("start", A), true)).unwrap();
+            });
+            let ready = held.ready.recv_timeout(Duration::from_secs(15));
+            let began = Instant::now();
+            let outcome = result.recv_timeout(Duration::from_secs(5));
+            drop(held);
+            client.join().unwrap();
+            ready.expect("readiness request must reach the held response");
+            let error = outcome
+                .expect("readiness budget must interrupt the response")
+                .unwrap_err();
+            assert!(began.elapsed() < Duration::from_secs(5));
+            error
+        });
+        assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+        assert_eq!(fixture.count(), before + 1, "readiness must not retry after expiry");
+    }
     std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
     fixture.reply(200, r#"{"status":"Ready"}"#);
     let ready = std::thread::scope(|scope| {
@@ -109,7 +138,7 @@ fn readiness_contract_fixture() {
     });
     let ready: Value = serde_json::from_str(&ready).unwrap();
     assert_eq!(ready["result"]["metadata"]["status"], "Ready");
-    assert_eq!(fixture.count(), n + 2);
+    assert_eq!(fixture.count(), n + 4);
     assert!(fixture
         .requests
         .lock()

@@ -75,6 +75,7 @@ matching OpenSSL shared libraries and CA certificates.
 ### Readiness and process execution
 
 Start waits up to 120 seconds for `Ready`, polling once per second.
+Expiry returns `attach_timeout`, including while waiting for a status response.
 Failures leave the reservation caller-owned. Exec setup has a separate
 30-second connection budget. The serialized command payload is limited to
 65,536 bytes.
