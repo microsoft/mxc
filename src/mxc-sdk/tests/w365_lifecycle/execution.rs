@@ -1210,9 +1210,11 @@ fn execution_upgrade_validation_fixture() {
     std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
     // Waiting for capacity is charged to setup, and completed workers restore it.
     fixture.reply(401, "never-send-a-command");
+    let error = spawn(&exec_request()).err().unwrap();
     assert_eq!(
-        spawn(&exec_request()).err().unwrap().details.unwrap()["httpStatus"],
-        401
+        error.details.as_ref().unwrap()["httpStatus"],
+        401,
+        "{error:?}"
     );
     fragmented_tls_deadline(&env);
     fixture.configure(&env);

@@ -175,6 +175,12 @@ impl FixtureCertificate {
                 &format!("/CN={hostname}"),
                 "-addext",
                 &format!("subjectAltName=DNS:{hostname}"),
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
                 "-out",
             ])
             .arg(&certificate)
