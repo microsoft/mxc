@@ -2,7 +2,20 @@
 # Licensed under the MIT License.
 
 trigger: none
+pr: none
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+- name: npmPackages
+  displayName: npm packages to publish
+  type: stringList
+  default:
+  - publish-sdk
+  - publish-nvx-runtime
+  values:
+  - publish-sdk
+  - publish-nvx-runtime
+
 resources:
   repositories:
   - repository: 1ESPipelineTemplates
@@ -35,7 +48,7 @@ extends:
 
     stages:
     - stage: Publish_to_NPM
-      displayName: 'Publish NPM Package'
+      displayName: 'Publish npm packages'
       variables:
       - name: release_environment
         value: Production
@@ -50,24 +63,58 @@ extends:
             targetPath: '$(Pipeline.Workspace)/packages'
             artifactName: mxc-npm-sdk-package
 
-        displayName: Publish to NPM
+        displayName: Publish npm packages
         steps:
-        - task: EsrpRelease@10
-          displayName: 'Publish to NPM'
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: Select npm packages
           inputs:
-            connectedservicename: $(serviceName)
-            usemanagedidentity: false
-            keyvaultname: $(azureKeyVaultName)
-            authcertname: $(authCertName)
-            signcertname: $(signCertName)
-            clientid: $(clientId)
-            intent: 'PackageDistribution'
-            contenttype: npm
-            contentsource: 'Folder'
-            folderlocation: '$(Pipeline.Workspace)/packages'
-            owners: $(ownersEmail)
-            approvers: $(approversEmail)
-            waitforreleasecompletion: true
-            serviceendpointurl: 'https://api.esrp.microsoft.com'
-            mainpublisher: ESRPRELPACMAN
-            domaintenantid: $(tenantId)
+            targetType: filePath
+            filePath: '$(Build.SourcesDirectory)/.azure-pipelines/scripts/select-npm-packages.ps1'
+            arguments: >-
+              -PayloadDirectory "$(Pipeline.Workspace)\packages"
+              -ReleaseDirectory "$(Pipeline.Workspace)\npm-release"
+          env:
+            MXC_NPM_PACKAGES: ${{ join(',', parameters.npmPackages) }}
+
+        - ${{ if containsValue(parameters.npmPackages, 'publish-sdk') }}:
+          - task: EsrpRelease@10
+            displayName: Publish SDK package to npm
+            inputs:
+              connectedservicename: $(serviceName)
+              usemanagedidentity: false
+              keyvaultname: $(azureKeyVaultName)
+              authcertname: $(authCertName)
+              signcertname: $(signCertName)
+              clientid: $(clientId)
+              intent: 'PackageDistribution'
+              contenttype: npm
+              contentsource: 'Folder'
+              folderlocation: '$(Pipeline.Workspace)/npm-release/sdk'
+              owners: $(ownersEmail)
+              approvers: $(approversEmail)
+              waitforreleasecompletion: true
+              serviceendpointurl: 'https://api.esrp.microsoft.com'
+              mainpublisher: ESRPRELPACMAN
+              domaintenantid: $(tenantId)
+        - ${{ if containsValue(parameters.npmPackages, 'publish-nvx-runtime') }}:
+          - task: EsrpRelease@10
+            displayName: Publish NVX runtime package to npm
+            inputs:
+              connectedservicename: $(serviceName)
+              usemanagedidentity: false
+              keyvaultname: $(azureKeyVaultName)
+              authcertname: $(authCertName)
+              signcertname: $(signCertName)
+              clientid: $(clientId)
+              intent: 'PackageDistribution'
+              contenttype: npm
+              contentsource: 'Folder'
+              folderlocation: '$(Pipeline.Workspace)/npm-release/nvx'
+              owners: $(ownersEmail)
+              approvers: $(approversEmail)
+              waitforreleasecompletion: true
+              serviceendpointurl: 'https://api.esrp.microsoft.com'
+              mainpublisher: ESRPRELPACMAN
+              domaintenantid: $(tenantId)

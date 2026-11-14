@@ -39,7 +39,10 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   already-published package on NuGet.org.
   `scripts/ci/test-nuget-release-selection.ps1` exercises package selection and
   validation without publishing.
-- `1ES.Release.Npm.yml` publishes the signed npm SDK package through ESRP.
+- `1ES.Release.Npm.yml` publishes the signed SDK and optional NVX runtime npm
+  packages through ESRP. Both are selected by default, with the SDK first.
+  When retrying a partial release, select only the unpublished package from
+  the same build and version.
 
 ### Rust crates.io release
 
