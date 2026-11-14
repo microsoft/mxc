@@ -6,7 +6,10 @@ use mxc_sdk::v1::{Error, ErrorCode, MxcProcess, WaitResult};
 use std::collections::VecDeque;
 use std::sync::mpsc;
 
-type Stream = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
+#[cfg(windows)]
+type Stream = schannel::tls_stream::TlsStream<std::net::TcpStream>;
+#[cfg(not(windows))]
+type Stream = native_tls::TlsStream<std::net::TcpStream>;
 type Script = Box<dyn FnOnce(&mut Stream) + Send>;
 
 struct ExecFixture {
@@ -18,17 +21,13 @@ struct ExecFixture {
 
 impl ExecFixture {
     fn new(env: &Environment) -> Self {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = FixtureCertificate::new("localhost");
         let mut ca = tempfile::NamedTempFile::new().unwrap();
-        ca.write_all(cert.cert.pem().as_bytes()).unwrap();
-        let key =
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into();
-        let tls = Arc::new(
-            rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.cert.der().clone()], key)
-                .unwrap(),
-        );
+        ca.write_all(cert.certificate.as_bytes()).unwrap();
+        #[cfg(windows)]
+        let (tls, key) = fixture_tls(&cert);
+        #[cfg(not(windows))]
+        let tls = fixture_tls(&cert);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -54,8 +53,15 @@ impl ExecFixture {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut stream =
-                    Stream::new(rustls::ServerConnection::new(tls.clone()).unwrap(), socket);
+                #[cfg(windows)]
+                let handshake = schannel::tls_stream::Builder::new().accept(tls.clone(), socket);
+                #[cfg(not(windows))]
+                let handshake = tls.accept(socket);
+                let mut stream = match handshake {
+                    Ok(stream) => stream,
+                    // Trust rejection probes deliberately fail the handshake.
+                    Err(_) => continue,
+                };
                 let mut header = Vec::new();
                 let mut byte = [0];
                 loop {
@@ -88,7 +94,7 @@ impl ExecFixture {
             worker: None,
             replies: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(target_os = "windows")]
-            _key: None,
+            _key: Some(key),
         };
         fixture.configure(env);
         env.set("W365A_DP_SUFFIX", "localhost");
@@ -734,23 +740,18 @@ fn native_execution_backpressure_fixture() {
     let (sent, received) = mpsc::channel();
     fixture.script(move |stream| {
         started(stream);
-        limit_receive_buffer(&stream.sock);
-        stream.conn.set_buffer_limit(Some(128 * 1024));
+        limit_receive_buffer(stream.get_ref());
         let result = (|| {
-            // StreamOwned may read while flushing. Drive only TLS writes here
-            // so the peer cannot relieve stdin backpressure before its output.
+            // Write all output before reading stdin to exercise duplex backpressure.
             for offset in (0..SIZE).step_by(65536) {
                 let bytes: Vec<u8> = (offset..(offset + 65536).min(SIZE))
                     .map(|i| (i % 251) as u8)
                     .collect();
                 for kind in [0x12, 0x13] {
-                    let mut writer = stream.conn.writer();
-                    writer.write_all(&[kind])?;
-                    writer.write_all(&(bytes.len() as u32).to_be_bytes())?;
-                    writer.write_all(&bytes)?;
-                    while stream.conn.wants_write() {
-                        stream.conn.write_tls(&mut stream.sock)?;
-                    }
+                    stream.write_all(&[kind])?;
+                    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+                    stream.write_all(&bytes)?;
+                    stream.flush()?;
                 }
             }
             let mut input = Vec::new();
@@ -921,7 +922,7 @@ fn native_execution_failure_and_disposal_fixture() {
     assert!(error.message.contains("remote_exec_error"), "{error}");
     let (release, released) = mpsc::channel();
     fixture.script(move |stream| {
-        limit_receive_buffer(&stream.sock);
+        limit_receive_buffer(stream.get_ref());
         started(stream);
         // Keep the peer alive without reading stdin until the client finishes.
         released.recv_timeout(Duration::from_secs(45)).unwrap();
@@ -945,7 +946,7 @@ fn native_execution_failure_and_disposal_fixture() {
     drop(process);
     let (release, released) = mpsc::channel();
     fixture.script(move |stream| {
-        limit_receive_buffer(&stream.sock);
+        limit_receive_buffer(stream.get_ref());
         started(stream);
         // Do not read stdin: disposal must interrupt a backpressured transport.
         released.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -1063,16 +1064,13 @@ fn execution_timeout_boundaries(env: &Environment, fixture: &ExecFixture) {
 }
 
 fn fragmented_tls_deadline(env: &Environment) {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = FixtureCertificate::new("localhost");
     let mut ca = tempfile::NamedTempFile::new().unwrap();
-    ca.write_all(cert.cert.pem().as_bytes()).unwrap();
-    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into();
-    let tls = Arc::new(
-        rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.cert.der().clone()], key)
-            .unwrap(),
-    );
+    ca.write_all(cert.certificate.as_bytes()).unwrap();
+    #[cfg(windows)]
+    let (tls, _key) = fixture_tls(&cert);
+    #[cfg(not(windows))]
+    let tls = fixture_tls(&cert);
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     env.set("MXC_W365_TEST_CA", ca.path().to_str().unwrap());
     env.set(
@@ -1086,7 +1084,7 @@ fn fragmented_tls_deadline(env: &Environment) {
     let stopped = stop.clone();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let mut socket = loop {
+        let socket = loop {
             match listener.accept() {
                 Ok((socket, _)) => break socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1106,27 +1104,16 @@ fn fragmented_tls_deadline(env: &Environment) {
         socket
             .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut connection = rustls::ServerConnection::new(tls).unwrap();
-        while !connection.wants_write() {
-            if connection.read_tls(&mut socket).unwrap() == 0 {
-                return;
-            }
-            connection.process_new_packets().unwrap();
-        }
-        let mut bytes = Vec::new();
-        while connection.wants_write() {
-            connection.write_tls(&mut bytes).unwrap();
-        }
-        flight.send(()).unwrap();
-        // Frequent valid TLS fragments must not restart the total setup budget.
-        for byte in bytes {
-            if stopped.load(std::sync::atomic::Ordering::Relaxed)
-                || socket.write_all(&[byte]).is_err()
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let socket = FragmentedHandshake {
+            socket,
+            flight: Some(flight),
+            stop: stopped,
+        };
+        #[cfg(windows)]
+        let handshake = schannel::tls_stream::Builder::new().accept(tls, socket);
+        #[cfg(not(windows))]
+        let handshake = tls.accept(socket);
+        assert!(handshake.is_err(), "fragmented handshake must not finish");
     });
     let (result, result_rx) = mpsc::channel();
     let began = Instant::now();
@@ -1155,6 +1142,40 @@ fn fragmented_tls_deadline(env: &Environment) {
         "exec_upgrade_timeout"
     );
     assert_eq!(error.details.as_ref().unwrap()["possiblySucceeded"], false);
+}
+
+#[derive(Debug)]
+struct FragmentedHandshake {
+    socket: std::net::TcpStream,
+    flight: Option<mpsc::Sender<()>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Read for FragmentedHandshake {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.read(bytes)
+    }
+}
+
+impl Write for FragmentedHandshake {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(flight) = self.flight.take() {
+            flight.send(()).unwrap();
+        }
+        // Frequent valid TLS fragments must not restart the total setup budget.
+        for byte in bytes {
+            if self.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.socket.write_all(&[*byte])?;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.socket.flush()
+    }
 }
 
 #[test]
@@ -1227,8 +1248,8 @@ fn execution_upgrade_validation_fixture() {
     );
     assert_eq!(fixture.count(), 9);
     let mut wrong_ca = tempfile::NamedTempFile::new().unwrap();
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    wrong_ca.write_all(cert.cert.pem().as_bytes()).unwrap();
+    let cert = FixtureCertificate::new("localhost");
+    wrong_ca.write_all(cert.certificate.as_bytes()).unwrap();
     env.set("MXC_W365_TEST_CA", wrong_ca.path().to_str().unwrap());
     assert_eq!(
         spawn(&exec_request()).err().unwrap().details.unwrap()["code"],

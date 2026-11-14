@@ -829,6 +829,8 @@ fn prepare_native_stdio(
     };
     #[cfg(unix)]
     let read_flags = {
+        // Duplicated descriptors share O_NONBLOCK. Save the original flags before
+        // wrapped reads change them, so native transfer can restore blocking I/O.
         use std::os::fd::AsRawFd;
         let mut flags = [None; 2];
         for (slot, pipe) in flags.iter_mut().zip([&pipes.stdout, &pipes.stderr]) {

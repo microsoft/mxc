@@ -86,8 +86,6 @@ uuid.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
-rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 filetime = "0.2"
 libloading = "0.8"
 quick-xml.workspace = true

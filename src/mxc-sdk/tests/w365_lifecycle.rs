@@ -150,6 +150,56 @@ fn readiness_contract_fixture() {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 const FIXTURE_IDENTITY_PASSWORD: &str = "fixture-only";
 
+struct FixtureCertificate {
+    certificate: String,
+    key: String,
+}
+
+impl FixtureCertificate {
+    fn new(hostname: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("certificate.pem");
+        let key = directory.path().join("key.pem");
+        let output = fixture_openssl()
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:prime256v1",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                &format!("/CN={hostname}"),
+                "-addext",
+                &format!("subjectAltName=DNS:{hostname}"),
+                "-out",
+            ])
+            .arg(&certificate)
+            .arg("-keyout")
+            .arg(&key)
+            .output()
+            .expect("W365 TLS fixtures require openssl on PATH or MXC_W365_TEST_OPENSSL");
+        assert!(
+            output.status.success(),
+            "fixture certificate generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Self {
+            certificate: std::fs::read_to_string(certificate).unwrap(),
+            key: std::fs::read_to_string(key).unwrap(),
+        }
+    }
+}
+
+fn fixture_openssl() -> std::process::Command {
+    std::process::Command::new(
+        std::env::var_os("MXC_W365_TEST_OPENSSL").unwrap_or_else(|| "openssl".into()),
+    )
+}
+
 #[cfg(target_os = "windows")]
 struct FixtureKey(Option<schannel::ncrypt_key::NcryptKey>);
 
@@ -172,17 +222,16 @@ impl Drop for FixtureKey {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn fixture_pkcs12(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Vec<u8> {
+fn fixture_pkcs12(cert: &FixtureCertificate) -> Vec<u8> {
     let directory = tempfile::tempdir().unwrap();
     let certificate = directory.path().join("certificate.pem");
     let key = directory.path().join("key.pem");
     let archive = directory.path().join("identity.p12");
-    std::fs::write(&certificate, cert.cert.pem()).unwrap();
-    std::fs::write(&key, cert.signing_key.serialize_pem()).unwrap();
-    let openssl = std::env::var_os("MXC_W365_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
-    // macOS cannot import rcgen's EC PKCS#8 PEM. These PKCS#12 algorithms work
+    std::fs::write(&certificate, &cert.certificate).unwrap();
+    std::fs::write(&key, &cert.key).unwrap();
+    // macOS imports the fixture identity as PKCS#12. These algorithms work
     // with its identity importer; they do not configure TLS or production crypto.
-    let output = std::process::Command::new(openssl)
+    let output = fixture_openssl()
         .args(["pkcs12", "-export", "-out"])
         .arg(&archive)
         .arg("-inkey")
@@ -210,9 +259,7 @@ fn fixture_pkcs12(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Vec<u8> {
 }
 
 #[cfg(target_os = "windows")]
-fn fixture_tls(
-    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
-) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
+fn fixture_tls(cert: &FixtureCertificate) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
     // SChannel needs a persisted server key; retain its exact handle for cleanup.
     let store = schannel::cert_store::PfxImportOptions::new()
         .password(FIXTURE_IDENTITY_PASSWORD)
@@ -231,17 +278,14 @@ fn fixture_tls(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn fixture_tls(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> native_tls::TlsAcceptor {
+fn fixture_tls(cert: &FixtureCertificate) -> native_tls::TlsAcceptor {
     #[cfg(target_os = "macos")]
     let identity =
         native_tls::Identity::from_pkcs12(&fixture_pkcs12(cert), FIXTURE_IDENTITY_PASSWORD)
             .unwrap();
     #[cfg(not(target_os = "macos"))]
-    let identity = native_tls::Identity::from_pkcs8(
-        cert.cert.pem().as_bytes(),
-        cert.signing_key.serialize_pem().as_bytes(),
-    )
-    .unwrap();
+    let identity =
+        native_tls::Identity::from_pkcs8(cert.certificate.as_bytes(), cert.key.as_bytes()).unwrap();
     native_tls::TlsAcceptor::new(identity).unwrap()
 }
 
@@ -316,9 +360,9 @@ impl Fixture {
         Self::with_hostname("localhost")
     }
     fn with_hostname(hostname: &str) -> Self {
-        let cert = rcgen::generate_simple_self_signed(vec![hostname.into()]).unwrap();
+        let cert = FixtureCertificate::new(hostname);
         let mut ca = tempfile::NamedTempFile::new().unwrap();
-        ca.write_all(cert.cert.pem().as_bytes()).unwrap();
+        ca.write_all(cert.certificate.as_bytes()).unwrap();
         #[cfg(target_os = "windows")]
         let (tls, key) = fixture_tls(&cert);
         #[cfg(not(target_os = "windows"))]
@@ -750,10 +794,10 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     assert_eq!(fixture.count(), before);
 
-    let wrong_ca = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let wrong_ca = FixtureCertificate::new("localhost");
     let mut wrong_file = tempfile::NamedTempFile::new().unwrap();
     wrong_file
-        .write_all(wrong_ca.cert.pem().as_bytes())
+        .write_all(wrong_ca.certificate.as_bytes())
         .unwrap();
     env.set("MXC_W365_TEST_CA", wrong_file.path().to_str().unwrap());
     assert!(invoke(&provision(), true).is_err());

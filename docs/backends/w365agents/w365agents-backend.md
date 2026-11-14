@@ -299,7 +299,7 @@ cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --t
 
 Keep fixture artifacts separate from shipping builds. Fresh-executor tests are
 ignored unless explicitly included as above. Linux/macOS jobs build the execution
-example but do not require a fixture executor. Windows/macOS fixtures require
+example but do not require a fixture executor. All fixture hosts require
 the OpenSSL CLI on `PATH` or selected by `MXC_W365_TEST_OPENSSL`.
 Test certificate and deadline overrides work only in `test-support` builds;
 shipping builds ignore them.
