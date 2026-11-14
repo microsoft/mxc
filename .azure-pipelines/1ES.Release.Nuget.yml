@@ -94,27 +94,6 @@ extends:
             MXC_NUGET_PACKAGES: ${{ join(',', parameters.nugetPackages) }}
 
         - ${{ if eq(parameters.publishTarget, 'NuGet.org') }}:
-          - ${{ if containsValue(parameters.nugetPackages, 'publish-sdk') }}:
-            - task: EsrpRelease@14
-              displayName: Publish SDK package to NuGet.org
-              inputs:
-                connectedservicename: $(serviceName)
-                usemanagedidentity: false
-                keyvaultname: $(azureKeyVaultName)
-                authcertname: $(authCertName)
-                signcertname: $(signCertName)
-                clientid: $(clientId)
-                intent: 'PackageDistribution'
-                contenttype: NuGet
-                organizationname: $(NuGetOrganizationName)
-                contentsource: 'Folder'
-                folderlocation: '$(Pipeline.Workspace)/nuget-release/sdk'
-                owners: $(ownersEmail)
-                approvers: $(approversEmail)
-                waitforreleasecompletion: true
-                serviceendpointurl: 'https://api.esrp.microsoft.com/'
-                mainpublisher: ESRPRELPACMAN
-                domaintenantid: $(tenantId)
           - ${{ if containsValue(parameters.nugetPackages, 'publish-nvx-runtime') }}:
             - task: EsrpRelease@14
               displayName: Publish NVX runtime package to NuGet.org
@@ -136,21 +115,42 @@ extends:
                 serviceendpointurl: 'https://api.esrp.microsoft.com/'
                 mainpublisher: ESRPRELPACMAN
                 domaintenantid: $(tenantId)
+          - ${{ if containsValue(parameters.nugetPackages, 'publish-sdk') }}:
+            - task: EsrpRelease@14
+              displayName: Publish SDK package to NuGet.org
+              inputs:
+                connectedservicename: $(serviceName)
+                usemanagedidentity: false
+                keyvaultname: $(azureKeyVaultName)
+                authcertname: $(authCertName)
+                signcertname: $(signCertName)
+                clientid: $(clientId)
+                intent: 'PackageDistribution'
+                contenttype: NuGet
+                organizationname: $(NuGetOrganizationName)
+                contentsource: 'Folder'
+                folderlocation: '$(Pipeline.Workspace)/nuget-release/sdk'
+                owners: $(ownersEmail)
+                approvers: $(approversEmail)
+                waitforreleasecompletion: true
+                serviceendpointurl: 'https://api.esrp.microsoft.com/'
+                mainpublisher: ESRPRELPACMAN
+                domaintenantid: $(tenantId)
 
         - ${{ else }}:
-          - ${{ if containsValue(parameters.nugetPackages, 'publish-sdk') }}:
-            - task: 1ES.PublishNuget@1
-              displayName: Push SDK package to Mxc-Azure-Feed
-              inputs:
-                packagesToPush: '$(NuGetPackagePath_sdk)'
-                packageParentPath: '$(Pipeline.Workspace)/nuget-release/sdk'
-                nuGetFeedType: internal
-                publishVstsFeed: 'Dart/Mxc-Azure-Feed'
           - ${{ if containsValue(parameters.nugetPackages, 'publish-nvx-runtime') }}:
             - task: 1ES.PublishNuget@1
               displayName: Push NVX runtime package to Mxc-Azure-Feed
               inputs:
                 packagesToPush: '$(NuGetPackagePath_nvx)'
                 packageParentPath: '$(Pipeline.Workspace)/nuget-release/nvx'
+                nuGetFeedType: internal
+                publishVstsFeed: 'Dart/Mxc-Azure-Feed'
+          - ${{ if containsValue(parameters.nugetPackages, 'publish-sdk') }}:
+            - task: 1ES.PublishNuget@1
+              displayName: Push SDK package to Mxc-Azure-Feed
+              inputs:
+                packagesToPush: '$(NuGetPackagePath_sdk)'
+                packageParentPath: '$(Pipeline.Workspace)/nuget-release/sdk'
                 nuGetFeedType: internal
                 publishVstsFeed: 'Dart/Mxc-Azure-Feed'

@@ -153,11 +153,11 @@ try {
     )) {
         $sdkCondition = $target.Text.IndexOf("`${{ if containsValue(parameters.nugetPackages, 'publish-sdk') }}")
         $nvxCondition = $target.Text.IndexOf("`${{ if containsValue(parameters.nugetPackages, 'publish-nvx-runtime') }}")
-        if ($sdkCondition -lt 0 -or $nvxCondition -le $sdkCondition) {
-            throw 'Both packages must be independently selectable, with the SDK first.'
+        if ($nvxCondition -lt 0 -or $sdkCondition -le $nvxCondition) {
+            throw 'Both packages must be independently selectable, with the NVX runtime first.'
         }
-        $sdkStep = $target.Text.Substring($sdkCondition, $nvxCondition - $sdkCondition)
-        $nvxStep = $target.Text.Substring($nvxCondition)
+        $nvxStep = $target.Text.Substring($nvxCondition, $sdkCondition - $nvxCondition)
+        $sdkStep = $target.Text.Substring($sdkCondition)
         if (-not $sdkStep.Contains($target.Task) -or -not $sdkStep.Contains($target.Sdk) -or
             -not $nvxStep.Contains($target.Task) -or -not $nvxStep.Contains($target.Nvx)) {
             throw "Incorrect package task or input for $($target.Task)."

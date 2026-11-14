@@ -76,26 +76,6 @@ extends:
           env:
             MXC_NPM_PACKAGES: ${{ join(',', parameters.npmPackages) }}
 
-        - ${{ if containsValue(parameters.npmPackages, 'publish-sdk') }}:
-          - task: EsrpRelease@10
-            displayName: Publish SDK package to npm
-            inputs:
-              connectedservicename: $(serviceName)
-              usemanagedidentity: false
-              keyvaultname: $(azureKeyVaultName)
-              authcertname: $(authCertName)
-              signcertname: $(signCertName)
-              clientid: $(clientId)
-              intent: 'PackageDistribution'
-              contenttype: npm
-              contentsource: 'Folder'
-              folderlocation: '$(Pipeline.Workspace)/npm-release/sdk'
-              owners: $(ownersEmail)
-              approvers: $(approversEmail)
-              waitforreleasecompletion: true
-              serviceendpointurl: 'https://api.esrp.microsoft.com'
-              mainpublisher: ESRPRELPACMAN
-              domaintenantid: $(tenantId)
         - ${{ if containsValue(parameters.npmPackages, 'publish-nvx-runtime') }}:
           - task: EsrpRelease@10
             displayName: Publish NVX runtime package to npm
@@ -110,6 +90,26 @@ extends:
               contenttype: npm
               contentsource: 'Folder'
               folderlocation: '$(Pipeline.Workspace)/npm-release/nvx'
+              owners: $(ownersEmail)
+              approvers: $(approversEmail)
+              waitforreleasecompletion: true
+              serviceendpointurl: 'https://api.esrp.microsoft.com'
+              mainpublisher: ESRPRELPACMAN
+              domaintenantid: $(tenantId)
+        - ${{ if containsValue(parameters.npmPackages, 'publish-sdk') }}:
+          - task: EsrpRelease@10
+            displayName: Publish SDK package to npm
+            inputs:
+              connectedservicename: $(serviceName)
+              usemanagedidentity: false
+              keyvaultname: $(azureKeyVaultName)
+              authcertname: $(authCertName)
+              signcertname: $(signCertName)
+              clientid: $(clientId)
+              intent: 'PackageDistribution'
+              contenttype: npm
+              contentsource: 'Folder'
+              folderlocation: '$(Pipeline.Workspace)/npm-release/sdk'
               owners: $(ownersEmail)
               approvers: $(approversEmail)
               waitforreleasecompletion: true
