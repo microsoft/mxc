@@ -37,22 +37,24 @@ preserve compatibility with the older supported host.
 
 ### Offline TLS fixtures
 
-W365 checkout/release fixtures use local HTTPS services with test-only
-certificate trust, not a production TLS verification bypass. The
-`mxc-sdk` integration target `w365_lifecycle` requires `test-support` and an
-isolated Cargo target directory so its artifacts cannot replace shipping builds.
-Its engine fixtures
-run in GitHub Actions and Azure build jobs on Windows, Linux and macOS;
-Windows also runs checkout/release through fresh executor processes.
-The .NET SDK test suite and Node SDK integration jobs exercise the public
-Dev JSON APIs.
+W365 fixtures run against loopback TLS services in GitHub Actions and Azure
+build/SDK jobs. Native engine and execution-example coverage runs on Windows,
+Linux and macOS; Windows also tests fresh executor processes and console input.
+The .NET and Node suites cover the public Dev JSON APIs. The scheduled workflow
+reuses these build jobs.
 
-Test-support native libraries and executors are kept separate from shipping
-artifacts. The Node jobs use `scripts/ci/run-w365-node-fixture.ps1` to build
-and select an isolated fixture library; ordinary packaged-artifact tests
-continue to use shipping libraries. These fixtures do not establish live-service
-compatibility. See the [W365 backend guide](../../backends/w365agents/w365agents-backend.md)
-for local commands and platform prerequisites.
+GitHub Actions requires nine native fixtures on Windows and eight on Linux/macOS.
+Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
+cross-compiled Windows/Linux ARM64 jobs.
+
+The `w365_lifecycle` integration target requires `test-support`. Fixture native
+libraries, executors and examples use isolated Cargo target directories and
+never replace shipping artifacts. Node selects its fixture library through
+`scripts/ci/run-w365-node-fixture.ps1`; packaged-artifact tests still use shipping
+libraries. Fixtures retain TLS verification and need no live tenant, but do not
+establish live-service compatibility. See the
+[W365 backend guide](../../backends/w365agents/w365agents-backend.md#offline-functional-fixtures)
+for coverage, local commands and prerequisites.
 
 ## Moving parts
 

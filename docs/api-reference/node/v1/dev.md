@@ -46,9 +46,11 @@ handles. `spawnWithExtendedOptionsJson` with `stdio: 'inherit'` attaches the
 workload to this process's standard streams and supports ProcessContainer,
 Bubblewrap, and Seatbelt.
 Existing-container execution leaves the container caller-owned.
-On timeout, in-container capture returns partial text without waiting for
-output streams to close. Read failures reject promptly, and cleanup
-preserves the original read or wait error.
+Captured existing-container execution closes unused stdin automatically.
+With live execution, close any stdin stream you take when the workload needs EOF.
+For SDK-enforced timeouts, in-container capture returns partial text without
+waiting for output streams to close. Read failures reject promptly, and
+cleanup preserves the original read or wait error.
 
 On WSLC, `spawnJson` and `spawnInContainerJson` return a process whose
 `standardInput` is writable. Ending it, or waiting without taking it, gives

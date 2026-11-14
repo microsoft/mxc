@@ -13,17 +13,208 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
-#[cfg(target_os = "windows")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const POOL: &str = "11111111-1111-1111-1111-111111111111";
 const A: &str = "22222222-2222-2222-2222-222222222222";
 const B: &str = "33333333-3333-3333-3333-333333333333";
 static ENV: Mutex<()> = Mutex::new(());
 
+#[path = "w365_lifecycle/execution.rs"]
+mod execution;
+
+#[test]
+fn readiness_contract_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = Fixture::new();
+    fixture.configure(&env);
+    env.set("W365A_DP_SUFFIX", "localhost");
+    env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
+    for state in ["Waiting", "Live", "Ready"] {
+        fixture.reply(
+            200,
+            &json!({"status":state, "computerUrl":"https://invalid/?ticket=secret"}).to_string(),
+        );
+    }
+    let result = invoke(&request("start", A), true).unwrap();
+    assert_eq!(result["result"]["metadata"]["status"], "Ready");
+    assert!(!result.to_string().contains("ticket"));
+    assert_eq!(fixture.count(), 3);
+    for n in 0..3 {
+        let sent = fixture.request(n);
+        assert!(sent.starts_with(&format!("GET /computers/{A}/status?api-version=1.0")));
+        assert!(sent
+            .to_ascii_lowercase()
+            .contains(&format!("x-ms-computerid: {A}")));
+    }
+    fixture.reply(200, r#"{"status":"Deleting"}"#);
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "unknown_device_status"
+    );
+    for status in [401, 403, 404, 410, 429, 500, 302] {
+        fixture.reply(status, "{}");
+        let error = invoke(&request("start", A), true).unwrap_err();
+        assert_eq!(error.details.unwrap()["httpStatus"], status);
+    }
+    fixture.reply(200, "{bad");
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "unparsable_response"
+    );
+    fixture.drop_reply();
+    assert_eq!(
+        invoke(&request("start", A), true)
+            .unwrap_err()
+            .details
+            .unwrap()["code"],
+        "status_transport"
+    );
+
+    let n = fixture.count();
+    env.set("MXC_W365_TEST_READY_BUDGET_MS", "0");
+    let error = invoke(&request("start", A), true).unwrap_err();
+    assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+    assert_eq!(fixture.count(), n, "zero budget must not dial");
+    env.set("MXC_W365_TEST_READY_BUDGET_MS", "1000");
+    fixture.reply(200, r#"{"status":"Waiting"}"#);
+    let began = Instant::now();
+    let error = invoke(&request("start", A), true).unwrap_err();
+    let details = error.details.unwrap();
+    assert_eq!(details["code"], "attach_timeout");
+    assert_eq!(details["lastState"], "Waiting");
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!(fixture.count(), n + 1);
+    for prefix in [
+        "",
+        "HTTP/1.1 200 Fixture\r\nContent-Length: 1000\r\nx-ms-request-id: fixture-request\r\n\r\n{\"status\":\"Waiting\"",
+    ] {
+        env.set("MXC_W365_TEST_READY_BUDGET_MS", "2000");
+        let before = fixture.count();
+        let error = std::thread::scope(|scope| {
+            let held = fixture.hold_reply(prefix);
+            let (completed, result) = mpsc::channel();
+            let client = scope.spawn(move || {
+                completed.send(invoke(&request("start", A), true)).unwrap();
+            });
+            let ready = held.ready.recv_timeout(Duration::from_secs(15));
+            let began = Instant::now();
+            let outcome = result.recv_timeout(Duration::from_secs(5));
+            drop(held);
+            client.join().unwrap();
+            ready.expect("readiness request must reach the held response");
+            let error = outcome
+                .expect("readiness budget must interrupt the response")
+                .unwrap_err();
+            assert!(began.elapsed() < Duration::from_secs(5));
+            error
+        });
+        assert_eq!(error.details.unwrap()["code"], "attach_timeout");
+        assert_eq!(fixture.count(), before + 1, "readiness must not retry after expiry");
+    }
+    std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
+    fixture.reply(200, r#"{"status":"Ready"}"#);
+    let ready = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("small-foreign-stack".into())
+            .stack_size(128 * 1024)
+            .spawn_scoped(scope, || {
+                mxc_sdk::v1::dev::start_container_json(
+                    &request("start", A).to_string(),
+                    mxc_sdk::v1::dev::JsonOptions { experimental: true },
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let ready: Value = serde_json::from_str(&ready).unwrap();
+    assert_eq!(ready["result"]["metadata"]["status"], "Ready");
+    assert_eq!(fixture.count(), n + 4);
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.starts_with("GET ")));
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 const FIXTURE_IDENTITY_PASSWORD: &str = "fixture-only";
+
+struct FixtureCertificate {
+    certificate: String,
+    key: String,
+}
+
+impl FixtureCertificate {
+    fn new(hostname: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("certificate.pem");
+        let key = directory.path().join("key.pem");
+        let config = directory.path().join("openssl.cnf");
+        // Keep host OpenSSL defaults from adding duplicate certificate extensions.
+        std::fs::write(
+            &config,
+            format!(
+                "[req]\n\
+                 distinguished_name=dn\n\
+                 x509_extensions=server\n\
+                 [dn]\n\
+                 [server]\n\
+                 subjectAltName=DNS:{hostname}\n\
+                 basicConstraints=critical,CA:FALSE\n\
+                 keyUsage=critical,digitalSignature\n\
+                 extendedKeyUsage=serverAuth\n"
+            ),
+        )
+        .unwrap();
+        let output = fixture_openssl()
+            .args(["req", "-config"])
+            .arg(&config)
+            .args([
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:prime256v1",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                &format!("/CN={hostname}"),
+                "-out",
+            ])
+            .arg(&certificate)
+            .arg("-keyout")
+            .arg(&key)
+            .output()
+            .expect("W365 TLS fixtures require openssl on PATH or MXC_W365_TEST_OPENSSL");
+        assert!(
+            output.status.success(),
+            "fixture certificate generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Self {
+            certificate: std::fs::read_to_string(certificate).unwrap(),
+            key: std::fs::read_to_string(key).unwrap(),
+        }
+    }
+}
+
+fn fixture_openssl() -> std::process::Command {
+    std::process::Command::new(
+        std::env::var_os("MXC_W365_TEST_OPENSSL").unwrap_or_else(|| "openssl".into()),
+    )
+}
 
 #[cfg(target_os = "windows")]
 struct FixtureKey(Option<schannel::ncrypt_key::NcryptKey>);
@@ -47,17 +238,16 @@ impl Drop for FixtureKey {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn fixture_pkcs12(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Vec<u8> {
+fn fixture_pkcs12(cert: &FixtureCertificate) -> Vec<u8> {
     let directory = tempfile::tempdir().unwrap();
     let certificate = directory.path().join("certificate.pem");
     let key = directory.path().join("key.pem");
     let archive = directory.path().join("identity.p12");
-    std::fs::write(&certificate, cert.cert.pem()).unwrap();
-    std::fs::write(&key, cert.signing_key.serialize_pem()).unwrap();
-    let openssl = std::env::var_os("MXC_W365_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
-    // macOS cannot import rcgen's EC PKCS#8 PEM. These PKCS#12 algorithms work
+    std::fs::write(&certificate, &cert.certificate).unwrap();
+    std::fs::write(&key, &cert.key).unwrap();
+    // macOS imports the fixture identity as PKCS#12. These algorithms work
     // with its identity importer; they do not configure TLS or production crypto.
-    let output = std::process::Command::new(openssl)
+    let output = fixture_openssl()
         .args(["pkcs12", "-export", "-out"])
         .arg(&archive)
         .arg("-inkey")
@@ -85,9 +275,7 @@ fn fixture_pkcs12(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> Vec<u8> {
 }
 
 #[cfg(target_os = "windows")]
-fn fixture_tls(
-    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
-) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
+fn fixture_tls(cert: &FixtureCertificate) -> (schannel::schannel_cred::SchannelCred, FixtureKey) {
     // SChannel needs a persisted server key; retain its exact handle for cleanup.
     let store = schannel::cert_store::PfxImportOptions::new()
         .password(FIXTURE_IDENTITY_PASSWORD)
@@ -106,17 +294,14 @@ fn fixture_tls(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn fixture_tls(cert: &rcgen::CertifiedKey<rcgen::KeyPair>) -> native_tls::TlsAcceptor {
+fn fixture_tls(cert: &FixtureCertificate) -> native_tls::TlsAcceptor {
     #[cfg(target_os = "macos")]
     let identity =
         native_tls::Identity::from_pkcs12(&fixture_pkcs12(cert), FIXTURE_IDENTITY_PASSWORD)
             .unwrap();
     #[cfg(not(target_os = "macos"))]
-    let identity = native_tls::Identity::from_pkcs8(
-        cert.cert.pem().as_bytes(),
-        cert.signing_key.serialize_pem().as_bytes(),
-    )
-    .unwrap();
+    let identity =
+        native_tls::Identity::from_pkcs8(cert.certificate.as_bytes(), cert.key.as_bytes()).unwrap();
     native_tls::TlsAcceptor::new(identity).unwrap()
 }
 
@@ -127,15 +312,23 @@ impl Environment {
             [
                 "W365A_CONTROLPLANE_URL",
                 "W365A_CP_TOKEN",
+                "W365A_DP_SUFFIX",
+                "W365A_DP_TOKEN",
                 "MXC_W365_TEST_CA",
                 "MXC_W365_TEST_PORT",
                 "MXC_W365_TEST_TIMEOUT_MS",
+                "MXC_W365_TEST_READY_BUDGET_MS",
+                "MXC_W365_TEST_DNS_DELAY_MS",
+                "MXC_W365_TEST_EXEC_ELAPSED_MS",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
             .collect(),
         );
         std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
+        std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
+        std::env::remove_var("MXC_W365_TEST_DNS_DELAY_MS");
+        std::env::remove_var("MXC_W365_TEST_EXEC_ELAPSED_MS");
         environment
     }
     fn set(&self, key: &str, value: &str) {
@@ -176,16 +369,16 @@ struct Fixture {
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
-    _key: FixtureKey,
+    _key: Option<FixtureKey>,
 }
 impl Fixture {
     fn new() -> Self {
         Self::with_hostname("localhost")
     }
     fn with_hostname(hostname: &str) -> Self {
-        let cert = rcgen::generate_simple_self_signed(vec![hostname.into()]).unwrap();
+        let cert = FixtureCertificate::new(hostname);
         let mut ca = tempfile::NamedTempFile::new().unwrap();
-        ca.write_all(cert.cert.pem().as_bytes()).unwrap();
+        ca.write_all(cert.certificate.as_bytes()).unwrap();
         #[cfg(target_os = "windows")]
         let (tls, key) = fixture_tls(&cert);
         #[cfg(not(target_os = "windows"))]
@@ -221,7 +414,10 @@ impl Fixture {
                 let mut stream = match handshake {
                     Ok(stream) => stream,
                     // Trust and hostname rejection probes deliberately fail the handshake.
-                    Err(_) => continue,
+                    Err(error) => {
+                        eprintln!("W365 loopback fixture server TLS handshake failed: {error:?}");
+                        continue;
+                    }
                 };
                 let mut data = Vec::new();
                 let mut buf = [0; 1024];
@@ -266,7 +462,7 @@ impl Fixture {
             stop,
             worker: Some(worker),
             #[cfg(target_os = "windows")]
-            _key: key,
+            _key: Some(key),
         }
     }
     fn configure(&self, env: &Environment) {
@@ -312,7 +508,9 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
     }
 }
 
@@ -515,10 +713,13 @@ fn lifecycle_contract_and_recovery_fixture() {
             );
         }
     }
+    for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN"] {
+        std::env::remove_var(key);
+    }
     for phase in ["start", "exec"] {
         assert_eq!(
             invoke(&request(phase, A), true).unwrap_err().code,
-            MxcErrorCode::UnsupportedPhase
+            MxcErrorCode::PolicyValidation
         );
     }
     for phase in ["stop", "deprovision"] {
@@ -612,10 +813,10 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     assert_eq!(fixture.count(), before);
 
-    let wrong_ca = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let wrong_ca = FixtureCertificate::new("localhost");
     let mut wrong_file = tempfile::NamedTempFile::new().unwrap();
     wrong_file
-        .write_all(wrong_ca.cert.pem().as_bytes())
+        .write_all(wrong_ca.certificate.as_bytes())
         .unwrap();
     env.set("MXC_W365_TEST_CA", wrong_file.path().to_str().unwrap());
     assert!(invoke(&provision(), true).is_err());
@@ -669,7 +870,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         ] {
             assert_eq!(
                 error.unwrap().code,
-                mxc_sdk::v1::ErrorCode::UnsupportedPhase
+                mxc_sdk::v1::ErrorCode::PolicyValidation
             );
         }
         assert_eq!(
@@ -744,7 +945,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         );
     }
     let first = fixture.request(first_checkout).to_ascii_lowercase();
-    assert!(first.starts_with(&format!("post /api/pools/{POOL}/sessions?api-version=2.0 ")));
+    assert!(first.starts_with(&format!("post /api/pools/{POOL}/sessions?api-version=3.0 ")));
     assert!(!first.contains("user-type:"));
     assert!(!first.contains("user-object-id:"));
     assert!(first.contains("x-ms-client-request-id:"));
@@ -762,7 +963,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     assert_eq!(
         sent.split_once("\r\n\r\n").unwrap().1,
         "",
-        "API 2.0 checkout is bodyless"
+        "API 3.0 checkout is bodyless"
     );
 
     for (kind, oid) in [(true, false), (false, true)] {
@@ -1007,7 +1208,7 @@ fn lifecycle_contract_and_recovery_fixture() {
 }
 
 // CI explicitly supplies a test-support executor. This never uses a live service.
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 #[test]
 #[ignore = "requires a separately built test-support native executor"]
 fn lifecycle_fresh_executor_fixture() {
@@ -1065,6 +1266,11 @@ fn lifecycle_fresh_executor_fixture() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = value["result"]["sandboxId"].as_str().unwrap();
     assert_eq!(id, format!("w365:{POOL}:{A}"));
+    assert!(fixture
+        .request(0)
+        .starts_with(&format!("POST /api/pools/{POOL}/sessions?api-version=3.0 ")));
+    std::env::remove_var("W365A_DP_SUFFIX");
+    std::env::remove_var("W365A_DP_TOKEN");
     assert!(!run(request("start", A), true).status.success());
     assert!(!run(request("exec", A), true).status.success());
     assert_eq!(fixture.count(), 1);
@@ -1083,7 +1289,7 @@ fn lifecycle_fresh_executor_fixture() {
     assert_eq!(fixture.count(), 3);
     assert!(fixture
         .request(2)
-        .starts_with(&format!("DELETE /api/sessions/{A}?")));
+        .starts_with(&format!("DELETE /api/sessions/{A}?api-version=2.0 ")));
     fixture.reply(
         200,
         &json!({"sessionId":A,"computerId":B,"status":"Succeeded"}).to_string(),

@@ -51,7 +51,7 @@ public static class MxcLifecycle
         byte[] request, uint? timeout, JsonOptions? options, bool capture)
     {
         var experimental = options?.Experimental == true ? 1 : 0;
-        var waitClosesUntakenStdin = DevJsonRequest.TargetsWslc(request);
+        var waitClosesUntakenStdin = capture || DevJsonRequest.TargetsWslc(request);
         unsafe
         {
             fixed (byte* requestPtr = request)

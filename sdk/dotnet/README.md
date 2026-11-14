@@ -11,6 +11,8 @@ that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/
 Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
+W365 Dev JSON execution uses the native runtime and output-drain deadline,
+without a second SDK timeout that interrupts service completion.
 
 ## Requirements
 
