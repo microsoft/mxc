@@ -730,6 +730,66 @@ fn serialize_owned_json(value: &impl serde::Serialize) -> *mut c_char {
         .unwrap_or(ptr::null_mut())
 }
 
+/// Register an absolute runtime directory for the process.
+///
+/// # Safety
+/// Both strings must be null or valid NUL-terminated strings. `out_error` must
+/// be null or point to fresh writable error-detail storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_register_runtime_directory(
+    backend_utf8: *const c_char,
+    directory_utf8: *const c_char,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_error.is_null() {
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    let outcome = catch_unwind(|| {
+        if backend_utf8.is_null() || directory_utf8.is_null() {
+            return Err((
+                MXC_STATUS_NULL_ARGUMENT,
+                MxcErrorDetail::from_message("backend and directory are required"),
+            ));
+        }
+        let backend = unsafe { cstr_to_str(backend_utf8) }.ok_or_else(|| {
+            (
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("backend is not UTF-8"),
+            )
+        })?;
+        let directory = unsafe { cstr_to_str(directory_utf8) }.ok_or_else(|| {
+            (
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("directory is not UTF-8"),
+            )
+        })?;
+        mxc_sdk::__ffi::register_runtime_directory(backend, directory).map_err(|error| {
+            (
+                status_from_error_code(error.code),
+                MxcErrorDetail::from_error(&error),
+            )
+        })
+    })
+    .unwrap_or_else(|panic| {
+        report_panic("mxc_register_runtime_directory", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+    match outcome {
+        Ok(()) => MXC_STATUS_SUCCESS,
+        Err((status, mut detail)) => {
+            if out_error.is_null() {
+                detail.free_strings();
+            } else {
+                unsafe { ptr::write(out_error, detail) };
+            }
+            status
+        }
+    }
+}
+
 /// Return the library version as a static, NUL-terminated C string.
 ///
 /// The pointer is valid for the lifetime of the process and must **not** be
@@ -1091,6 +1151,80 @@ pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) ->
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn runtime_registration_ffi_is_idempotent_and_rejects_conflicts() {
+        use super::*;
+        const CHILD: &str = "MXC_TEST_RUNTIME_REGISTRATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("tests::runtime_registration_ffi_is_idempotent_and_rejects_conflicts")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let backend = CString::new("microvm").unwrap();
+        let current = std::env::current_dir().unwrap();
+        let path = CString::new(current.to_str().unwrap()).unwrap();
+        let other = CString::new(current.parent().unwrap().to_str().unwrap()).unwrap();
+        let mut detail = MxcErrorDetail::none();
+        let status =
+            unsafe { mxc_register_runtime_directory(backend.as_ptr(), path.as_ptr(), &mut detail) };
+        if !mxc_sdk::__ffi::MICROVM_RUNTIME_COMPILED {
+            assert_eq!(status, MXC_STATUS_BACKEND_UNAVAILABLE);
+            unsafe { mxc_error_detail_free(&mut detail) };
+            return;
+        }
+        assert_eq!(status, MXC_STATUS_SUCCESS);
+        assert_eq!(
+            unsafe { mxc_register_runtime_directory(backend.as_ptr(), path.as_ptr(), &mut detail) },
+            MXC_STATUS_SUCCESS
+        );
+        assert_eq!(
+            unsafe {
+                mxc_register_runtime_directory(backend.as_ptr(), other.as_ptr(), &mut detail)
+            },
+            MXC_STATUS_POLICY_VALIDATION
+        );
+        assert!(!detail.message_utf8.is_null());
+        unsafe { mxc_error_detail_free(&mut detail) };
+    }
+
+    #[test]
+    fn runtime_registration_reports_invalid_arguments_and_backend() {
+        use super::*;
+        let mut detail = MxcErrorDetail::none();
+        let directory = CString::new("relative").unwrap();
+        let backend = CString::new("unknown").unwrap();
+        let status = unsafe {
+            mxc_register_runtime_directory(backend.as_ptr(), directory.as_ptr(), &mut detail)
+        };
+        assert_eq!(status, MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+        assert!(!detail.message_utf8.is_null());
+        unsafe { mxc_error_detail_free(&mut detail) };
+        assert_eq!(
+            unsafe { mxc_register_runtime_directory(ptr::null(), directory.as_ptr(), &mut detail) },
+            MXC_STATUS_NULL_ARGUMENT
+        );
+        unsafe { mxc_error_detail_free(&mut detail) };
+        let invalid = [0xffu8, 0];
+        assert_eq!(
+            unsafe {
+                mxc_register_runtime_directory(
+                    invalid.as_ptr().cast(),
+                    directory.as_ptr(),
+                    &mut detail,
+                )
+            },
+            MXC_STATUS_INVALID_UTF8
+        );
+        unsafe { mxc_error_detail_free(&mut detail) };
+    }
+
     use super::*;
 
     fn run_with(request_json: &str) -> MxcRunResult {

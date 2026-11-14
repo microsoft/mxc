@@ -55,6 +55,7 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
   stateAwareWithStdin = false;
+  stateAwareCapture = false;
   spawnWithStdinCount = 0;
   spawnWithInheritedStdioCount = 0;
 
@@ -134,6 +135,17 @@ class FakeNative implements StreamingNativeFacade {
     this.stateAwareRequest = request;
     this.stateAwareExperimental = experimental;
     this.spawn(request, experimental, outHandle, error, completion);
+  }
+
+  stateAwareExecCaptureAsync(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.stateAwareCapture = true;
+    this.stateAwareExecAsync(request, experimental, outHandle, error, completion);
   }
 
   stateAwareExec(
@@ -426,6 +438,14 @@ describe('native streaming binding ownership', () => {
     assert.deepStrictEqual(streams.readableHandles, [12, 13]);
     await driver.free();
     assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('dispatches captured lifecycle execution to the capture entry point', async () => {
+    const native = new FakeNative();
+    const factory = new FakeStreams();
+    const driver = await createStateAwareStreamingDriverAsync('request', false, native, factory, false, 'capture');
+    assert.strictEqual(native.stateAwareCapture, true);
+    await driver.free();
   });
 
   it('passes disabled experimental authorization as zero', async () => {

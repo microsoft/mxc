@@ -71,3 +71,6 @@ Captured output is lossy UTF-8 text. Callers own and dispose live handles;
 existing-container execution leaves the container caller-owned.
 A descendant holding an output pipe open can delay captured execution
 completion after a workload timeout.
+
+For MicroVM output and recovery limitations, see the
+[NVX backend guide](../../../backends/nvx/nvx.md#output-timeout-and-cleanup).

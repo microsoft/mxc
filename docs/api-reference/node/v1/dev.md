@@ -57,3 +57,6 @@ combined terminal output and the exit code. Structured warnings and output
 metadata are unavailable on this route. The executor enforces
 `process.timeout`, but `wait().timedOut` is `false`: the terminal channel
 reports only an exit code.
+
+For MicroVM output and recovery limitations, see the
+[NVX backend guide](../../../backends/nvx/nvx.md#output-timeout-and-cleanup).

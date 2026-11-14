@@ -21,9 +21,9 @@ preserve compatibility with the older supported host.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
-  Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
-  workflow run, so what gets tested is exactly what got built.
+  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, WSLC,
+  and MicroVM the Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`,
+  in the same workflow run, so what gets tested is exactly what got built.
 
 - IsolationSession also downloads `telemetry-test-executor-<target>`, a separate
   local-only debug executor with `test-support` and `isolation_session`. Shipping
@@ -883,3 +883,9 @@ jobs:
 - **All OS build jobs must pass** before validation testing happens. 
 - **Artifacts live one day.** Re-running a test job long after the build has
   expired fails at download; re-run the whole workflow instead.
+
+The Windows x64 MicroVM scheduled lane also runs Node and .NET development
+JSON creation and lifecycle scenarios from the Windows SDK bundle, including
+live streams and Node capture overflow followed by container reuse. These
+managed scenarios discover their packaged NVX runtimes with `MXC_FFI_DIR` and
+`ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR` cleared.

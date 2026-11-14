@@ -150,13 +150,7 @@ pub fn run_state_aware(
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         crate::mxc_common::models::ContainmentBackend::MicroVm => {
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new();
-            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
-                &mut runner,
-                bound,
-                dry_run,
-            );
-            runner.finish(outcome)
+            crate::backend_modules::nvx::state_aware::dispatch(bound, dry_run)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -443,19 +437,7 @@ fn exec_state_aware_with_capture_mode(
                 ));
             }
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = if _capture_output {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::for_capture()
-            } else {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new()
-            };
-            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
-                &mut runner,
-                bound,
-            );
-            let handle = runner.finish(handle)?;
-            Ok(Box::new(
-                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
-            ))
+            crate::backend_modules::nvx::state_aware::dispatch_exec(bound, _capture_output)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),

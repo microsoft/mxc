@@ -11,8 +11,10 @@ The backend supports Windows x64 only. Windows ARM64 and Linux hosts do not have
 active MicroVM execution path; support for those platforms is
 future work. Enabling the feature does not make an unsupported host available.
 
-`v1::available_backends` checks the feature, bundle manifest/library, and active
-hypervisor. Availability is advisory; execution verifies runtime requirements.
+`v1::available_backends` and platform support report MicroVM when the feature,
+bundle manifest/library, and active hypervisor are available. This is advisory;
+execution verifies runtime requirements. MicroVM execution uses the development
+JSON APIs, not typed V1 requests.
 
 ## Requirements and quick start
 
@@ -39,8 +41,9 @@ guest images, and provenance files. Do not substitute a standalone OpenVMM
 executable or a partial bundle.
 
 Windows x64 Azure build artifacts, release ZIPs, and VPack artifacts include
-this complete directory beside the executor. The Node SDK package excludes
-it because typed V1 does not support MicroVM targeting. The bundle retains the
+this complete directory beside the executor. Node and .NET callers can install
+the optional `@microsoft/mxc-sdk-nvx-runtime-win32-x64` or
+`Microsoft.Mxc.Sdk.Nvx.Runtime` package respectively for JSON requests. The bundle retains the
 NVX release's signatures and pinned hashes; MXC's executable-signing step does
 not modify it.
 
@@ -148,7 +151,7 @@ does not define the limits of this integration.
 | Working directory | Optional absolute POSIX guest path; see the limits below. |
 | Environment | Guest default, optionally extended with additive entries; see below. |
 | Process timeout | `0` means no workload timeout; nonzero values may not exceed 3,600,000 ms. |
-| Captured output | Create-and-run capture and lifecycle `run_in_container_json` accept at most 64 MiB (67,108,864 bytes) combined stdout and stderr. Live streams are caller-controlled and do not have this MXC capture limit. |
+| Captured output | Create-and-run capture and lifecycle `run_in_container_json` accept at most 64 MiB (67,108,864 bytes) combined stdout and stderr, except .NET lifecycle capture. Live streams are caller-controlled and do not have this MXC capture limit. |
 | Filesystem policy | Read-only, read-write, and denied paths are mapped to the agent and require the corresponding runtime capabilities. |
 | Network policy | Egress defaults and CIDR/protocol/port rules, ingress defaults, and host-loopback postures require the corresponding runtime capabilities and native validation. Host-loopback allow makes guest listeners reachable on the same host loopback port. |
 | Runtime proxy | `runtimeConfig.networkProxy` requires the runtime's proxy capability and a port other than 0 or 53. Proxy environment variables remain rejected. |
@@ -212,7 +215,9 @@ mean that the workload has stopped.
 For lifecycle `run_in_container_json`, overflow cancels only that execution;
 the caller-owned container remains provisioned and usable. The limit also
 applies when the workload timeout is zero. Cleanup failures are reported
-alongside the original failure.
+alongside the original failure. The .NET `RunInContainerJson` and
+`RunInContainerJsonAsync` methods do not enforce this limit; large output can
+consume significant memory.
 
 Lifecycle envelope calls, including validation, explicitly close the native
 host. A close failure after successful work returns `BackendError`; a primary
@@ -224,15 +229,13 @@ credentials. The error code and failed operation are still reported.
 If provision succeeds but close fails, MXC retains the provisioned container
 and returns its ID in Rust `Error.details.nvxRecovery.sandboxId`, with
 `details.nvxRecovery.state` recording the last-known state, `"provisioned"`.
-Use that ID to continue or deprovision through Rust `v1::dev` JSON; do not retry
-provision. Treat the ID as sensitive; ordinary error formatting omits it.
+Use that ID to continue or deprovision through the development JSON APIs; do
+not retry provision. Treat the ID as sensitive; ordinary error formatting omits it.
 Pre-existing error details are retained under `details.primaryDetails`.
 These fields are part of the experimental Rust `v1::dev` behaviour and may
 change as the development API evolves.
 
-The existing C ABI does not expose structured `Error.details`. C-backed Node
-and .NET callers therefore do not receive this recovery ID when provision
-succeeds but close fails, even though the container remains provisioned.
+Node and .NET do not expose the retained container ID in this failure case.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only

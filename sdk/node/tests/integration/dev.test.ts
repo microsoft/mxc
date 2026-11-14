@@ -8,6 +8,10 @@ import { it } from 'node:test';
 import { runJson, spawnJson, spawnWithPtyJson, validateProcessJson } from '@microsoft/mxc-sdk/v1/dev';
 import { MxcError } from '@microsoft/mxc-sdk/v1';
 import { isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { verifyPackagedRuntime } from './packaged-runtime-test.js';
 
 const windows = process.platform === 'win32';
 const creationSkip = windows ? sandboxSkipReason
@@ -155,4 +159,53 @@ it('V1.Dev rejects unknown fields and unregistered exact versions through native
     validateProcessJson(unknownField),
     (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
   );
+});
+
+
+it('V1.Dev installs both npm packages and discovers NVX without overrides', {
+  skip: process.platform !== 'win32' || process.arch !== 'x64',
+  timeout: 300_000,
+}, () => {
+  const require = createRequire(import.meta.url);
+  const installedSdk = path.dirname(require.resolve('@microsoft/mxc-sdk/package.json'));
+  const integrationRoot = process.cwd();
+  const sdkSource = path.resolve(integrationRoot, '..', '..');
+  const inCheckout = fs.existsSync(path.join(sdkSource, 'package.json')) &&
+    fs.existsSync(path.join(sdkSource, '..', 'node-nvx-runtime', 'package.json'));
+  const repoRoot = inCheckout ? path.resolve(sdkSource, '..', '..') : undefined;
+  const packageDir = process.env.MXC_SDK_PACKAGE_DIR;
+  const runtimeDir = process.env.MXC_NVX_PACKAGE_DIR;
+  const singleTarball = (directory: string | undefined): string | undefined => {
+    if (!directory) return undefined;
+    const files = fs.readdirSync(directory).filter(file => file.endsWith('.tgz'));
+    assert.equal(files.length, 1, `expected exactly one package in ${directory}`);
+    return path.resolve(directory, files[0]);
+  };
+  const candidates = [
+    ...(process.env.MXC_NVX_TEST_DLL ? [path.resolve(process.env.MXC_NVX_TEST_DLL)] : []),
+    path.join(installedSdk, 'bin', 'x64', 'mxc_ffi.dll'),
+  ];
+  if (repoRoot) candidates.push(
+    path.join(repoRoot, 'src', 'target', 'debug', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'release', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'debug', 'mxc_ffi.dll'),
+    path.join(repoRoot, 'src', 'target', 'x86_64-pc-windows-msvc', 'release', 'mxc_ffi.dll'),
+  );
+  const library = candidates.find(file => fs.existsSync(file));
+  assert.ok(library, 'Windows x64 integration requires a built mxc_ffi.dll');
+  const runtimeRoot = runtimeDir ? runtimeDir : inCheckout
+    ? path.join(sdkSource, '..', 'node-nvx-runtime')
+    : path.dirname(require.resolve('@microsoft/mxc-sdk-nvx-runtime-win32-x64/package.json'));
+  verifyPackagedRuntime({
+    sdkRoot: inCheckout && !packageDir ? sdkSource : installedSdk,
+    runtimeRoot,
+    library,
+    dependencyRoots: [path.join(installedSdk, 'node_modules'), path.join(integrationRoot, 'node_modules'),
+      ...(inCheckout ? [path.join(sdkSource, 'node_modules')] : [])],
+    fixtureParent: integrationRoot,
+    inventoryFile: repoRoot ? path.join(repoRoot, 'src', 'mxc-sdk', 'src', 'backends', 'nvx', 'crate_runtime.rs') : undefined,
+    buildSdk: inCheckout && !packageDir,
+    baseTarball: singleTarball(packageDir),
+    runtimeTarball: singleTarball(runtimeDir),
+  });
 });
