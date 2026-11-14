@@ -229,7 +229,8 @@ enables its parent-death cleanup. CLI execution uses `--new-session` instead.
 
 CLI execution still inherits its standard input, output, and error
 descriptors, but the workload cannot reopen the host terminal through
-`/dev/tty` or use it for terminal job control. For programs that need a
+`/dev/tty` or use it for terminal job control. SDK inherited-stdio execution
+(`spawn_with_extended_options` with `SpawnStdio::Inherit`) behaves the same way. For programs that need a
 controlling terminal, use the SDK's PTY execution API, which allocates a
 separate terminal and supports resizing and merged output.
 ### Deny-by-default filesystem

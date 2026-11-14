@@ -122,6 +122,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        let caller_stdio = crate::mxc_common::sandbox_process::open_caller_stdio();
         validate_common(request)?;
         let launch = self.validate_prepared(request)?;
         if let Some(plan) = launch.egress_plan.as_ref() {
@@ -204,6 +205,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             launch,
             logger,
             stdio,
+            caller_stdio,
         )?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
@@ -522,6 +524,7 @@ impl BubblewrapScriptRunner {
         launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
+        caller_stdio: [bool; 3],
     ) -> Result<BwrapChild, ScriptResponse> {
         let ValidatedLaunch {
             egress_plan,
@@ -709,6 +712,10 @@ impl BubblewrapScriptRunner {
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit());
+                crate::mxc_common::sandbox_process::keep_caller_stdio_across_exec(
+                    &mut command,
+                    caller_stdio,
+                );
                 None
             }
             StdioMode::Pty(size) => match LivePty::attach(
@@ -1646,6 +1653,7 @@ mod tests {
                 },
                 &mut Logger::new(Mode::Buffer),
                 StdioMode::Pipes,
+                [true; 3],
             )
             .err()
         else {

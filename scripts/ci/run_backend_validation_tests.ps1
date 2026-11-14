@@ -190,7 +190,8 @@ function Invoke-ProcessContainerStreamingTests {
         Assert-File -Path $file
     }
 
-    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes',
+        'inherited_stdio_processcontainer_uses_caller_stdio') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
         $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
@@ -211,7 +212,8 @@ function Invoke-ProcessContainerStreamingTests {
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
-                'DevJson_CapturesOutputAndStreamsInput')
+                'DevJson_CapturesOutputAndStreamsInput',
+                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
@@ -222,7 +224,9 @@ function Invoke-ProcessContainerStreamingTests {
             'public tool discovery allows tool reads but denies sibling private files',
             'V1.Dev runJson captures output and exit status',
             'V1.Dev spawnJson supports bidirectional pipes',
-            'V1.Dev spawnWithPtyJson supports an interactive terminal'
+            'V1.Dev spawnWithPtyJson supports an interactive terminal',
+            'spawnWithExtendedOptions with inherited stdio uses the calling process stdio',
+            'V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio'
         )
         Push-Location $nodeSuiteRoot
         try {

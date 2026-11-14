@@ -56,6 +56,13 @@ internal interface IContainerRunner
     MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);
+
+    /// <summary>Spawn a complete request with stdio and other controls chosen in the options.</summary>
+    IMxcProcess SpawnWithExtendedOptions(
+        ContainerRequest request,
+        SpawnExtendedOptions? options = null) =>
+        throw new NotSupportedException(
+            "This container runner does not support extended spawn options.");
 }
 
 /// <summary>
@@ -116,6 +123,12 @@ internal sealed class MxcContainerRunner : IContainerRunner
         ContainerRequest request,
         SpawnWithPtyOptions? options = null) =>
         MxcContainer.SpawnWithPty(request, options);
+
+    /// <inheritdoc/>
+    public IMxcProcess SpawnWithExtendedOptions(
+        ContainerRequest request,
+        SpawnExtendedOptions? options = null) =>
+        MxcContainer.SpawnWithExtendedOptions(request, options);
 }
 
 /// <summary>

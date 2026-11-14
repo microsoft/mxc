@@ -107,6 +107,7 @@
 //! | **capture** | [`v1::run`] | [`v1::container::run_in_container`] | captured stdout and stderr |
 //! | **handle**  | [`v1::spawn`] | [`v1::container::spawn_in_container`] | separate live pipes |
 //! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
+//! | **inherited** | [`v1::spawn_with_extended_options`] with [`v1::SpawnStdio::Inherit`] | — | the caller's own stdin, stdout, and stderr |
 //!
 //! [`v1::container::provision_container`], [`v1::container::start_container`],
 //! [`v1::container::stop_container`], and
@@ -129,6 +130,12 @@
 //! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
 //! an existing IsolationSession container. Unsupported backends reject the
 //! request before creating a sandbox.
+//!
+//! [`v1::spawn_with_extended_options`] takes extensible options. With
+//! [`v1::SpawnStdio::Inherit`] it attaches the workload to the calling
+//! process's own stdin, stdout, and stderr, such as a terminal or pseudo-console
+//! the caller already set up; ProcessContainer, Bubblewrap, and Seatbelt support
+//! that mode.
 //!
 //! Policy and operational warnings are available through [`MxcProcess::warnings`]
 //! and [`ExecutionResult::warnings`]. These include security warnings, network rules
@@ -236,8 +243,8 @@ pub mod v1 {
     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
     pub use crate::options::{
         DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
-        SpawnInContainerOptions, SpawnInContainerWithPtyOptions, SpawnOptions, SpawnWithPtyOptions,
-        StartOptions, StopOptions, TelemetryConfig,
+        SpawnExtendedOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
+        SpawnOptions, SpawnStdio, SpawnWithPtyOptions, StartOptions, StopOptions, TelemetryConfig,
     };
 
     /// V1 telemetry consent administration.
@@ -358,6 +365,19 @@ pub mod v1 {
         let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         crate::mxc_engine::spawn_with_pty(&prepared.inner, options.size.into())
             .and_then(MxcPtyProcess::new)
+    }
+
+    /// Spawn a [`ContainerRequest`] with stdio and other controls chosen in [`SpawnExtendedOptions`].
+    pub fn spawn_with_extended_options(
+        request: ContainerRequest,
+        options: SpawnExtendedOptions,
+    ) -> Result<MxcProcess, Error> {
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
+        match options.stdio {
+            SpawnStdio::Pipes => crate::mxc_engine::spawn_execution_request(&prepared.inner, false),
+            SpawnStdio::Inherit => crate::mxc_engine::spawn_with_inherited_stdio(&prepared.inner),
+        }
+        .map(MxcProcess::new)
     }
 
     /// Run a [`ContainerRequest`] to completion and capture its output.
@@ -542,6 +562,22 @@ pub mod __ffi {
         size.validate()?;
         crate::mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
             .and_then(v1::MxcPtyProcess::new)
+    }
+
+    pub fn spawn_with_extended_options_json(
+        request_json: &str,
+        experimental: bool,
+        stdio: v1::SpawnStdio,
+    ) -> Result<MxcProcess, Error> {
+        match stdio {
+            v1::SpawnStdio::Pipes => {
+                crate::mxc_engine::spawn_one_shot_json(request_json, experimental, false)
+            }
+            v1::SpawnStdio::Inherit => {
+                crate::mxc_engine::spawn_one_shot_inherited_stdio_json(request_json, experimental)
+            }
+        }
+        .map(MxcProcess::new)
     }
 
     /// Run a raw exact-version JSON container request to completion and capture

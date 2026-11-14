@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Diagnostics;
 using System.Text;
+using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
@@ -67,6 +69,109 @@ public class MxcProcessTests
     public void Spawn_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(() => MxcContainer.Spawn(null!));
+    }
+
+    [Fact]
+    public void SpawnWithExtendedOptions_NullRequest_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => MxcContainer.SpawnWithExtendedOptions(null!));
+    }
+
+    [Fact]
+    public async Task SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        var hostVariant = Environment.GetEnvironmentVariable(InheritedStdioHostVariable);
+        if (hostVariant is not null)
+        {
+            RunInheritedStdioHost(hostVariant);
+            return;
+        }
+
+        using (var piped = MxcContainer.SpawnWithExtendedOptions(
+            new ContainerRequest(InheritedStdioCommand("PIPES")) { TimeoutMs = 30_000 }))
+        {
+            var cancellation = TestContext.Current.CancellationToken;
+            var stdin = piped.StandardInput;
+            Assert.NotNull(stdin);
+            var output = piped.WaitForExitWithOutputAsync(cancellation);
+            await stdin.WriteAsync(Encoding.UTF8.GetBytes(
+                InheritedStdioInput + (OperatingSystem.IsWindows() ? "\r\n" : "\n")), cancellation);
+            stdin.Dispose();
+            var (outcome, pipedOut, pipedErr) = await output;
+            Assert.Equal(7, outcome.ExitCode);
+            Assert.Contains($"PIPES_OUT:{InheritedStdioInput}", Encoding.UTF8.GetString(pipedOut));
+            Assert.Contains("PIPES_ERR", Encoding.UTF8.GetString(pipedErr));
+        }
+
+        foreach (var variant in new[] { "typed", "1.0.0", "1.1.0-alpha" })
+        {
+            var start = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            if (Path.GetFileNameWithoutExtension(start.FileName) == "dotnet")
+            {
+                start.ArgumentList.Add(typeof(MxcProcessTests).Assembly.Location);
+            }
+            start.ArgumentList.Add("-method");
+            start.ArgumentList.Add(
+                $"{typeof(MxcProcessTests).FullName}.{nameof(SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio)}");
+            start.Environment[InheritedStdioHostVariable] = variant;
+
+            using var host = Process.Start(start)!;
+            var cancellation = TestContext.Current.CancellationToken;
+            var stdout = host.StandardOutput.ReadToEndAsync(cancellation);
+            var stderr = host.StandardError.ReadToEndAsync(cancellation);
+            await host.StandardInput.WriteAsync(
+                (InheritedStdioInput + (OperatingSystem.IsWindows() ? "\r\n" : "\n")).AsMemory(),
+                cancellation);
+            host.StandardInput.Close();
+            await host.WaitForExitAsync(cancellation).WaitAsync(TimeSpan.FromMinutes(2), cancellation);
+            var output = await stdout;
+            var error = await stderr;
+            var marker = InheritedStdioMarker(variant);
+            Assert.True(host.ExitCode == 0, $"{variant} host exited {host.ExitCode}:\n{output}\n{error}");
+            Assert.Contains($"{marker}_OUT:{InheritedStdioInput}", output);
+            Assert.Contains($"{marker}_ERR", error);
+        }
+    }
+
+    private const string InheritedStdioHostVariable = "MXC_DOTNET_INHERITED_STDIO_HOST";
+    private const string InheritedStdioInput = "INHERITED_STDIN_LINE";
+
+    private static string InheritedStdioMarker(string variant) =>
+        "INHERITED_STDIO_" + variant.Replace('.', '_').Replace('-', '_');
+
+    private static string InheritedStdioCommand(string marker) =>
+        OperatingSystem.IsWindows()
+            ? $"cmd.exe /v:on /c \"set /p L= & echo {marker}_OUT:!L! & echo {marker}_ERR 1>&2 & exit /b 7\""
+            : $"IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit 7";
+
+    private static void RunInheritedStdioHost(string variant)
+    {
+        var command = InheritedStdioCommand(InheritedStdioMarker(variant));
+        using var process = variant == "typed"
+            ? MxcContainer.SpawnWithExtendedOptions(
+                new ContainerRequest(command) { TimeoutMs = 30_000 },
+                new SpawnExtendedOptions { Stdio = SpawnStdio.Inherit })
+            : Dev.MxcContainer.SpawnWithExtendedOptionsJson(
+                new JsonObject
+                {
+                    ["version"] = variant,
+                    ["containment"] = "process",
+                    ["process"] = new JsonObject { ["commandLine"] = command, ["timeout"] = 30_000 },
+                }.ToJsonString(),
+                new Dev.SpawnExtendedJsonOptions { Stdio = SpawnStdio.Inherit });
+        Assert.Null(process.StandardInput);
+        Assert.Null(process.StandardOutput);
+        Assert.Null(process.StandardError);
+        var result = process.Wait();
+        Assert.False(result.TimedOut);
+        Assert.Equal(7, result.ExitCode);
     }
 
     [Fact]

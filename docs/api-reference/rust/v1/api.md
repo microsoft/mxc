@@ -9,7 +9,7 @@ Callers do not supply JSON or a schema version.
 The separate [V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
 accepts caller-authored requests
 for create-and-run execution and container lifecycle operations.
-Attached execution is not exposed by the V1 SDK.
+Attached execution in an existing container is not exposed by the V1 SDK.
 
 ## Choosing a launch operation
 
@@ -19,6 +19,7 @@ Attached execution is not exposed by the V1 SDK.
 | Live standard pipes | `v1::spawn` | `v1::container::spawn_in_container` | `MxcProcess` |
 | Live standard pipes with a writable WSLC stdin | `v1::spawn_with_stdin` | `v1::container::spawn_in_container_with_stdin` | `MxcProcess` |
 | Interactive terminal | `v1::spawn_with_pty` | `v1::container::spawn_in_container_with_pty` | `MxcPtyProcess` |
+| The caller's own stdin, stdout, and stderr | `v1::spawn_with_extended_options` with `SpawnStdio::Inherit` | — | `MxcProcess` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
@@ -31,6 +32,14 @@ attaching the workload to the host process's global console streams.
 Read the terminal output concurrently rather than only after `wait`. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
+
+`spawn_with_extended_options` takes extensible options. Its default
+`SpawnStdio::Pipes` behaves exactly like `spawn`. `SpawnStdio::Inherit`
+attaches the workload to whatever the calling process's stdin, stdout, and
+stderr already are, such as a console, pseudo-console, or pipes the caller set
+up. MXC allocates no pipes or PTY, so the caller keeps ownership of its
+terminal handling. Inherit is supported by ProcessContainer, Bubblewrap, and
+Seatbelt.
 
 ## Discovery and validation
 
@@ -289,6 +298,22 @@ pub fn spawn_with_pty(
 request: ContainerRequest,
 options: SpawnWithPtyOptions,
 ) -> Result<MxcPtyProcess, Error>;
+```
+
+
+## `mxc_sdk::v1::spawn_with_extended_options`
+
+Spawn a [ContainerRequest] with stdio and other controls chosen in `SpawnExtendedOptions`.
+
+With `SpawnStdio::Inherit` the returned `MxcProcess` has no streams to take;
+use it to wait for or kill the process. Backends other than ProcessContainer,
+Bubblewrap, and Seatbelt reject `Inherit` with `ErrorCode::UnsupportedContainment`.
+
+```rust
+pub fn spawn_with_extended_options(
+request: ContainerRequest,
+options: SpawnExtendedOptions,
+) -> Result<MxcProcess, Error>;
 ```
 
 

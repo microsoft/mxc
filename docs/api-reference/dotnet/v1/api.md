@@ -15,14 +15,19 @@ Callers do not supply JSON or a schema version.
 | Live standard pipes | `Spawn` / `SpawnAsync` | `SpawnInContainer` / `SpawnInContainerAsync` | `MxcProcess` |
 | Live standard pipes with a writable WSLC stdin | `SpawnWithStdin` / `SpawnWithStdinAsync` | `SpawnInContainerWithStdin` / `SpawnInContainerWithStdinAsync` | `MxcProcess` |
 | Interactive terminal | `SpawnWithPty` | `SpawnInContainerWithPty` | `MxcPtyProcess` |
+| The caller's own standard input, output, and error | `SpawnWithExtendedOptions` with `SpawnStdio.Inherit` | — | `MxcProcess` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
 and operation options. Create-and-run PTY support covers IsolationSession, Bubblewrap,
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
 IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
-give the caller explicit input, output, resize, and process ownership; there
-is no separate public attached-console launch API. Typed V1 does not accept
+give the caller explicit input, output, resize, and process ownership.
+`SpawnWithExtendedOptions` takes extensible options; its default
+`SpawnStdio.Pipes` behaves like `Spawn`. `SpawnStdio.Inherit` instead attaches
+the workload to whatever the calling process's standard streams already are,
+such as a console, pseudo-console, or pipes the caller set up; it supports
+ProcessContainer, Bubblewrap, and Seatbelt. Typed V1 does not accept
 ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
 [V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
 accepts caller-authored requests separately.
@@ -181,6 +186,20 @@ Spawn a complete request attached to an MXC-owned PTY.
 public static MxcPtyProcess SpawnWithPty(
     ContainerRequest request,
     SpawnWithPtyOptions? options = null);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcContainer` — SpawnWithExtendedOptions
+
+Spawn a complete request with stdio and other controls chosen in the options.
+With `SpawnStdio.Inherit` the returned process has no streams to take, and
+backends other than ProcessContainer, Bubblewrap, and Seatbelt throw
+`MxcException` with `ErrorCode.UnsupportedContainment`.
+
+```csharp
+public static MxcProcess SpawnWithExtendedOptions(
+    ContainerRequest request,
+    SpawnExtendedOptions? options = null);
 ```
 
 

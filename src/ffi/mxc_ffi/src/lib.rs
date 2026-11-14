@@ -223,6 +223,11 @@ pub const MXC_STATUS_PANIC: i32 = 102;
 /// [`MXC_STATUS_PANIC`].
 pub const MXC_STATUS_CONSENT_WRITE_FAILED: i32 = 103;
 
+/// `stdio` value for [`mxc_spawn_extended_json`]: new pipes, as with `mxc_spawn_json`.
+pub const MXC_SPAWN_STDIO_PIPES: i32 = 0;
+/// `stdio` value for [`mxc_spawn_extended_json`]: the calling process's own stdin, stdout, and stderr.
+pub const MXC_SPAWN_STDIO_INHERIT: i32 = 1;
+
 /// Map an [`ErrorCode`] to its stable FFI status code.
 pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
     match code {

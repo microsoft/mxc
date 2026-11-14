@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { it } from 'node:test';
 import { runJson, spawnJson, spawnWithPtyJson, validateProcessJson } from '@microsoft/mxc-sdk/v1/dev';
 import { MxcError } from '@microsoft/mxc-sdk/v1';
@@ -11,6 +13,58 @@ const windows = process.platform === 'win32';
 const creationSkip = windows ? sandboxSkipReason
   : process.platform === 'linux' ? (isLinuxRoot ? undefined : 'Bubblewrap requires root')
   : process.platform === 'darwin' ? undefined : 'Unsupported host';
+
+const inheritedStdioInput = 'INHERITED_STDIN_LINE';
+const inheritedStdioCommand = windows
+  ? 'cmd.exe /v:on /c "set /p L= & echo INHERITED_OUT:!L! & echo INHERITED_ERR 1>&2 & exit /b 7"'
+  : "IFS= read -r line; printf 'INHERITED_OUT:%s\\n' \"$line\"; printf 'INHERITED_ERR\\n' >&2; exit 7";
+
+const inheritedStdioScript = `
+import { spawnWithExtendedOptions } from '@microsoft/mxc-sdk/v1';
+import { spawnWithExtendedOptionsJson } from '@microsoft/mxc-sdk/v1/dev';
+const request = process.env.MXC_INHERITED_REQUEST;
+const proc = process.env.MXC_INHERITED_API === 'typed'
+  ? await spawnWithExtendedOptions({ command: request }, { stdio: 'inherit' })
+  : await spawnWithExtendedOptionsJson(request, { stdio: 'inherit' });
+try {
+  if (proc.standardInput || proc.standardOutput || proc.standardError) process.exit(90);
+  process.exitCode = (await proc.wait()).exitCode;
+} finally {
+  proc.dispose();
+}
+`;
+
+function runInheritedStdioHost(
+  api: 'typed' | 'dev',
+  request: string,
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      process.execPath,
+      ['--input-type=module', '-e', inheritedStdioScript],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: { ...process.env, MXC_INHERITED_API: api, MXC_INHERITED_REQUEST: request },
+        timeout: 60000,
+      },
+      (error, stdout, stderr) => {
+        const exitCode = error === null ? 0 : typeof error.code === 'number' ? error.code : null;
+        resolve({ exitCode, stdout, stderr });
+      },
+    );
+    child.stdin?.end(`${inheritedStdioInput}${windows ? '\r\n' : '\n'}`);
+  });
+}
+
+function assertUsedCallerStdio(result: { exitCode: number | null; stdout: string; stderr: string }) {
+  assert.equal(result.exitCode, 7, result.stderr);
+  assert.ok(result.stdout.includes(`INHERITED_OUT:${inheritedStdioInput}`), result.stdout);
+  assert.ok(result.stderr.includes('INHERITED_ERR'), result.stderr);
+}
+
+it('spawnWithExtendedOptions with inherited stdio uses the calling process stdio', { skip: creationSkip }, async () => {
+  assertUsedCallerStdio(await runInheritedStdioHost('typed', inheritedStdioCommand));
+});
 
 async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   let text = '';
@@ -56,6 +110,10 @@ for (const version of ['1.0.0', '1.1.0-alpha']) {
     } finally {
       proc.dispose();
     }
+  });
+
+  it(`V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio (${version})`, { skip: creationSkip }, async () => {
+    assertUsedCallerStdio(await runInheritedStdioHost('dev', request(inheritedStdioCommand)));
   });
 
   it(`V1.Dev spawnWithPtyJson supports an interactive terminal (${version})`, { skip: creationSkip }, async () => {
