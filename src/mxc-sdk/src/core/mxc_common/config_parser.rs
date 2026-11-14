@@ -1258,7 +1258,7 @@ fn validate_single_backend_section(
         None => format!(
             "Multiple containment backends configured: 'containment' is '{containment_wire}' \
              (no per-backend section is defined for this backend), but the config includes \
-             backend section(s): {}. Only one backend section is allowed; remove the unused \
+             unrelated backend section(s): {}. Only one backend section is allowed; remove the unused \
              section(s).",
             extras.join(", "),
         ),
@@ -1901,8 +1901,8 @@ mod tests {
     fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
         const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
             'containment' is 'microvm' (no per-backend section is defined for this backend), but \
-            the config includes backend section(s): processContainer. Only one backend section is \
-            allowed; remove the unused section(s).";
+            the config includes unrelated backend section(s): processContainer. Only one backend \
+            section is allowed; remove the unused section(s).";
 
         for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
             let json = format!(

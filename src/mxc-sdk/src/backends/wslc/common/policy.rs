@@ -766,9 +766,16 @@ mod tests {
 
     #[test]
     fn provision_accepts_standalone_denied_path() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = std::env::current_dir().unwrap().join(directory.path());
+        let mounted = root.join("mounted");
+        let denied = root.join("denied");
+        std::fs::create_dir(&mounted).unwrap();
+        std::fs::create_dir(&denied).unwrap();
+
         let req = request_with_policy(ContainerPolicy {
-            readwrite_paths: vec!["C:\\src".to_string()],
-            denied_paths: vec!["D:\\secrets".to_string()],
+            readwrite_paths: vec![mounted.to_string_lossy().into_owned()],
+            denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         });
         validate_provision_policy(&req).unwrap();

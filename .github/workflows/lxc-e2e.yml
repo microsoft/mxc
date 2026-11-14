@@ -39,7 +39,36 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            lxc lxc-templates iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates busybox-static iptables debootstrap uidmap bridge-utils
+
+      - name: Configure unprivileged LXC
+        run: |
+          set -euo pipefail
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -m 700 "$backup_dir"
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            if sudo test -e "$file" || sudo test -L "$file"; then
+              sudo cp -a "$file" "$backup_dir/$(basename "$file")"
+            fi
+          done
+          touch "$backup_dir/complete"
+
+          for file in /etc/subuid /etc/subgid; do
+            sudo touch "$file"
+            if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
+              printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
+            fi
+          done
+
+          sudo touch /etc/lxc/default.conf
+
+          # Remove active mappings before adding the test-only UID/GID range.
+          sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
+          printf '%s\n' \
+            'lxc.idmap = u 0 100000 65536' \
+            'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
+
+
 
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.
@@ -117,7 +146,7 @@ jobs:
         working-directory: src
         env:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
-        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test wxc_e2e_tests_e2e_lxc_network_capability
+        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test wxc_e2e_tests_e2e_lxc_network_capability --test wxc_e2e_tests_e2e_lxc_static_network
 
       # These create and start a container, so they need this lane's root and
       # its LXC install. `sdk_helpers` rides along because this is the only lane
@@ -127,6 +156,25 @@ jobs:
         env:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test streaming_lxc --test sdk_helpers
+
+      - name: Restore LXC configuration
+        if: always()
+        run: |
+          set -euo pipefail
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          if [ -f "$backup_dir/complete" ]; then
+            status=0
+            for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+              backup="$backup_dir/$(basename "$file")"
+              if sudo test -e "$backup" || sudo test -L "$backup"; then
+                sudo cp -a --remove-destination "$backup" "$file" || status=1
+              else
+                sudo rm -f "$file" || status=1
+              fi
+            done
+            exit "$status"
+          fi
+
 
       - name: Show leftover firewall state on failure
         if: failure()

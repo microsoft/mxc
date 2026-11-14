@@ -127,10 +127,8 @@ jobs:
         continue-on-error: true
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          # Network-dependent LXC tests remain gated by
-          # MXC_SKIP_LXC_NETWORK_TESTS because guest DHCP is unreliable here.
-          packages: bubblewrap lxc dnsmasq-base iptables bridge-utils
-          version: 1.4-${{ matrix.runner }}
+          packages: bubblewrap lxc uidmap dnsmasq-base iptables bridge-utils
+          version: 1.5-${{ matrix.runner }}
 
       - name: Verify or repair Linux containment dependencies
         if: matrix.os_label == 'linux'
@@ -141,6 +139,7 @@ jobs:
           packages=(
             bubblewrap
             lxc
+            uidmap
             dnsmasq-base
             iptables
             bridge-utils
@@ -150,6 +149,8 @@ jobs:
             bwrap
             lxc-start
             lxc-create
+            newuidmap
+            newgidmap
             dnsmasq
             iptables
             brctl
@@ -208,6 +209,35 @@ jobs:
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
+      - name: Configure unprivileged LXC
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -m 700 "$backup_dir"
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            if sudo test -e "$file" || sudo test -L "$file"; then
+              sudo cp -a "$file" "$backup_dir/$(basename "$file")"
+            fi
+          done
+          touch "$backup_dir/complete"
+
+          for file in /etc/subuid /etc/subgid; do
+            sudo touch "$file"
+            if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
+              printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
+            fi
+          done
+
+          sudo touch /etc/lxc/default.conf
+
+          # Remove active mappings before adding the test-only UID/GID range.
+          sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
+          printf '%s\n' \
+            'lxc.idmap = u 0 100000 65536' \
+            'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
+
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
         shell: bash
@@ -240,4 +270,23 @@ jobs:
               MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
           else
             npm test
+          fi
+
+      - name: Restore LXC configuration
+        if: always() && matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup_dir="$RUNNER_TEMP/mxc-lxc-${{ github.run_id }}-${{ github.run_attempt }}"
+          if [ -f "$backup_dir/complete" ]; then
+            status=0
+            for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+              backup="$backup_dir/$(basename "$file")"
+              if sudo test -e "$backup" || sudo test -L "$backup"; then
+                sudo cp -a --remove-destination "$backup" "$file" || status=1
+              else
+                sudo rm -f "$file" || status=1
+              fi
+            done
+            exit "$status"
           fi

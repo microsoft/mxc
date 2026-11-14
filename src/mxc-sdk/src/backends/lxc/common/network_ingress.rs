@@ -238,6 +238,36 @@ impl IngressManager {
         self.preserve_policy = preserve;
     }
 
+    pub(crate) fn record_startup_rules(&mut self, ipv6: bool) {
+        self.v4_chain_created = true;
+        self.v4_hooked = true;
+        self.v6_chain_created = ipv6;
+        self.v6_hooked = ipv6;
+    }
+
+    pub(crate) fn startup_rules(
+        container_name: &str,
+        policy: &ContainerPolicy,
+    ) -> Result<super::network_iptables::FirewallRuleArgs, String> {
+        if let Some(field) = Self::permissive_inbound_field(policy) {
+            return Err(format!(
+                "{field} asks for permissive inbound, which LXC does not support."
+            ));
+        }
+        let chain = ingress_chain_name_for(container_name);
+        let commands = |family| {
+            let rules = Self::build_ingress_rules(&chain, family);
+            let mut commands = vec![vec!["-N".into(), chain.clone()]];
+            commands.extend(rules.body);
+            commands.push(rules.hook);
+            commands
+        };
+        Ok(super::network_iptables::FirewallRuleArgs {
+            ipv4: commands(IpFamily::V4),
+            ipv6: commands(IpFamily::V6),
+        })
+    }
+
     /// Discard the record of what was installed, so no later removal is
     /// attempted.
     pub fn forget(&mut self) {

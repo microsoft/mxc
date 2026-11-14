@@ -223,13 +223,13 @@ impl Drop for LearningModeTraceHandle {
 
 /// Resolved Learning Mode trace exports from `processmodel.dll`.
 ///
-/// Construct with [`LearningModeApi::load`]. Cloning is cheap (the struct holds three
-/// function pointers into the resident system DLL).
+/// Construct with [`LearningModeApi::load`].
 #[derive(Clone, Copy)]
 pub struct LearningModeApi {
     start: LearningModeStart,
     stop: PfnStopLearningModeTrace,
     close: PfnCloseLearningModeTrace,
+    source_option_support: Option<PfnIsLearningModeTraceSourceOptionSupported>,
 }
 
 impl std::fmt::Debug for LearningModeApi {
@@ -309,6 +309,7 @@ impl LearningModeApi {
             start: LearningModeStart::Legacy(start),
             stop,
             close,
+            source_option_support: None,
         }
     }
 
@@ -324,6 +325,7 @@ impl LearningModeApi {
             start: LearningModeStart::WithOptions(start),
             stop,
             close,
+            source_option_support: None,
         }
     }
 
@@ -331,6 +333,16 @@ impl LearningModeApi {
     #[must_use]
     pub fn trace_sources(&self) -> LearningModeTraceSources {
         self.start.sources()
+    }
+
+    pub(crate) fn supports_trace_sources(&self) -> bool {
+        match (self.start, self.source_option_support) {
+            (LearningModeStart::WithOptions(_), Some(query)) => {
+                // SAFETY: The resolved export accepts the C source-option bitmask.
+                unsafe { query(REQUIRED_TRACE_SOURCE_OPTIONS).as_bool() }
+            }
+            _ => true,
+        }
     }
 
     /// Start a Learning Mode trace for the sandbox identified by
@@ -505,7 +517,21 @@ unsafe fn select_learning_mode_exports(
         )?)
     };
 
-    Ok(LearningModeApi { start, stop, close })
+    let source_option_support = match start {
+        LearningModeStart::WithOptions(_) => {
+            lookup(SOURCE_OPTION_SUPPORTED_NAME).map(|proc| unsafe {
+                std::mem::transmute::<RawExport, PfnIsLearningModeTraceSourceOptionSupported>(proc)
+            })
+        }
+        LearningModeStart::Legacy(_) => None,
+    };
+
+    Ok(LearningModeApi {
+        start,
+        stop,
+        close,
+        source_option_support,
+    })
 }
 
 fn resolve_required_export(
@@ -735,6 +761,48 @@ mod tests {
             assert_eq!(api.trace_sources(), LearningModeTraceSources::AccessOnly);
             assert_eq!(SUPPORT_CALLS.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[test]
+    fn option_support_is_queried_again_without_starting_a_trace() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        let api = select_from_exports(&[
+            START_WITH_OPTIONS_NAME,
+            STOP_NAME,
+            CLOSE_NAME,
+            SOURCE_OPTION_SUPPORTED_NAME,
+        ])
+        .unwrap();
+
+        for supported in [false, true] {
+            NETWORK_SUPPORTED.store(i32::from(supported), Ordering::SeqCst);
+            assert_eq!(api.supports_trace_sources(), supported);
+            assert_eq!(SUPPORT_OPTION.load(Ordering::SeqCst), 0x3);
+        }
+        assert_eq!(SUPPORT_CALLS.load(Ordering::SeqCst), 3);
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn absent_query_and_legacy_start_preserve_advisory_support() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        NETWORK_SUPPORTED.store(0, Ordering::SeqCst);
+        for available in [
+            vec![START_WITH_OPTIONS_NAME, START_NAME, STOP_NAME, CLOSE_NAME],
+            vec![
+                START_NAME,
+                STOP_NAME,
+                CLOSE_NAME,
+                SOURCE_OPTION_SUPPORTED_NAME,
+            ],
+        ] {
+            let api = select_from_exports(&available).unwrap();
+            assert!(api.supports_trace_sources());
+        }
+        assert_eq!(SUPPORT_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(START_CALLS.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1055,32 +1123,35 @@ mod tests {
     #[test]
     fn failed_option_aware_start_identifies_selected_export() {
         let _guard = TEST_LOCK.lock().unwrap();
-        reset_fakes();
-        START_RESULT.store(E_FAIL.0, Ordering::SeqCst);
-        let api = select_from_exports(&[
-            START_WITH_OPTIONS_NAME,
-            SOURCE_OPTION_SUPPORTED_NAME,
-            START_NAME,
-            STOP_NAME,
-            CLOSE_NAME,
-        ])
-        .unwrap();
+        for result in [E_FAIL, windows::Win32::Foundation::E_NOTIMPL] {
+            reset_fakes();
+            START_RESULT.store(result.0, Ordering::SeqCst);
+            let api = select_from_exports(&[
+                START_WITH_OPTIONS_NAME,
+                START_NAME,
+                STOP_NAME,
+                CLOSE_NAME,
+                SOURCE_OPTION_SUPPORTED_NAME,
+            ])
+            .unwrap();
+            assert!(api.supports_trace_sources());
 
-        let error = unsafe { api.start_trace(fake_environment()).unwrap_err() };
+            let error = unsafe { api.start_trace(fake_environment()).unwrap_err() };
 
-        assert!(matches!(
-            error,
-            LearningModeError::HResultCall {
-                function: "StartLearningModeTraceWithOptions",
-                code
-            } if code == E_FAIL.0
-        ));
-        assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            START_OPTIONS.load(Ordering::SeqCst),
-            REQUIRED_TRACE_SOURCE_OPTIONS
-        );
-        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                error,
+                LearningModeError::HResultCall {
+                    function: "StartLearningModeTraceWithOptions",
+                    code
+                } if code == result.0
+            ));
+            assert_eq!(START_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                START_OPTIONS.load(Ordering::SeqCst),
+                REQUIRED_TRACE_SOURCE_OPTIONS
+            );
+            assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

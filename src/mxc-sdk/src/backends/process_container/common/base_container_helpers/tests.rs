@@ -186,13 +186,6 @@ fn runtime_proxy_launches_child() {
 #[test]
 fn runtime_proxy_captures_denials_and_launches_child() {
     let _guard = crate::process_container_common::test_env::lock();
-    if !BaseContainerRunner::supports_identityless_loopback_proxy()
-        .expect("query identity-less loopback proxy support")
-        || !BaseContainerRunner::is_native_capture_available()
-    {
-        eprintln!("SKIPPED: native proxy capture requires PSEC 1.0 and Learning Mode APIs");
-        return;
-    }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let output_directory = tempfile::tempdir().unwrap();
     let mut request = runtime_proxy_request(&proxy);
@@ -207,6 +200,14 @@ fn runtime_proxy_captures_denials_and_launches_child() {
         ),
         ..Default::default()
     });
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
+        || !BaseContainerRunner::is_native_capture_available()
+    {
+        assert_native_capture_rejected(request, output_directory.path());
+        eprintln!("VERIFIED: unsupported native capture rejected without a child or report");
+        return;
+    }
     assert_eq!(run_proxy_command(request).trim(), "proxy-launched");
     let documents: Vec<_> = std::fs::read_dir(output_directory.path())
         .unwrap()
@@ -230,6 +231,61 @@ fn runtime_proxy_captures_denials_and_launches_child() {
     let document: DenialsDocument =
         serde_json::from_slice(&std::fs::read(&documents[0]).unwrap()).unwrap();
     assert_eq!(document.summary.exit_code, 0);
+    eprintln!("VERIFIED: native proxy child ran and wrote one capture document with exit code 0");
+}
+
+fn assert_native_capture_rejected(mut request: ExecutionRequest, output_directory: &Path) {
+    let child_marker = output_directory.join("child-ran.txt");
+    request.script_code = format!(
+        "cmd.exe /d /c echo proxy-launched > \"{}\"",
+        child_marker.display()
+    );
+    request.working_directory = output_directory.to_str().unwrap().to_string();
+    request.policy.readwrite_paths = vec![request.working_directory.clone()];
+    let mut logger = Logger::new(Mode::Buffer);
+    let error = BaseContainerRunner::new()
+        .spawn(&request, &mut logger, StdioMode::Pipes)
+        .err()
+        .expect("unsupported capture must reject instead of launching a child");
+
+    assert_eq!(
+        error.failure_phase,
+        crate::mxc_common::models::FailurePhase::BackendUnavailable,
+        "{error:?}\n{}",
+        logger.get_buffer()
+    );
+    assert!(
+        !child_marker.exists(),
+        "rejected capture executed the workload"
+    );
+    assert!(
+        std::fs::read_dir(output_directory)
+            .unwrap()
+            .next()
+            .is_none(),
+        "rejected capture wrote output into {}",
+        output_directory.display()
+    );
+}
+
+#[test]
+fn unsupported_native_capture_does_not_execute_or_write_a_report() {
+    let _guard =
+        crate::process_container_common::test_env::CaptureCapabilityGuard::set(true, false);
+    let output_directory = tempfile::tempdir().unwrap();
+    let mut request = ExecutionRequest::default();
+    request.policy.capture_denials = Some(CaptureDenialsConfig {
+        output_path: Some(
+            output_directory
+                .path()
+                .join("denials.json")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        ..Default::default()
+    });
+    assert_native_capture_rejected(request, output_directory.path());
 }
 
 #[test]

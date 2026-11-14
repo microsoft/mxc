@@ -110,7 +110,9 @@ fn main() {
                 requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
-            emit_mxc_error_exit(&e.into_mxc_error());
+            let error = e.into_mxc_error();
+            eprintln!("{}", error.to_envelope_string());
+            signal_cleanup::exit_after_signal_cleanup(error.code.exit_code());
         }
     };
 
@@ -122,7 +124,8 @@ fn main() {
 
     // Handle dry_run request.
     if arguments.parse_and_validate() {
-        script_runner::handle_dry_run_exit(&response, &mut logger);
+        script_runner::emit_dry_run_result(&response, &mut logger);
+        signal_cleanup::exit_after_signal_cleanup(response.exit_code);
     }
 
     // Show output to the user.
@@ -141,7 +144,7 @@ fn main() {
 
     script_runner::emit_backend_error_envelope(&response);
 
-    process::exit(response.exit_code);
+    signal_cleanup::exit_after_signal_cleanup(response.exit_code);
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {

@@ -943,9 +943,19 @@ mod tests {
 
     #[test]
     fn overlap_allows_non_overlapping_denied_path() {
-        // Denied path shares no mounted ancestor — WSLC just never mounts it.
-        validate_denied_path_overlap(&strings(&[r"C:\project"]), &[], &strings(&[r"D:\secrets"]))
-            .expect("non-overlapping denied path must be accepted");
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = std::env::current_dir().unwrap().join(directory.path());
+        let mounted = root.join("mounted");
+        let denied = root.join("denied");
+        std::fs::create_dir(&mounted).unwrap();
+        std::fs::create_dir(&denied).unwrap();
+
+        validate_denied_path_overlap(
+            &[mounted.to_string_lossy().into_owned()],
+            &[],
+            &[denied.to_string_lossy().into_owned()],
+        )
+        .expect("non-overlapping denied path must be accepted");
     }
 
     #[test]

@@ -42,7 +42,9 @@ sudo rm -rf "$BASE"
 sudo mkdir -p "$BASE/data/secret_child"
 echo "CHILD_KEPT" | sudo tee "$BASE/data/secret_child/keep.txt" > /dev/null
 echo "PARENT_SECRET" | sudo tee "$BASE/data/sibling.txt" > /dev/null
-sudo chown -R "$(id -u):$(id -g)" "$BASE/data/secret_child"
+
+# Give mapped container users access to the writable child.
+sudo chmod 777 "$BASE/data/secret_child"
 
 echo "Running LXC most-specific test (denied parent, rw child)..."
 OUT=$("$LXC_EXEC" --experimental \
