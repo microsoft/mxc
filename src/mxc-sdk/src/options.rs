@@ -30,6 +30,26 @@ pub struct SpawnWithPtyOptions {
     pub size: crate::sandbox::MxcPtySize,
 }
 
+/// How [`spawn_with_extended_options`](crate::v1::spawn_with_extended_options) connects the workload's stdin, stdout, and stderr.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpawnStdio {
+    /// New pipes the caller reads and writes through [`MxcProcess`](crate::v1::MxcProcess), as with `spawn`.
+    #[default]
+    Pipes,
+    /// The calling process's own stdin, stdout, and stderr.
+    Inherit,
+}
+
+/// Invocation controls for spawn_with_extended_options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpawnExtendedOptions {
+    /// Per-invocation telemetry opt-in, subject to consent and policy.
+    pub telemetry: Option<TelemetryConfig>,
+    pub stdio: SpawnStdio,
+}
+
 /// Invocation controls for provisioning a container.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProvisionOptions {

@@ -125,7 +125,7 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             if "%WITH_WSLC%"=="1" (
-                for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
+                for %%B in (wxc-wslc-daemon.exe wslcsdk.dll mxc-wslc-gateway.tar) do (
                     if not exist "!BIN_DIR!\%%B" (
                         echo ERROR: WSLC-enabled Node runtime is missing !BIN_DIR!\%%B
                         exit /b 1
@@ -136,6 +136,7 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             ) else (
                 if exist "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe" del /Q "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe"
                 if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
+                if exist "sdk\node\bin\!SDK_ARCH!\mxc-wslc-gateway.tar" del /Q "sdk\node\bin\!SDK_ARCH!\mxc-wslc-gateway.tar"
             )
         )
     )
@@ -146,6 +147,7 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_WSLC%"=="1" (
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe"
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll"
+        if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\mxc-wslc-gateway.tar" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\mxc-wslc-gateway.tar"
     )
     if exist "!BIN_DIR!\mxc_ffi.dll" (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
@@ -153,7 +155,7 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
         echo   Copied !RID!\native\mxc_ffi.dll
         if "%WITH_WSLC%"=="1" if "!COPY_WSLC_RUNTIME!"=="1" (
-            for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
+            for %%B in (wxc-wslc-daemon.exe wslcsdk.dll mxc-wslc-gateway.tar) do (
                 if not exist "!BIN_DIR!\%%B" (
                     echo ERROR: WSLC-enabled C# runtime unit is missing !BIN_DIR!\%%B
                     exit /b 1

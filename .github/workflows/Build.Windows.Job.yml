@@ -147,6 +147,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node --test scripts/tests/microvm-validation.test.js
 
+      - name: Test NuGet release package selection
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: ${{ github.workspace }}
+        shell: powershell
+        run: ./scripts/ci/test-nuget-release-selection.ps1
+
       - name: Verify packaged MicroVM tests
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: ${{ github.workspace }}
@@ -236,6 +242,7 @@ jobs:
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/mxc_ffi.dll
             src/target/${{ matrix.target }}/release/wslcsdk.dll
+            src/target/${{ matrix.target }}/release/mxc-wslc-gateway.tar
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
             src/target/${{ matrix.target }}/release/nvx-e2e-tests.exe

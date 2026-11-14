@@ -78,8 +78,10 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        let (_, mut client) = open_client()?;
-        validate_with_client(&mut client, request)
+        super::run_with_sufficient_stack(|| {
+            let (_, mut client) = open_client()?;
+            validate_with_client(&mut client, request)
+        })
     }
 
     fn run_captured_inner(
@@ -89,6 +91,14 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
+        super::run_with_sufficient_stack(|| self.run_captured_validated(request, logger))
+    }
+
+    fn run_captured_validated(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<CapturedRun, MxcError> {
         let (state_root, mut client) = open_client()?;
         run_with_client(
             &mut client,
@@ -433,6 +443,13 @@ pub(crate) fn spawn_streaming(
         }
     })?;
     super::policy::validate_request(request)?;
+    super::run_with_sufficient_stack(|| spawn_streaming_validated(request, logger))
+}
+
+fn spawn_streaming_validated(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let (state_root, mut client) = open_client()?;

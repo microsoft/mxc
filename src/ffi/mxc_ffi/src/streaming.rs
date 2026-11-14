@@ -15,8 +15,9 @@
 //!   [`mxc_exec_state_aware_json`](crate::mxc_exec_state_aware_json) return the
 //!   same opaque `*mut MxcSandbox`. Free it exactly once with
 //!   [`mxc_sandbox_free`] (which kills the child tree if still running).
-//!   [`mxc_spawn_with_stdin_json`] does the same as [`mxc_spawn_json`] with a
-//!   writable stdin.
+//!   [`mxc_spawn_extended_json`] takes a stdio mode; with
+//!   [`MXC_SPAWN_STDIO_INHERIT`] the process uses the caller's own stdio and
+//!   has no streams to take.
 //! - [`mxc_sandbox_take_stdin`] / [`mxc_sandbox_take_stdout`] /
 //!   [`mxc_sandbox_take_stderr`] each hand out a **separate** opaque stream
 //!   handle (`*mut MxcWriteStream` / `*mut MxcReadStream`) the first time they
@@ -67,14 +68,15 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::__ffi::{spawn_container_json, spawn_container_with_stdin_json};
+use mxc_sdk::__ffi::{spawn_container_json, spawn_with_extended_options_json};
 use mxc_sdk::mxc_common::models::SandboxOutputMetadata;
 use mxc_sdk::mxc_common::sandbox_process::NativeStdio;
-use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
+use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, SpawnStdio, StreamCloser, WaitResult};
 
 use crate::{
-    alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
-    MXC_STATUS_BACKEND_UNAVAILABLE, MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT,
+    alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_SPAWN_STDIO_INHERIT,
+    MXC_SPAWN_STDIO_PIPES, MXC_STATUS_BACKEND_ERROR, MXC_STATUS_BACKEND_UNAVAILABLE,
+    MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_NULL_ARGUMENT,
     MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
@@ -401,15 +403,15 @@ pub unsafe extern "C" fn mxc_spawn_json(
     unsafe { finish_spawn(outcome, out_handle, out_error) }
 }
 
-/// [`mxc_spawn_json`] with a writable stdin, which a WSLC process started
-/// there does not get.
+/// [`mxc_spawn_json`] with `stdio` set to [`MXC_SPAWN_STDIO_PIPES`] or [`MXC_SPAWN_STDIO_INHERIT`].
 ///
 /// # Safety
 /// As for [`mxc_spawn_json`].
 #[no_mangle]
-pub unsafe extern "C" fn mxc_spawn_with_stdin_json(
+pub unsafe extern "C" fn mxc_spawn_extended_json(
     request_json_utf8: *const c_char,
     experimental: i32,
+    stdio: i32,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -425,14 +427,24 @@ pub unsafe extern "C" fn mxc_spawn_with_stdin_json(
         return MXC_STATUS_NULL_ARGUMENT;
     }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let stdio = match stdio {
+            MXC_SPAWN_STDIO_PIPES => SpawnStdio::Pipes,
+            MXC_SPAWN_STDIO_INHERIT => SpawnStdio::Inherit,
+            _ => {
+                return Err((
+                    MXC_STATUS_MALFORMED_REQUEST,
+                    MxcErrorDetail::from_message("unknown stdio mode"),
+                ))
+            }
+        };
         spawn_json_inner(
             request_json_utf8,
             experimental != 0,
-            spawn_container_with_stdin_json,
+            |json, experimental| spawn_with_extended_options_json(json, experimental, stdio),
         )
     }))
     .unwrap_or_else(|panic| {
-        crate::report_panic("mxc_spawn_with_stdin_json", &*panic);
+        crate::report_panic("mxc_spawn_extended_json", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -446,7 +458,7 @@ pub unsafe extern "C" fn mxc_spawn_with_stdin_json(
 fn spawn_json_inner(
     request_json_utf8: *const c_char,
     experimental: bool,
-    spawn: fn(&str, bool) -> Result<MxcProcess, mxc_sdk::v1::Error>,
+    spawn: impl FnOnce(&str, bool) -> Result<MxcProcess, mxc_sdk::v1::Error>,
 ) -> Result<MxcProcess, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -1370,50 +1382,81 @@ mod tests {
     #[test]
     fn spawn_null_out_handle_is_null_argument() {
         let request = request("echo hi");
-        for entry_point in [mxc_spawn_json, mxc_spawn_with_stdin_json] {
-            // SAFETY: valid string, deliberately-null out_handle.
-            let status =
-                unsafe { entry_point(request.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
-            assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
-        }
+
+        // SAFETY: valid string, deliberately-null out_handle.
+        let status =
+            unsafe { mxc_spawn_json(request.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
     #[test]
     fn spawn_null_request_reports_null_argument() {
-        for entry_point in [mxc_spawn_json, mxc_spawn_with_stdin_json] {
-            let mut handle: *mut MxcSandbox = ptr::null_mut();
-            let mut err = MxcErrorDetail::none();
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
 
-            // SAFETY: null request pointer is explicitly handled.
-            let status = unsafe { entry_point(ptr::null(), 0, &mut handle, &mut err) };
-            assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
-            assert!(handle.is_null());
-            assert!(
-                !err.message_utf8.is_null(),
-                "an error message should be provided"
-            );
+        // SAFETY: null request pointer is explicitly handled.
+        let status = unsafe { mxc_spawn_json(ptr::null(), 0, &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        assert!(handle.is_null());
+        assert!(
+            !err.message_utf8.is_null(),
+            "an error message should be provided"
+        );
 
-            // SAFETY: `err` was filled by the entry point and not yet freed.
-            unsafe { crate::mxc_error_detail_free(&mut err) };
-        }
+        // SAFETY: `err` was filled by the entry point and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
     }
 
     #[test]
     fn spawn_malformed_request_reports_malformed_request() {
         let request = CString::new("{ not json").unwrap();
-        for entry_point in [mxc_spawn_json, mxc_spawn_with_stdin_json] {
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
+
+        // SAFETY: valid string and valid out pointers.
+        let status = unsafe { mxc_spawn_json(request.as_ptr(), 0, &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(handle.is_null());
+        assert!(!err.message_utf8.is_null());
+
+        // SAFETY: `err` was filled by the entry point and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
+    }
+
+    #[test]
+    fn spawn_extended_validates_stdio_and_reports_request_errors() {
+        let request = CString::new("{ not json").unwrap();
+        for (stdio, expected) in [
+            (MXC_SPAWN_STDIO_PIPES, MXC_STATUS_MALFORMED_REQUEST),
+            (MXC_SPAWN_STDIO_INHERIT, MXC_STATUS_MALFORMED_REQUEST),
+            (2, MXC_STATUS_MALFORMED_REQUEST),
+        ] {
             let mut handle: *mut MxcSandbox = ptr::null_mut();
             let mut err = MxcErrorDetail::none();
 
             // SAFETY: valid string and valid out pointers.
-            let status = unsafe { entry_point(request.as_ptr(), 0, &mut handle, &mut err) };
-            assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+            let status = unsafe {
+                mxc_spawn_extended_json(request.as_ptr(), 0, stdio, &mut handle, &mut err)
+            };
+            assert_eq!(status, expected, "stdio {stdio}");
             assert!(handle.is_null());
             assert!(!err.message_utf8.is_null());
 
             // SAFETY: `err` was filled by the entry point and not yet freed.
             unsafe { crate::mxc_error_detail_free(&mut err) };
         }
+
+        // SAFETY: deliberately-null request and out_handle.
+        let status = unsafe {
+            mxc_spawn_extended_json(
+                ptr::null(),
+                0,
+                MXC_SPAWN_STDIO_INHERIT,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
     #[test]

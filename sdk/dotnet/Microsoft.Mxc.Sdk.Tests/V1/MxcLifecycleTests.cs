@@ -534,6 +534,7 @@ public class MxcLifecycleTests
         dryRun();
         Assert.True(File.Exists(Path.Combine(AppContext.BaseDirectory, "wxc-wslc-daemon.exe")));
         Assert.True(File.Exists(Path.Combine(AppContext.BaseDirectory, "wslcsdk.dll")));
+        Assert.True(File.Exists(Path.Combine(AppContext.BaseDirectory, "mxc-wslc-gateway.tar")));
 #else
         var ex = Assert.Throws<MxcException>(dryRun);
         Assert.Equal(ErrorCode.BackendUnavailable, ex.Code);

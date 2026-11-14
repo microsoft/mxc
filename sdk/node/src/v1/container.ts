@@ -18,6 +18,7 @@ import {
   type BindingRunResult,
 } from '../bindings/run.js';
 import {
+  spawnBindingInheritedStdioProcessJson,
   spawnBindingSandboxProcess,
 } from '../bindings/streaming.js';
 import type { MxcProcess } from './container-process.js';
@@ -25,7 +26,13 @@ import { spawnBindingSandboxWithPty } from '../bindings/pty.js';
 import { spawnProcessContainerWithPty } from '../bindings/process-container-pty.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
-import type { RunOptions, SpawnOptions, SpawnWithPtyOptions } from './operation-options.js';
+import type {
+  RunOptions,
+  SpawnOptions,
+  SpawnStdio,
+  SpawnExtendedOptions,
+  SpawnWithPtyOptions,
+} from './operation-options.js';
 
 export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<ContainmentChoice>([
@@ -421,11 +428,7 @@ function toExecutionResult(result: BindingRunResult): ExecutionResult {
   return output;
 }
 
-/**
- * Create a container request and asynchronously return its live process. A
- * WSLC command reads end-of-file on stdin; use {@link spawnWithStdin} to give
- * it input.
- */
+/** Create a container request and asynchronously return its live process. */
 export async function spawn(
   request: ContainerRequest,
   options: SpawnOptions = {},
@@ -434,22 +437,6 @@ export async function spawn(
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
     false,
-  );
-}
-
-/**
- * {@link spawn} with a writable `standardInput` whose end gives the command
- * end-of-file.
- */
-export async function spawnWithStdin(
-  request: ContainerRequest,
-  options: SpawnOptions = {},
-): Promise<MxcProcess> {
-  validateOperationOptions('spawnWithStdin', options, false);
-  return spawnBindingSandboxProcess(
-    prepareContainerRequest(request, options.telemetry),
-    false,
-    true,
   );
 }
 
@@ -483,6 +470,32 @@ export async function spawnWithPty(
     false,
     size.rows,
     size.columns,
+  );
+}
+
+/** Create a container request with stdio and other controls chosen in the options. */
+export async function spawnWithExtendedOptions(
+  request: ContainerRequest,
+  options: SpawnExtendedOptions = {},
+): Promise<MxcProcess> {
+  validateOperationOptions('spawnWithExtendedOptions', options, false, ['stdio']);
+  const stdio = spawnStdio('spawnWithExtendedOptions', options.stdio);
+  const preparedRequest = prepareContainerRequest(request, options.telemetry);
+  if (stdio === 'pipes') return spawnBindingSandboxProcess(preparedRequest, false);
+  return spawnBindingInheritedStdioProcessJson(
+    JSON.stringify(preparedRequest),
+    false,
+    preparedRequest.process.timeout,
+  );
+}
+
+/** @internal Validates the stdio choice shared by the typed and exact-JSON spawns. */
+export function spawnStdio(apiName: string, value: unknown): SpawnStdio {
+  if (value === undefined) return 'pipes';
+  if (value === 'pipes' || value === 'inherit') return value;
+  throw new MxcError(
+    'malformed_request',
+    `${apiName} option 'stdio' must be 'pipes' or 'inherit'`,
   );
 }
 

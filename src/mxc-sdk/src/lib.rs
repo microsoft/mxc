@@ -51,11 +51,8 @@
 //! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. A WSLC process reads
-//! end-of-file on stdin, and [`MxcProcess::take_stdin`] returns `None` for it,
-//! unless it was started by [`v1::spawn_with_stdin`] or
-//! [`v1::container::spawn_in_container_with_stdin`].
-//! IsolationSession is also available through the typed lifecycle API.
+//! requires the `isolation_session` build feature. WSLC and IsolationSession
+//! are also available through the typed lifecycle API.
 //!
 //! The `wslc` feature stages `wslcsdk.dll` into the cargo profile directory,
 //! and WSLC loads it from beside the module holding this code, so an executable
@@ -107,6 +104,7 @@
 //! | **capture** | [`v1::run`] | [`v1::container::run_in_container`] | captured stdout and stderr |
 //! | **handle**  | [`v1::spawn`] | [`v1::container::spawn_in_container`] | separate live pipes |
 //! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
+//! | **inherited** | [`v1::spawn_with_extended_options`] with [`v1::SpawnStdio::Inherit`] | — | the caller's own stdin, stdout, and stderr |
 //!
 //! [`v1::container::provision_container`], [`v1::container::start_container`],
 //! [`v1::container::stop_container`], and
@@ -120,8 +118,7 @@
 //! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
 //! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
-//! stream they did not take. WSLC exposes stdin only for
-//! [`v1::spawn_with_stdin`] and [`v1::container::spawn_in_container_with_stdin`].
+//! stream they did not take.
 //!
 //! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
 //! execution on supported backends, including IsolationSession, Bubblewrap, LXC,
@@ -129,6 +126,12 @@
 //! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
 //! an existing IsolationSession container. Unsupported backends reject the
 //! request before creating a sandbox.
+//!
+//! [`v1::spawn_with_extended_options`] takes extensible options. With
+//! [`v1::SpawnStdio::Inherit`] it attaches the workload to the calling
+//! process's own stdin, stdout, and stderr, such as a terminal or pseudo-console
+//! the caller already set up; ProcessContainer, Bubblewrap, and Seatbelt support
+//! that mode.
 //!
 //! Policy and operational warnings are available through [`MxcProcess::warnings`]
 //! and [`ExecutionResult::warnings`]. These include security warnings, network rules
@@ -176,6 +179,9 @@ pub use backend_modules::windows_sandbox::lifecycle as windows_sandbox_lifecycle
 #[doc(hidden)]
 #[cfg(all(target_os = "windows", feature = "wslc"))]
 pub use backend_modules::wslc::common as wslc_common;
+#[doc(hidden)]
+#[cfg(all(target_os = "windows", feature = "wslc"))]
+pub use backend_modules::wslc::gateway_policy as wslc_gateway_policy;
 #[doc(hidden)]
 pub use core_modules::learning_mode_core;
 #[doc(hidden)]
@@ -233,8 +239,8 @@ pub mod v1 {
     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
     pub use crate::options::{
         DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
-        SpawnInContainerOptions, SpawnInContainerWithPtyOptions, SpawnOptions, SpawnWithPtyOptions,
-        StartOptions, StopOptions, TelemetryConfig,
+        SpawnExtendedOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
+        SpawnOptions, SpawnStdio, SpawnWithPtyOptions, StartOptions, StopOptions, TelemetryConfig,
     };
 
     /// V1 telemetry consent administration.
@@ -271,15 +277,15 @@ pub mod v1 {
     /// V1 typed lifecycle entry points.
     pub mod container {
         use super::{
-            ContainerId, Error, ExecutionRequest, ExecutionResult, RunInContainerOptions,
-            SpawnInContainerOptions,
+            ContainerId, Error, ExecutionRequest, ExecutionResult, MxcProcess,
+            RunInContainerOptions,
         };
 
         pub use crate::sandbox::{
             deprovision as deprovision_container, provision as provision_container,
-            spawn_in_container, spawn_in_container_with_pty, spawn_in_container_with_stdin,
-            start as start_container, stop as stop_container, validate_deprovision,
-            validate_process, validate_provision, validate_start, validate_stop,
+            spawn_in_container, spawn_in_container_with_pty, start as start_container,
+            stop as stop_container, validate_deprovision, validate_process, validate_provision,
+            validate_start, validate_stop,
         };
 
         /// Run a workload in an existing container to completion and capture output.
@@ -288,13 +294,11 @@ pub mod v1 {
             request: ExecutionRequest,
             options: RunInContainerOptions,
         ) -> Result<ExecutionResult, Error> {
-            crate::wait_with_output(spawn_in_container(
-                container_id,
-                request,
-                SpawnInContainerOptions {
-                    telemetry: options.telemetry,
-                },
-            )?)
+            let input = request
+                .into_sdk_input(container_id, options.telemetry)
+                .map_err(Error::from)?;
+            let process = crate::mxc_engine::exec_typed_state_aware_request(input, false, false)?;
+            crate::wait_with_output(MxcProcess::new(process))
         }
     }
 
@@ -328,20 +332,7 @@ pub mod v1 {
     /// Returns a [`MxcProcess`] handle for live bidirectional stdio and termination;
     /// no pty is allocated. Any stdout/stderr stream the caller does not
     /// `take_*` is drained and discarded by [`wait`](MxcProcess::wait).
-    ///
-    /// A WSLC process started this way reads end-of-file on stdin; use
-    /// [`spawn_with_stdin`] to give it input.
     pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error> {
-        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
-        crate::mxc_engine::spawn_execution_request(&prepared.inner, false).map(MxcProcess::new)
-    }
-
-    /// Spawn a [`ContainerRequest`] with a writable stdin, which
-    /// [`MxcProcess::take_stdin`] returns.
-    pub fn spawn_with_stdin(
-        request: ContainerRequest,
-        options: SpawnOptions,
-    ) -> Result<MxcProcess, Error> {
         let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         crate::mxc_engine::spawn_execution_request(&prepared.inner, true).map(MxcProcess::new)
     }
@@ -357,6 +348,19 @@ pub mod v1 {
             .and_then(MxcPtyProcess::new)
     }
 
+    /// Spawn a [`ContainerRequest`] with stdio and other controls chosen in [`SpawnExtendedOptions`].
+    pub fn spawn_with_extended_options(
+        request: ContainerRequest,
+        options: SpawnExtendedOptions,
+    ) -> Result<MxcProcess, Error> {
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
+        match options.stdio {
+            SpawnStdio::Pipes => crate::mxc_engine::spawn_execution_request(&prepared.inner, true),
+            SpawnStdio::Inherit => crate::mxc_engine::spawn_with_inherited_stdio(&prepared.inner),
+        }
+        .map(MxcProcess::new)
+    }
+
     /// Run a [`ContainerRequest`] to completion and capture its output.
     ///
     /// Both streams are drained concurrently, so an output-heavy child cannot
@@ -368,12 +372,9 @@ pub mod v1 {
     /// `Err` is returned when the backend can't be selected/spawned (an
     /// [`Error`]), or when waiting on the child fails at the OS level.
     pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error> {
-        crate::wait_with_output(spawn(
-            request,
-            SpawnOptions {
-                telemetry: options.telemetry,
-            },
-        )?)
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
+        let process = crate::mxc_engine::spawn_execution_request(&prepared.inner, false)?;
+        crate::wait_with_output(MxcProcess::new(process))
     }
 
     #[cfg(all(test, target_os = "windows"))]
@@ -497,11 +498,90 @@ pub mod v1 {
     }
 }
 
+mod lifecycle_thread_context {
+    /// Context carried onto the C ABI lifecycle worker.
+    #[doc(hidden)]
+    pub struct LifecycleThreadContext {
+        #[cfg(target_os = "windows")]
+        token: Option<crate::mxc_common::process_util::SendOwnedHandle>,
+        telemetry: crate::mxc_common::telemetry::session::SessionContext,
+        sink: Option<crate::mxc_common::logger::Logger>,
+    }
+
+    impl LifecycleThreadContext {
+        /// Capture the caller's security and diagnostic context before spawning.
+        pub fn capture() -> Result<Self, String> {
+            #[cfg(target_os = "windows")]
+            let token =
+                crate::mxc_common::process_util::duplicate_thread_token().map_err(|error| {
+                    format!("could not preserve the calling thread's impersonation: {error}")
+                })?;
+            let sink = crate::mxc_common::logger::Logger::inherit_thread_diagnostic_sink();
+            Ok(Self {
+                #[cfg(target_os = "windows")]
+                token,
+                telemetry: crate::mxc_common::telemetry::session::capture(),
+                sink: sink.has_diagnostic_sink().then_some(sink),
+            })
+        }
+
+        /// Run under the captured context, refusing to execute if impersonation fails.
+        pub fn run<T>(self, f: impl FnOnce() -> T) -> Result<T, String> {
+            #[cfg(target_os = "windows")]
+            if let Some(token) = &self.token {
+                // SAFETY: token is a live impersonation token and None selects this thread.
+                unsafe {
+                    windows::Win32::System::Threading::SetThreadToken(None, Some(token.get()))
+                }
+                .map_err(|error| {
+                    format!("could not impersonate on the lifecycle worker: {error}")
+                })?;
+            }
+            let _session = crate::mxc_common::telemetry::session::resume(self.telemetry);
+            let _sink = self
+                .sink
+                .as_ref()
+                .map(crate::mxc_common::logger::Logger::install_thread_diagnostic_sink);
+            Ok(f())
+        }
+    }
+}
+
 /// Internal adapters for the C ABI and native contract tests, not SDK authoring APIs.
 #[doc(hidden)]
 pub mod __ffi {
     use super::*;
     use crate::sandbox::WaitResult;
+
+    /// Whether this build contains the Windows x64 MicroVM runtime adapter.
+    #[doc(hidden)]
+    pub const MICROVM_RUNTIME_COMPILED: bool = cfg!(all(
+        target_os = "windows",
+        target_arch = "x86_64",
+        feature = "microvm"
+    ));
+
+    /// Register the runtime directory used by the MicroVM backend in this process.
+    pub fn register_runtime_directory(backend: &str, directory: &str) -> Result<(), Error> {
+        if backend != "microvm" {
+            return Err(Error::new(
+                ErrorCode::UnsupportedContainment,
+                "unknown runtime backend",
+            ));
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        {
+            crate::backend_modules::nvx::register_runtime_directory(directory).map_err(Error::from)
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+        {
+            let _ = directory;
+            Err(Error::new(
+                ErrorCode::BackendUnavailable,
+                "MicroVM runtime is unavailable on this platform",
+            ))
+        }
+    }
 
     /// Spawn a raw exact-version JSON container request as a live process.
     ///
@@ -515,18 +595,7 @@ pub mod __ffi {
         request_json: &str,
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, false)
-            .map(MxcProcess::new)
-    }
-
-    /// [`spawn_container_json`] with a writable stdin, which
-    /// [`MxcProcess::take_stdin`] returns.
-    pub fn spawn_container_with_stdin_json(
-        request_json: &str,
-        experimental: bool,
-    ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, true)
-            .map(MxcProcess::new)
+        crate::mxc_engine::spawn_one_shot_json(request_json, experimental).map(MxcProcess::new)
     }
 
     /// Spawn an exact-version JSON request attached to a caller-controlled PTY.
@@ -539,6 +608,22 @@ pub mod __ffi {
         size.validate()?;
         crate::mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
             .and_then(v1::MxcPtyProcess::new)
+    }
+
+    pub fn spawn_with_extended_options_json(
+        request_json: &str,
+        experimental: bool,
+        stdio: v1::SpawnStdio,
+    ) -> Result<MxcProcess, Error> {
+        match stdio {
+            v1::SpawnStdio::Pipes => {
+                crate::mxc_engine::spawn_one_shot_json(request_json, experimental)
+            }
+            v1::SpawnStdio::Inherit => {
+                crate::mxc_engine::spawn_one_shot_inherited_stdio_json(request_json, experimental)
+            }
+        }
+        .map(MxcProcess::new)
     }
 
     /// Run a raw exact-version JSON container request to completion and capture
@@ -554,6 +639,9 @@ pub mod __ffi {
             }
         }
     }
+
+    #[doc(hidden)]
+    pub use crate::lifecycle_thread_context::LifecycleThreadContext;
 
     /// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and return its JSON response envelope.
     pub fn run_lifecycle_json(
@@ -573,10 +661,8 @@ pub mod __ffi {
     /// `sandboxId` identifying a started container). No pty is allocated.
     ///
     /// IsolationSession and WSLC serve this with the crate's corresponding
-    /// `isolation_session` or `wslc` feature. WSLC returns stdout and stderr
-    /// pipes, and its process reads end-of-file on stdin; use
-    /// [`execute_lifecycle_with_stdin_json`] to give it input. Windows Sandbox
-    /// cannot hand back pipes and refuses.
+    /// `isolation_session` or `wslc` feature. Windows Sandbox cannot hand back
+    /// pipes and refuses.
     /// `experimental` opts in to experimental backends, as for
     /// [`run_lifecycle_json`].
     ///
@@ -584,6 +670,16 @@ pub mod __ffi {
     /// workload backgrounded is reclaimed when the container is stopped and
     /// deprovisioned.
     pub fn execute_lifecycle_json(
+        request_json: &str,
+        experimental: bool,
+    ) -> Result<MxcProcess, Error> {
+        crate::mxc_engine::exec_state_aware_json(request_json, experimental, true)
+            .map(MxcProcess::new)
+    }
+
+    /// Execute for a run-to-completion helper: like [`execute_lifecycle_json`],
+    /// but a WSLC workload reads end-of-file on stdin.
+    pub fn execute_lifecycle_for_run_json(
         request_json: &str,
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
@@ -597,16 +693,6 @@ pub mod __ffi {
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
         crate::mxc_engine::exec_state_aware_capture_json(request_json, experimental)
-            .map(MxcProcess::new)
-    }
-
-    /// [`execute_lifecycle_json`] with a writable stdin, which
-    /// [`MxcProcess::take_stdin`] returns.
-    pub fn execute_lifecycle_with_stdin_json(
-        request_json: &str,
-        experimental: bool,
-    ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::exec_state_aware_json(request_json, experimental, true)
             .map(MxcProcess::new)
     }
 

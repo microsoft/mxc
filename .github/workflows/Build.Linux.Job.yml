@@ -153,7 +153,7 @@ jobs:
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version missing_denials; do
             cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
@@ -241,7 +241,8 @@ jobs:
 
       # These need no LXC installed: the engine tests inject their probes, and
       # the dispatch and FFI pins are refused before a container is created.
-      - name: Test LXC dispatch and discovery
+      # The WSLC gateway runs in a Linux container, so its tests run here.
+      - name: Test LXC dispatch, discovery, and WSLC gateway
         working-directory: src
         shell: bash
         run: |
@@ -270,6 +271,8 @@ jobs:
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
           run_pinned "Probe coverage" -p mxc-sdk --lib mxc_engine::probe
           run_pinned "Backend registry" -p mxc-sdk --lib mxc_engine::backend_registry
+          run_pinned "WSLC gateway" -p mxc-wslc-gateway
+          run_pinned "WSLC gateway image" -p mxc-sdk --test wslc_gateway_image
 
           # Hyperlight is a Linux backend only on x64, and the probe reports it
           # from a feature-gated branch the default build never compiles.
@@ -279,6 +282,17 @@ jobs:
             run_pinned "Backend registry (${{ matrix.features }})" \
               --features "${{ matrix.features }}" -p mxc-sdk --lib mxc_engine::backend_registry
           fi
+
+      # The gateway image ships the musl build.
+      - name: Test WSLC gateway on musl
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          target="${target%-gnu}-musl"
+          rustup target add "$target"
+          cargo test --locked --release --target "$target" -p mxc-wslc-gateway
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.

@@ -21,9 +21,9 @@ preserve compatibility with the older supported host.
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
-  Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
-  workflow run, so what gets tested is exactly what got built.
+  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, WSLC,
+  and MicroVM the Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`,
+  in the same workflow run, so what gets tested is exactly what got built.
 
 - IsolationSession also downloads `telemetry-test-executor-<target>`, a separate
   local-only debug executor with `test-support` and `isolation_session`. Shipping
@@ -211,7 +211,8 @@ called by the native policy suite.
 
 `isolation-session` and `wslc` run every suite and report each one. For
 `wslc` that is the command-line suite from the build artifact plus the .NET and
-Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites skip unless
+Node create-and-run and lifecycle suites and the ignored Rust `streaming_wslc`
+tests from the SDK bundle. The .NET and Node suites skip unless
 `MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
@@ -241,11 +242,21 @@ pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
 direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
 against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
 
+Inherited-stdio cases run the SDK in a child process and check that the
+workload reads that process's stdin and writes to its stdout and stderr, for
+the typed API and V1.Dev on `1.0.0` and `1.1.0-alpha`. ProcessContainer
+requires the Rust, .NET, and Node cases. Bubblewrap and Seatbelt run the Rust
+case in their streaming suites and the Node case in `dev.test.js`.
+
 IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
 validation, and cleanup cases. IsolationSession also covers existing-container
 PTYs; its Rust and Node cases check partial capture on timeout with
-descendant-held pipes. Bundle discovery and runtime result gates require the
-named scenarios to pass.
+descendant-held pipes. WSLC also requires its stdin cases in Rust, .NET, and
+Node: spawn gives the command a writable stdin pipe, and run gives it
+end-of-file, for new and existing containers. Bundle discovery and runtime
+result gates require the named scenarios to pass. A skipped Node suite lists no
+test names, so the bundle checks that the Node WSLC test files still define
+them.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -555,7 +566,13 @@ compatibility-consent workloads pause at a ready/release handshake so their
 SDDL can also be checked while they are alive. It covers
 learning-mode enforcement, explicit capture paths and warnings, multiple
 capabilities, environment/cwd/exit propagation, and timeout cleanup of a
-ready-signalled grandchild. A copy of `cmd.exe` named `pwsh.exe` checks that an
+ready-signalled grandchild. It independently queries Learning Mode NETWORK
+source support. When the option-aware start export is present but NETWORK
+support is false or cannot be queried, access-denial capture must still succeed
+through the legacy access-only fallback when that lifecycle is available.
+Hosts that do not need this fallback explicitly report the scenario as not
+exercised; deterministic Rust export-selection tests cover both probe results
+and missing exports. A copy of `cmd.exe` named `pwsh.exe` checks that an
 intentional nonzero workload exit preserves its stderr without recommending
 drive-root read grants. UI checks cover all four isolation values and use
 uncontained positive controls for clipboard, desktop creation, and a no-op
@@ -885,3 +902,9 @@ jobs:
 - **All OS build jobs must pass** before validation testing happens. 
 - **Artifacts live one day.** Re-running a test job long after the build has
   expired fails at download; re-run the whole workflow instead.
+
+The Windows x64 MicroVM scheduled lane also runs Node and .NET development
+JSON creation and lifecycle scenarios from the Windows SDK bundle, including
+live streams and Node capture overflow followed by container reuse. These
+managed scenarios discover their packaged NVX runtimes with `MXC_FFI_DIR` and
+`ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR` cleared.

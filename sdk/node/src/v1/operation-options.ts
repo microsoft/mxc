@@ -23,6 +23,17 @@ export interface SpawnWithPtyOptions {
   size?: MxcPtySize;
 }
 
+/** How spawnWithExtendedOptions connects the workload's standard streams. */
+export type SpawnStdio = 'pipes' | 'inherit';
+
+/** Invocation controls for spawnWithExtendedOptions. */
+export interface SpawnExtendedOptions {
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
+  /** Defaults to `'pipes'`, which behaves like `spawn`. */
+  stdio?: SpawnStdio;
+}
+
 /** Invocation controls for provisioning a container. */
 export interface ProvisionOptions {
   telemetry?: TelemetryConfig;

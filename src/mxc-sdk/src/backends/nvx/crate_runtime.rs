@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
@@ -186,6 +186,310 @@ fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
     bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
 }
 
+static RUNTIME_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn register_runtime_directory(directory: &str) -> Result<(), MxcError> {
+    register_directory_in(&RUNTIME_DIRECTORY, directory)
+}
+
+fn register_directory_in(storage: &OnceLock<PathBuf>, directory: &str) -> Result<(), MxcError> {
+    let path = Path::new(directory);
+    if !path.is_absolute() {
+        return Err(MxcError::malformed_request(
+            "NVX runtime directory must be an absolute path",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        MxcError::backend_unavailable(format!("cannot resolve NVX runtime directory: {error}"))
+    })?;
+    if !canonical.is_dir() {
+        return Err(MxcError::backend_unavailable(
+            "NVX runtime path is not a directory",
+        ));
+    }
+    crate::mxc_common::module_lifetime::pin_current_module()
+        .map_err(MxcError::backend_unavailable)?;
+    let registered = storage.get_or_init(|| canonical.clone());
+    if *registered != canonical {
+        return Err(MxcError::new(
+            MxcErrorCode::PolicyValidation,
+            "a different NVX runtime directory is already registered for this process",
+        ));
+    }
+    Ok(())
+}
+
+fn discover_bundle() -> Result<BundledAgent, MxcError> {
+    let configured = std::env::var_os("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    discover_bundle_from(
+        configured.as_deref(),
+        RUNTIME_DIRECTORY.get().map(PathBuf::as_path),
+        || {
+            crate::mxc_common::process_util::module_path_for_address(discover_bundle as *const ())
+                .map_err(MxcError::backend_unavailable)
+        },
+    )
+}
+
+fn module_candidates(directory: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![directory.join("aci-edge-sandboxes")];
+    let mut components = directory.components().rev();
+    let is_rid_native = ["native", "win-x64", "runtimes"].iter().all(|expected| {
+        components.next().is_some_and(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|part| part.eq_ignore_ascii_case(expected))
+        })
+    });
+    if is_rid_native {
+        if let Some(rid) = directory.parent() {
+            candidates.push(rid.join("aci-edge-sandboxes"));
+            if let Some(root) = rid.parent().and_then(Path::parent) {
+                candidates.push(root.join("aci-edge-sandboxes"));
+            }
+        }
+    }
+    candidates
+}
+
+// File inventory from the approved SHA256SUMS pinned in signature_verification.
+const REQUIRED_BUNDLE_FILES: &[&str] = &[
+    r"bin\aci_edge_agent.dll",
+    r"bundle-manifest.json",
+    r"SOURCE-MANIFEST.json",
+    r"SHA256SUMS",
+    r"NOTICE.txt",
+    r"bin\EULA.txt",
+    r"bin\direct-images.exe",
+    r"bin\openvmm.exe",
+    r"guest\initramfs-edge.cpio.gz",
+    r"guest\nvx-edge-agent",
+    r"guest\vmlinux",
+    r"guest\vmlinux.config",
+    r"licenses\linux\COPYING",
+    r"licenses\linux\LICENSES\deprecated\0BSD",
+    r"licenses\linux\LICENSES\deprecated\CC0-1.0",
+    r"licenses\linux\LICENSES\deprecated\GFDL-1.1",
+    r"licenses\linux\LICENSES\deprecated\GFDL-1.2",
+    r"licenses\linux\LICENSES\deprecated\GPL-1.0",
+    r"licenses\linux\LICENSES\deprecated\ISC",
+    r"licenses\linux\LICENSES\deprecated\Linux-OpenIB",
+    r"licenses\linux\LICENSES\deprecated\X11",
+    r"licenses\linux\LICENSES\deprecated\Zlib",
+    r"licenses\linux\LICENSES\dual\Apache-2.0",
+    r"licenses\linux\LICENSES\dual\CC-BY-4.0",
+    r"licenses\linux\LICENSES\dual\CDDL-1.0",
+    r"licenses\linux\LICENSES\dual\MPL-1.1",
+    r"licenses\linux\LICENSES\dual\copyleft-next-0.3.1",
+    r"licenses\linux\LICENSES\exceptions\GCC-exception-2.0",
+    r"licenses\linux\LICENSES\exceptions\Linux-syscall-note",
+    r"licenses\linux\LICENSES\preferred\BSD-2-Clause",
+    r"licenses\linux\LICENSES\preferred\BSD-3-Clause",
+    r"licenses\linux\LICENSES\preferred\BSD-3-Clause-Clear",
+    r"licenses\linux\LICENSES\preferred\GPL-2.0",
+    r"licenses\linux\LICENSES\preferred\LGPL-2.0",
+    r"licenses\linux\LICENSES\preferred\LGPL-2.1",
+    r"licenses\linux\LICENSES\preferred\MIT",
+    r"provenance\direct-images\NOTICE.txt",
+    r"provenance\direct-images\SHA256SUMS",
+    r"provenance\direct-images\cgmanifest.json",
+    r"provenance\direct-images\dependency-inventory.json",
+    r"provenance\direct-images\direct-images-manifest.json",
+    r"provenance\direct-images\licenses\modules\001\LICENSE",
+    r"provenance\direct-images\licenses\modules\002\LICENSE",
+    r"provenance\direct-images\licenses\modules\003\LICENSE",
+    r"provenance\direct-images\licenses\modules\004\LICENSE.md",
+    r"provenance\direct-images\licenses\modules\005\AUTHORS",
+    r"provenance\direct-images\licenses\modules\005\LICENSE",
+    r"provenance\direct-images\licenses\modules\005\NOTICE",
+    r"provenance\direct-images\licenses\modules\005\cli\connhelper\internal\syntax\LICENSE",
+    r"provenance\direct-images\licenses\modules\006\LICENSE",
+    r"provenance\direct-images\licenses\modules\007\LICENSE",
+    r"provenance\direct-images\licenses\modules\008\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\gzhttp\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\internal\lz4ref\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\internal\snapref\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\s2\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\s2\cmd\internal\filepathx\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\s2\cmd\internal\readahead\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\snappy\AUTHORS",
+    r"provenance\direct-images\licenses\modules\009\snappy\CONTRIBUTORS",
+    r"provenance\direct-images\licenses\modules\009\snappy\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\snappy\xerial\LICENSE",
+    r"provenance\direct-images\licenses\modules\009\zstd\internal\xxhash\LICENSE.txt",
+    r"provenance\direct-images\licenses\modules\010\LICENSE",
+    r"provenance\direct-images\licenses\modules\011\LICENSE",
+    r"provenance\direct-images\licenses\modules\012\LICENSE",
+    r"provenance\direct-images\licenses\modules\012\cmd\runhcs\LICENSE",
+    r"provenance\direct-images\licenses\modules\012\cmd\runhcs\NOTICE",
+    r"provenance\direct-images\licenses\modules\012\pkg\go-runhcs\LICENSE",
+    r"provenance\direct-images\licenses\modules\012\pkg\go-runhcs\NOTICE",
+    r"provenance\direct-images\licenses\modules\013\LICENSE.md",
+    r"provenance\direct-images\licenses\modules\014\LICENSE",
+    r"provenance\direct-images\licenses\modules\014\LICENSE.docs",
+    r"provenance\direct-images\licenses\modules\015\LICENSE",
+    r"provenance\direct-images\licenses\modules\016\LICENSE",
+    r"provenance\direct-images\licenses\modules\017\LICENSE.txt",
+    r"provenance\direct-images\licenses\modules\018\LICENSE",
+    r"provenance\direct-images\licenses\modules\019\LICENSE",
+    r"provenance\direct-images\licenses\modules\020\LICENSE",
+    r"provenance\direct-images\licenses\modules\021\AUTHORS",
+    r"provenance\direct-images\licenses\modules\021\LICENSE",
+    r"provenance\direct-images\licenses\modules\022\LICENSE",
+    r"provenance\direct-images\licenses\modules\022\PATENTS",
+    r"provenance\direct-images\licenses\modules\023\LICENSE",
+    r"provenance\direct-images\licenses\modules\023\PATENTS",
+    r"provenance\direct-images\licenses\modules\024\LICENSE",
+    r"provenance\direct-images\licenses\modules\024\PATENTS",
+    r"provenance\direct-images\licenses\source\EULA.txt",
+    r"provenance\direct-images\licenses\toolchain\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\compile\internal\ssa\_gen\vendor\golang.org\x\tools\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\compile\internal\ssa\_gen\vendor\golang.org\x\tools\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\google\pprof\AUTHORS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\google\pprof\CONTRIBUTORS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\google\pprof\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\google\pprof\third_party\svgpan\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\ianlancetaylor\demangle\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\microsoft\go-infra\telemetry\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\github.com\microsoft\go-infra\telemetry\config\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\arch\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\arch\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\build\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\build\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\mod\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\mod\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\sync\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\sync\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\sys\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\sys\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\telemetry\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\telemetry\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\term\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\term\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\text\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\text\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\tools\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\golang.org\x\tools\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\cmd\vendor\rsc.io\markdown\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\crypto\internal\boring\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\runtime\testdata\testgoroutineleakprofile\goker\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\github.com\microsoft\go-crypto-darwin\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\github.com\microsoft\go-crypto-openssl\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\github.com\microsoft\go-crypto-winnative\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\crypto\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\crypto\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\net\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\net\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\sys\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\sys\PATENTS",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\text\LICENSE",
+    r"provenance\direct-images\licenses\toolchain\src\vendor\golang.org\x\text\PATENTS",
+    r"provenance\edge-guest.json",
+    r"provenance\edge-windows.json",
+    r"provenance\licenses\linux\COPYING-LINUX",
+    r"provenance\licenses\nvx\LICENSE",
+    r"provenance\licenses\nvx\THIRD_PARTY_NOTICES.md",
+    r"provenance\licenses\openvmm\LICENSE",
+    r"provenance\openvmm.provenance.json",
+    r"provenance\vmlinux.provenance.json",
+    r"source\linux\BUILD-ENVIRONMENT.txt",
+    r"source\linux\SOURCE-MANIFEST.json",
+    r"source\linux\SOURCE.md",
+    r"source\linux\config-microvm",
+    r"source\linux\patches\0001-microvm-xe9-earlycon.patch",
+    r"source\linux\patches\0002-microvm-hvc-xe9.patch",
+    r"source\linux\patches\0003-microvm-virtio-mmio-shared-status.patch",
+];
+
+fn selected_bundle_with(
+    directory: &Path,
+    is_file: &impl Fn(&Path) -> bool,
+) -> Result<BundledAgent, MxcError> {
+    let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
+    for relative_path in REQUIRED_BUNDLE_FILES {
+        let path = directory.join(relative_path);
+        if !is_file(&path) {
+            return Err(MxcError::backend_unavailable(format!(
+                "NVX bundle is missing {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(bundle)
+}
+
+fn module_candidate_exists(candidate: &Path) -> Result<bool, MxcError> {
+    match std::fs::symlink_metadata(candidate) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(MxcError::backend_unavailable(format!(
+            "cannot inspect NVX runtime directory {}: {error}",
+            candidate.display()
+        ))),
+    }
+}
+
+fn require_module_directory(candidate: &Path) -> Result<(), MxcError> {
+    let metadata = std::fs::metadata(candidate).map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "cannot resolve NVX runtime directory {}: {error}",
+            candidate.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(MxcError::backend_unavailable(format!(
+            "NVX runtime path {} is not a directory",
+            candidate.display()
+        )));
+    }
+    Ok(())
+}
+
+fn discover_bundle_from(
+    configured: Option<&Path>,
+    registered: Option<&Path>,
+    module_path: impl FnOnce() -> Result<PathBuf, MxcError>,
+) -> Result<BundledAgent, MxcError> {
+    discover_bundle_from_with(
+        configured,
+        registered,
+        module_path,
+        &module_candidate_exists,
+        &require_module_directory,
+        &Path::is_file,
+    )
+}
+
+fn discover_bundle_from_with(
+    configured: Option<&Path>,
+    registered: Option<&Path>,
+    module_path: impl FnOnce() -> Result<PathBuf, MxcError>,
+    candidate_exists: &impl Fn(&Path) -> Result<bool, MxcError>,
+    require_directory: &impl Fn(&Path) -> Result<(), MxcError>,
+    is_file: &impl Fn(&Path) -> bool,
+) -> Result<BundledAgent, MxcError> {
+    if let Some(directory) = configured.or(registered) {
+        return selected_bundle_with(directory, is_file);
+    }
+    let module = module_path()?;
+    let directory = module.parent().ok_or_else(|| {
+        MxcError::backend_unavailable("the native module has no parent directory")
+    })?;
+    for candidate in module_candidates(directory) {
+        if candidate_exists(&candidate)? {
+            require_directory(&candidate)?;
+            return selected_bundle_with(&candidate, is_file);
+        }
+    }
+    let bundle = BundledAgent::discover().map_err(map_error)?;
+    selected_bundle_with(bundle.directory(), is_file)
+}
+
 fn platform_snapshots() -> PlatformSnapshots {
     PlatformSnapshots::new(
         PLATFORM_SNAPSHOT_MAX_VCPUS,
@@ -205,7 +509,7 @@ fn create_client_with_guard(
     state_root: &Path,
     guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 ) -> Result<NvxClient, MxcError> {
-    let bundle = BundledAgent::discover().map_err(map_error)?;
+    let bundle = discover_bundle()?;
     let directory = bundle.directory().canonicalize().map_err(|error| {
         MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
     })?;
@@ -232,11 +536,11 @@ impl NvxClient {
 }
 
 pub(super) fn agent_bundle_available() -> bool {
-    BundledAgent::discover().is_ok_and(|bundle| bundle.library().is_file())
+    discover_bundle().is_ok_and(|bundle| bundle.library().is_file())
 }
 
 pub(super) fn require_agent_bundle_present() -> Result<(), MxcError> {
-    let bundle = BundledAgent::discover().map_err(map_error)?;
+    let bundle = discover_bundle()?;
     if bundle.library().is_file() {
         Ok(())
     } else {
@@ -262,7 +566,7 @@ pub(super) fn state_root(
                 "NVX signed bundled agent: cannot resolve LOCALAPPDATA for the agent state directory",
             )
         })?;
-    let bundle = BundledAgent::discover().map_err(map_error)?;
+    let bundle = discover_bundle()?;
     state_root_in(&local_app_data, bundle.manifest_sha256())
 }
 
@@ -919,6 +1223,202 @@ mod tests {
     use super::*;
     use aci_edge_sandboxes::ExecControl;
     use std::sync::Condvar;
+
+    #[test]
+    fn runtime_discovery_prioritizes_explicit_over_registration() {
+        let explicit = Path::new(r"C:\missing-explicit-nvx-bundle");
+        let registered = Path::new(r"C:\missing-registered-nvx-bundle");
+        let error = discover_bundle_from(Some(explicit), Some(registered), || {
+            panic!("module lookup must not run")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("missing-explicit-nvx-bundle"));
+        let error = discover_bundle_from(None, Some(registered), || {
+            panic!("module lookup must not run")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("missing-registered-nvx-bundle"));
+    }
+
+    #[test]
+    fn bundle_requires_each_runtime_file() {
+        let directory = Path::new(r"C:\nvx-bundle");
+        let files = std::cell::RefCell::new(Vec::new());
+        assert!(selected_bundle_with(directory, &|path| {
+            files.borrow_mut().push(path.to_path_buf());
+            true
+        })
+        .is_ok());
+        let files = files.into_inner();
+        assert_eq!(files.len(), 147);
+        for missing in &files {
+            let error = selected_bundle_with(directory, &|path| path != missing)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+            assert!(error
+                .message
+                .contains(&missing.to_string_lossy().to_string()));
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_bundle_with_only_agent_library() {
+        let directory = Path::new(r"C:\incomplete-nvx-bundle");
+        let result = discover_bundle_from_with(
+            Some(directory),
+            None,
+            || panic!("module lookup must not run"),
+            &|_| panic!("module candidates must not be inspected"),
+            &|_| panic!("module candidates must not be resolved"),
+            &|path| path.ends_with("aci_edge_agent.dll"),
+        );
+        let error = result.err().unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("bundle-manifest.json"));
+    }
+
+    #[test]
+    fn discovery_rejects_missing_kernel_config() {
+        let directory = Path::new(r"C:\incomplete-nvx-bundle");
+        let missing = directory.join(r"guest\vmlinux.config");
+        let error = selected_bundle_with(directory, &|path| path != missing)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("vmlinux.config"));
+    }
+
+    #[test]
+    fn discovery_rejects_missing_source_manifest() {
+        let directory = Path::new(r"C:\incomplete-nvx-bundle");
+        let error =
+            selected_bundle_with(directory, &|path| !path.ends_with("SOURCE-MANIFEST.json"))
+                .err()
+                .unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("SOURCE-MANIFEST.json"));
+    }
+
+    #[test]
+    fn discovery_rejects_dangling_module_link_without_fallback() {
+        let candidates_seen = std::cell::Cell::new(0);
+        let result = discover_bundle_from_with(
+            None,
+            None,
+            || Ok(PathBuf::from(r"C:\app\runtimes\win-x64\native\mxc_ffi.dll")),
+            &|_| {
+                candidates_seen.set(candidates_seen.get() + 1);
+                Ok(true)
+            },
+            &|_| Err(MxcError::backend_unavailable("dangling module link")),
+            &|_| panic!("invalid candidate must not be selected"),
+        );
+        let error = result.err().unwrap();
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("dangling module link"));
+        assert_eq!(candidates_seen.get(), 1);
+    }
+
+    #[test]
+    fn discovery_accepts_valid_module_link() {
+        let candidate = PathBuf::from(r"C:\app\runtimes\win-x64\native\aci-edge-sandboxes");
+        let candidates_seen = std::cell::Cell::new(0);
+        let bundle = discover_bundle_from_with(
+            None,
+            None,
+            || Ok(PathBuf::from(r"C:\app\runtimes\win-x64\native\mxc_ffi.dll")),
+            &|path| {
+                candidates_seen.set(candidates_seen.get() + 1);
+                assert_eq!(path, candidate);
+                Ok(true)
+            },
+            &|path| {
+                assert_eq!(path, candidate);
+                Ok(())
+            },
+            &|_| true,
+        )
+        .unwrap();
+        assert_eq!(bundle.directory(), candidate);
+        assert_eq!(candidates_seen.get(), 1);
+    }
+
+    #[test]
+    fn module_candidate_metadata_distinguishes_directory_file_and_absence() {
+        let current = std::env::current_dir().unwrap();
+        let file = std::env::current_exe().unwrap();
+        assert!(module_candidate_exists(&current).unwrap());
+        assert!(require_module_directory(&current).is_ok());
+        assert!(module_candidate_exists(&file).unwrap());
+        assert_eq!(
+            require_module_directory(&file).unwrap_err().code,
+            MxcErrorCode::BackendUnavailable
+        );
+        assert!(!module_candidate_exists(&current.join("missing-nvx-candidate-for-test")).unwrap());
+    }
+
+    #[test]
+    fn module_candidates_cover_nuget_and_flat_layouts() {
+        let module_dir = Path::new(r"C:\app\runtimes\win-x64\native");
+        assert_eq!(
+            module_candidates(module_dir),
+            vec![
+                PathBuf::from(r"C:\app\runtimes\win-x64\native\aci-edge-sandboxes"),
+                PathBuf::from(r"C:\app\runtimes\win-x64\aci-edge-sandboxes"),
+                PathBuf::from(r"C:\app\aci-edge-sandboxes"),
+            ]
+        );
+        let mixed_module = Path::new(r"C:\app\Runtimes\Win-X64\Native\mxc_ffi.dll");
+        let mixed_case = mixed_module.parent().unwrap();
+        assert_eq!(
+            module_candidates(mixed_case),
+            vec![
+                PathBuf::from(r"C:\app\Runtimes\Win-X64\Native\aci-edge-sandboxes"),
+                PathBuf::from(r"C:\app\Runtimes\Win-X64\aci-edge-sandboxes"),
+                PathBuf::from(r"C:\app\aci-edge-sandboxes"),
+            ]
+        );
+        assert_eq!(
+            module_candidates(Path::new(r"C:\app")),
+            vec![PathBuf::from(r"C:\app\aci-edge-sandboxes")]
+        );
+    }
+
+    #[test]
+    fn runtime_directory_is_canonical_idempotent_and_rejects_conflicts() {
+        let storage = OnceLock::new();
+        let current = std::env::current_dir().unwrap();
+        let parent = current.parent().unwrap();
+        let path = current.to_str().unwrap();
+        assert_eq!(
+            register_directory_in(&storage, "relative")
+                .unwrap_err()
+                .code,
+            MxcErrorCode::MalformedRequest
+        );
+        assert!(register_directory_in(&storage, path).is_ok());
+        assert!(register_directory_in(&storage, current.join(".").to_str().unwrap()).is_ok());
+        assert_eq!(
+            register_directory_in(&storage, parent.to_str().unwrap())
+                .unwrap_err()
+                .code,
+            MxcErrorCode::PolicyValidation
+        );
+        assert_eq!(
+            register_directory_in(
+                &OnceLock::new(),
+                current.join("no-such-nvx-runtime").to_str().unwrap()
+            )
+            .unwrap_err()
+            .code,
+            MxcErrorCode::BackendUnavailable
+        );
+    }
 
     #[test]
     fn lifecycle_ids_preserve_native_tokens_and_reject_malformed_ids() {

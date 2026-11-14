@@ -150,13 +150,7 @@ pub fn run_state_aware(
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         crate::mxc_common::models::ContainmentBackend::MicroVm => {
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new();
-            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
-                &mut runner,
-                bound,
-                dry_run,
-            );
-            runner.finish(outcome)
+            crate::backend_modules::nvx::state_aware::dispatch(bound, dry_run)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -357,16 +351,16 @@ fn run_state_aware_typed(
 /// caller's stdio. The streaming counterpart of the exec arm of
 /// [`run_state_aware`].
 ///
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file;
-/// IsolationSession always provides one, and MicroVM rejects it before setup.
+/// `wslc_stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// other backends ignore it.
 ///
 /// Backends without a state-aware impl return an [`MxcError`] with
 /// `unsupported_phase`.
 pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    exec_state_aware_with_capture_mode(parsed, stdin, false)
+    exec_state_aware_with_capture_mode(parsed, wslc_stdin, false)
 }
 
 fn exec_state_aware_capture(
@@ -377,7 +371,7 @@ fn exec_state_aware_capture(
 
 fn exec_state_aware_with_capture_mode(
     parsed: ParsedStateAwareRequest,
-    _stdin: bool,
+    _wslc_stdin: bool,
     _capture_output: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
@@ -422,7 +416,7 @@ fn exec_state_aware_with_capture_mode(
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
-            let mut runner = if _stdin {
+            let mut runner = if _wslc_stdin {
                 crate::wslc_common::WslcStateAwareRunner::with_piped_stdin()
             } else {
                 crate::wslc_common::WslcStateAwareRunner::new()
@@ -437,25 +431,8 @@ fn exec_state_aware_with_capture_mode(
         }
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         crate::mxc_common::models::ContainmentBackend::MicroVm => {
-            if _stdin {
-                return Err(MxcError::unsupported_containment(
-                    "MicroVM lifecycle exec does not support writable stdin",
-                ));
-            }
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = if _capture_output {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::for_capture()
-            } else {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new()
-            };
-            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
-                &mut runner,
-                bound,
-            );
-            let handle = runner.finish(handle)?;
-            Ok(Box::new(
-                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
-            ))
+            crate::backend_modules::nvx::state_aware::dispatch_exec(bound, _capture_output)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -844,9 +821,11 @@ fn run_state_aware_envelope(
 fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware(parsed, stdin))
+    exec_state_aware_process_parsed(parsed, logger, |parsed| {
+        exec_state_aware(parsed, wslc_stdin)
+    })
 }
 
 fn exec_state_aware_capture_parsed(
@@ -1044,15 +1023,15 @@ pub fn run_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
-/// model as a live streaming process, with a writable WSLc stdin if `stdin`.
+/// model as a live streaming process, with a writable WSLc stdin if `wslc_stdin`.
 pub fn exec_typed_state_aware_request(
     input: SdkStateAwareInput,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
@@ -1114,15 +1093,15 @@ pub fn run_state_aware_json(
 /// streaming process, returning a [`SandboxProcess`] handle.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]; `stdin` is as for [`exec_state_aware`].
+/// [`run_state_aware_json`]; `wslc_stdin` is as for [`exec_state_aware`].
 pub fn exec_state_aware_json(
     request_json: &str,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
 }
 
 pub fn exec_state_aware_capture_json(

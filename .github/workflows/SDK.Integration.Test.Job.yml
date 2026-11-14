@@ -61,6 +61,13 @@ jobs:
           name: npm-packages
           path: sdk-pkg
 
+      - name: Download optional NVX runtime package
+        if: matrix.os_label == 'windows'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-packages-nvx-runtime
+          path: sdk-pkg-nvx
+
       - name: Install dependencies + SDK from artifact
         shell: bash
         run: |
@@ -221,6 +228,9 @@ jobs:
       # backend is covered, so MXC_LXC_TESTS_REQUIRE_EXECUTION turns an LXC
       # skip into a failure here rather than a green job that tested nothing.
       - name: npm test
+        env:
+          MXC_SDK_PACKAGE_DIR: ${{ github.workspace }}/sdk-pkg
+          MXC_NVX_PACKAGE_DIR: ${{ github.workspace }}/sdk-pkg-nvx
         shell: bash
         run: |
           if [ "${{ matrix.os_label }}" = "linux" ]; then

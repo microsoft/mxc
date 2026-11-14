@@ -11,6 +11,19 @@ namespace Microsoft.Mxc.Sdk.Tests;
 public class DevEntryPointTests
 {
     [Fact]
+    public async Task RealNativeLifecycleAndCapturedExecRejectUnsupportedBackend()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows() &&
+            System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64 &&
+            File.Exists(Path.Combine(AppContext.BaseDirectory, "mxc_ffi.dll")), "Windows x64 mxc_ffi.dll required");
+        const string start = """{"version":"1.0.0","phase":"start","sandboxId":"nosuchbackend:abc123"}""";
+        const string exec = """{"version":"1.1.0-alpha","phase":"exec","sandboxId":"nosuchbackend:abc123","process":{"commandLine":"echo"}}""";
+        var lifecycle = Assert.Throws<MxcException>(() => Dev.MxcLifecycle.ValidateStartJson(start));
+        Assert.Equal(ErrorCode.UnsupportedContainment, lifecycle.Code);
+        var capture = await Assert.ThrowsAsync<MxcException>(() => Dev.MxcLifecycle.RunInContainerJsonAsync(exec, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(ErrorCode.UnsupportedContainment, capture.Code);
+    }
+    [Fact]
     public async Task DevEntryPointsRejectInvalidDocumentsWithoutLaunching()
     {
         var synchronous = Assert.Throws<MxcException>(
@@ -70,6 +83,18 @@ public class DevEntryPointTests
         Assert.Equal((uint?)250, timeout);
         Assert.Equal((byte)0, request[^1]);
         Assert.Equal(json, Encoding.UTF8.GetString(request.AsSpan(0, request.Length - 1)));
+    }
+
+    [Theory]
+    [InlineData("""{"version":"1.0.0","containment":"wslc","process":{"commandLine":"cat"}}""", null, true)]
+    [InlineData("""{"version":"1.0.0","containment":"process","process":{"commandLine":"cat"}}""", null, false)]
+    [InlineData("""{"version":"1.0.0","phase":"exec","sandboxId":"wslc:a","process":{"commandLine":"cat"}}""", "exec", true)]
+    [InlineData("""{"version":"1.0.0","phase":"exec","sandboxId":"iso:a","process":{"commandLine":"cat"}}""", "exec", false)]
+    public void OnlyWslcRequestsAreRecognizedAsWslc(string json, string? phase, bool expected)
+    {
+        var (request, _) = Dev.DevJsonRequest.Prepare(
+            json, nameof(OnlyWslcRequestsAreRecognizedAsWslc), phase);
+        Assert.Equal(expected, Dev.DevJsonRequest.TargetsWslc(request));
     }
 
     [Fact]

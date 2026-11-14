@@ -73,6 +73,19 @@ internal static class DevJsonRequest
         }
     }
 
+    internal static bool TargetsWslc(byte[] request)
+    {
+        using var document = JsonDocument.Parse(
+            request.AsMemory(0, request.Length - 1), InspectionOptions);
+        var root = document.RootElement;
+        return (root.TryGetProperty("containment", out var containment)
+                && containment.ValueKind == JsonValueKind.String
+                && containment.ValueEquals("wslc"))
+            || (root.TryGetProperty("sandboxId", out var sandboxId)
+                && sandboxId.ValueKind == JsonValueKind.String
+                && sandboxId.GetString()!.StartsWith("wslc:", StringComparison.Ordinal));
+    }
+
     private static byte[] ToNullTerminatedUtf8(string json)
     {
         if (json.Contains('\0'))

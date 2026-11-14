@@ -9,20 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `MxcLifecycle.SpawnInContainerWithStdin` and
-  `SpawnInContainerWithStdinAsync` start a command in a container with a
-  writable `StandardInput`. For a WSLC container, disposing it, or waiting
-  before taking it, gives the command end-of-file; `SpawnInContainer` still
-  gives a WSLC command end-of-file at once.
-- `MxcContainer.SpawnWithStdin` and `SpawnWithStdinAsync` create a container
-  with a writable `StandardInput`. For a WSLC request, disposing it, or waiting
-  before taking it, gives the command end-of-file; `Spawn` and `Run` still give
-  a WSLC command end-of-file at once.
-
 ### Changed
 
+- `MxcContainer.Spawn` / `SpawnAsync` and `MxcLifecycle.SpawnInContainer` /
+  `SpawnInContainerAsync` expose a writable `StandardInput` for WSLC. Disposing
+  it gives the command end-of-file, and waiting before taking it also gives the
+  command end-of-file. `Run` and `RunInContainer` continue giving the command
+  end-of-file. Killing a WSLC `SpawnInContainer` command that is still running,
+  or reaching its timeout, deletes its container about a minute later, because
+  MXC does not signal a WSLC process that has stdin.
 - The managed V1 facade uses `MxcContainer` with `ContainerRequest` for
   complete requests, and `MxcLifecycle` with typed `ProvisionRequest`,
   `LifecycleContainmentKind`, `ContainerId`, and `ExecutionRequest` for

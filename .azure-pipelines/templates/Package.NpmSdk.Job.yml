@@ -76,9 +76,12 @@ jobs:
         find $(sdkDirectory)/bin -name unix-test-proxy -exec chmod +x {} +
       displayName: Restore execute permission on unix-test-proxy
 
-    # Drop symbol files from the npm package — symbols ship separately.
-    - script: rm -rf $(sdkDirectory)/bin/*/symbols
-      displayName: Strip symbols/ from npm package
+    # NVX runtime assets and symbols ship separately from the base SDK.
+    - script: |
+        set -euo pipefail
+        mv "$(sdkDirectory)/bin/x64/aci-edge-sandboxes" "$(Build.SourcesDirectory)/sdk/node-nvx-runtime/aci-edge-sandboxes"
+        rm -rf "$(sdkDirectory)"/bin/*/aci-edge-sandboxes "$(sdkDirectory)"/bin/*/symbols
+      displayName: Stage NVX runtime and strip symbols from base SDK
 
     - script: |
         set -euo pipefail
@@ -106,9 +109,23 @@ jobs:
       workingDirectory: $(sdkDirectory)
       displayName: npm run build
 
-    - script: npm pack
+    - script: |
+        set -euo pipefail
+        package="$(npm pack --silent)"
+        contents="$(tar -tzf "$package")"
+        if [[ "$contents" == *aci-edge-sandboxes* ]]; then
+          echo "Base SDK package unexpectedly contains NVX runtime assets" >&2
+          exit 1
+        fi
       workingDirectory: $(sdkDirectory)
-      displayName: npm pack
+      displayName: Pack and verify base SDK
+
+    - script: |
+        set -euo pipefail
+        cp "$(Build.SourcesDirectory)/LICENSE.md" "$(Build.SourcesDirectory)/sdk/node-nvx-runtime/"
+        npm pack
+      workingDirectory: $(Build.SourcesDirectory)/sdk/node-nvx-runtime
+      displayName: Pack optional NVX runtime
 
     - task: CopyFiles@2
       displayName: Copy npm package
@@ -117,6 +134,13 @@ jobs:
         contents: |
           *.tgz
         targetFolder: '$(outputDirectory)/packages'
+
+    - task: CopyFiles@2
+      displayName: Copy optional NVX npm package
+      inputs:
+        sourceFolder: $(Build.SourcesDirectory)/sdk/node-nvx-runtime
+        contents: '*.tgz'
+        targetFolder: '$(outputDirectory)/packages/nvx'
 
     - task: 1ES.PublishPipelineArtifact@1
       displayName: Upload SDK as pipeline artifact

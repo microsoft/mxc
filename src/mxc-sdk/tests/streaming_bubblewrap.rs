@@ -12,6 +12,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod inherited_stdio_contract;
 mod unix_pty_contract;
 
 use mxc_sdk::v1::WaitResult;
@@ -106,6 +107,22 @@ fn run_terminal_fixture(mut command: std::process::Command) -> String {
         "terminal fixture failed: {outcome:?}\n{output}"
     );
     output
+}
+
+#[test]
+fn bubblewrap_inherited_stdio_uses_caller_stdio() {
+    if !bwrap_available() {
+        return;
+    }
+    inherited_stdio_contract::assert_uses_caller_stdio(
+        "bubblewrap_inherited_stdio_uses_caller_stdio",
+        |command| bwrap_request(&command, 30_000),
+        |marker, exit_code| {
+            format!(
+                "IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit {exit_code}"
+            )
+        },
+    );
 }
 
 #[test]

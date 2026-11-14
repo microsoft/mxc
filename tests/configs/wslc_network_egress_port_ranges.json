@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-port-ranges",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho RANGE_START=$(p 1.1.1.1:80)\necho RANGE_END=$(p 1.1.1.1:443)\necho RANGE_BELOW=$(p 1.1.1.1:79)\necho RANGE_ABOVE=$(p 1.1.1.1:444)\necho RANGE_OUTSIDE=$(p 1.1.1.1:853)\necho LIST_FIRST=$(p 8.8.8.8:443)\necho LIST_SECOND=$(p 8.8.8.8:853)\necho LIST_OTHER=$(p 8.8.8.8:53)\necho ALL_PORTS_443=$(p 9.9.9.9:443)\necho ALL_PORTS_853=$(p 9.9.9.9:853)\necho UNLISTED=$(p 1.0.0.1:443)"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "1.1.1.1/32" }],
+          "ports": [{ "port": 80, "endPort": 443, "protocol": "tcp" }]
+        },
+        {
+          "to": [{ "cidr": "8.8.8.8/32" }],
+          "ports": [{ "port": 443, "protocol": "tcp" }, { "port": 853, "protocol": "tcp" }]
+        },
+        { "to": [{ "cidr": "9.9.9.9/32" }], "ports": [{ "protocol": "tcp" }] }
+      ]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}

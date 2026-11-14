@@ -103,7 +103,8 @@ calls the platform and backend discovery APIs without `MXC_FFI_DIR` and checks
 that its managed SDK assembly matches the package asset for its target
 framework. An unsupported-host result is valid; native loading, interop, and
 deserialization exceptions still fail the check. These package checks do not
-require an available containment backend.
+require an available containment backend. Each consumer also checks that
+execution fails when its packaged native library is removed.
 
 From `sdk/dotnet`, run:
 
@@ -122,8 +123,9 @@ First build the solution as above to restore its dependencies. The script
 packs the SDK in Release configuration, runs both temporary consumers, and
 removes their isolated package caches and output afterward. Use
 `-Configuration Debug` to pack a Debug build instead. It temporarily clears
-`MXC_FFI_DIR` and restores the caller's value when finished. Both .NET 8 and
-.NET 10 runtimes must be installed.
+`MXC_FFI_DIR` and restores the caller's value when finished. The temporary
+directory must be outside a checkout. Both .NET 8 and .NET 10 runtimes must be
+installed.
 
 ### Local Node SDK package validation
 
@@ -164,6 +166,13 @@ The Linux .NET SDK job also installs Bubblewrap and strictly runs
 backend availability gate turns a missing Bubblewrap prerequisite into a
 failure, and the exact-method filter plus result-count check ensures the
 regression itself ran and passed.
+
+### WSLC gateway image
+
+`wslc-gateway-image-check` rebuilds the committed WSLC gateway images on
+Windows x64 and fails if they don't match the source. Regenerate them with
+`scripts/build-wslc-gateway-image.ps1`; see
+[WSLC gateway image](wslc-gateway-image.md).
 
 ### Local Windows SDK proxy checks
 
