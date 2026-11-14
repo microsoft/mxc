@@ -87,6 +87,9 @@ Get platform support information.
 
 On Windows, ProcessContainer requires native PSEC support. Other supported
 backends are detected independently; the host is unsupported when none are available.
+MicroVM is reported when available, but execution requires the development
+JSON API; typed V1 requests cannot select it. Availability is advisory.
+Windows native backend availability is refreshed on each call.
 
 ```typescript
 export function getPlatformSupport(): PlatformSupport;

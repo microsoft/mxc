@@ -106,6 +106,13 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
     error: AbiErrorDetail,
     completion: NativeSpawnCompletion,
   ): void;
+  stateAwareExecCaptureAsync(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+    completion: NativeSpawnCompletion,
+  ): void;
   stateAwareExecForRunAsync(
     request: string,
     experimental: number,
@@ -202,6 +209,8 @@ function bindStreamingNativeFacade(
     ],
   });
 
+  let stateAwareExecCaptureBinding: typeof stateAwareExecBinding | undefined;
+
   // For run-to-completion helpers: a WSLC workload reads end-of-file on stdin.
   const stateAwareExecForRunBinding = bindNativeFunction<KoffiFunc<(
     request: string,
@@ -245,6 +254,24 @@ function bindStreamingNativeFacade(
     },
     stateAwareExecForRunAsync(request, experimental, outHandle, error, completion) {
       stateAwareExecForRunBinding.async(request, experimental, outHandle, error, completion);
+    },
+    stateAwareExecCaptureAsync(request, experimental, outHandle, error, completion) {
+      stateAwareExecCaptureBinding ??= bindNativeFunction<KoffiFunc<(
+        request: string,
+        experimental: number,
+        outHandle: Pointer[],
+        error: AbiErrorDetail,
+      ) => number>>(handle, {
+        symbol: 'mxc_exec_state_aware_capture_json',
+        result: 'int32_t',
+        parameters: [
+          'const char *',
+          'int32_t',
+          koffi.out(koffi.pointer(AbiSandbox, 2)),
+          koffi.out(koffi.pointer(AbiErrorDetailType)),
+        ],
+      });
+      stateAwareExecCaptureBinding.async(request, experimental, outHandle, error, completion);
     },
     id: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_id',
@@ -333,7 +360,8 @@ type StateAwareSandboxProcessFactory = (
   requestJson: string,
   experimental: boolean,
   timeoutMs: number | undefined,
-  capture: boolean,
+  forRun: boolean,
+  output: 'stream' | 'capture',
 ) => MxcProcess;
 let stateAwareSandboxProcessFactory: StateAwareSandboxProcessFactory | undefined;
 let oneShotSyncProcessFactory:
@@ -818,6 +846,7 @@ export function spawnStateAwareBindingSandboxProcess(
       experimental,
       timeoutMs,
       false,
+      'stream',
     );
   }
 
@@ -837,13 +866,16 @@ export async function createStateAwareStreamingDriverAsync(
   experimental: boolean,
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
-  capture = false,
+  forRun = false,
+  output: 'stream' | 'capture' = 'stream',
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
-  const exec = capture
-    ? native.stateAwareExecForRunAsync.bind(native)
-    : native.stateAwareExecAsync.bind(native);
+  const exec = output === 'capture'
+    ? native.stateAwareExecCaptureAsync.bind(native)
+    : forRun
+      ? native.stateAwareExecForRunAsync.bind(native)
+      : native.stateAwareExecAsync.bind(native);
   const status = await new Promise<number>((resolve, reject) => {
     exec(
       requestJson,
@@ -860,15 +892,16 @@ export async function createStateAwareStreamingDriverAsync(
   );
 }
 
-/** `capture` starts the workload with the run-to-completion settings. */
+/** `forRun` starts the workload with the run-to-completion settings. */
 export async function spawnStateAwareBindingSandboxProcessAsync(
   requestJson: string,
   experimental: boolean,
   timeoutMs?: number,
-  capture = false,
+  forRun = false,
+  output: 'stream' | 'capture' = 'stream',
 ): Promise<MxcProcess> {
   if (stateAwareSandboxProcessFactory !== undefined) {
-    return stateAwareSandboxProcessFactory(requestJson, experimental, timeoutMs, capture);
+    return stateAwareSandboxProcessFactory(requestJson, experimental, timeoutMs, forRun, output);
   }
   ensureSupportedNodeVersion();
   const driver = await createStateAwareStreamingDriverAsync(
@@ -876,7 +909,8 @@ export async function spawnStateAwareBindingSandboxProcessAsync(
     experimental,
     getStreamingNative(),
     nodeStreamFactory,
-    capture,
+    forRun,
+    output,
   );
   return createSandboxProcess(driver, timeoutMs);
 }

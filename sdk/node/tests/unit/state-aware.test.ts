@@ -135,18 +135,18 @@ function installStateAwareExecBinding(
   request: () => Record<string, unknown>;
   experimental: () => boolean;
   timeout: () => number | undefined;
-  capture: () => boolean | undefined;
+  forRun: () => boolean | undefined;
 } {
   let binding: FakeStateAwareExecBinding | undefined;
   let requestJson: string | undefined;
   let experimental = false;
   let timeoutMs: number | undefined;
-  let captureMode: boolean | undefined;
-  _setStateAwareBindingSandboxProcessFactory((request, allowExperimental, timeout, capture) => {
+  let forRunMode: boolean | undefined;
+  _setStateAwareBindingSandboxProcessFactory((request, allowExperimental, timeout, forRun) => {
     requestJson = request;
     experimental = allowExperimental;
     timeoutMs = timeout;
-    captureMode = capture;
+    forRunMode = forRun;
     binding = createBinding();
     return new MxcProcess(binding, timeout);
   });
@@ -161,7 +161,7 @@ function installStateAwareExecBinding(
     },
     experimental: () => experimental,
     timeout: () => timeoutMs,
-    capture: () => captureMode,
+    forRun: () => forRunMode,
   };
 }
 
@@ -810,7 +810,7 @@ timeoutMs: 250 },
     assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello', timeout: 250 });
     assert.strictEqual(exec.request().correlationVector, undefined);
     assert.strictEqual(exec.timeout(), 250);
-    assert.strictEqual(exec.capture(), true, 'a captured run starts without writable stdin');
+    assert.strictEqual(exec.forRun(), true, 'a captured run starts without writable stdin');
     assert.strictEqual(exec.binding().freed, true);
   });
 
@@ -933,7 +933,7 @@ timeoutMs: 123 },
       assert.deepStrictEqual(exec.request().process, { commandLine: 'echo live', timeout: 123 });
       assert.strictEqual(exec.experimental(), false);
       assert.strictEqual(exec.timeout(), 123);
-      assert.strictEqual(exec.capture(), false);
+      assert.strictEqual(exec.forRun(), false);
     } finally {
       proc.dispose();
     }

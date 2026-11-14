@@ -429,6 +429,43 @@ describe('getPlatformSupport probe integration', () => {
     assert.deepStrictEqual(support.availableMethods, ['wslc']);
   });
 
+  it('supports a Windows host with only MicroVM', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _setWindowsBackendDetectors(
+      () => [{ backend: 'microvm', capabilities: [], warnings: [] }],
+      () => false,
+    );
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.reason, '');
+    assert.deepStrictEqual(support.availableMethods, ['microvm']);
+  });
+
+  it('refreshes MicroVM availability without rerunning the cached Windows probe', { skip: !isWindows }, () => {
+    let available = false;
+    let probeCalls = 0;
+    _setProbeRunner(() => {
+      probeCalls++;
+      return JSON.stringify({ probes: { baseContainerApiPresent: false } });
+    });
+    _setWindowsBackendDetectors(
+      () => available ? [{ backend: 'microvm', capabilities: [], warnings: [] }] : [],
+      () => false,
+    );
+    const absent = getPlatformSupport();
+    assert.strictEqual(absent.isSupported, false);
+    assert.deepStrictEqual(absent.availableMethods, []);
+    available = true;
+    const present = getPlatformSupport();
+    assert.strictEqual(present.isSupported, true);
+    assert.deepStrictEqual(present.availableMethods, ['microvm']);
+    available = false;
+    const removed = getPlatformSupport();
+    assert.strictEqual(removed.isSupported, false);
+    assert.deepStrictEqual(removed.availableMethods, []);
+    assert.strictEqual(probeCalls, 1);
+  });
+
   it('retries failed native Windows discovery and reports its cause', { skip: !isWindows }, () => {
     let calls = 0;
     _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
@@ -441,7 +478,7 @@ describe('getPlatformSupport probe integration', () => {
     assert.strictEqual(support.isSupported, true);
     assert.deepStrictEqual(support.availableMethods, ['wslc']);
     assert.strictEqual(getPlatformSupport(), support);
-    assert.strictEqual(calls, 2);
+    assert.strictEqual(calls, 3);
   });
 
   it('preserves historical V1 platform tiers', { skip: !isWindows }, () => {

@@ -75,6 +75,7 @@ struct WindowsPlatformAvailability {
     process_container: bool,
     wslc: bool,
     isolation_session: bool,
+    microvm: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -90,6 +91,7 @@ fn windows_platform_support_with(availability: WindowsPlatformAvailability) -> P
             ContainmentBackend::IsolationSession,
             availability.isolation_session,
         ),
+        (ContainmentBackend::MicroVm, availability.microvm),
     ] {
         if available {
             available_methods.push(backend.wire_name().to_string());
@@ -166,9 +168,9 @@ where
 /// `mxc-sdk` library can actually run. On Linux both `bubblewrap` and `lxc` are
 /// reported when present, and either one alone makes the host supported. On
 /// Windows the native capability probe supplies isolation and UI capabilities,
-/// and `wslc` is reported when the host has the WSL Container runtime (requires
-/// the `wslc` feature). The broader host-capability set (backends the host can
-/// run but the SDK cannot launch) is reported separately by
+/// `wslc` is reported when its runtime is available, and `microvm` is reported
+/// when its development JSON backend is available. The broader host-capability
+/// set (backends the host can run but the SDK cannot launch) is reported separately by
 /// [`available_backends`](crate::v1::available_backends).
 ///
 /// Every probe here answers "is the tooling usable", not "may this process use
@@ -213,6 +215,7 @@ pub fn platform_support() -> PlatformSupport {
             process_container: crate::process_container_common::base_container_runner::BaseContainerRunner::is_base_container_api_present(),
             wslc: wslc_available(),
             isolation_session: isolation_session_present(),
+            microvm: crate::mxc_engine::probe::microvm_host_available(),
         })
     }
 
@@ -322,23 +325,26 @@ mod tests {
     fn windows_support_requires_an_available_backend() {
         use super::{windows_platform_support_with, WindowsPlatformAvailability};
 
-        let cases: &[(bool, bool, bool, &[&str])] = &[
-            (false, false, false, &[]),
-            (true, false, false, &["processcontainer"]),
-            (false, true, false, &["wslc"]),
-            (false, false, true, &["isolation_session"]),
+        let cases: &[(bool, bool, bool, bool, &[&str])] = &[
+            (false, false, false, false, &[]),
+            (true, false, false, false, &["processcontainer"]),
+            (false, true, false, false, &["wslc"]),
+            (false, false, true, false, &["isolation_session"]),
+            (false, false, false, true, &["microvm"]),
             (
                 true,
                 true,
                 true,
-                &["processcontainer", "wslc", "isolation_session"],
+                true,
+                &["processcontainer", "wslc", "isolation_session", "microvm"],
             ),
         ];
-        for &(process_container, wslc, isolation_session, expected) in cases {
+        for &(process_container, wslc, isolation_session, microvm, expected) in cases {
             let support = windows_platform_support_with(WindowsPlatformAvailability {
                 process_container,
                 wslc,
                 isolation_session,
+                microvm,
             });
             assert_eq!(support.available_methods, expected);
             assert_eq!(support.is_supported, !expected.is_empty());

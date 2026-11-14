@@ -107,7 +107,9 @@ $testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @(
     '--test', 'isolation_session', '--test', 'sdk_helpers',
     '--test', 'streaming_processcontainer', '--no-run'))
 $probeArtifacts = Invoke-CargoBuild (@('build') + $sdkPackage + @('--example', 'sta_probe'))
-$nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session,wslc') |
+$nativeFeatures = 'isolation_session,wslc'
+if ($Architecture -eq 'x64') { $nativeFeatures += ',mxc-sdk/microvm' }
+$nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', $nativeFeatures) |
     Where-Object { $_.target.name -eq 'mxc_ffi' } |
     ForEach-Object { $_.filenames } |
     Where-Object { [IO.Path]::GetExtension($_) -eq '.dll' } |
@@ -143,10 +145,16 @@ $publish = @(
     '-c', 'Release', '-f', 'net10.0', '-r', "win-$Architecture", '-p:MxcWithIsolationSession=true', '-p:MxcWithWslc=true',
     '--self-contained', 'true', '-o', $dotnetOut, '--nologo'
 )
+if ($Architecture -eq 'x64') { $publish += '-p:MxcWithMicrovm=true' }
 if ($NuGetSource) {
     $publish += @('--source', $NuGetSource)
 }
 Invoke-Checked 'dotnet publish' { dotnet @publish }
+if ($Architecture -eq 'x64') {
+    $testNative = Join-Path $srcRoot "target\dotnet-test-support\$triple\debug\mxc_ffi.dll"
+    if (-not (Test-Path -LiteralPath $testNative -PathType Leaf)) { throw 'MicroVM test-support DLL is missing.' }
+    Copy-Item -LiteralPath $testNative -Destination (Join-Path $dotnetOut 'mxc_ffi.dll') -Force
+}
 
 Copy-Item -LiteralPath $WxcExecPath -Destination (New-Directory (Join-Path $OutputDirectory "bin\$Architecture"))
 
@@ -182,7 +190,7 @@ $helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helper
     -SourceDirectory (Join-Path $repoRoot 'tests\scripts') -ScriptsDirectory $scriptsOut)
 
 $integrationOut = New-Directory (Join-Path $OutputDirectory 'sdk-integration')
-Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\dev.test.js'), (Join-Path $integrationRoot 'dist\wslc-state-aware.test.js'), (Join-Path $integrationRoot 'dist\wslc-e2e.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
+Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\dev.test.js'), (Join-Path $integrationRoot 'dist\wslc-state-aware.test.js'), (Join-Path $integrationRoot 'dist\wslc-e2e.test.js'), (Join-Path $integrationRoot 'dist\nvx-json.test.js'), (Join-Path $integrationRoot 'dist\packaged-runtime-test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
 Copy-Item -LiteralPath (Join-Path $integrationRoot 'package.json'), (Join-Path $integrationRoot 'run-tests.js') -Destination $integrationOut
 # Stages the SDK built above in place of the installed copy.
 $modulesOut = New-Directory (Join-Path $integrationOut 'node_modules')
@@ -197,6 +205,20 @@ foreach ($name in 'bin', 'dist', 'node_modules', 'package.json', 'LICENSE.md') {
     }
 }
 
+if ($Architecture -eq 'x64') {
+    $nvxRuntime = Join-Path (Split-Path -Parent $nativeLibrary) 'aci-edge-sandboxes'
+    if (-not (Test-Path -LiteralPath (Join-Path $nvxRuntime 'bundle-manifest.json') -PathType Leaf)) {
+        throw "The MicroVM build did not stage its runtime at $nvxRuntime."
+    }
+    Copy-Item -LiteralPath $nvxRuntime -Destination $dotnetOut -Recurse -Force
+    $nestedRuntime = Join-Path $sdkOut 'node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64'
+    if (Test-Path -LiteralPath $nestedRuntime) { Remove-Item -LiteralPath $nestedRuntime -Recurse -Force }
+    $runtimePackage = New-Directory (Join-Path $modulesOut '@microsoft\mxc-sdk-nvx-runtime-win32-x64')
+    $runtimeSource = Join-Path $repoRoot 'sdk\node-nvx-runtime'
+    Copy-Item -LiteralPath (Join-Path $runtimeSource 'package.json'), (Join-Path $runtimeSource 'README.md') -Destination $runtimePackage
+    Copy-Item -LiteralPath $nvxRuntime -Destination $runtimePackage -Recurse -Force
+}
+
 $manifest = [ordered]@{
     format_version = 1
     produced_at    = [DateTime]::UtcNow.ToString('o')
@@ -208,6 +230,7 @@ $manifest = [ordered]@{
     triplet        = $triple
     features       = @('isolation_session', 'wslc', 'dotnetsdk', 'node-sdk-integration')
 }
+if ($Architecture -eq 'x64') { $manifest['features'] += 'microvm' }
 if ($Package) {
     $manifest['package'] = $Package
 }
@@ -238,6 +261,8 @@ $required = @(
     'sdk-integration\dist\dev.test.js',
     'sdk-integration\dist\wslc-state-aware.test.js',
     'sdk-integration\dist\wslc-e2e.test.js',
+    'sdk-integration\dist\nvx-json.test.js',
+    'sdk-integration\dist\packaged-runtime-test.js',
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wslcsdk.dll",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc-wslc-gateway.tar",
@@ -245,6 +270,15 @@ $required = @(
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
     'test_scripts\run_isolation_session_resize_smoke.ps1'
 )
+if ($Architecture -eq 'x64') {
+    $required += @(
+        'dotnet\aci-edge-sandboxes\bundle-manifest.json',
+        'dotnet\aci-edge-sandboxes\bin\aci_edge_agent.dll',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\package.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bundle-manifest.json',
+        'sdk-integration\node_modules\@microsoft\mxc-sdk-nvx-runtime-win32-x64\aci-edge-sandboxes\bin\aci_edge_agent.dll'
+    )
+}
 $required += @($helperPaths | ForEach-Object { Join-Path 'test_scripts' $_ })
 foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $OutputDirectory $relativePath) -PathType Leaf)) {
@@ -309,6 +343,9 @@ Assert-Discovery '.NET exact-JSON IsolationSession lifecycle tests' 'MxcLifecycl
 Assert-Discovery '.NET exact-JSON WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
 }
+Assert-Discovery '.NET NVX JSON lifecycle tests' 'MxcLifecycleNvxE2ETests\.DevJson_NvxLifecycleCaptureAndLiveStreams' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleNvxE2ETests'
+}
 Assert-Discovery '.NET WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
 }
@@ -332,6 +369,8 @@ foreach ($test in @(
 }
 Push-Location $integrationOut
 $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
+$previousNvx = $env:MXC_ENABLE_NVX_TESTS
+$env:MXC_ENABLE_NVX_TESTS = '0'
 try {
     Assert-Discovery 'Node SDK integration suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/isolation-session-state-aware.test.js
@@ -339,8 +378,11 @@ try {
     Assert-Discovery 'Node ProcessContainer suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/windows-process-container.test.js
     }
-    Assert-Discovery 'Node exact-JSON creation suite' 'V1.Dev spawnWithPtyJson supports an interactive terminal' {
+    Assert-Discovery 'Node exact-JSON creation suite' '(?s)(?=.*V1.Dev spawnWithPtyJson supports an interactive terminal)(?=.*V1.Dev installs both npm packages and discovers NVX without overrides)' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/dev.test.js
+    }
+    Assert-Discovery 'Node NVX JSON lifecycle suite' 'V1.Dev NVX JSON lifecycle capture, live streams and overflow recovery' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/nvx-json.test.js
     }
     Assert-Discovery 'Node WSLC lifecycle suite' 'WSLC state-aware lifecycle E2E' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-state-aware.test.js
@@ -369,6 +411,7 @@ try {
 }
 finally {
     Remove-Item Env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS
+    [Environment]::SetEnvironmentVariable('MXC_ENABLE_NVX_TESTS', $previousNvx)
     Pop-Location
 }
 

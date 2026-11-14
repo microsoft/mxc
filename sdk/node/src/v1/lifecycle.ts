@@ -143,7 +143,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions,
   apiName: string,
-  capture = false,
+  forRun = false,
 ): Promise<MxcProcess> {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
@@ -151,7 +151,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
     false,
     request.timeoutMs,
-    capture,
+    forRun,
   );
 }
 

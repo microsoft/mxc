@@ -60,12 +60,44 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm pack
+
+      - name: Stage optional NVX runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mv bin/x64/aci-edge-sandboxes ../node-nvx-runtime/aci-edge-sandboxes
+          rm -rf bin/*/aci-edge-sandboxes bin/*/symbols
+
+      - name: Pack base SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(npm pack --silent)"
+          contents="$(tar -tzf "$package")"
+          if [[ "$contents" == *aci-edge-sandboxes* ]]; then
+            echo "Base SDK package unexpectedly contains NVX runtime assets" >&2
+            exit 1
+          fi
+
+      - name: Pack optional NVX runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp ../../LICENSE.md ../node-nvx-runtime/
+          (cd ../node-nvx-runtime && npm pack)
 
       - name: Upload SDK package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-packages
           path: sdk/node/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload optional NVX runtime package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-packages-nvx-runtime
+          path: sdk/node-nvx-runtime/*.tgz
           if-no-files-found: error
           retention-days: 1
