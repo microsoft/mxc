@@ -7,9 +7,10 @@ use schemars::{gen::SchemaGenerator, JsonSchema};
 use serde_json::{json, Value};
 
 use super::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, MicroVmProvisionRequest,
-    OneShotRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
-    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
+    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, KataProvisionRequest,
+    MicroVmProvisionRequest, OneShotRequest, StartRequest, StopRequest,
+    WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest, WslcProvisionRequest,
+    WslcProvisionSessionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -40,6 +41,7 @@ fn provision_dispatch(
     isolation_session: Value,
     microvm: Value,
     wslc: Value,
+    kata: Value,
     w365_agents: Value,
 ) -> Value {
     branch(
@@ -55,9 +57,13 @@ fn provision_dispatch(
                     discriminator("containment", "wslc"),
                     wslc,
                     branch(
-                        discriminator("containment", "w365_agents"),
-                        w365_agents,
-                        Value::Bool(false),
+                        discriminator("containment", "kata"),
+                        kata,
+                        branch(
+                            discriminator("containment", "w365_agents"),
+                            w365_agents,
+                            Value::Bool(false),
+                        ),
                     ),
                 ),
             ),
@@ -175,6 +181,7 @@ pub fn development_schema() -> Value {
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
     let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
+    let kata = subschema::<KataProvisionRequest>(&mut generator);
     let w365_agents = subschema::<super::W365AgentsProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
@@ -187,6 +194,7 @@ pub fn development_schema() -> Value {
         isolation_session,
         microvm,
         wslc,
+        kata,
         w365_agents,
     );
     let state_aware = phase_dispatch(
@@ -228,6 +236,7 @@ mod tests {
         "IsolationSessionProvisionRequest",
         "MicroVmProvisionRequest",
         "WslcProvisionRequest",
+        "KataProvisionRequest",
         "W365AgentsProvisionRequest",
         "StartRequest",
         "ExecRequest",
@@ -249,6 +258,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "provision"),
                 ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
+                ("KataProvisionRequest", "provision"),
                 ("W365AgentsProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
@@ -262,6 +272,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
+                ("KataProvisionRequest", "kata"),
                 ("W365AgentsProvisionRequest", "w365_agents"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],

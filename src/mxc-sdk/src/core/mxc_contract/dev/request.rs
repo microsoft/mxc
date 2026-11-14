@@ -71,6 +71,7 @@ where
 
 fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
     match probe_containment(json)? {
+        Containment::Kata => deserialize(json, "Kata provision").map(ProvisionRequest::Kata),
         Containment::WindowsSandbox => {
             deserialize(json, "Windows Sandbox provision").map(ProvisionRequest::WindowsSandbox)
         }

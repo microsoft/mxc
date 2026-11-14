@@ -16,6 +16,7 @@ fn accepts_every_containment_value() {
         "windows_sandbox",
         "microvm",
         "hyperlight",
+        "kata",
         "isolation_session",
         "wslc",
     ] {

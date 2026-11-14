@@ -10,7 +10,7 @@
 //! never reads it.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
+    ContainmentBackend, IsolationSessionProvisionConfig, KataConfig, MicroVmProvisionConfig,
     W365AgentsProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
@@ -21,6 +21,10 @@ use crate::mxc_common::state_aware_request::Phase;
 pub enum StateAwareProvision {
     /// No configuration differs from a present configuration with no `appId`.
     IsolationSession(Option<IsolationSessionProvisionConfig>),
+    /// The Kata guest root filesystem and hypervisor. The contract requires the
+    /// `kata` section, so unlike the other backends the configuration is never
+    /// absent.
+    Kata(KataConfig),
     /// Windows Sandbox has no backend-specific provision configuration.
     WindowsSandbox,
     /// MicroVM provision configuration.
@@ -36,6 +40,7 @@ impl StateAwareProvision {
     pub fn containment(&self) -> ContainmentBackend {
         match self {
             Self::IsolationSession(_) => ContainmentBackend::IsolationSession,
+            Self::Kata(_) => ContainmentBackend::Kata,
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
             Self::MicroVm(_) => ContainmentBackend::MicroVm,
             Self::Wslc(_) => ContainmentBackend::Wslc,
@@ -204,6 +209,10 @@ mod tests {
                 ContainmentBackend::MicroVm,
             ),
             (StateAwareProvision::Wslc(None), ContainmentBackend::Wslc),
+            (
+                StateAwareProvision::Kata(KataConfig::default()),
+                ContainmentBackend::Kata,
+            ),
         ] {
             let operation = StateAwareOperation::Provision(provision);
             assert_eq!(operation.phase(), Phase::Provision);
