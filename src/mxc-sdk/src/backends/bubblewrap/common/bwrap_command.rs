@@ -26,6 +26,7 @@ pub(crate) struct PolicyMount {
     pub source: String,
     pub destination: String,
     pub intent: FsIntent,
+    pub readonly_overlay: Option<String>,
 }
 
 pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
@@ -35,6 +36,7 @@ pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
             destination: mount.path.clone(),
             source: mount.path,
             intent: mount.intent,
+            readonly_overlay: None,
         })
         .collect()
 }
@@ -364,6 +366,7 @@ fn sandbox_link_target(location: &str, target: &str) -> String {
 #[cfg(any(target_os = "linux", test))]
 fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>> {
     let mut layout = Vec::new();
+    let mut overlay_source = None;
     let mut args = mount_args.iter().map(String::as_str);
     while let Some(option) = args.next() {
         let entry = match option {
@@ -371,6 +374,21 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>
             | "--unshare-net" | "--die-with-parent" => continue,
             "--dev" | "--proc" | "--remount-ro" => SandboxEntry::Closed,
             "--tmpfs" => SandboxEntry::Tmpfs,
+            "--overlay-src" => {
+                // The last source is the top layer.
+                overlay_source = Some(args.next()?);
+                continue;
+            }
+            "--ro-overlay" => {
+                let destination = args.next()?;
+                let entry = if overlay_source.take()? == destination {
+                    SandboxEntry::HostBind
+                } else {
+                    SandboxEntry::Closed
+                };
+                layout.push((destination, entry));
+                continue;
+            }
             "--dir" => SandboxEntry::Directory,
             "--symlink" => SandboxEntry::Symlink {
                 target: args.next()?,
@@ -394,7 +412,7 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>
         };
         layout.push((args.next()?, entry));
     }
-    Some(layout)
+    overlay_source.is_none().then_some(layout)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -900,13 +918,23 @@ pub(crate) fn build_args_classified_with_mode(
             }
             // Read-only: already covered by the base ro-bind, but listed
             // explicitly so the intent is clear and it overrides any rw parent.
-            FsIntent::ReadOnly => {
-                args.extend([
+            // The private layer goes below the host source, so directories in
+            // both layers keep the host's owner and permissions.
+            FsIntent::ReadOnly => match &mount.readonly_overlay {
+                Some(layer) => args.extend([
+                    "--overlay-src".into(),
+                    layer.clone(),
+                    "--overlay-src".into(),
+                    mount.source.clone(),
+                    "--ro-overlay".into(),
+                    mount.destination.clone(),
+                ]),
+                None => args.extend([
                     "--ro-bind".into(),
                     mount.source.clone(),
                     mount.destination.clone(),
-                ]);
-            }
+                ]),
+            },
             FsIntent::Denied => {
                 if denied_files.contains(&mount.source) {
                     args.extend([
@@ -2435,6 +2463,7 @@ mod tests {
             source: path.into(),
             destination: path.into(),
             intent,
+            readonly_overlay: None,
         }
     }
 
@@ -2729,12 +2758,22 @@ mod tests {
     }
 
     #[test]
+    fn links_in_a_readonly_overlay_keep_the_host_alias_layout() {
+        let mut parent = mount("/data", FsIntent::ReadOnly);
+        parent.readonly_overlay = Some("/private/deny-mountpoints".into());
+        let plan = plan_for(&[parent], &[], &[aliased("/data/alias", "/data/project")]);
+        assert!(plan.args.is_empty());
+        assert!(plan.unavailable.is_empty());
+    }
+
+    #[test]
     fn links_inside_a_bind_of_another_host_path_are_unavailable() {
         let mounts = [
             PolicyMount {
                 source: "/var/run/app".into(),
                 destination: "/run/app".into(),
                 intent: FsIntent::ReadWrite,
+                readonly_overlay: None,
             },
             mount("/data/project", FsIntent::ReadWrite),
         ];
@@ -2801,13 +2840,15 @@ mod tests {
 
     #[test]
     fn an_unknown_mount_option_makes_every_grant_link_unavailable() {
-        let layout: Vec<String> = ["--overlay-src", "/data", "--tmpfs", "/tmp"]
-            .map(String::from)
-            .into();
-        let grant = aliased("/home/alice/app", "/data/repos/app");
-        let plan = plan_grant_links(&layout, std::slice::from_ref(&grant));
-        assert_eq!(plan.args, Vec::<String>::new());
-        assert_eq!(plan.unavailable, grant.links);
+        for option in ["--unknown-mount", "--overlay-src"] {
+            let layout: Vec<String> = [option, "/data", "--tmpfs", "/tmp"]
+                .map(String::from)
+                .into();
+            let grant = aliased("/home/alice/app", "/data/repos/app");
+            let plan = plan_grant_links(&layout, std::slice::from_ref(&grant));
+            assert_eq!(plan.args, Vec::<String>::new());
+            assert_eq!(plan.unavailable, grant.links);
+        }
     }
 
     #[test]

@@ -572,6 +572,10 @@ public static class MxcContainer
     public static MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);
+
+    public static MxcProcess SpawnWithExtendedOptions(
+        ContainerRequest request,
+        SpawnExtendedOptions? options = null);
 }
 ```
 
@@ -1312,6 +1316,34 @@ public sealed class SpawnWithPtyOptions
 ```
 
 
+## `Microsoft.Mxc.Sdk.V1.SpawnStdio`
+
+How `SpawnWithExtendedOptions` connects the workload's standard streams.
+
+```csharp
+public enum SpawnStdio
+{
+    Pipes = 0,
+    Inherit = 1,
+}
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.SpawnExtendedOptions`
+
+Invocation controls for `SpawnWithExtendedOptions`.
+
+```csharp
+public sealed class SpawnExtendedOptions
+{
+    public SpawnExtendedOptions();
+
+    public TelemetryConfig? Telemetry { get; set; }
+    public SpawnStdio Stdio { get; set; }
+}
+```
+
+
 ## `Microsoft.Mxc.Sdk.V1.StartOptions`
 
 Invocation controls for starting a provisioned container.
@@ -1478,7 +1510,7 @@ public enum TelemetryPolicyState
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```csharp
 public sealed class TelemetryConfig

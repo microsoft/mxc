@@ -190,7 +190,8 @@ function Invoke-ProcessContainerStreamingTests {
         Assert-File -Path $file
     }
 
-    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes',
+        'inherited_stdio_processcontainer_uses_caller_stdio') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
         $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
@@ -211,7 +212,8 @@ function Invoke-ProcessContainerStreamingTests {
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
-                'DevJson_CapturesOutputAndStreamsInput')
+                'DevJson_CapturesOutputAndStreamsInput',
+                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
@@ -222,7 +224,9 @@ function Invoke-ProcessContainerStreamingTests {
             'public tool discovery allows tool reads but denies sibling private files',
             'V1.Dev runJson captures output and exit status',
             'V1.Dev spawnJson supports bidirectional pipes',
-            'V1.Dev spawnWithPtyJson supports an interactive terminal'
+            'V1.Dev spawnWithPtyJson supports an interactive terminal',
+            'spawnWithExtendedOptions with inherited stdio uses the calling process stdio',
+            'V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio'
         )
         Push-Location $nodeSuiteRoot
         try {
@@ -458,15 +462,22 @@ function Invoke-MicroVmTests {
     $scenarios = [ordered]@{
         'facade' = 'VM_EXECUTED facade sequential '
         'SDK JSON capture' = 'VM_EXECUTED SDK JSON binary capture timeout limit and cleanup'
-        'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem '
+        'SDK JSON lifecycle' = 'VM_EXECUTED SDK JSON lifecycle clone start state reuse live-owner rejection and adoption'
+        'SDK clone cleanup' = 'VM_EXECUTED SDK JSON lifecycle same-process clone cleanup lease release and reuse'
+        'snapshot memory' = 'VM_EXECUTED snapshot memory explicit 256 clone and 512 resource cold boot guest sizing both modes'
+        'executor lifecycle' = 'VM_EXECUTED executor lifecycle provision/dry-run clone start cross-process exec and cleanup'
+        'executor platform snapshots' = 'VM_EXECUTED executor platform snapshot NIC/noNIC clones stable templates and isolated VMs'
+        'SDK platform snapshots' = 'VM_EXECUTED SDK JSON platform snapshot repeated capture/streaming clones and isolation'
+        'snapshot fallback warnings' = 'VM_EXECUTED SDK JSON platform snapshot cold fallback capture/streaming warnings lifecycle diagnostics and recovery'
+        'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup confirmed clones'
         'executor' = 'VM_EXECUTED executor sequential '
-        'executor image reuse' = 'VM_EXECUTED executor registered-image reuse offline and concurrent'
+        'executor image reuse' = 'VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation'
         'executor configs' = 'VM_EXECUTED executor configs '
-        'executor interruption' = 'VM_EXECUTED executor console interruption '
-        'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
-        'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges'
-        'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls'
-        'network proxy' = 'VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic'
+        'executor interruption' = 'VM_EXECUTED executor console interruption capture/startup/execution/owned-vmm/cleanup'
+        'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement confirmed clones'
+        'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges confirmed clones'
+        'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls confirmed clones'
+        'network proxy' = 'VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic confirmed clones'
     }
     foreach ($scenario in $scenarios.Keys) {
         if (-not $output.Contains($scenarios[$scenario])) {

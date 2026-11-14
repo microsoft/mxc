@@ -54,9 +54,9 @@ Captured execution drains both streams concurrently. Output-read failures are
 returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
-Creation takes `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions` after
-the request. `SpawnWithPtyOptions.size` carries initial dimensions and defaults
-to 24 rows by 80 columns.
+Creation takes `RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or
+`SpawnExtendedOptions` after the request. `SpawnWithPtyOptions.size`
+carries initial dimensions and defaults to 24 rows by 80 columns.
 
 Set the request's typed `Containment` when a specific backend is required.
 Shared restrictions remain on `ContainerRequest`; backend-specific settings
@@ -120,7 +120,7 @@ command started this way reads end-of-file on stdin;
 `v1::container::spawn_in_container_with_stdin` gives it a writable stdin.
 `v1::container::spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
-Attached execution is not exposed by the Rust SDK. Lifecycle operations and
+Attached execution in an existing container is not exposed by the Rust SDK. Lifecycle operations and
 existing-container execution are synchronous in Rust. Backend support and phase-specific requirements are described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
@@ -157,6 +157,25 @@ Seatbelt rejects PTY mode with `guiAccess`.
 applications must use their own completion protocol. Untaken merged output is
 drained and discarded without waiting indefinitely for descendants that keep
 the terminal open. Ordinary `spawn` continues to use separate pipes.
+
+`v1::spawn_with_extended_options` takes `SpawnExtendedOptions`, which can
+gain fields in V1. Its default `SpawnStdio::Pipes` behaves like `spawn`.
+`SpawnStdio::Inherit` attaches the workload to the calling process's own
+stdin, stdout, and stderr, such as a console, pseudo-console, or pipes the
+caller already set up; the returned `MxcProcess` has no streams to take, and
+ProcessContainer, Bubblewrap, and Seatbelt support it. The options and the
+enum are `#[non_exhaustive]`: start from `Default::default()` and assign fields.
+
+```rust,no_run
+use mxc_sdk::v1::{self, SpawnStdio, SpawnExtendedOptions};
+
+let mut options = SpawnExtendedOptions::default();
+options.stdio = SpawnStdio::Inherit;
+let mut process = v1::spawn_with_extended_options(v1::ContainerRequest::new("echo hi"), options)?;
+process.wait()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
@@ -173,10 +192,12 @@ features. See the backend documentation under
 host prerequisites and enforcement details.
 
 Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
-leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
-explicitly disables it. Opt-in remains
-subject to MXC's persisted user consent and administrative policy.
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`, not on
+`ContainerRequest`. These preferences remain accepted but do not control the
+four Required events. On eligible Windows builds, all supported request
+contracts collect Required events regardless of omission, `enabled: Some(false)`,
+consent, or policy. Consent-management APIs retain their stored-state behavior;
+they do not disable Required collection. See [Telemetry](../../docs/telemetry.md).
 
 Filesystem discovery helpers and their result/options types live under
 `mxc_sdk::v1::policy::filesystem`. They take `environment: Option<&[(String, String)]>`;

@@ -117,13 +117,14 @@ if (-not $nativeLibrary) {
 }
 $wslcDaemon = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'mxc-sdk', '--features', 'wslc', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
 
-# The wslc build feature stages the WSLC SDK library beside mxc_ffi.
+# The wslc build feature stages the WSLC SDK library and gateway image beside mxc_ffi.
 $wslcSdk = Join-Path (Split-Path -Parent $nativeLibrary) 'wslcsdk.dll'
+$wslcGateway = Join-Path (Split-Path -Parent $nativeLibrary) 'mxc-wslc-gateway.tar'
 
 $sdkBin = New-Directory (Join-Path $nodeSdkRoot "bin\$Architecture")
 $retiredPlm = Join-Path $sdkBin 'plm.exe'
 if (Test-Path -LiteralPath $retiredPlm) { Remove-Item -LiteralPath $retiredPlm }
-Copy-Item -LiteralPath $WxcExecPath, $nativeLibrary, $wslcDaemon, $wslcSdk -Destination $sdkBin -Force
+Copy-Item -LiteralPath $WxcExecPath, $nativeLibrary, $wslcDaemon, $wslcSdk, $wslcGateway -Destination $sdkBin -Force
 foreach ($project in $nodeSdkRoot, $integrationRoot) {
     Push-Location $project
     try {
@@ -218,6 +219,7 @@ $required = @(
     'dotnet\mxc_ffi.dll',
     'dotnet\wxc-wslc-daemon.exe',
     'dotnet\wslcsdk.dll',
+    'dotnet\mxc-wslc-gateway.tar',
     'node\node.exe',
     'node\LICENSE',
     'sdk-integration\package.json',
@@ -229,6 +231,7 @@ $required = @(
     'sdk-integration\dist\wslc-e2e.test.js',
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wslcsdk.dll",
+    "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc-wslc-gateway.tar",
     'test_scripts\run_isolation_session_tests.ps1',
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
     'test_scripts\run_isolation_session_resize_smoke.ps1'
@@ -268,7 +271,8 @@ foreach ($test in 'dev_json_one_shot_pty_supports_interactive_input', 'dev_json_
 Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-helpers-tests.exe') --list
 }
-foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes',
+    'inherited_stdio_processcontainer_uses_caller_stdio') {
     Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
         & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
     }

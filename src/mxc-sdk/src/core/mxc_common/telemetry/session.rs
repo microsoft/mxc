@@ -108,7 +108,7 @@ pub fn start_with_learning_mode(
     resume(SessionContext {
         session_id: id,
         learning_mode,
-        critical_events: source_contract == Some(ContractVersion::V1_1_0Alpha),
+        critical_events: super::uses_required_events(source_contract),
         disabled: false,
     })
 }
@@ -297,7 +297,7 @@ mod tests {
         ] {
             let mut logger = Logger::new(Mode::Buffer);
             let _scope = start(true, "", source_contract, &mut logger);
-            let expected_critical = source_contract == Some(ContractVersion::V1_1_0Alpha);
+            let expected_critical = source_contract.is_some();
             assert_eq!(critical_events(), expected_critical);
             let id = current().expect("random session");
             let context = capture();
@@ -414,11 +414,11 @@ mod tests {
                     let mut logger = Logger::new(Mode::Buffer);
                     let expected_critical = worker % 2 == 0;
                     let contract = if expected_critical {
-                        ContractVersion::V1_1_0Alpha
+                        Some(ContractVersion::V1_0_0)
                     } else {
-                        ContractVersion::V1_0_0
+                        None
                     };
-                    let _scope = start(true, "", Some(contract), &mut logger);
+                    let _scope = start(true, "", contract, &mut logger);
                     let id = current().unwrap();
                     barrier.wait();
                     assert_eq!(current(), Some(id));

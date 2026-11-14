@@ -107,6 +107,7 @@
 //! | **capture** | [`v1::run`] | [`v1::container::run_in_container`] | captured stdout and stderr |
 //! | **handle**  | [`v1::spawn`] | [`v1::container::spawn_in_container`] | separate live pipes |
 //! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
+//! | **inherited** | [`v1::spawn_with_extended_options`] with [`v1::SpawnStdio::Inherit`] | — | the caller's own stdin, stdout, and stderr |
 //!
 //! [`v1::container::provision_container`], [`v1::container::start_container`],
 //! [`v1::container::stop_container`], and
@@ -129,6 +130,12 @@
 //! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
 //! an existing IsolationSession container. Unsupported backends reject the
 //! request before creating a sandbox.
+//!
+//! [`v1::spawn_with_extended_options`] takes extensible options. With
+//! [`v1::SpawnStdio::Inherit`] it attaches the workload to the calling
+//! process's own stdin, stdout, and stderr, such as a terminal or pseudo-console
+//! the caller already set up; ProcessContainer, Bubblewrap, and Seatbelt support
+//! that mode.
 //!
 //! Policy and operational warnings are available through [`MxcProcess::warnings`]
 //! and [`ExecutionResult::warnings`]. These include security warnings, network rules
@@ -176,6 +183,9 @@ pub use backend_modules::windows_sandbox::lifecycle as windows_sandbox_lifecycle
 #[doc(hidden)]
 #[cfg(all(target_os = "windows", feature = "wslc"))]
 pub use backend_modules::wslc::common as wslc_common;
+#[doc(hidden)]
+#[cfg(all(target_os = "windows", feature = "wslc"))]
+pub use backend_modules::wslc::gateway_policy as wslc_gateway_policy;
 #[doc(hidden)]
 pub use core_modules::learning_mode_core;
 #[doc(hidden)]
@@ -233,8 +243,8 @@ pub mod v1 {
     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
     pub use crate::options::{
         DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
-        SpawnInContainerOptions, SpawnInContainerWithPtyOptions, SpawnOptions, SpawnWithPtyOptions,
-        StartOptions, StopOptions, TelemetryConfig,
+        SpawnExtendedOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
+        SpawnOptions, SpawnStdio, SpawnWithPtyOptions, StartOptions, StopOptions, TelemetryConfig,
     };
 
     /// V1 telemetry consent administration.
@@ -357,6 +367,19 @@ pub mod v1 {
             .and_then(MxcPtyProcess::new)
     }
 
+    /// Spawn a [`ContainerRequest`] with stdio and other controls chosen in [`SpawnExtendedOptions`].
+    pub fn spawn_with_extended_options(
+        request: ContainerRequest,
+        options: SpawnExtendedOptions,
+    ) -> Result<MxcProcess, Error> {
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
+        match options.stdio {
+            SpawnStdio::Pipes => crate::mxc_engine::spawn_execution_request(&prepared.inner, false),
+            SpawnStdio::Inherit => crate::mxc_engine::spawn_with_inherited_stdio(&prepared.inner),
+        }
+        .map(MxcProcess::new)
+    }
+
     /// Run a [`ContainerRequest`] to completion and capture its output.
     ///
     /// Both streams are drained concurrently, so an output-heavy child cannot
@@ -379,6 +402,114 @@ pub mod v1 {
     #[cfg(all(test, target_os = "windows"))]
     mod tests {
         use super::*;
+
+        #[test]
+        fn public_creation_uses_required_telemetry_without_opt_in() {
+            use crate::mxc_common::telemetry::{self, events::test_sink};
+
+            let store = tempfile::tempdir().unwrap();
+            let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+            env.set_policy_value(0);
+            telemetry::consent::set_consent(false, "test").unwrap();
+            let _lock = test_sink::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            test_sink::install();
+
+            for enabled in [None, Some(false)] {
+                let request = ContainerRequest {
+                    containment: Containment::Bubblewrap,
+                    ..ContainerRequest::new("true")
+                };
+                let error = run(
+                    request,
+                    RunOptions {
+                        telemetry: enabled.map(|enabled| TelemetryConfig {
+                            enabled: Some(enabled),
+                        }),
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+
+                let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                let starts = test_sink::take_starts();
+                let ends = test_sink::take_executions();
+                let errors = test_sink::take_errors();
+                assert_eq!(starts.len(), expected, "enabled={enabled:?}");
+                assert_eq!(ends.len(), expected, "enabled={enabled:?}");
+                assert_eq!(errors.len(), expected, "enabled={enabled:?}");
+                if let Some(start) = starts.first() {
+                    assert_eq!(start.session_id, ends[0].session_id);
+                    assert_eq!(start.session_id, errors[0].session_id);
+                    assert_eq!(start.backend, "bubblewrap");
+                    assert_eq!(ends[0].outcome, "failure");
+                }
+                assert!(test_sink::take_requirements().is_empty());
+                assert!(test_sink::take_verbose().is_empty());
+            }
+            test_sink::clear();
+        }
+
+        #[test]
+        fn json_and_public_creation_preserve_process_attribution_without_telemetry() {
+            use crate::mxc_common::telemetry::{self, events::test_sink};
+
+            let store = tempfile::tempdir().unwrap();
+            let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+            env.set_policy_value(0);
+            telemetry::consent::set_consent(false, "test").unwrap();
+            let _lock = test_sink::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            test_sink::install();
+
+            for typed in [false, true] {
+                for enabled in [None, Some(false)] {
+                    let succeeded = if typed {
+                        run(
+                            ContainerRequest {
+                                containment: Containment::Process,
+                                ..ContainerRequest::new("cmd /c exit 0")
+                            },
+                            RunOptions {
+                                telemetry: enabled.map(|enabled| TelemetryConfig {
+                                    enabled: Some(enabled),
+                                }),
+                            },
+                        )
+                        .is_ok()
+                    } else {
+                        let mut request = serde_json::json!({
+                            "version": "1.0.0",
+                            "containment": "process",
+                            "process": { "commandLine": "cmd /c exit 0" }
+                        });
+                        if let Some(enabled) = enabled {
+                            request["telemetry"] = serde_json::json!({ "enabled": enabled });
+                        }
+                        crate::__ffi::run_json(&request.to_string(), false).is_ok()
+                    };
+                    let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                    let starts = test_sink::take_starts();
+                    let ends = test_sink::take_executions();
+                    assert_eq!(starts.len(), expected, "typed={typed}, enabled={enabled:?}");
+                    assert_eq!(ends.len(), expected, "typed={typed}, enabled={enabled:?}");
+                    if let Some(start) = starts.first() {
+                        assert_eq!(start.sandbox_kind, "process");
+                        assert_eq!(ends[0].sandbox_kind, "process");
+                        assert_eq!(start.backend, "processcontainer");
+                        assert_eq!(
+                            ends[0].outcome,
+                            if succeeded { "success" } else { "failure" }
+                        );
+                    }
+                    test_sink::take_errors();
+                    test_sink::take_requirements();
+                }
+            }
+            test_sink::clear();
+        }
 
         #[test]
         fn public_request_probe_uses_sdk_request_model() {
@@ -431,6 +562,22 @@ pub mod __ffi {
         size.validate()?;
         crate::mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
             .and_then(v1::MxcPtyProcess::new)
+    }
+
+    pub fn spawn_with_extended_options_json(
+        request_json: &str,
+        experimental: bool,
+        stdio: v1::SpawnStdio,
+    ) -> Result<MxcProcess, Error> {
+        match stdio {
+            v1::SpawnStdio::Pipes => {
+                crate::mxc_engine::spawn_one_shot_json(request_json, experimental, false)
+            }
+            v1::SpawnStdio::Inherit => {
+                crate::mxc_engine::spawn_one_shot_inherited_stdio_json(request_json, experimental)
+            }
+        }
+        .map(MxcProcess::new)
     }
 
     /// Run a raw exact-version JSON container request to completion and capture

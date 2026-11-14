@@ -441,7 +441,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| {
                 ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -534,7 +534,7 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v1_0::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| {
                 ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -618,7 +618,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
         }
         crate::mxc_common::config_contract_adapters::dev::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| ParseError::StateAware(error.into_state_aware())),
     }
@@ -1684,7 +1684,6 @@ fn normalize_common_request_ir(
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
-        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
     });
 
     // UI section. Capture presence before the typed mapping consumes `ui`:
@@ -1704,6 +1703,7 @@ fn normalize_common_request_ir(
 
     Ok(ExecutionRequest {
         source_contract: Some(source_contract),
+        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
         container_id,
         env,
         inherit_default_env,
@@ -1727,14 +1727,13 @@ fn normalize_common_request_ir(
     })
 }
 
-/// Normalize checked exact input without retaining source or backend JSON.
+/// Normalize checked lifecycle input without retaining request JSON.
 fn normalize_state_aware(
     input: StateAwareInput,
     logger: &mut Logger,
-    preserve_source_contract: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let (common, operation) = input.into_parts();
-    let mut request = normalize_state_aware_common(
+    let request = normalize_state_aware_common(
         common,
         NormalizationContext {
             phase: operation.phase(),
@@ -1757,20 +1756,17 @@ fn normalize_state_aware(
         },
         logger,
     )?;
-    if !preserve_source_contract {
-        request.source_contract = None;
-    }
     Ok(ParsedStateAwareRequest::new(request, operation))
 }
 
-/// Normalize trusted typed Rust SDK lifecycle input without JSON parsing or
-/// external exact-contract attribution.
+/// Normalize trusted typed Rust SDK lifecycle input, preserving its selected
+/// contract for diagnostics and telemetry without JSON parsing.
 #[doc(hidden)]
 pub fn normalize_sdk_state_aware_request(
     input: crate::mxc_common::sdk_input::SdkStateAwareInput,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    normalize_state_aware(input.into_normalization_input()?, logger, false)
+    normalize_state_aware(input.into_normalization_input()?, logger)
 }
 
 /// Temporary routing view; production derives it exclusively from the operation.
@@ -1978,6 +1974,40 @@ mod tests {
         parse_exact_mxc_request_json(json, &mut test_logger())
     }
 
+    #[test]
+    fn requested_containment_does_not_depend_on_telemetry_presence() {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+            for telemetry in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"enabled": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": "process",
+                    "process": {"commandLine": "echo hello"}
+                });
+                if let Some(telemetry) = &telemetry {
+                    json["telemetry"] = telemetry.clone();
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                assert_eq!(request.requested_sandbox_kind, Some("process"));
+                assert_eq!(request.telemetry.is_some(), telemetry.is_some());
+                assert_eq!(
+                    request.telemetry.as_ref().and_then(|value| value.enabled),
+                    telemetry
+                        .as_ref()
+                        .and_then(|value| value.get("enabled"))
+                        .and_then(serde_json::Value::as_bool)
+                );
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct ProxySnapshot {
         address: Option<String>,
@@ -2013,10 +2043,7 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
-                requested_sandbox_kind: request
-                    .telemetry
-                    .as_ref()
-                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
+                requested_sandbox_kind: request.requested_sandbox_kind,
             }
         }
     }

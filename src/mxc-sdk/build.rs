@@ -13,6 +13,8 @@ mod build_mxc_telemetry;
 #[cfg(feature = "link-wslcsdk")]
 #[path = "build/build_wslc_common.rs"]
 mod build_wslc_common;
+#[path = "build/build_wslc_gateway_image.rs"]
+mod build_wslc_gateway_image;
 #[path = "build/verify_nvx_runtime_signatures.rs"]
 mod verify_nvx_runtime_signatures;
 
@@ -22,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     verify_nvx_runtime_signatures::run()?;
     #[cfg(feature = "link-wslcsdk")]
     build_wslc_common::run();
+    build_wslc_gateway_image::run()?;
     build_mxc_common::run()?;
     build_mxc_build_common::embed_version_info_for_binary(
         "wxc-windows-sandbox-daemon",

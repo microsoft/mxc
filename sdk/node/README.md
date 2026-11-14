@@ -85,7 +85,7 @@ stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
 streams before awaiting completion; any untaken streams are drained internally
 to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`.
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`.
 Execution options do not support `dryRun`.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI
@@ -130,6 +130,29 @@ Unsupported combinations are rejected before sandbox creation.
 ProcessContainer PTY passes `timeoutMs` to `wxc-exec`, but the executor
 channel reports only an exit code: `terminal.wait().timedOut` is `false`
 even if that timeout ended the workload.
+
+## Spawn with this process's own console
+
+`spawnWithExtendedOptions` takes extensible options; its default
+`stdio: 'pipes'` behaves like `spawn`. With `stdio: 'inherit'` it attaches the
+workload to this Node.js process's standard input, output, and error, such as
+a console, pseudo-console, or pipes set up by the parent. MXC allocates no
+pipes or PTY, and the returned `MxcProcess` has no streams to take.
+ProcessContainer, Bubblewrap, and Seatbelt support inherited stdio.
+
+```typescript
+import { spawnWithExtendedOptions } from '@microsoft/mxc-sdk/v1';
+
+const proc = await spawnWithExtendedOptions(
+  { command: 'echo hello', timeoutMs: 30_000 },
+  { stdio: 'inherit' },
+);
+try {
+  console.log(await proc.wait());
+} finally {
+  proc.dispose();
+}
+```
 
 ## Lifecycle API
 
@@ -267,15 +290,19 @@ available after terminal settling; denial-capture fields are populated only
 when the backend produces them.
 
 Creation telemetry is supplied through `telemetry: { enabled: true }` on
-`RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`.
-Omission leaves telemetry disabled; `enabled: false` explicitly disables it.
-Opt-in remains subject to MXC's persisted user consent and administrative policy. Telemetry consent
+`RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`, not
+on `ContainerRequest`.
+These preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `enabled: false`, consent, or policy.
+See [Telemetry](../../docs/telemetry.md). Telemetry consent
 APIs and `getPlatformSupport` are exported from `@microsoft/mxc-sdk/v1`.
 
 `getTelemetryConsentStatus` reads stored/effective consent and policy,
 `requestTelemetryConsent` accepts an application-owned presenter, and
 `withdrawTelemetryConsent` withdraws consent. Each returns a Promise. These
 operations are Windows-only and report `not-applicable` on other platforms.
+Their stored-state behavior is unchanged; they do not disable Required collection.
 
 `getAvailableBackends()` reads native host availability, isolation tiers,
 capabilities, and warnings through in-process `mxc_ffi`. It returns

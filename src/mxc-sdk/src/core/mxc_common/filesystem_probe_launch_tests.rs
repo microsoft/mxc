@@ -39,6 +39,11 @@ mod scenarios {
         let readable = allowed.join("readable");
         let denied = directory.join("denied");
         let marker = allowed.join("workload-ran");
+        let read_only = directory.join("read-only");
+        if stage == "bwrap-missing-denials" {
+            std::fs::create_dir(&read_only).unwrap();
+        }
+        let missing_denied = read_only.join("missing");
         std::fs::write(&readable, b"readable").unwrap();
         std::fs::write(&denied, b"denied").unwrap();
         let target = if matches!(
@@ -46,14 +51,24 @@ mod scenarios {
             "bwrap-denied" | "lxc-denied" | "wslc-overlap"
         ) {
             &denied
+        } else if stage == "bwrap-missing-denials" {
+            &missing_denied
         } else {
             &readable
         };
-        let filesystem = FilesystemPolicy {
-            readwrite_paths: vec![allowed.to_str().unwrap().to_string()],
-            readonly_paths: vec![readable.to_str().unwrap().to_string()],
-            denied_paths: vec![denied.to_str().unwrap().to_string()],
-            ..Default::default()
+        let filesystem = if stage == "bwrap-missing-denials" {
+            FilesystemPolicy {
+                readonly_paths: vec![read_only.to_str().unwrap().to_string()],
+                denied_paths: vec![missing_denied.to_str().unwrap().to_string()],
+                ..Default::default()
+            }
+        } else {
+            FilesystemPolicy {
+                readwrite_paths: vec![allowed.to_str().unwrap().to_string()],
+                readonly_paths: vec![readable.to_str().unwrap().to_string()],
+                denied_paths: vec![denied.to_str().unwrap().to_string()],
+                ..Default::default()
+            }
         };
         assert!(INJECTION.set((stage, target.clone())).is_ok());
         let start = Instant::now();
@@ -265,7 +280,7 @@ mod scenarios {
             "bubblewrap",
             false,
             "bubblewrap_mount_paths_reject_stalls",
-            &["bwrap-denied", "bwrap-granted"],
+            &["bwrap-denied", "bwrap-granted", "bwrap-missing-denials"],
         );
     }
 
