@@ -328,6 +328,19 @@ that can be executed independently.
 > [Container lifecycle architecture](development/architecture/container-lifecycle.md)
 > and [telemetry architecture](development/architecture/telemetry.md).
 
+### IsolationSession Command-Line Quoting
+
+IsolationSession normally runs `process.commandLine` as
+`cmd.exe /c <commandLine>`, without adding quotes around the command.
+When the command starts with `"` (after any leading spaces or tabs), `cmd`
+normally removes the first and last quotes; see `cmd /?` for the exceptions.
+
+Adding an extra pair of outer quotes is a workaround for a known
+IsolationSession command-line quoting bug. A fix is planned for a future
+major release, when IsolationSession will add these quotes automatically.
+When upgrading to that release, remove the extra outer quotes added for this
+workaround; keep quotes required around program paths and arguments.
+
 ### Working Directory
 
 `process.cwd` is optional. When it is set, it is passed to the backend
