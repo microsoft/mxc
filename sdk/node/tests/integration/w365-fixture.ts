@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +31,7 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
     const directory = mkdtempSync(join(tmpdir(), 'mxc-w365-'));
     const certificate = join(directory, 'certificate.pem');
     const key = join(directory, 'key.pem');
+    const config = join(directory, 'openssl.cnf');
     const keys = ['W365A_CONTROLPLANE_URL', 'W365A_CP_TOKEN',
       'W365A_DP_SUFFIX', 'W365A_DP_TOKEN',
       'MXC_W365_TEST_CA', 'MXC_W365_TEST_PORT'] as const;
@@ -73,11 +74,23 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       ).href) as typeof import('./node_modules/@microsoft/mxc-sdk/dist/bindings/native-stdio.js');
       const supportsStreaming = nativeStdio.supportsNativeStdio(
         process.platform, process.versions.node);
+      // Match the native fixture's server profile without host OpenSSL defaults.
+      writeFileSync(config, [
+        '[req]',
+        'distinguished_name=dn',
+        'x509_extensions=server',
+        '[dn]',
+        '[server]',
+        'subjectAltName=DNS:localhost',
+        'basicConstraints=critical,CA:FALSE',
+        'keyUsage=critical,digitalSignature',
+        'extendedKeyUsage=serverAuth',
+        '',
+      ].join('\n'));
       execFileSync(process.env.MXC_W365_TEST_OPENSSL ?? 'openssl', [
-        'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-        '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost',
-        '-addext', 'extendedKeyUsage=serverAuth',
-        '-addext', 'basicConstraints=critical,CA:FALSE',
+        'req', '-config', config, '-x509', '-newkey', 'ec',
+        '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
+        '-subj', '/CN=localhost',
         '-keyout', key, '-out', certificate,
       ], { stdio: 'pipe' });
       server = createServer({ cert: readFileSync(certificate), key: readFileSync(key) },
