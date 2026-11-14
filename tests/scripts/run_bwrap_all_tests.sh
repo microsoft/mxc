@@ -40,18 +40,9 @@ check_line_endings() {
 
 check_line_endings
 
-# Deliberately a non-root suite. Several tests assert that the sandbox drops
-# its capabilities, which only holds when the launcher is unprivileged: under
-# sudo, bwrap runs as real root, CAPBND stays full, and those tests fail for a
-# reason that has nothing to do with the code under test. Refusing up front is
-# far clearer than two misleading failures halfway through.
-#
-# Root-only suites are run directly rather than from here, so that the two
-# requirements never have to be satisfied by the same invocation.
 if [ "$(id -u)" -eq 0 ]; then
     echo "ERROR: run this suite as an unprivileged user, not root."
-    echo "       Tests here assert that the sandbox drops its capabilities,"
-    echo "       which cannot hold when the launcher is already root."
+    echo "       Filesystem permission checks must not inherit root access."
     echo "       Root-only tests are run individually, for example:"
     echo "         sudo bash $SCRIPT_DIR/run_bwrap_inbound_deny_test.sh"
     exit 1
@@ -99,6 +90,7 @@ run_test() {
 }
 
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
+run_test "Bubblewrap Workload Capabilities" "$SCRIPT_DIR/run_bwrap_capabilities_test.sh"
 run_test "Bubblewrap cwd advisory" "$SCRIPT_DIR/run_bwrap_cwd_advisory_test.sh"
 run_test "Bubblewrap Environment" "$SCRIPT_DIR/run_bwrap_environment_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"

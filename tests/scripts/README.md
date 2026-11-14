@@ -137,11 +137,17 @@ overrides are assigned only to child processes, never to the invoking shell.
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
 | `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap`, Python 3 for terminal isolation |
+| `run_bwrap_capabilities_test.sh` | Workload capability removal, read-only mount protection, and supervisor networking in all three modes; CI runs as both root and non-root | `lxc-exec`, Python 3, Bubblewrap network prerequisites |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
 run focused backend suites; the aggregate scripts above are what CI dispatches to.
+
+The Bubblewrap capability test still runs its isolated and proxy cases when
+no suitable host IPv4 address is available for the firewall fixture. It reports
+the firewall case as skipped and returns 77 after the remaining cases, or 1
+if any case fails. CI continues to reject incomplete coverage.
 
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does

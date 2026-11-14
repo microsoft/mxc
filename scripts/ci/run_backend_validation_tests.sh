@@ -57,17 +57,18 @@ case "$backend" in
         # not that the assertion held. Without this the job goes green having
         # verified none of the directional enforcement.
         MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_bwrap_all_tests.sh"
-        # The inbound chain test needs real host CAP_NET_ADMIN to read the
-        # sandbox's network namespace and inject a peer into it, so the non-root
-        # suite above can only report it as skipped. Invoking it separately here
-        # is what makes that security assertion actually run in CI; it must not
-        # be folded into the suite, which asserts the sandbox drops capabilities
-        # and therefore cannot itself run as root.
+
         if ! sudo -n true 2>/dev/null; then
-            echo "Bubblewrap CI requires passwordless sudo to run the inbound" \
-                 "default-deny test; it cannot be verified unprivileged." >&2
+            echo "Bubblewrap CI requires passwordless sudo for root capability" \
+                 "and inbound default-deny tests." >&2
             exit 2
         fi
+        if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
+            bash "$test_script_root/run_bwrap_capabilities_test.sh"; then
+            echo "The Bubblewrap root capability test failed or skipped." >&2
+            exit 1
+        fi
+
         # A skip here means a prerequisite is missing on the runner, not that
         # the assertion passed. Translate it into an explicit failure so the
         # inbound guarantee can never be reported as verified without running.

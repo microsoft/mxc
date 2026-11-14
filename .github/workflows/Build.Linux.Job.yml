@@ -332,6 +332,14 @@ jobs:
           LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
         run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
+      - name: Test Bubblewrap workload capabilities (unprivileged and root)
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: |
+          bash tests/scripts/run_bwrap_capabilities_test.sh
+          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_capabilities_test.sh
+
       - name: Upload binaries
         if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

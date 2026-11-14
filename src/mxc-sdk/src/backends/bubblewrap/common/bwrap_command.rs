@@ -372,6 +372,10 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>
         let entry = match option {
             "--unshare-user" | "--unshare-pid" | "--unshare-ipc" | "--unshare-uts"
             | "--unshare-net" | "--die-with-parent" => continue,
+            "--cap-drop" => {
+                args.next()?;
+                continue;
+            }
             "--dev" | "--proc" | "--remount-ro" => SandboxEntry::Closed,
             "--tmpfs" => SandboxEntry::Tmpfs,
             "--overlay-src" => {
@@ -833,11 +837,9 @@ pub(crate) fn build_args_classified_with_mode(
     if !network_mode.uses_external_userns() {
         args.push("--unshare-user".into());
     }
-    // SECURITY: proxy mode joins the supervisor's user namespace rather than
-    // unsharing, leaving that descriptor open in the workload. It is inert only
-    // because bwrap empties the capability sets before exec — asserted by
-    // run_bwrap_network_proxy_test.sh, explained in
-    // docs/backends/bwrap/bubblewrap-backend.md.
+
+    // Bubblewrap otherwise preserves capabilities for root callers.
+    args.extend(["--cap-drop".into(), "ALL".into()]);
     args.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
             .into_iter()
@@ -1018,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn seccomp_descriptor_precedes_the_command_in_every_network_mode() {
+    fn security_options_precede_the_command_in_every_network_mode() {
         let request = base_request();
         let proxy = ProxyAddress::new("127.0.0.1".into(), 3128);
         for (mode, proxy_address) in [
@@ -1036,7 +1038,13 @@ mod tests {
                 &[],
                 &policy_mounts(&request.policy),
                 true,
-                |_| Vec::new(),
+                |mount_args| {
+                    assert!(
+                        sandbox_layout(mount_args).is_some(),
+                        "{mode:?} capability flags must not invalidate the mount layout"
+                    );
+                    Vec::new()
+                },
             );
             assert_eq!(
                 &args[args.len() - 6..],
@@ -1045,6 +1053,16 @@ mod tests {
             );
             assert_eq!(args.iter().filter(|arg| *arg == "--seccomp").count(), 1);
             assert!(!args.iter().any(|arg| arg == "--add-seccomp-fd"));
+            let command = args.iter().position(|arg| arg == "--").unwrap();
+            assert_eq!(
+                args[..command]
+                    .windows(2)
+                    .filter(|pair| *pair == ["--cap-drop", "ALL"])
+                    .count(),
+                1,
+                "{mode:?} must explicitly drop every workload capability before exec"
+            );
+            assert!(!args.iter().any(|arg| arg == "--cap-add"));
         }
     }
 
