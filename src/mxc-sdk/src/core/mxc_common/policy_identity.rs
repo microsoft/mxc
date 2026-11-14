@@ -42,7 +42,8 @@
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
-//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
+//! | `source_contract` | Contract attribution used only for diagnostics and telemetry. |
+//! | `requested_sandbox_kind` | Caller-requested containment used only for telemetry attribution. |
 //!
 //! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
 //! `windowsSandbox` root keys.
@@ -196,7 +197,9 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::MicroVm(None)
-            | StateAwareProvision::Wslc(None),
+            | StateAwareProvision::Wslc(None)
+            // Pool/account coordinates are not containment policy.
+            | StateAwareProvision::W365Agents(_),
         ) => Value::Null,
 
         StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
@@ -258,6 +261,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         // External contract provenance is diagnostics/telemetry attribution,
         // not enforcement.
         source_contract: _excluded_source_contract,
+        // Requested containment is telemetry attribution, not the resolved policy.
+        requested_sandbox_kind: _excluded_requested_sandbox_kind,
         container_id,
         working_directory,
         script_timeout,
@@ -807,9 +812,10 @@ mod tests {
     fn telemetry_settings_do_not_change_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
+        changed.requested_sandbox_kind = Some("process");
+        assert_eq!(baseline, policy_hash(&changed));
         changed.telemetry = Some(crate::mxc_common::models::TelemetryConfig {
             enabled: Some(true),
-            requested_sandbox_kind: Some("process"),
         });
         assert_eq!(
             baseline,

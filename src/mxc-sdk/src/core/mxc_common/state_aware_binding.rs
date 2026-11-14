@@ -106,6 +106,11 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
         }
     }
 
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    pub(crate) fn operation(&self) -> &BoundStateAwareOperation<B> {
+        &self.operation
+    }
+
     pub(crate) fn into_parts(self) -> (ExecutionRequest, BoundStateAwareOperation<B>) {
         (self.request, self.operation)
     }
@@ -177,6 +182,30 @@ fn incompatible_payload(actual: &ContainmentBackend, backend: &str) -> MxcError 
     MxcError::malformed_request(format!(
         "state-aware {actual:?} operation is incompatible with backend {backend:?}"
     ))
+}
+
+/// Bind W365 provision inputs and ordinary sandbox-addressed operations.
+pub fn bind_w365_agents<B>(
+    parsed: ParsedStateAwareRequest,
+) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = crate::mxc_common::models::W365AgentsProvisionConfig,
+        StartConfig = (),
+        ExecConfig = (),
+        StopConfig = (),
+        DeprovisionConfig = (),
+    >,
+{
+    BoundStateAwareRequest::bind(
+        parsed,
+        ContainmentBackend::W365Agents,
+        "w365",
+        |provision| match provision {
+            StateAwareProvision::W365Agents(config) => Ok(config.flatten()),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+    )
 }
 
 /// Bind an IsolationSession operation without changing configuration presence.

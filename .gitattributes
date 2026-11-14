@@ -4,3 +4,4 @@
 .github/workflows/*.lock.yml linguist-generated=true
 
 *.dll binary
+*.tar binary

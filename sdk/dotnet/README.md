@@ -11,6 +11,8 @@ that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/
 Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
+W365 Dev JSON execution uses the native runtime and output-drain deadline,
+without a second SDK timeout that interrupts service completion.
 
 ## Requirements
 
@@ -25,6 +27,20 @@ installed stable .NET 10.0 SDK feature band. Framework-dependent applications
 require the runtime for their application target; self-contained applications
 include their runtime.
 Backend-specific operating-system requirements still apply.
+
+## MicroVM JSON requests
+
+On Windows x64 with Windows Hypervisor Platform enabled, install the optional
+`Microsoft.Mxc.Sdk.Nvx.Runtime` package at the same version as the SDK. Then:
+
+```csharp
+using Microsoft.Mxc.Sdk.V1.Dev;
+
+var result = await MxcContainer.RunJsonAsync(
+    """{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"process":{"commandLine":"echo hello","timeout":30000}}""",
+    new JsonOptions { Experimental = true });
+Console.WriteLine(result.Stdout);
+```
 
 ## Run to completion
 
@@ -65,12 +81,13 @@ Console.WriteLine($"exit={result.ExitCode}");
 ```
 
 `Spawn` / `SpawnAsync` return a live `MxcProcess` with separate stdin, stdout,
-and stderr streams, plus wait, termination, and disposal operations. A WSLC
-command started this way reads end-of-file on stdin; use `SpawnWithStdin` or
-`SpawnWithStdinAsync` to give it a writable `StandardInput`. Shared filesystem,
-network, and UI restrictions are authored directly on `ContainerRequest`,
-alongside the selected backend configuration. The SDK selects the contract
-version; `ContainerRequest` does not accept a caller-selected schema version.
+and stderr streams, plus wait, termination, and disposal operations. On WSLC,
+`StandardInput` is writable; dispose it to give the command end-of-file.
+Waiting before taking it also gives the command end-of-file. `Run` / `RunAsync`
+give a WSLC command end-of-file. Shared filesystem, network, and UI restrictions
+are authored directly on `ContainerRequest`, alongside the selected backend
+configuration. The SDK selects the contract version; `ContainerRequest` does
+not accept a caller-selected schema version.
 
 `UiPolicy.Disable` defaults to `true`; clipboard and input-injection
 permissions are authored separately.
@@ -80,8 +97,9 @@ SDK-owned nested choice such as `Containment.Process` (the default),
 `Containment.ProcessContainer`, or `Containment.Wslc`. Backend semantics are
 validated by the native engine.
 
-Creation methods accept their own `RunOptions`, `SpawnOptions`, or
-`SpawnWithPtyOptions` after the request. Set `SpawnWithPtyOptions.Size` to
+Creation methods accept their own `RunOptions`, `SpawnOptions`,
+`SpawnWithPtyOptions`, or `SpawnExtendedOptions` after the request.
+Set `SpawnWithPtyOptions.Size` to
 choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellation
 tokens come last.
 
@@ -127,6 +145,24 @@ PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
 canonical mode; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
+
+## Spawn with the caller's own console
+
+`SpawnWithExtendedOptions` takes extensible options; its default
+`SpawnStdio.Pipes` behaves like `Spawn`. With `SpawnStdio.Inherit` it attaches
+the workload to the calling process's standard input, output, and error, such
+as a console, pseudo-console, or pipes the caller already set up. MXC
+allocates no pipes or PTY, and the returned `MxcProcess` has no streams to
+take. ProcessContainer, Bubblewrap, and Seatbelt support inherited stdio.
+
+```csharp
+using Microsoft.Mxc.Sdk.V1;
+
+using var process = MxcContainer.SpawnWithExtendedOptions(
+    new ContainerRequest("cmd.exe /c echo hello") { TimeoutMs = 30_000 },
+    new SpawnExtendedOptions { Stdio = SpawnStdio.Inherit });
+WaitResult result = process.Wait();
+```
 
 ## Lifecycle API
 
@@ -174,14 +210,12 @@ finally
 }
 ```
 
-Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. A
-WSLC command started this way reads end-of-file on stdin; use
-`SpawnInContainerWithStdin` or `SpawnInContainerWithStdinAsync` to give it a
-writable `StandardInput`; waiting on such a process before taking
-`StandardInput` gives the command end-of-file. The
-asynchronous methods are convenience wrappers over native operations and
-support cancellation. Backend and phase-specific policy requirements are
-described in the
+Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. On
+WSLC, `StandardInput` is writable; dispose it to give the command end-of-file.
+Waiting before taking it also gives the command end-of-file.
+`RunInContainer` / `RunInContainerAsync` give a WSLC command end-of-file. The
+asynchronous methods are convenience wrappers over native operations and support
+cancellation. Backend and phase-specific policy requirements are described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
 
@@ -263,16 +297,21 @@ host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
 On Windows, ProcessContainer is reported only when native PSEC is available;
-other backends are detected independently. `MxcContainer.Probe(request)` checks
+other backends are detected independently. Available MicroVM support is
+reported for the development JSON APIs; typed V1 requests cannot select it.
+`MxcContainer.Probe(request)` checks
 request compatibility without creating a container. If native ProcessContainer
 cannot serve the request, `Tier` is null and `Error` explains why; `Probes`
 still contains host capability facts.
 
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
-leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`
-explicitly disables it. Opt-in is still gated by MXC's persisted user consent
-and administrative policy.
+`SpawnOptions`, `SpawnWithPtyOptions`, or `SpawnExtendedOptions`, not on
+`ContainerRequest`. These
+preferences remain accepted but do not control the four Required events.
+On eligible Windows builds, all supported request contracts collect Required
+events regardless of omission, `Enabled = false`, consent, or policy.
+Consent-management APIs retain their stored-state behavior; they do not
+disable Required collection. See [Telemetry](../../docs/telemetry.md).
 
 Filesystem discovery helpers are on `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`
 and return `FilesystemPolicyResult` from the same namespace. They take an

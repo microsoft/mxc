@@ -24,7 +24,9 @@ public static class MxcLifecycle
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(RunInContainerJson), "exec");
         using var process = await Microsoft.Mxc.Sdk.V1.MxcLifecycle.RunBlockingOperationAsync(
-            () => SpawnInContainer(request, timeout, options), late => late.Dispose(), cancellationToken)
+            () => SpawnInContainer(request, timeout, options, capture: true),
+            late => late.Dispose(),
+            cancellationToken)
             .ConfigureAwait(false);
         var (outcome, stdout, stderr) = await process
             .WaitForExitWithOutputAsync(cancellationToken).ConfigureAwait(false);
@@ -42,20 +44,25 @@ public static class MxcLifecycle
     public static MxcProcess SpawnInContainerJson(string json, JsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnInContainerJson), "exec");
-        return SpawnInContainer(request, timeout, options);
+        return SpawnInContainer(request, timeout, options, capture: false);
     }
 
     private static MxcProcess SpawnInContainer(
-        byte[] request, uint? timeout, JsonOptions? options)
+        byte[] request, uint? timeout, JsonOptions? options, bool capture)
     {
+        var experimental = options?.Experimental == true ? 1 : 0;
+        var waitClosesUntakenStdin = capture || DevJsonRequest.TargetsWslc(request);
         unsafe
         {
             fixed (byte* requestPtr = request)
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_exec_state_aware_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
+                var status = capture
+                    ? NativeMethods.mxc_exec_state_aware_for_run_json(
+                        requestPtr, experimental, &handle, &error)
+                    : NativeMethods.mxc_exec_state_aware_json(
+                        requestPtr, experimental, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -67,7 +74,10 @@ public static class MxcLifecycle
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    timeout,
+                    waitClosesUntakenStdin);
             }
         }
     }

@@ -48,6 +48,8 @@ pub enum Containment {
     Bubblewrap,
     /// Kata Containers microVM (experimental).
     Kata,
+    /// Remote Windows 365 container lifecycle operations (experimental).
+    W365Agents,
 }
 
 impl Containment {
@@ -65,6 +67,7 @@ impl Containment {
             "isolation_session" => Self::IsolationSession,
             "bubblewrap" => Self::Bubblewrap,
             "kata" => Self::Kata,
+            "w365_agents" => Self::W365Agents,
             _ => return None,
         })
     }

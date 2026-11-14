@@ -310,9 +310,8 @@ pub struct LifecycleResult {
 
 ## `mxc_sdk::v1::MxcProcess`
 
-A live container process, returned by `v1::spawn`, `v1::spawn_with_stdin`,
-`v1::container::spawn_in_container`, and
-`v1::container::spawn_in_container_with_stdin`.
+A live container process, returned by `v1::spawn` and
+`v1::container::spawn_in_container`.
 
 ```rust
 pub struct MxcProcess {
@@ -612,7 +611,7 @@ impl ExecutionRequest {
 
 ## `mxc_sdk::v1::TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent and policy.
+Compatibility preference; does not control Required telemetry.
 
 ```rust
 pub struct TelemetryConfig {
@@ -764,6 +763,37 @@ Invocation controls for spawning a caller-controlled terminal.
 pub struct SpawnWithPtyOptions {
   pub telemetry: Option<TelemetryConfig>,
   pub size: MxcPtySize,
+}
+```
+
+
+## `mxc_sdk::v1::SpawnStdio`
+
+How `spawn_with_extended_options` connects the workload's stdin, stdout, and stderr.
+
+This enum is `#[non_exhaustive]` so it can gain modes in V1.
+
+```rust
+#[non_exhaustive]
+pub enum SpawnStdio {
+  Pipes, // default
+  Inherit,
+}
+```
+
+
+## `mxc_sdk::v1::SpawnExtendedOptions`
+
+Invocation controls for `spawn_with_extended_options`.
+
+This struct is `#[non_exhaustive]` so it can gain fields in V1. Construct it
+from `Default::default()` and assign fields rather than using a struct literal.
+
+```rust
+#[non_exhaustive]
+pub struct SpawnExtendedOptions {
+  pub telemetry: Option<TelemetryConfig>,
+  pub stdio: SpawnStdio,
 }
 ```
 

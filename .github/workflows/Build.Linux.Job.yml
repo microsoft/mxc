@@ -5,19 +5,31 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.arch }}
+    name: ${{ matrix.arch }} (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             features: hyperlight
+            upload_artifacts: true
+          - arch: x64
+            runner: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+            features: hyperlight
+            upload_artifacts: false
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ''
+            upload_artifacts: true
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ''
+            upload_artifacts: false
     runs-on: ${{ matrix.runner }}
     # A wedged PTY child would otherwise hold the runner for the 6-hour cap.
     timeout-minutes: 45
@@ -50,8 +62,11 @@ jobs:
           workspaces: |
             src -> target
             src/tools/lxc -> target
-          key: ${{ matrix.target }}-v2
+          key: ${{ matrix.runner }}-${{ matrix.target }}-v2
           cache-on-failure: false
+
+      - name: Install Linux TLS build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - name: Install ARM64 cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -157,7 +172,7 @@ jobs:
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version missing_denials; do
             cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
@@ -191,6 +206,22 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
+      - name: Test W365 lifecycle and execution with trusted TLS fixtures
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p mxc-sdk --example w365_execution --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture
+          names="$(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --list)"
+          for case in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture \
+            readiness_contract_fixture execution::native_execution_streams_fixture \
+            execution::native_execution_backpressure_fixture \
+            execution::native_execution_failure_and_disposal_fixture \
+            execution::execution_upgrade_validation_fixture execution::execution_host_output_fixture; do
+            grep -Fxq "$case: test" <<< "$names"
+          done
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target "${{ matrix.target }}" --target-dir target/w365-fixture -- --include-ignored
+
       - name: Test native module lifetime
         working-directory: src
         run: |
@@ -220,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y lxc-utils
+          sudo apt-get install -y lxc
           sudo "target/${{ matrix.target }}/release/mxc-filesystem-probe-tests" --ignored --exact \
             core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::lxc_mount_paths_reject_stalls
 
@@ -234,7 +265,8 @@ jobs:
 
       # These need no LXC installed: the engine tests inject their probes, and
       # the dispatch and FFI pins are refused before a container is created.
-      - name: Test LXC dispatch and discovery
+      # The WSLC gateway runs in a Linux container, so its tests run here.
+      - name: Test LXC dispatch, discovery, and WSLC gateway
         working-directory: src
         shell: bash
         run: |
@@ -268,6 +300,8 @@ jobs:
           run_pinned "Kata refusals" -p mxc-sdk --test streaming_kata kata_refuses_what_it_cannot_enforce_before_creating_anything
           run_pinned "Kata lifecycle refusals" -p mxc-sdk --test streaming_kata kata_lifecycle_refuses_unknown_and_malformed_sandboxes
           run_pinned "Kata FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_kata_backend_only_when_experimental
+          run_pinned "WSLC gateway" -p mxc-wslc-gateway
+          run_pinned "WSLC gateway image" -p mxc-sdk --test wslc_gateway_image
 
           # Hyperlight is a Linux backend only on x64, and the probe reports it
           # from a feature-gated branch the default build never compiles.
@@ -277,6 +311,17 @@ jobs:
             run_pinned "Backend registry (${{ matrix.features }})" \
               --features "${{ matrix.features }}" -p mxc-sdk --lib mxc_engine::backend_registry
           fi
+
+      # The gateway image ships the musl build.
+      - name: Test WSLC gateway on musl
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          target="${target%-gnu}-musl"
+          rustup target add "$target"
+          cargo test --locked --release --target "$target" -p mxc-wslc-gateway
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
@@ -326,6 +371,7 @@ jobs:
           cp "$binary" "target/${{ matrix.target }}/release/streaming_kata"
 
       - name: Upload binaries
+        if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lxc-binaries-${{ matrix.target }}

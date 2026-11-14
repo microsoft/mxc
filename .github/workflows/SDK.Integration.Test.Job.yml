@@ -18,9 +18,13 @@ jobs:
             os_label: windows
             runner: windows-latest
             node_version: 26.8.0
-          - name_label: linux
+          - name_label: linux-ubuntu24.04
             os_label: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            node_version: 24
+          - name_label: linux-ubuntu26.04
+            os_label: linux
+            runner: ubuntu-26.04
             node_version: 24
           - name_label: macos
             os_label: macos
@@ -57,6 +61,13 @@ jobs:
           name: npm-packages
           path: sdk-pkg
 
+      - name: Download optional NVX runtime package
+        if: matrix.os_label == 'windows'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-packages-nvx-runtime
+          path: sdk-pkg-nvx
+
       - name: Install dependencies + SDK from artifact
         shell: bash
         run: |
@@ -67,6 +78,29 @@ jobs:
 
       - name: npm run build
         run: npm run build
+
+      - name: Install Linux TLS build dependencies
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Test W365 Dev JSON with an isolated native TLS fixture
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci/run-w365-node-fixture.ps1
 
       - name: Refresh Linux package indexes
         if: matrix.os_label == 'linux'
@@ -93,25 +127,10 @@ jobs:
         continue-on-error: true
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          # Installs the LXC + Bubblewrap substrate the SDK integration
-          # tests need. Capability probe 27576588204 confirmed these
-          # packages install cleanly on ubuntu-latest, ubuntu-22.04, and
-          # ubuntu-24.04-arm and that lxc-net.service brings up the
-          # lxcbr0 bridge with dnsmasq serving DHCP on 10.0.3.0/24, so
-          # the long-standing "classic LXC is unreliable on GHA
-          # ubuntu-latest" assumption no longer holds for the non-network
-          # LXC paths (create/start/attach/mount/exit-code).
-          # The network-dependent LXC tests stay gated by
-          # MXC_SKIP_LXC_NETWORK_TESTS=1 (see the job-level env block)
-          # because the alpine download template's eth0 doesn't pick up
-          # a DHCP lease within the test window on these runners.
-          # The ADO equivalent
-          # (.azure-pipelines/templates/SDK.Integration.Test.Job.yml)
-          # installs a similar but narrower set and sets the same skip
-          # env var for the same reason (compounded by 1ES Hosted Pool
-          # egress filtering).
-          packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
-          version: 1.4
+          # Network-dependent LXC tests remain gated by
+          # MXC_SKIP_LXC_NETWORK_TESTS because guest DHCP is unreliable here.
+          packages: bubblewrap lxc dnsmasq-base iptables bridge-utils
+          version: 1.4-${{ matrix.runner }}
 
       - name: Verify or repair Linux containment dependencies
         if: matrix.os_label == 'linux'
@@ -122,7 +141,6 @@ jobs:
           packages=(
             bubblewrap
             lxc
-            lxc-utils
             dnsmasq-base
             iptables
             bridge-utils
@@ -198,8 +216,8 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
-      # preserves the env vars above.
+      # Linux needs root for Bubblewrap unprivileged-userns paths.
+      # Pass test controls explicitly because Ubuntu 26.04's sudo ignores -E.
       #
       # `sudo` resets PATH from its own `secure_path`, which picks the image's
       # Node ahead of the one setup-node installed, so the suite would run on a
@@ -210,10 +228,16 @@ jobs:
       # backend is covered, so MXC_LXC_TESTS_REQUIRE_EXECUTION turns an LXC
       # skip into a failure here rather than a green job that tested nothing.
       - name: npm test
+        env:
+          MXC_SDK_PACKAGE_DIR: ${{ github.workspace }}/sdk-pkg
+          MXC_NVX_PACKAGE_DIR: ${{ github.workspace }}/sdk-pkg-nvx
         shell: bash
         run: |
           if [ "${{ matrix.os_label }}" = "linux" ]; then
-            sudo -E env "PATH=$PATH" MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
+            sudo env "PATH=$PATH" \
+              "MXC_SKIP_OS_BUILD_DEPENDENT_TESTS=$MXC_SKIP_OS_BUILD_DEPENDENT_TESTS" \
+              "MXC_SKIP_LXC_NETWORK_TESTS=$MXC_SKIP_LXC_NETWORK_TESTS" \
+              MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
           else
             npm test
           fi

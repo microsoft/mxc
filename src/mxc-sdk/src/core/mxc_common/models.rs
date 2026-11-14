@@ -47,6 +47,9 @@ pub enum ContainmentBackend {
     /// Kata Containers: a Linux microVM driven through the Kata shim v2
     /// interface. Experimental; selected on the wire as `"kata"`.
     Kata,
+    /// Experimental remote Windows 365 checkout lifecycle.
+    #[serde(rename = "w365_agents")]
+    W365Agents,
 }
 
 impl ContainmentBackend {
@@ -64,6 +67,7 @@ impl ContainmentBackend {
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
             ContainmentBackend::Kata => "kata",
+            ContainmentBackend::W365Agents => "w365_agents",
         }
     }
 
@@ -80,6 +84,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
             ContainmentBackend::Kata => Some("kata"),
+            ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Vm => None,
@@ -133,6 +138,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
             W::Kata => Self::Kata,
+            W::W365Agents => Self::W365Agents,
         }
     }
 }
@@ -272,6 +278,14 @@ impl MicroVmProvisionConfig {
         }
         Ok(())
     }
+}
+
+/// Passive W365 provision inputs; defaults and enforcement belong to the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W365AgentsProvisionConfig {
+    pub pool_id: String,
+    pub user_type: Option<String>,
+    pub user_object_id: Option<String>,
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -873,13 +887,9 @@ impl TestFeatureConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
-    /// Explicit telemetry opt-in for this invocation.
-    /// `Some(true)` = opt in (still subject to consent and policy),
-    /// `Some(false)` = force off, `None` = off.
+    /// Compatibility preference ignored by supported-contract Required collection.
+    /// Unattributed requests require `Some(true)`, consent, and permitting policy.
     pub enabled: Option<bool>,
-    /// Caller-requested containment kind, retained for telemetry attribution.
-    #[serde(skip)]
-    pub requested_sandbox_kind: Option<&'static str>,
 }
 
 /// Guest runtime for the Hyperlight backend: what `process.commandLine`
@@ -1021,11 +1031,14 @@ pub struct KataConfig {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExecutionRequest {
-    /// Exact external contract that produced this request.
+    /// Contract that produced this request, including typed SDK compatibility input.
     ///
-    /// Direct typed SDK construction has no external contract attribution.
+    /// Direct internal construction may omit contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
+    /// Caller-requested containment kind, independent of telemetry preferences.
+    #[serde(skip)]
+    pub requested_sandbox_kind: Option<&'static str>,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).

@@ -18,7 +18,7 @@ parameters:
 jobs:
 - job: 'build_arm64_MAC'
   displayName: 'Build (arm64 MAC)'
-  timeoutInMinutes: 120
+  timeoutInMinutes: 240
 
   pool:
     name: Azure Pipelines
@@ -50,8 +50,8 @@ jobs:
         installOptions:
           configFile: $(configTomlPath)
         cacheOptions:
-          enabled: true
-          enableTargetCache: true
+          enabled: false
+          enableTargetCache: false
         setupOptions:
           setupPython: true
           pythonArtifactFeeds: Dart/Mxc-Azure-Feed
@@ -94,6 +94,24 @@ jobs:
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk -p mxc_ffi --lib state_aware
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
       displayName: Test state-aware SDK boundaries
+      workingDirectory: $(workingDirectory)
+
+    # W365 loopback TLS fixtures need test-support overrides. Use a separate
+    # target directory to keep those overrides out of shipping artifacts.
+    - script: |
+        set -euo pipefail
+        fixture_target="$(Agent.TempDirectory)/w365-fixture"
+        cargo build --locked --release --target $(targetTriple) -p mxc-sdk --example w365_execution --features test-support --target-dir "$fixture_target"
+        tests="$(cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --list)"
+        for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture \
+          readiness_contract_fixture execution::native_execution_streams_fixture \
+          execution::native_execution_backpressure_fixture \
+          execution::native_execution_failure_and_disposal_fixture \
+          execution::execution_upgrade_validation_fixture execution::execution_host_output_fixture; do
+          grep -Fxq "$name: test" <<< "$tests"
+        done
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --include-ignored
+      displayName: Test W365 lifecycle and execution fixtures
       workingDirectory: $(workingDirectory)
 
     # --- macOS Code Signing + Notarization (official builds only) ---

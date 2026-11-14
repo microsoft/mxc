@@ -1,0 +1,21 @@
+[package]
+name = "mxc-wslc-gateway"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Built for Linux musl by scripts/build-wslc-gateway-image.ps1. A separate
+# crate so mxc-sdk's dependencies never reach the image build.
+[[bin]]
+name = "mxc-wslc-gateway"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

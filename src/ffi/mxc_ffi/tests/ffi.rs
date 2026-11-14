@@ -501,3 +501,26 @@ fn extern_spawn_json_reaches_the_lxc_backend() {
     // SAFETY: `error` was filled by `mxc_spawn_json`.
     unsafe { mxc_error_detail_free(&mut error) };
 }
+
+#[test]
+fn lifecycle_capture_rejects_bad_inputs_and_frees_details() {
+    use mxc_ffi::mxc_exec_state_aware_capture_json;
+    let mut handle = ptr::null_mut();
+    let mut detail: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    let status =
+        unsafe { mxc_exec_state_aware_capture_json(ptr::null(), 0, &mut handle, &mut detail) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+    assert!(handle.is_null());
+    unsafe { mxc_error_detail_free(&mut detail) };
+    assert!(detail.message_utf8.is_null());
+    let invalid = CString::new(vec![0xff]).unwrap();
+    let status =
+        unsafe { mxc_exec_state_aware_capture_json(invalid.as_ptr(), 0, &mut handle, &mut detail) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_INVALID_UTF8);
+    unsafe { mxc_error_detail_free(&mut detail) };
+    assert!(detail.message_utf8.is_null());
+    let status = unsafe {
+        mxc_exec_state_aware_capture_json(invalid.as_ptr(), 0, ptr::null_mut(), ptr::null_mut())
+    };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}

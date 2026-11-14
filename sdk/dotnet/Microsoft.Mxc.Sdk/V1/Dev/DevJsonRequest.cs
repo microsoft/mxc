@@ -56,6 +56,16 @@ internal static class DevJsonRequest
                     $"{operation} requires phase '{expectedPhase}'");
             }
 
+            // W365's native deadline includes output drain; a managed kill would cut it short.
+            if (expectedPhase == "exec" &&
+                document.RootElement.TryGetProperty("sandboxId", out var sandboxId) &&
+                sandboxId.ValueKind == JsonValueKind.String &&
+                sandboxId.GetString() is { } identity &&
+                identity.StartsWith("w365:", StringComparison.Ordinal))
+            {
+                return (request, null);
+            }
+
             if (document.RootElement.TryGetProperty("process", out var process) &&
                 process.ValueKind == JsonValueKind.Object &&
                 process.TryGetProperty("timeout", out var timeout) &&
@@ -71,6 +81,19 @@ internal static class DevJsonRequest
             throw new MxcException(ErrorCode.MalformedRequest,
                 $"{operation} received invalid JSON: {error.Message}", error);
         }
+    }
+
+    internal static bool TargetsWslc(byte[] request)
+    {
+        using var document = JsonDocument.Parse(
+            request.AsMemory(0, request.Length - 1), InspectionOptions);
+        var root = document.RootElement;
+        return (root.TryGetProperty("containment", out var containment)
+                && containment.ValueKind == JsonValueKind.String
+                && containment.ValueEquals("wslc"))
+            || (root.TryGetProperty("sandboxId", out var sandboxId)
+                && sandboxId.ValueKind == JsonValueKind.String
+                && sandboxId.GetString()!.StartsWith("wslc:", StringComparison.Ordinal));
     }
 
     private static byte[] ToNullTerminatedUtf8(string json)

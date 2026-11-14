@@ -112,13 +112,41 @@ impl Drop for StdinWriter {
     }
 }
 
+/// Reserved native endpoints and their original Unix output flags.
+struct PreparedNativeStdio {
+    pipes: NativeStdio,
+    #[cfg(unix)]
+    read_flags: [Option<libc::c_int>; 2],
+}
+
+impl PreparedNativeStdio {
+    fn restore_read_flags(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            for (pipe, flags) in [&self.pipes.stdout, &self.pipes.stderr]
+                .into_iter()
+                .zip(self.read_flags)
+            {
+                if let (Some(pipe), Some(flags)) = (pipe, flags) {
+                    // SAFETY: the reserved endpoint is owned and has no active caller.
+                    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags) } < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// An [`ExecHandle`]'s streams, once classified.
 struct PreparedStreams {
     stdout: Option<ReadStream>,
     stderr: Option<ReadStream>,
     stdin: Option<Box<dyn Write + Send>>,
     stdin_closer: Option<StdinCloser>,
-    native_stdio: NativeStdio,
+    native_stdio: PreparedNativeStdio,
 }
 
 /// A streaming [`SandboxProcess`] backed by a state-aware [`ExecHandle`].
@@ -141,7 +169,7 @@ pub struct ExecSandboxProcess {
     /// or by `Drop`.
     terminator: Option<Box<dyn FnOnce() -> Result<(), MxcError> + Send>>,
     /// Owned duplicates reserved for a possible native stdio transfer.
-    native_stdio: Option<NativeStdio>,
+    native_stdio: Option<PreparedNativeStdio>,
     /// Whether the caller selected the individual-stream access mode.
     individual_stdio_taken: bool,
     /// The waiter's terminal result once joined, so repeat waits preserve both
@@ -495,18 +523,21 @@ impl SandboxProcess for ExecSandboxProcess {
         let Some(source) = self.native_stdio.as_ref() else {
             return Ok(None);
         };
-        if (source.stdin.is_some() && self.stdin.is_none())
-            || (source.stdout.is_some() && self.stdout.is_none())
-            || (source.stderr.is_some() && self.stderr.is_none())
+        if (source.pipes.stdin.is_some() && self.stdin.is_none())
+            || (source.pipes.stdout.is_some() && self.stdout.is_none())
+            || (source.pipes.stderr.is_some() && self.stderr.is_none())
         {
             return Err(std::io::Error::other(
                 "native stdio must be taken before taking individual streams",
             ));
         }
 
-        if source.is_empty() {
+        if source.pipes.is_empty() {
             return Ok(None);
         }
+        // dup shares status flags: undo the cancellable wrappers' O_NONBLOCK
+        // before transferring pipes, once no wrapped reader can be taken.
+        source.restore_read_flags()?;
         let stdio = self
             .native_stdio
             .take()
@@ -517,7 +548,7 @@ impl SandboxProcess for ExecSandboxProcess {
         self.stdin_closer.take();
         self.stdout_canceller.take();
         self.stderr_canceller.take();
-        Ok(Some(stdio))
+        Ok(Some(stdio.pipes))
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -786,15 +817,41 @@ fn prepare_native_stdio(
     stdin: PipeHandle,
     stdout: PipeHandle,
     stderr: PipeHandle,
-) -> Result<NativeStdio, MxcError> {
+) -> Result<PreparedNativeStdio, MxcError> {
     let duplicate = |handle, stream| {
         duplicate_native_pipe(native_pipe_source(handle), stream)
             .map_err(|error| MxcError::backend_error(error.to_string()))
     };
-    Ok(NativeStdio {
+    let pipes = NativeStdio {
         stdin: duplicate(stdin, "stdin")?,
         stdout: duplicate(stdout, "stdout")?,
         stderr: duplicate(stderr, "stderr")?,
+    };
+    #[cfg(unix)]
+    let read_flags = {
+        // Duplicated descriptors share O_NONBLOCK. Save the original flags before
+        // wrapped reads change them, so native transfer can restore blocking I/O.
+        use std::os::fd::AsRawFd;
+        let mut flags = [None; 2];
+        for (slot, pipe) in flags.iter_mut().zip([&pipes.stdout, &pipes.stderr]) {
+            if let Some(pipe) = pipe {
+                // SAFETY: this endpoint is owned and the backend has not released it.
+                let value = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+                if value < 0 {
+                    return Err(MxcError::backend_error(format!(
+                        "failed to read the exec output pipe flags: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                *slot = Some(value);
+            }
+        }
+        flags
+    };
+    Ok(PreparedNativeStdio {
+        pipes,
+        #[cfg(unix)]
+        read_flags,
     })
 }
 
@@ -810,10 +867,8 @@ fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
 /// Note this does **not** leave the backend's original fd wholly untouched, as
 /// [`dup_fd_to_file`] alone would: `InterruptibleReader` sets `O_NONBLOCK`, and
 /// that is a property of the open file description, which every `dup` shares.
-/// The backend's fd therefore becomes non-blocking too. Harmless while no
-/// state-aware backend is non-Windows — all three are Windows — but a Unix one
-/// that later reads or re-hands its own fd would see `EAGAIN` where it expected
-/// a blocking read.
+/// The backend's fd therefore becomes non-blocking too. Native transfer restores
+/// the original flags after the caller selects it instead of wrapped reads.
 #[cfg(not(target_os = "windows"))]
 fn wrap_cancellable_read(handle: PipeHandle) -> Option<ReadStream> {
     let file = dup_fd_to_file(handle)?;

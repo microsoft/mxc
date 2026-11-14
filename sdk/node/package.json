@@ -1,6 +1,6 @@
 {
   "name": "@microsoft/mxc-sdk",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "TypeScript SDK for MXC (Microsoft eXecution Containers)",
   "type": "module",
   "types": "dist/index.d.ts",
@@ -34,6 +34,7 @@
   },
   "files": [
     "bin/",
+    "!bin/**/aci-edge-sandboxes/**",
     "dist/",
     "LICENSE.md",
     "README.md"
@@ -72,5 +73,13 @@
   },
   "engines": {
     "node": ">=24.0.0"
+  },
+  "peerDependencies": {
+    "@microsoft/mxc-sdk-nvx-runtime-win32-x64": "1.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@microsoft/mxc-sdk-nvx-runtime-win32-x64": {
+      "optional": true
+    }
   }
 }

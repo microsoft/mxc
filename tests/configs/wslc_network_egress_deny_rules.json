@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-deny-rules",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho DENIED=$(p 1.1.1.1:443)\necho DENIED_ANY_PORT=$(p 1.0.0.1:80)\necho NAME_DENIED=$(p one.one.one.one:443)\necho PORT_DENIED=$(p 9.9.9.9:443)\necho PORT_OTHER=$(p 9.9.9.9:853)\necho EXCEPT_ALLOWED=$(p 8.8.8.8:443)\necho EXCEPT_SIBLING=$(p 8.8.8.4:443)\necho ANY_PROTOCOL_DENIED=$(p 8.8.4.4:853)\necho ANY_PROTOCOL_OTHER=$(p 8.8.4.4:443)\necho NAME_ALLOWED=$(p dns.google:443)\nnslookup dns.google >/tmp/ns 2>&1 && grep -q '8\\.8\\.[48]\\.[48]' /tmp/ns && echo DNS=RESOLVED || echo DNS=FAILED\ntimeout 8 nslookup one.one.one.one 1.1.1.1 >/dev/null 2>&1 && echo UDP_DIRECT=REACHED || echo UDP_DIRECT=BLOCKED\nping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 && echo ICMP=REACHED || echo ICMP=BLOCKED\nnc -z -w 3 8.8.8.8 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
+  },
+  "network": {
+    "egress": {
+      "default": "allow",
+      "deny": [
+        { "to": [{ "cidr": "1.1.1.0/24" }, { "cidr": "1.0.0.0/24" }] },
+        { "to": [{ "cidr": "9.9.9.9/32" }], "ports": [{ "port": 443, "protocol": "tcp" }] },
+        { "to": [{ "cidr": "8.8.8.0/24", "except": ["8.8.8.8/32"] }] },
+        { "to": [{ "cidr": "8.8.4.4/32" }], "ports": [{ "port": 853, "protocol": "any" }] },
+        { "to": [{ "cidr": "0.0.0.0/0" }], "ports": [{ "port": 53, "protocol": "udp" }] }
+      ]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}

@@ -40,6 +40,10 @@ pub fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
 }
 
 /// Convert a UTF-8 string to a null-terminated UTF-16 wide string.
+///
+/// This truncates at the first embedded NUL. Do not use it for a security
+/// identity or any other value whose prefix and full form must stay distinct.
+/// Reject embedded NULs before calling it, or use [`os_str_to_wide`].
 pub fn to_wide(s: &str) -> Vec<u16> {
     U16CString::from_str_truncate(s).into_vec_with_nul()
 }

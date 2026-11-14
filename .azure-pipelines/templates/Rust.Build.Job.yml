@@ -17,7 +17,7 @@ jobs:
   - job: 'build_${{ item.arch }}_${{ item.component }}'
     displayName: 'Build (${{ item.arch }} ${{ item.component }})'
     dependsOn: []
-    timeoutInMinutes: 120
+    timeoutInMinutes: 240
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       ${{ if eq(item.os, 'windows') }}:
@@ -64,6 +64,9 @@ jobs:
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/tools/lxc
         cargoFeatures: hyperlight
+        ${{ if eq(item.arch, 'arm64') }}:
+          AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
+          AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR: /usr/include
         signPattern: |
           lxc-exec
           unix-test-proxy
@@ -77,7 +80,7 @@ jobs:
       configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
 
     # 1ES Rust virtual tasks read these settings (toolchain feed, registry
-    # auth, target-dir cache) from the job's templateContext. Official-only
+    # auth) from the job's templateContext. Official-only
     # because Mxc-Azure-Feed needs System.AccessToken.
     ${{ if eq(parameters.isOfficialBuild, true) }}:
       templateContext:
@@ -92,18 +95,45 @@ jobs:
           installOptions:
             configFile: $(configTomlPath)
           cacheOptions:
-            enabled: true
-            enableTargetCache: true
+            enabled: false
+            enableTargetCache: false
 
     steps:
       - checkout: self
 
+      - pwsh: |
+          $openssl = Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'
+          if (-not (Test-Path $openssl)) {
+            throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
+          }
+          Write-Host "##vso[task.setvariable variable=MXC_W365_TEST_OPENSSL]$openssl"
+        displayName: Expose OpenSSL for Windows TLS fixtures
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+
+      - script: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+        displayName: Install Linux TLS build dependencies
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'))
+
       # Install Linux ARM64 toolchain for arm64 linux builds
       - script: |
-          sudo apt-get update
+          set -euo pipefail
           sudo apt-get install -y gcc-aarch64-linux-gnu
-        displayName: Install ARM64 toolchain
-        condition: and(eq('${{ item.os }}','linux'), eq('${{ item.arch }}','arm64'))
+          sudo dpkg --add-architecture arm64
+          . /etc/os-release
+          sources="$(mktemp)"
+          trap 'rm -f "$sources"' EXIT
+          for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://azure.archive.ubuntu.com/ubuntu $suite main universe" >> "$sources"
+            echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports $suite main" >> "$sources"
+          done
+          apt_options=(-o "Dir::Etc::sourcelist=$sources" -o "Dir::Etc::sourceparts=-")
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libssl-dev:arm64
+        displayName: Install ARM64 toolchain and target OpenSSL
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'arm64'))
 
       - ${{ if eq(parameters.isOfficialBuild, true) }}:
         - template: Rust.Build.Steps.Official.yml@self
@@ -117,7 +147,7 @@ jobs:
               enableTest: 'false'
 
       - ${{ else }}:
-        # Fork-PR / Unofficial: plain rustup + crates.io, no auth tasks.
+        # Fork-PR / Unofficial: rustup and the public dependency mirror.
         - template: Rust.Build.Steps.Unofficial.yml@self
           parameters:
             targetTriple: $(triplet)
@@ -128,12 +158,25 @@ jobs:
             ${{ else }}:
               enableTest: 'false'
 
+      - script: |
+          set -euo pipefail
+          features="$(cargo tree --locked --target $(triplet) -p mxc-sdk --no-default-features --features hyperlight -e features -i ureq)"
+          grep -q 'ureq feature "native-tls"' <<< "$features"
+          if grep -qE 'ureq feature "(gzip|rustls)"' <<< "$features"; then
+            echo "ARM64 must use native TLS without rustls or Hyperlight's x86_64-only gzip feature." >&2
+            exit 1
+          fi
+        displayName: Check ARM64 HTTP dependency features
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'arm64'))
+
       # These are separate workspace members (not deps of lxc), so the
       # workspace-member-scoped build above doesn't pick them up.
       - script: |
-          cargo build --release --target $(triplet) -p unix_test_proxy -p mxc_ffi --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+          cargo build --locked --release --target $(triplet) -p unix_test_proxy -p mxc_ffi
         displayName: Build Node runtime dependencies
-        condition: eq('${{ item.os }}', 'linux')
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'))
 
       # The managed telemetry tests need debug-only test seams that must never
       # be present in the production DLL. Build that isolated DLL here
@@ -142,7 +185,7 @@ jobs:
           cargo build --locked -p mxc_ffi --features "test-support isolation_session wslc" --target $(triplet) --target-dir $(dotnetTestSupportTargetDir)
         displayName: Build .NET test-support native library
         workingDirectory: $(Build.SourcesDirectory)/src
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       - script: |
           set -euo pipefail
@@ -153,11 +196,54 @@ jobs:
           cargo test --locked --release --target $(triplet) -p mxc-sdk --test state_aware
         displayName: Test common contracts and state-aware SDK boundaries
         workingDirectory: $(Build.SourcesDirectory)/src
-        condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
+
+      - script: |
+          set -euo pipefail
+          fixture_target="$(Agent.TempDirectory)/w365-fixture"
+          cargo build --locked --release --target $(triplet) -p mxc-sdk --example w365_execution --features test-support --target-dir "$fixture_target"
+          tests="$(cargo test --locked --release --target $(triplet) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --list)"
+          for name in lifecycle_contract_and_recovery_fixture transport_deadlines_fixture \
+            readiness_contract_fixture execution::native_execution_streams_fixture \
+            execution::native_execution_backpressure_fixture \
+            execution::native_execution_failure_and_disposal_fixture \
+            execution::execution_upgrade_validation_fixture execution::execution_host_output_fixture; do
+            grep -Fxq "$name: test" <<< "$tests"
+          done
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir "$fixture_target" -- --include-ignored
+        displayName: Test W365 lifecycle and execution fixtures
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(succeeded(), eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
+
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $fixtureTarget = Join-Path '$(Agent.TempDirectory)' 'w365-fixture'
+          cargo build --locked --release --target $(triplet) -p wxc --features test-support --target-dir $fixtureTarget
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target $(triplet) -p mxc-sdk --example w365_execution --features test-support --target-dir $fixtureTarget
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path (Join-Path $fixtureTarget '$(triplet)\release\wxc-exec.exe')).Path
+          $tests = cargo test --locked --release --target $(triplet) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir $fixtureTarget -- --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in @(
+            'lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture', 'lifecycle_fresh_executor_fixture',
+            'readiness_contract_fixture', 'execution::native_execution_streams_fixture',
+            'execution::native_execution_backpressure_fixture',
+            'execution::native_execution_failure_and_disposal_fixture',
+            'execution::execution_upgrade_validation_fixture',
+            'execution::execution_fresh_executor_fixture'
+          )) {
+            if (-not ($tests -match "^${name}: test")) { throw "Missing W365 fixture: $name" }
+          }
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --test w365_lifecycle --features test-support --target-dir $fixtureTarget -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        displayName: Test W365 lifecycle and execution fixtures
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       - task: EsrpCodeSigning@6
         displayName: Code Sign
-        condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))
+        condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))
         inputs:
           ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
           AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -202,12 +288,14 @@ jobs:
             $(signPattern)
           targetFolder: $(outputDirectory)/$(targetTriple)
 
-      # Copy wslcsdk.dll
+      # The WSLC SDK library and gateway image aren't signed here.
       - task: CopyFiles@2
-        displayName: Copy wslcsdk.dll
+        displayName: Copy WSLC runtime files
         inputs:
           sourceFolder: $(targetTripleDir)
-          contents: wslcsdk.dll
+          contents: |
+            wslcsdk.dll
+            mxc-wslc-gateway.tar
           targetFolder: $(outputDirectory)/$(targetTriple)
 
       # The NVX release is already signed and hash-pinned; copy it without re-signing.
@@ -239,7 +327,7 @@ jobs:
 
       - task: CopyFiles@2
         displayName: Copy generated .NET bindings
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
         inputs:
           sourceFolder: $(Build.SourcesDirectory)/sdk/dotnet/Microsoft.Mxc.Sdk/Native
           contents: NativeMethods.g.cs
@@ -247,7 +335,7 @@ jobs:
 
       - task: CopyFiles@2
         displayName: Copy .NET test-support native library
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
         inputs:
           sourceFolder: $(dotnetTestSupportTargetDir)/$(triplet)/debug
           contents: mxc_ffi.dll
@@ -255,7 +343,7 @@ jobs:
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish .NET test-support native library
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
         inputs:
           path: '$(outputDirectory)/dotnet-test-support-$(targetTriple)'
           artifactName: mxc-dotnet-test-support-$(targetTriple)

@@ -145,7 +145,7 @@ fn common_snapshot(request: &ExecutionRequest) -> Value {
         "proxyAddress": proxy.map(|address| &address.address),
         "proxyPort": proxy.map(|address| address.port),
         "proxyUrl": proxy.and_then(|address| address.original_url.as_ref()),
-        "telemetryKind": request.telemetry.as_ref().and_then(|value| value.requested_sandbox_kind),
+        "telemetryKind": request.requested_sandbox_kind,
     })
 }
 

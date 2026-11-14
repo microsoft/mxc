@@ -143,9 +143,11 @@ For Seatbelt, `profileOverride` replaces the generated profile, so
 incorporated; see the [Seatbelt backend guide](../../backends/seatbelt/seatbelt-backend.md)
 for details.
 
-WSLc networking supports only all-deny isolated or all-allow bridged
-`egress.default` / `ingress.default` / `ingress.hostLoopback` postures; it
-rejects mixed postures and per-destination rules. IsolationSession cannot
+WSLc create-and-run execution enforces per-destination egress rules and mixed
+`egress.default` / `ingress.default` / `ingress.hostLoopback` postures with
+its [built-in proxy](../../backends/wslc/wsl-container-getting-started.md#built-in-proxy).
+WSLc container lifecycle operations support only all-deny isolated or
+all-allow bridged postures. IsolationSession cannot
 restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
 section is rejected for IsolationSession. Unsupported filesystem, network, or

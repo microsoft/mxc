@@ -441,7 +441,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| {
                 ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -534,7 +534,7 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v1_0::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| {
                 ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -622,7 +622,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
         }
         crate::mxc_common::config_contract_adapters::dev::AdaptedConfigRequest::StateAware(
             input,
-        ) => normalize_state_aware(input, logger, true)
+        ) => normalize_state_aware(input, logger)
             .map(MxcRequest::StateAware)
             .map_err(|error| ParseError::StateAware(error.into_state_aware())),
     }
@@ -1329,6 +1329,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "iso" => Some(wire::Containment::IsolationSession),
         "kata" => Some(wire::Containment::Kata),
         "microvm" => Some(wire::Containment::Microvm),
+        "w365" => Some(wire::Containment::W365Agents),
         _ => None,
     }
 }
@@ -1347,6 +1348,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::IsolationSession) => "isolation_session",
         Some(wire::Containment::Bubblewrap) => "bubblewrap",
         Some(wire::Containment::Kata) => "kata",
+        Some(wire::Containment::W365Agents) => "w365_agents",
     }
 }
 
@@ -1395,6 +1397,15 @@ fn normalize_common_request_ir(
 
     let source_contract = cfg.source_contract;
     let container_id = cfg.container_id.unwrap_or_default();
+    // JSON may legally carry `\u0000`. `string_util::to_wide` truncates at that
+    // NUL, so a value used as a session or profile name would collapse to its
+    // prefix. This is the single funnel for every entry point. Do not echo the
+    // raw id; the NUL would also truncate logs.
+    if container_id.contains('\0') {
+        return Err(WxcError::ConfigParse(
+            "containerId must not contain null bytes".to_string(),
+        ));
+    }
 
     // Process section: required for one-shot and state-aware exec; optional for
     // non-exec state-aware phases (require_process == false).
@@ -1687,7 +1698,6 @@ fn normalize_common_request_ir(
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
-        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
     });
 
     // UI section. Capture presence before the typed mapping consumes `ui`:
@@ -1707,6 +1717,7 @@ fn normalize_common_request_ir(
 
     Ok(ExecutionRequest {
         source_contract: Some(source_contract),
+        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
         container_id,
         env,
         inherit_default_env,
@@ -1731,14 +1742,13 @@ fn normalize_common_request_ir(
     })
 }
 
-/// Normalize checked exact input without retaining source or backend JSON.
+/// Normalize checked lifecycle input without retaining request JSON.
 fn normalize_state_aware(
     input: StateAwareInput,
     logger: &mut Logger,
-    preserve_source_contract: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let (common, operation) = input.into_parts();
-    let mut request = normalize_state_aware_common(
+    let request = normalize_state_aware_common(
         common,
         NormalizationContext {
             phase: operation.phase(),
@@ -1751,6 +1761,7 @@ fn normalize_state_aware(
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
                     StateAwareProvision::MicroVm(_) => wire::Containment::Microvm,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
+                    StateAwareProvision::W365Agents(_) => wire::Containment::W365Agents,
                 }),
                 StateAwareOperation::Start { .. }
                 | StateAwareOperation::Exec { .. }
@@ -1761,20 +1772,17 @@ fn normalize_state_aware(
         },
         logger,
     )?;
-    if !preserve_source_contract {
-        request.source_contract = None;
-    }
     Ok(ParsedStateAwareRequest::new(request, operation))
 }
 
-/// Normalize trusted typed Rust SDK lifecycle input without JSON parsing or
-/// external exact-contract attribution.
+/// Normalize trusted typed Rust SDK lifecycle input, preserving its selected
+/// contract for diagnostics and telemetry without JSON parsing.
 #[doc(hidden)]
 pub fn normalize_sdk_state_aware_request(
     input: crate::mxc_common::sdk_input::SdkStateAwareInput,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    normalize_state_aware(input.into_normalization_input()?, logger, false)
+    normalize_state_aware(input.into_normalization_input()?, logger)
 }
 
 /// Temporary routing view; production derives it exclusively from the operation.
@@ -1982,6 +1990,40 @@ mod tests {
         parse_exact_mxc_request_json(json, &mut test_logger())
     }
 
+    #[test]
+    fn requested_containment_does_not_depend_on_telemetry_presence() {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+            for telemetry in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"enabled": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": "process",
+                    "process": {"commandLine": "echo hello"}
+                });
+                if let Some(telemetry) = &telemetry {
+                    json["telemetry"] = telemetry.clone();
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                assert_eq!(request.requested_sandbox_kind, Some("process"));
+                assert_eq!(request.telemetry.is_some(), telemetry.is_some());
+                assert_eq!(
+                    request.telemetry.as_ref().and_then(|value| value.enabled),
+                    telemetry
+                        .as_ref()
+                        .and_then(|value| value.get("enabled"))
+                        .and_then(serde_json::Value::as_bool)
+                );
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct ProxySnapshot {
         address: Option<String>,
@@ -2017,10 +2059,7 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
-                requested_sandbox_kind: request
-                    .telemetry
-                    .as_ref()
-                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
+                requested_sandbox_kind: request.requested_sandbox_kind,
             }
         }
     }
@@ -2044,6 +2083,7 @@ mod tests {
         WindowsSandbox,
         MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
+        W365Agents(Option<Option<crate::mxc_common::models::W365AgentsProvisionConfig>>),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -2075,6 +2115,9 @@ mod tests {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())
                                 }))
+                            }
+                            StateAwareProvision::W365Agents(config) => {
+                                ProvisionSnapshot::W365Agents(config.clone())
                             }
                         }),
                         _ => None,
@@ -4857,6 +4900,39 @@ mod tests {
         let mut logger = test_logger();
         load_mxc_request_from_json(state_aware, &mut logger)
             .expect("0.9 state-aware inheritance should parse");
+    }
+
+    #[test]
+    fn container_id_embedded_nul_is_rejected_on_every_entry_point() {
+        let one_shot = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let one_shot_error = load_mxc_request_from_json(one_shot, &mut test_logger()).unwrap_err();
+        assert!(
+            one_shot_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {one_shot_error:?}"
+        );
+        assert!(
+            !one_shot_error.message().contains('\0'),
+            "diagnostic must not echo the raw NUL id"
+        );
+
+        let v09 = "{\n            \"version\": \"0.9.0-alpha\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let v09_error = load_mxc_request_from_json(v09, &mut test_logger()).unwrap_err();
+        assert!(
+            v09_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {v09_error:?}"
+        );
+
+        let distinct = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha-evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(distinct, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.container_id, "alpha-evil");
     }
 
     #[test]

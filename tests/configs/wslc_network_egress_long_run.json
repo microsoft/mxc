@@ -1,11 +1,9 @@
 {
   "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
   "version": "1.0.0",
-  "containerId": "wslc-network-egress-rules-rejected",
+  "containerId": "wslc-network-egress-long-run",
   "containment": "wslc",
-  "process": {
-    "commandLine": "echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN"
-  },
+  "process": { "commandLine": "echo LONG_RUN_STARTED; sleep 300" },
   "network": {
     "egress": {
       "default": "deny",
@@ -13,7 +11,5 @@
     },
     "ingress": { "default": "deny", "hostLoopback": "deny" }
   },
-  "wslc": {
-    "image": "alpine:latest"
-  }
+  "wslc": { "image": "alpine:latest" }
 }

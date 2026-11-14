@@ -12,16 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `spawnWithPty` supports ProcessContainer requests.
-- `spawnInContainerWithStdin` starts a command in a container with a writable
-  `standardInput`. For a WSLC container, ending it gives the command
-  end-of-file; `spawnInContainer` still gives a WSLC command end-of-file at
-  once.
-- `spawnWithStdin` creates a container with a writable `standardInput`. For a
-  WSLC request, ending it gives the command end-of-file; `spawn` and `run` still
-  give a WSLC command end-of-file at once.
 
 ### Changed
 
+- `spawn` and `spawnInContainer` expose a writable `standardInput` for WSLC.
+  Ending it gives the command end-of-file, and waiting ends an untaken stdin.
+  `run` and `runInContainer` continue giving the command end-of-file. Killing a
+  WSLC `spawnInContainer` command that is still running, or reaching its
+  timeout, deletes its container about a minute later, because MXC does not
+  signal a WSLC process that has stdin.
 - Public operations, request/result types, discovery, and telemetry are
   exported only from `@microsoft/mxc-sdk/v1`.
 - Creation uses `ContainerRequest` with Promise-returning `run` or `spawn`.

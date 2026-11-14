@@ -30,7 +30,7 @@ The workspace members and shared Rust dependencies are declared in
 | `mxc-sdk` | Public Rust API and the internal engine, exact contracts, shared runtime, backend implementations, telemetry, build support, and schema support |
 | `mxc_ffi` | C ABI shared/static library used by language SDKs |
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
-| Tools | Diagnostics, schema generation, and test executables |
+| Tools | Diagnostics, schema generation, and test executables, plus the WSLC gateway (`tools/wslc_gateway`), an unpublished Linux binary shipped as a container image. It shares `mxc-sdk`'s `gateway_policy.rs` through `#[path]` instead of linking `mxc-sdk` |
 
 Within `mxc-sdk`, `mxc_common` remains the backend-neutral foundation and
 `mxc_engine` owns dispatch. Backend modules depend on shared modules through
