@@ -160,9 +160,27 @@ impl FixtureCertificate {
         let directory = tempfile::tempdir().unwrap();
         let certificate = directory.path().join("certificate.pem");
         let key = directory.path().join("key.pem");
+        let config = directory.path().join("openssl.cnf");
+        // Keep host OpenSSL defaults from adding duplicate certificate extensions.
+        std::fs::write(
+            &config,
+            format!(
+                "[req]\n\
+                 distinguished_name=dn\n\
+                 x509_extensions=server\n\
+                 [dn]\n\
+                 [server]\n\
+                 subjectAltName=DNS:{hostname}\n\
+                 basicConstraints=critical,CA:FALSE\n\
+                 keyUsage=critical,digitalSignature\n\
+                 extendedKeyUsage=serverAuth\n"
+            ),
+        )
+        .unwrap();
         let output = fixture_openssl()
+            .args(["req", "-config"])
+            .arg(&config)
             .args([
-                "req",
                 "-x509",
                 "-newkey",
                 "ec",
@@ -173,14 +191,6 @@ impl FixtureCertificate {
                 "1",
                 "-subj",
                 &format!("/CN={hostname}"),
-                "-addext",
-                &format!("subjectAltName=DNS:{hostname}"),
-                "-addext",
-                "basicConstraints=critical,CA:FALSE",
-                "-addext",
-                "keyUsage=critical,digitalSignature",
-                "-addext",
-                "extendedKeyUsage=serverAuth",
                 "-out",
             ])
             .arg(&certificate)
