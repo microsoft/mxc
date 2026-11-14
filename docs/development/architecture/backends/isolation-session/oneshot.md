@@ -163,13 +163,20 @@ exit-wait and exit code, console resize, and the graceful-shutdown ladder
 (close stdin → send-ctrl-close → terminate). It sets the interactive-console
 flag when `wxc-exec`'s stdout is a TTY.
 
+When stdin is a pipe or file and stdout is not a console, MXC closes the
+workload's stdin when the input ends, so programs such as `sort.exe` can
+finish instead of timing out. Console input and ConPTY behavior are unchanged.
+Errors reported by this close operation go to configured diagnostic logs.
+EOF delivery requires `IsoSessionOps::BehaviorVersion()` to return 2 or higher.
+
 On timeout, MXC stops its input-copying thread and waits up to one second for
 it to release its pipe handle before calling `CloseStandardInput`. If the thread
 is still running, MXC skips that step and continues with console-close and
 termination, still reporting a timeout once the workload is confirmed stopped.
+The one-second limit applies to the relay wait; final cleanup can still wait
+for an in-progress stdin-close call.
 
 A failed Windows thread wait is an error, unlike a wait whose time limit expires.
-The OS client must also close its input handle for the workload to receive EOF.
 
 After the workload exits, create-and-run execution uses the same
 [output draining rules as lifecycle `Relayed` execution](state-aware-rust.md#output-draining-after-relayed-execution):

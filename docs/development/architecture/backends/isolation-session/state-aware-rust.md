@@ -417,8 +417,9 @@ service serialises (or rejects, depending on session state) at its own layer.
 
 `Relayed` execution uses the same [timeout cleanup](oneshot.md#os-api-dependency)
 as create-and-run execution: stop input copying before closing stdin, or skip
-stdin-close if the thread has not exited within one second. SDK `Piped` and
-explicit PTY operations keep their existing shutdown behavior.
+stdin-close if the thread has not exited within one second. This also includes
+closing stdin when pipe or file input ends and stdout is not a console.
+SDK `Piped` and explicit PTY operations keep their existing shutdown behavior.
 
 ### Output draining after relayed execution
 

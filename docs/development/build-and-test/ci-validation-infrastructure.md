@@ -223,6 +223,22 @@ The IsolationSession command-line suite also checks that piped and file stdin
 reach the workload when stdout is a console. A workload reads one line and
 returns a distinct exit code only if the line matches.
 
+The Rust suite's `relayed_pipe_and_file_stdin_reach_eof_with_redirected_stdout`
+test covers finite pipe/file stdin with stdout redirected to a file, through
+both the create-and-run and lifecycle `Relayed` engine paths used by the CLI.
+Child processes isolate these standard handles from the test runner. Each case
+requires all four sorted lines and normal exit before the 15-second request
+timeout. A separate 120-second watchdog bounds each child.
+
+The SDK writer-drop EOF test also runs, covering caller-owned stdin rather
+than the relay. Both tests share a direct `IsoSessionOps::BehaviorVersion()`
+check. Below version 2, they print `SKIPPED` and return before creating a
+sandbox; query errors fail.
+Rust reports an early return as `ok`, not `ignored`. The nightly invocation uses
+`--show-output` so the skip reason is visible; an `ok` result on an older host
+does not establish EOF coverage. See the
+[OS prerequisite](../architecture/backends/isolation-session/oneshot.md#os-api-dependency).
+
 The suite also runs `isolation_session_post_exit_output.json`. A child waits
 for the workload to exit, then writes numbered lines to stdout and stderr
 for about 30 seconds. The test requires every line, both final markers, and
