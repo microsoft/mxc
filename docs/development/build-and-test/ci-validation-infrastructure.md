@@ -547,7 +547,13 @@ compatibility-consent workloads pause at a ready/release handshake so their
 SDDL can also be checked while they are alive. It covers
 learning-mode enforcement, explicit capture paths and warnings, multiple
 capabilities, environment/cwd/exit propagation, and timeout cleanup of a
-ready-signalled grandchild. A copy of `cmd.exe` named `pwsh.exe` checks that an
+ready-signalled grandchild. It independently queries Learning Mode NETWORK
+source support. When the option-aware start export is present but NETWORK
+support is false or cannot be queried, access-denial capture must still succeed
+through the legacy access-only fallback when that lifecycle is available.
+Hosts that do not need this fallback explicitly report the scenario as not
+exercised; deterministic Rust export-selection tests cover both probe results
+and missing exports. A copy of `cmd.exe` named `pwsh.exe` checks that an
 intentional nonzero workload exit preserves its stderr without recommending
 drive-root read grants. UI checks cover all four isolation values and use
 uncontained positive controls for clipboard, desktop creation, and a no-op
