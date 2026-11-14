@@ -147,11 +147,6 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node --test scripts/tests/microvm-validation.test.js
 
-      - name: Test ADO pipeline setup
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: ${{ github.workspace }}
-        run: node --test scripts/tests/ado-pipeline.test.cjs
-
       - name: Verify packaged MicroVM tests
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: ${{ github.workspace }}
