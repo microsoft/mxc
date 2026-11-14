@@ -901,5 +901,5 @@ These changes would break V1 callers, so they wait for V2:
 - Move `captureDenials` to a top-level request field that each backend
   accepts or rejects, instead of a backend-specific field.
 - Mark every Rust SDK options struct `#[non_exhaustive]` so options can gain
-  fields without a new operation, and fold `spawn` and `spawn_with_stdin` into
+  fields without a new operation, and fold `spawn` into
   `spawn_with_extended_options`.

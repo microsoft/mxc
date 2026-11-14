@@ -228,27 +228,13 @@ srv.handle_request()
     containment: { type: 'wslc' as const, config: { image: 'alpine:latest' } },
   });
 
-  it('should give a spawned command end-of-file so reading output before waiting finishes', { timeout: 120_000 }, async () => {
-    const child = await sdk.spawn(stdinRequest("sh -c 'cat; echo SPAWN_SAW_EOF'"));
-    try {
-      assert.strictEqual(child.standardInput, null, 'plain spawn exposes no stdin for WSLC');
-      const stdout = await collectBytes(child.standardOutput);
-      const result = await child.wait();
-      assert.strictEqual(result.timedOut, false);
-      assert.strictEqual(result.exitCode, 0);
-      assert.strictEqual(stdout.toString('utf8').trim(), 'SPAWN_SAW_EOF');
-    } finally {
-      child.dispose();
-    }
-  });
-
-  it('should forward every stdin byte to a command spawned with stdin', { timeout: 120_000 }, async () => {
+  it('should forward every stdin byte to a spawned command', { timeout: 120_000 }, async () => {
     const payload = Buffer.alloc(64 * 1024);
     for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
-    const child = await sdk.spawnWithStdin(stdinRequest('cat'));
+    const child = await sdk.spawn(stdinRequest('cat'));
     try {
       const stdin = child.standardInput;
-      assert.ok(stdin !== null, 'spawnWithStdin exposes stdin for WSLC');
+      assert.ok(stdin !== null, 'spawn exposes stdin for WSLC');
       const stdoutPromise = collectBytes(child.standardOutput);
       stdin.end(payload);
       const [result, stdout] = await Promise.all([child.wait(), stdoutPromise]);
@@ -260,14 +246,34 @@ srv.handle_request()
     }
   });
 
-  it('should give a command spawned with stdin end-of-file when wait ends an untaken stdin', { timeout: 120_000 }, async () => {
-    const child = await sdk.spawnWithStdin(stdinRequest("sh -c 'cat; echo WAIT_SAW_EOF'"));
+  it('should give a spawned command end-of-file when wait ends an untaken stdin', { timeout: 120_000 }, async () => {
+    const child = await sdk.spawn(stdinRequest("sh -c 'readlink /proc/self/fd/0; cat; echo WAIT_SAW_EOF'"));
     try {
       const stdoutPromise = collectBytes(child.standardOutput);
       const [result, stdout] = await Promise.all([child.wait(), stdoutPromise]);
       assert.strictEqual(result.timedOut, false, 'waiting must end a stdin the caller never took');
       assert.strictEqual(result.exitCode, 0);
-      assert.strictEqual(stdout.toString('utf8').trim(), 'WAIT_SAW_EOF');
+      assert.match(
+        stdout.toString('utf8').trim(),
+        /^pipe:\[\d+\]\nWAIT_SAW_EOF$/,
+        'the command must read a stdin pipe that wait ended',
+      );
+    } finally {
+      child.dispose();
+    }
+  });
+
+  it('should let output be read to the end before waiting once stdin is ended', { timeout: 120_000 }, async () => {
+    const child = await sdk.spawn(stdinRequest("sh -c 'cat; echo SPAWN_SAW_EOF'"));
+    try {
+      const stdin = child.standardInput;
+      assert.ok(stdin !== null, 'spawn exposes stdin for WSLC');
+      stdin.end('SPAWN_INPUT\n');
+      const stdout = await collectBytes(child.standardOutput);
+      const result = await child.wait();
+      assert.strictEqual(result.timedOut, false, 'ending stdin must let the command finish');
+      assert.strictEqual(result.exitCode, 0);
+      assert.strictEqual(stdout.toString('utf8').trim(), 'SPAWN_INPUT\nSPAWN_SAW_EOF');
     } finally {
       child.dispose();
     }
@@ -293,13 +299,13 @@ srv.handle_request()
   it('should not time out a command that exits leaving stdin unread', { timeout: 180_000 }, async () => {
     // The WSLc SDK reports this exit about 50 seconds late, so a timeout
     // shorter than that only passes if the exit is seen when it happens.
-    const child = await sdk.spawnWithStdin({
+    const child = await sdk.spawn({
       ...stdinRequest("sh -c 'head -c 1 >/dev/null; echo LATE_DONE'"),
       timeoutMs: 40_000,
     });
     try {
       const stdin = child.standardInput;
-      assert.ok(stdin !== null, 'spawnWithStdin exposes stdin for WSLC');
+      assert.ok(stdin !== null, 'spawn exposes stdin for WSLC');
       stdin.on('error', () => {});
       const stdoutPromise = collectBytes(child.standardOutput);
       stdin.write(Buffer.alloc(4 * 1024 * 1024));
@@ -511,13 +517,13 @@ describe('WSLC SDK E2E — built-in proxy', {
   });
 
   it('should probe targets read from stdin through the built-in proxy', { timeout: 180_000 }, async () => {
-    const child = await sdk.spawnWithStdin(proxyRequest(
+    const child = await sdk.spawn(proxyRequest(
       ['while read -r t; do echo "$t=$(p "$t")"; done'],
       ALLOW_CLOUDFLARE_443,
     ));
     try {
       const stdin = child.standardInput;
-      assert.ok(stdin !== null, 'spawnWithStdin exposes stdin for WSLC');
+      assert.ok(stdin !== null, 'spawn exposes stdin for WSLC');
       const stdoutPromise = collectBytes(child.standardOutput);
       stdin.end('1.1.1.1:443\n8.8.8.8:443\n1.1.1.1:80\n');
       const [result, stdout] = await Promise.all([child.wait(), stdoutPromise]);

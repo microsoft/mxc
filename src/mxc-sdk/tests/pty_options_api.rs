@@ -7,10 +7,8 @@ use mxc_sdk::v1::{
 };
 
 #[test]
-fn creation_spawns_take_the_same_request_and_options() {
+fn creation_spawn_takes_request_and_options() {
     let _: fn(ContainerRequest, SpawnOptions) -> Result<MxcProcess, mxc_sdk::v1::Error> = v1::spawn;
-    let _: fn(ContainerRequest, SpawnOptions) -> Result<MxcProcess, mxc_sdk::v1::Error> =
-        v1::spawn_with_stdin;
 }
 
 #[test]
