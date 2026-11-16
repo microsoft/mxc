@@ -39,8 +39,8 @@ import subprocess
 import sys
 
 fixture = Path(sys.argv[1])
-expected_uid, port = map(int, sys.argv[2:4])
-mode, address = sys.argv[4:6]
+expected_uid, port, blocked_port = map(int, sys.argv[2:5])
+mode, address = sys.argv[5:7]
 assert os.getuid() == expected_uid, "capability removal must not change the workload UID"
 status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
 for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
@@ -75,9 +75,23 @@ except OSError as error:
 else:
     raise AssertionError("read-only fixture was writable")
 
+def connects(host, port, timeout):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
 if mode != "isolated":
+    with socket.create_connection((address, port), timeout=5):
+        pass
+
+    # Both modes drop traffic to slirp's host gateway, except the proxy port.
+    assert not connects("10.0.2.2", blocked_port, 3), f"{mode}: blocked endpoint was reachable"
     result = subprocess.run(["iptables", "-F", "MXC_EGRESS"], capture_output=True, text=True)
     assert result.returncode != 0, "workload flushed its egress firewall"
+    assert not connects("10.0.2.2", blocked_port, 3), \
+        f"{mode}: the flush attempt opened a blocked endpoint"
     with socket.create_connection((address, port), timeout=5):
         pass
 
@@ -87,7 +101,8 @@ print(f"CAPABILITIES_DROPPED_{mode}")
 failed = []
 skipped = []
 with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory, \
-        socket.socket() as proxy_listener, socket.socket() as firewall_listener:
+        socket.socket() as proxy_listener, socket.socket() as firewall_listener, \
+        socket.socket() as blocked_listener:
     root = Path(directory)
     fixture = root / "readonly"
     fixture.mkdir()
@@ -95,6 +110,9 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
     proxy_listener.bind(("127.0.0.1", 0))
     proxy_listener.listen(8)
     proxy_port = proxy_listener.getsockname()[1]
+    blocked_listener.bind(("127.0.0.1", 0))
+    blocked_listener.listen(8)
+    blocked_port = blocked_listener.getsockname()[1]
 
     for mode in ("isolated", "firewall", "proxy"):
         address, port = "10.0.2.2", proxy_port
@@ -124,7 +142,8 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
                 pass
 
         command = (
-            f"python3 - {shlex.quote(str(fixture))} {os.getuid()} {port} {mode} {address} <<'WORKLOAD'\n"
+            f"python3 - {shlex.quote(str(fixture))} {os.getuid()} {port} {blocked_port} "
+            f"{mode} {address} <<'WORKLOAD'\n"
             + workload + "\nWORKLOAD"
         )
         config = {
@@ -133,7 +152,7 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
             "containment": "bubblewrap",
             "process": {
                 "commandLine": command,
-                "timeout": 15000,
+                "timeout": 30000,
                 "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
             },
             "filesystem": {"readonlyPaths": [str(fixture)]},

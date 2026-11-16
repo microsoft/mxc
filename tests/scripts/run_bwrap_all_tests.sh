@@ -22,8 +22,9 @@ strict_exempt() {
     esac
 }
 
-# The symlink-alias regression tests, which CI must not lose.
+# Regression tests that CI must not lose.
 declare -A LAST_LINES=(
+    ["Bubblewrap Workload Capabilities"]="Bubblewrap capability test complete."
     ["Bubblewrap Baseline Aliases"]="Bubblewrap baseline-alias test complete."
     ["Bubblewrap Grant Aliases"]="Bubblewrap grant-alias test complete."
 )

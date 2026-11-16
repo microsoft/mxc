@@ -208,8 +208,10 @@ for local commands and watchdog behavior.
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
 isolated, firewall, and proxy cases require empty workload capability sets,
-denied privileged socket creation and read-only bind remounts, and working
-supervisor-provided connectivity for the network-enabled modes.
+denied privileged socket creation and read-only bind remounts. The
+network-enabled modes also require working supervisor-provided connectivity,
+and a live blocked endpoint that stays blocked after the workload tries to
+flush its firewall.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
