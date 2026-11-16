@@ -5,7 +5,11 @@
 - **Status:** Proposed
 - **Issue:** [#1462](https://github.com/microsoft/mxc/issues/1462)
 - **Contributor:** `@theelliotm`
-- **Implementation PRs:** [#1679](https://github.com/microsoft/mxc/pull/1679) (SDK 3.0.5).
+- **Implementation PRs:** [#1679](https://github.com/microsoft/mxc/pull/1679) (SDK 3.0.5),
+  [#1717](https://github.com/microsoft/mxc/pull/1717) (`runtimeConfig` contract),
+  [#1719](https://github.com/microsoft/mxc/pull/1719) (daemon cooperative proxy),
+  [#1740](https://github.com/microsoft/mxc/pull/1740) (controller image),
+  [#1753](https://github.com/microsoft/mxc/pull/1753) (create-and-run egress).
 
 WSLC networking today supports only all-allow (`BRIDGED`) or all-deny (`NONE`).
 This design adds a per-container controller container that enforces TCP CIDR
@@ -495,14 +499,16 @@ probes used direct TCP connections, ignoring the proxy variables.
 - `wslc/common/policy_mapping.rs`: return the new mode from
   `map_network_policy`.
 
-- New `wslc/common/egress_controller.rs`: controller settings and lifecycle,
-  including loading the controller image and rendering the controller policy
-  environment variable.
+- `wslc/common/egress_gateway.rs`: controller settings and lifecycle,
+  loading the controller image, rendering the controller policy environment
+  variable, ownership records and deleting leftovers when a session starts.
+
+- `wslc/gateway_policy.rs`: the controller policy type, shared with the
+  controller binary.
 
 - `wslc/common/container_steps.rs`: networks, environment, the workload's
-  `resolv.conf` volume, port mappings, the session host loopback hostname,
-  the controller's `NET_ADMIN`, and deleting leftover workloads, controllers
-  and networks when a session starts.
+  `resolv.conf` volume, port mappings, the session host loopback hostname and
+  the controller's `NET_ADMIN`.
 
 - `bin/wslc_daemon/session_manager.rs`: track the controller, networks and
   the workload's proxy URL in `ContainerEntry`.
@@ -513,30 +519,31 @@ probes used direct TCP connections, ignoring the proxy variables.
 - `wslc/common/policy.rs`: `reject_proxy_credentials_in_argv` checks the
   proxy URL that exec will inject, not only the exec request's own.
 
-- New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
-  packaged as an image tar. No new crate. See
+- Controller binary `mxc-wslc-gateway`: a static Rust (musl) binary in the
+  unpublished `src/tools/wslc_gateway` crate, packaged as an image tar. It
+  includes `gateway_policy.rs` by path, so it doesn't link `mxc-sdk`. See
   [Controller image](#controller-image).
 
 ### Controller image
 
 - **Image:** a single layer holding only the static controller binary, with
   no base image. The controller writes its nftables rules over netlink, so it
-  needs no `nft` binary or libraries. The image is about 600 KB, and a build
+  needs no `nft` binary or libraries. The image is 700–800 KB, and a build
   step writes it with fixed timestamps and metadata, so the same binary always
   gives the same image ID.
 
 - **Build:** the x86_64 and aarch64 controller tars are committed under
   `src/mxc-sdk/assets/`, so building `mxc-sdk` needs no musl toolchain or
-  download. A script cross-compiles the controller for Linux musl and
-  regenerates the tars when its source changes. `mxc-sdk`'s build script picks
+  download. `scripts/build-wslc-gateway-image.ps1` cross-compiles the
+  controller for Linux musl and regenerates the tars when its source changes. `mxc-sdk`'s build script picks
   the tar for the target architecture, compiles its image ID into the WSLC
   backend, and copies the tar next to the final binary, as it does for
   `wslcsdk.dll`. Building the controller in `build.rs` would need a nested
   Cargo build.
 
-- **CI check:** CI rebuilds the controller images with the pinned toolchain
-  and `--locked`, and fails if their IDs don't match the committed tars, so
-  the committed tars match the source. Rebuilding the prototype from another
+- **CI check:** `WSLC.Gateway.Image.Check.Job.yml` runs the script with
+  `-Check`, rebuilding the images with the pinned toolchain and `--locked`,
+  and fails if their IDs don't match the committed tars. Rebuilding the prototype from another
   directory gave identical IDs for both architectures.
 
 - **Distribution:** the tar ships beside each binary that runs the WSLC
@@ -597,20 +604,30 @@ probes used direct TCP connections, ignoring the proxy variables.
   `Worker::shutdown` deletes them with the workload.
 
 - **Leftovers:** a crash leaves the workload, controller and networks in the
-  store. A store admits one live session, so when MXC starts a session on a
-  store (create-and-run or daemon), MXC's proxied-mode resources already there
-  are orphaned. MXC force-deletes the workload and controller (ignoring not
-  found), then the networks, which frees their names and subnets. Containers
-  go first because a network can't be deleted while one is attached
-  (`ERROR_SHARING_VIOLATION`).
+  store. A store admits one live session, so when MXC opens a session on a
+  store (create-and-run or daemon), every proxy recorded for that store is a
+  leftover. Before starting a proxy, MXC force-deletes the recorded workload
+  and controller (ignoring not found), then the networks, which frees their
+  names and subnets, and warns that it removed them. Containers go first
+  because a network can't be deleted while one is attached
+  (`ERROR_SHARING_VIOLATION`). MXC tries every resource even after one fails,
+  keeps the failures in the record, and returns an error naming what to
+  delete by hand.
 
-- **Identifying leftovers:** the 3.0.5 SDK can't list or label containers, so
-  MXC keeps an ownership record. Before creating them, MXC writes their names
-  to a file under `%LOCALAPPDATA%\mxc`, and cleanup deletes only recorded
-  names. Names derive from existing IDs (`containerId` for create-and-run,
-  `sandboxId` for the daemon). A lost record leaves leftovers in place but
-  never deletes another tool's resources in a store shared through
-  `wslc.storagePath`.
+- **Identifying leftovers:** the 3.0.5 SDK can't label containers, so MXC
+  keeps an ownership record per proxy:
+  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.json`,
+  in an owner-only directory. The store fingerprint hashes the canonical store
+  path, and the key hashes the session name (`containerId` for create-and-run,
+  `sandboxId` for the daemon). Resources are named
+  `mxc-wslc-gw-<key>-<role>`. MXC writes the record before creating them, and
+  cleanup deletes only recorded names.
+
+- **Unrecorded resources:** if the store has an `mxc-wslc-gw-` network or one
+  of this proxy's containers without a record (a lost record or another tool
+  sharing the store through `wslc.storagePath`), MXC refuses to start rather
+  than reuse or delete it. The error asks the user to delete it by hand or set
+  a different `wslc.storagePath`.
 
 - **Controller exits during use:** the workload loses network access. MXC
   doesn't restart the controller; the caller must deprovision.
@@ -685,8 +702,8 @@ Delivery order:
     and rejected policy fields.
 
 - **Cost:** one extra container and two networks per container, plus startup
-  time, a ~600 KB controller image tar per architecture in each package, and
-  ~1.2 MB of committed tars in the repository.
+  time, a 700–800 KB controller image tar per architecture in each package,
+  and ~1.5 MB of committed tars in the repository.
 
 ## Open questions
 
