@@ -370,6 +370,19 @@ field or set it to `"linux"`.
 This fail-closed exception applies within V1 and does not require a new
 versioned API surface.
 
+### Security-servicing exception: Bubblewrap root identity
+
+Bubblewrap root launches use administrator-reserved subordinate UID/GID
+ranges instead of exposing host root ownership to the workload. This applies
+to all supported contracts and SDK entrypoints, including V1. Root callers
+must provision the ranges and filesystem access for the mapped identity;
+missing or conflicting allocations reject startup. Unprivileged callers
+retain their existing identity behavior.
+
+This containment correction does not change request JSON or add SDK fields.
+See [Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers)
+for prerequisites and ownership semantics.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the

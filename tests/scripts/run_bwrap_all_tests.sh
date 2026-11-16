@@ -17,7 +17,7 @@ SKIPS=""
 # unsatisfiable.
 strict_exempt() {
     case "$1" in
-    "Bubblewrap Inbound Deny") return 0 ;;
+    "Bubblewrap Inbound Deny" | "Bubblewrap Identity Rejection") return 0 ;;
     *) return 1 ;;
     esac
 }
@@ -92,6 +92,7 @@ run_test() {
 
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
 run_test "Bubblewrap Workload Capabilities" "$SCRIPT_DIR/run_bwrap_capabilities_test.sh"
+run_test "Bubblewrap Identity Rejection" "$SCRIPT_DIR/run_bwrap_identity_rejection_test.sh"
 run_test "Bubblewrap cwd advisory" "$SCRIPT_DIR/run_bwrap_cwd_advisory_test.sh"
 run_test "Bubblewrap Environment" "$SCRIPT_DIR/run_bwrap_environment_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"

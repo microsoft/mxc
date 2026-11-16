@@ -9,7 +9,7 @@ if [ ! -f "$LXC_EXEC" ]; then
     exit 1
 fi
 
-for tool in bwrap unshare python3 mount timeout; do
+for tool in bwrap unshare setpriv python3 mount timeout; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "FAIL: $tool is required for resolver isolation coverage."
         exit 1
@@ -22,11 +22,15 @@ fi
 
 # Replace host paths only inside a private mount namespace.
 if [ "${MXC_RESOLVER_ISOLATION_INNER:-0}" != "1" ]; then
-    if ! unshare -Urm true >/dev/null 2>&1; then
+    namespace_args=(--mount)
+    if [ "$(id -u)" -ne 0 ]; then
+        namespace_args+=(--user --map-current-user --keep-caps)
+    fi
+    if ! unshare "${namespace_args[@]}" true >/dev/null 2>&1; then
         echo "SKIP: unprivileged user and mount namespaces are unavailable."
         exit 77
     fi
-    exec unshare -Urm env MXC_RESOLVER_ISOLATION_INNER=1 \
+    exec unshare "${namespace_args[@]}" env MXC_RESOLVER_ISOLATION_INNER=1 \
         LXC_EXEC="$LXC_EXEC" bash "$0"
 fi
 
@@ -41,10 +45,12 @@ cleanup() {
         kill "$PEER_PID" 2>/dev/null || true
         wait "$PEER_PID" 2>/dev/null || true
     fi
-    if [ "$ETC_MOUNTED" = 1 ]; then umount /etc; fi
-    if [ "$RUN_MOUNTED" = 1 ]; then umount /run; fi
-    if [ "$VAR_MOUNTED" = 1 ]; then umount /var; fi
-    if [ "$MNT_MOUNTED" = 1 ]; then umount /mnt; fi
+
+    # The private /etc has no mtab; unmount without updating mount records.
+    if [ "$ETC_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /etc; fi
+    if [ "$RUN_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /run; fi
+    if [ "$VAR_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /var; fi
+    if [ "$MNT_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /mnt; fi
     rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -336,6 +342,7 @@ for path in ["/run/systemd/resolve/io.systemd.Resolve",
             raise SystemExit("FAIL: host resolver IPC control did not answer")
 PY
     if ! output="$(TMPDIR="$WORK_DIR/scratch" timeout 60 \
+        setpriv --inh-caps=-all --ambient-caps=-all -- \
         "$LXC_EXEC" --experimental "$WORK_DIR/$mode.json" 2>&1)"; then
         echo "$output"
         echo "FAIL: resolver isolation in $mode mode."

@@ -119,6 +119,48 @@ requiring root privileges or a container runtime.
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
 
+### Root callers
+
+Root callers require administrator-reserved subordinate UID and GID allocations
+in `/etc/subuid` and `/etc/subgid`, and `getent` for checking host accounts.
+Each file must be a regular, root-owned file, not a symlink or writable by
+group or others. Root launches also require `/proc/<pid>/setgroups` (Linux
+3.19+) and an unshifted host user namespace. Mixed real/effective root
+credentials and root callers in limited user namespaces are rejected.
+
+MXC selects the first allocation for root with at least 65,536 IDs in each
+file. Numeric owner `0` and account names whose UID is 0 are supported. UID
+and GID bases may differ. The workload maps sandbox IDs 0 through 65,535 into
+those reserved ranges, runs as sandbox UID/GID 1000, and has no supplementary
+groups or capabilities. No sandbox identity maps to host UID or GID 0.
+For example, reserved UID/GID bases of 100,000 would make the workload's host
+UID/GID 101,000. These numbers are an illustration, not default allocations.
+
+Missing, undersized, malformed, or overlapping allocations reject startup.
+The selected ranges must not contain account UIDs, group GIDs, or account
+primary GIDs reported by `getent`. An account lookup failure or truncated
+result also rejects startup. Administrators must ensure the ranges are
+reserved for this use, including existing file ownership and identities that
+an account service does not enumerate. Absence from `/etc/passwd` is not proof
+that an ID is unused. MXC never allocates ranges or edits the host's account
+configuration.
+
+Filesystem grants must be accessible to the mapped host UID/GID with no
+supplementary groups, including directory traversal. Granting a root-owned
+`0700` directory or `0600` file does not make it accessible. MXC rejects such
+grants before launch; it does not change their ownership or permissions.
+Provision the intended access explicitly. Files created in writable grants
+belong to the mapped host identity.
+
+The trusted root network supervisor stays in the host user namespace and
+enters only the workload's network namespace to install policy. Its private
+state directory is not granted to the workload. Generated hosts and resolver
+files are passed by descriptor and copied read-only into the sandbox; their
+host inputs must be readable by the mapped identity.
+
+Unprivileged callers keep their existing UID/GID behavior and do not require
+subordinate allocations.
+
 ### Host tool lookup
 
 MXC finds `bwrap` and the network tools above in this order, both for the
@@ -168,7 +210,8 @@ lxc-exec --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
 
 Bubblewrap creates a namespace-isolated process by:
 
-1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
+1. Creating or joining a private user namespace and unsharing PID, IPC, and
+   UTS namespaces
 2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
    sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
    `/usr/libexec`, `/usr/share`, `/etc`, plus a read-only copy of the resolver
@@ -188,11 +231,10 @@ Bubblewrap creates a namespace-isolated process by:
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
-Capability removal does not change the workload's UID or GID. Run MXC as an
-unprivileged user: a root caller still gives the workload root-owner access
-to visible host files, including secrets in `/etc` and writable policy grants.
-The separate network supervisor retains the namespace capabilities it needs
-to install firewall rules.
+Unprivileged callers retain their UID/GID. Root callers use the reserved
+identity described under [Root callers](#root-callers), rather than retaining
+root-owner access to visible host files. The separate network supervisor
+retains the capabilities it needs to install firewall rules.
 
 Bubblewrap ignores a refused capability drop when the caller is root, for
 example when the host's seccomp or security policy blocks `capset`. MXC
@@ -327,8 +369,8 @@ Common consequences of this default:
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
-unreadable to a non-root caller — user-namespace UID mapping does not
-bypass kernel DAC.
+unreadable to an unprivileged or shifted root workload. User namespaces do not
+bypass the host's file permissions.
 
 ## Configuration
 
@@ -503,7 +545,8 @@ This needs no root or `slirp4netns`.
 
 **Address filtering** (`egress.allow` / `egress.deny`) puts the sandbox in a
 private, slirp-backed network namespace and programs its rules there from a
-supervisor holding `CAP_NET_ADMIN` inside an unprivileged user namespace.
+supervisor holding `CAP_NET_ADMIN` in the network namespace's owning user
+namespace, or in the host user namespace for a root caller.
 **No root required**; the sandbox drops `CAP_NET_ADMIN` before the workload
 starts, so it cannot undo the rules.
 

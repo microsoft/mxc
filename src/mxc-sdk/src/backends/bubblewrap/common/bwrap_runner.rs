@@ -39,7 +39,9 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, capability_check, lifetime_spawner, missing_denials, network_rules,
+    bwrap_version, capability_check,
+    identity::RootIdentity,
+    lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::{self, ResolverFile},
@@ -151,6 +153,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // so it sees the already-tightened intents.
         crate::mxc_common::filesystem_access::check_delegation(&request.policy)
             .map_err(|error| error.into_response())?;
+        if let Some(identity) = launch.root_identity {
+            identity
+                .check_delegation(&request.policy)
+                .map_err(|error| error.into_response())?;
+        }
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
@@ -220,6 +227,7 @@ struct ValidatedLaunch {
     bwrap_version: bwrap_version::BwrapVersion,
     bwrap_is_setuid: bool,
     network_tools: Option<proxy_network::NetworkTools>,
+    root_identity: Option<RootIdentity>,
 }
 
 impl BubblewrapScriptRunner {
@@ -361,6 +369,8 @@ impl BubblewrapScriptRunner {
             // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
             ScriptResponse::error(&err.to_string())
         })?;
+        let root_identity =
+            RootIdentity::for_caller().map_err(|error| ScriptResponse::error(&error))?;
         let network_tools = if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
             // the caller actually asked for.
@@ -385,6 +395,7 @@ impl BubblewrapScriptRunner {
             bwrap_version: bwrap.version,
             bwrap_is_setuid: bwrap.is_setuid,
             network_tools,
+            root_identity,
         })
     }
 }
@@ -532,7 +543,12 @@ impl BubblewrapScriptRunner {
             bwrap_version,
             bwrap_is_setuid,
             network_tools,
+            root_identity,
         } = launch;
+        let workload_userns = root_identity
+            .map(RootIdentity::create_namespace)
+            .transpose()
+            .map_err(|error| ScriptResponse::failed(FailurePhase::LaunchFailed, &error))?;
         let checked_network_tools = || {
             network_tools.as_ref().ok_or_else(|| {
                 ScriptResponse::error(
@@ -552,7 +568,19 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
-        let resolver_file = ResolverFile::for_host(&request.policy, logger);
+        let resolver_readable =
+            match root_identity.map(|identity| identity.check_read("/etc/resolv.conf")) {
+                Some(Err(error)) => {
+                    logger.warning_line(&format!(
+                    "WARNING: Bubblewrap: {error}. No resolver snapshot or pin will be supplied."
+                ));
+                    false
+                }
+                _ => true,
+            };
+        let resolver_file = resolver_readable
+            .then(|| ResolverFile::for_host(&request.policy, logger))
+            .flatten();
         let mut mounts = bwrap_command::policy_mounts(&request.policy);
         let resolver_args = match &resolver_file {
             Some(resolver) => resolver
@@ -586,6 +614,13 @@ impl BubblewrapScriptRunner {
             // the egress rule must open.
             Some(resolved) => {
                 let egress = resolved.egress();
+                if egress.pin().is_some() {
+                    if let Some(identity) = root_identity {
+                        identity.check_read("/etc/hosts").map_err(|error| {
+                            ScriptResponse::failed(FailurePhase::LaunchFailed, &error)
+                        })?;
+                    }
+                }
 
                 // A proxied chain opens no port 53, so the workload resolves
                 // through the proxy rather than a nameserver of its own.
@@ -598,6 +633,7 @@ impl BubblewrapScriptRunner {
                     resolver,
                     logger,
                     request.script_timeout,
+                    workload_userns.as_ref(),
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -619,8 +655,9 @@ impl BubblewrapScriptRunner {
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
-                let resolver =
-                    proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger);
+                let resolver = resolver_readable
+                    .then(|| proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger))
+                    .flatten();
                 match proxy_network::ProxyNetworkNamespace::start(
                     checked_network_tools()?,
                     &plan,
@@ -629,6 +666,7 @@ impl BubblewrapScriptRunner {
                     resolver.as_ref(),
                     logger,
                     request.script_timeout,
+                    workload_userns.as_ref(),
                 ) {
                     Ok(network) => {
                         warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
@@ -675,6 +713,18 @@ impl BubblewrapScriptRunner {
             ));
         }
 
+        if let Some(identity) = root_identity {
+            identity.configure_args(&mut args);
+            if proxy_network.is_none() {
+                let namespace = workload_userns.as_ref().ok_or_else(|| {
+                    ScriptResponse::failed(
+                        FailurePhase::LaunchFailed,
+                        "Bubblewrap: mapped workload user namespace is missing",
+                    )
+                })?;
+                args.splice(0..0, ["--userns".into(), namespace.as_raw_fd().to_string()]);
+            }
+        }
         if stdio == StdioMode::Inherit {
             args.insert(0, "--new-session".into());
         }
@@ -698,6 +748,9 @@ impl BubblewrapScriptRunner {
         // 3. Spawn `bwrap`.
         let mut command = Command::new(&bwrap);
         command.args(&args);
+        if let Some(identity) = root_identity {
+            identity.configure_command(&mut command);
+        }
         let pty = match stdio {
             StdioMode::Pipes => {
                 command
@@ -755,6 +808,11 @@ impl BubblewrapScriptRunner {
         }
         startup.prepare_command(&mut command);
         let mut descriptors = vec![seccomp_filter.as_raw_fd()];
+        if proxy_network.is_none() {
+            if let Some(namespace) = &workload_userns {
+                descriptors.push(namespace.as_raw_fd());
+            }
+        }
         if let Some(fd) = resolver_file.as_ref().and_then(ResolverFile::snapshot_fd) {
             descriptors.push(fd);
         }
@@ -1650,6 +1708,7 @@ mod tests {
                     bwrap_version: bwrap_version::BwrapVersion::new(0, 11, 0),
                     bwrap_is_setuid: false,
                     network_tools: None,
+                    root_identity: None,
                 },
                 &mut Logger::new(Mode::Buffer),
                 StdioMode::Pipes,

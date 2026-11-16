@@ -71,6 +71,7 @@ for coverage, local commands and prerequisites.
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
+| `scripts/ci/bwrap-root-ids.py` | Temporarily reserves root subordinate UID/GID ranges on disposable Bubblewrap CI hosts and restores their original configuration. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at the directory CI passes as `-TempDirectory`, so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
@@ -249,6 +250,39 @@ flush its firewall. Each case is repeated through a `bwrap` wrapper whose
 seccomp filter refuses `capset` and the bounding-set drop; that launch must
 fail without running the workload. The test's last line names the modes that
 passed, and CI requires all three.
+Root cases also require the configured UID/GID mappings, empty supplementary
+groups, denial of root-only files and grants, and shifted ownership of newly
+created files.
+Only the firewall case needs a non-loopback host IPv4 address
+outside slirp's subnet; if unavailable, isolated and proxy cases still run,
+then the script reports exit 77. A failed workload takes precedence over skips.
+
+The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts.
+It reuses valid root allocations or selects free 65,536-ID blocks from the
+host's `SUB_UID_MIN/MAX` and `SUB_GID_MIN/MAX` pools in `/etc/login.defs`,
+excluding existing allocations, account UIDs, primary GIDs, and group GIDs.
+An unsafe existing root allocation or exhausted pool fails setup.
+The helper backs up both files before writing either one. Build and scheduled
+jobs restore the original contents, metadata, and file absence in `always()`
+cleanup steps, including after test failures. A failed restoration retains the
+backups and fails the job. Run `python3 scripts/ci/test_bwrap_root_ids.py` for
+the selection and backup/restore fixtures; they never modify host configuration.
+
+This CI provisioning is not for persistent hosts. Production and manual root
+validation still require administrator-reserved ranges; see
+[Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers).
+`run_bwrap_identity_rejection_test.sh` supplies invalid allocation and account
+fixtures in a private mount namespace, without editing host configuration.
+The staged `mxc-filesystem-probe-tests` payload also runs the ignored
+`backend_modules::bubblewrap::common::identity::tests::root_sdk_streaming_and_pty_use_mapped_identity`
+case as root. It exercises public SDK pipes, PTY input/output and resizing,
+and verifies that the SDK host's identity, groups, and user namespace stay
+unchanged. Both the build and scheduled validation require these cases;
+missing prerequisites do not count as passing coverage.
+The same payload runs `root_backend_hostname_pin_uses_mapped_identity` against
+private mount fixtures. It checks hostname pins from private supervisor storage
+through the backend's programmatic request path; request JSON still restricts
+proxy hosts to loopback names and addresses.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

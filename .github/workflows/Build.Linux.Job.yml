@@ -153,7 +153,7 @@ jobs:
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version missing_denials; do
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version missing_denials identity; do
             cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
@@ -332,7 +332,15 @@ jobs:
           LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
         run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
-      - name: Test Bubblewrap workload capabilities (unprivileged and root)
+      - name: Reserve Bubblewrap root IDs on the disposable CI host
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 scripts/ci/test_bwrap_root_ids.py
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"
+
+      - name: Test Bubblewrap workload identities and capabilities
         working-directory: ${{ github.workspace }}
         shell: bash
         env:
@@ -341,6 +349,7 @@ jobs:
           set -euo pipefail
           expected="Bubblewrap capability test complete: isolated, firewall, proxy."
           bash tests/scripts/run_bwrap_capabilities_test.sh | tee "$RUNNER_TEMP/capabilities-user.log"
+          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_identity_rejection_test.sh
           sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_capabilities_test.sh \
             | tee "$RUNNER_TEMP/capabilities-root.log"
           for log in "$RUNNER_TEMP/capabilities-user.log" "$RUNNER_TEMP/capabilities-root.log"; do
@@ -349,6 +358,20 @@ jobs:
               exit 1
             fi
           done
+          payload="src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
+          for case in root_sdk_streaming_and_pty_use_mapped_identity root_backend_hostname_pin_uses_mapped_identity; do
+            test_name="backend_modules::bubblewrap::common::identity::tests::$case"
+            "$payload" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
+            sudo -n "$payload" --ignored --exact "$test_name"
+          done
+
+      - name: Restore Bubblewrap root ID configuration
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"
 
       - name: Upload binaries
         if: matrix.upload_artifacts
