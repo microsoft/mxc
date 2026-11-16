@@ -20,6 +20,12 @@ Creates an LXC container to provide:
 - **Filesystem isolation** via bind mounts with read-only/read-write/denied enforcement
 - **Network isolation** via iptables rules inside the container's own network namespace
 
+Before running the requested command, MXC checks the container's complete UID
+and GID maps.  It rejects unreadable or empty maps, malformed rows, invalid
+ranges, or any mapping to outside ID 0.  Container root must map to a nonzero
+outside UID.  Validation failure prevents the workload from starting and
+triggers a container stop; a failed stop is reported.
+
 ## Prerequisites
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged

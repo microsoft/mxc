@@ -456,38 +456,72 @@ impl LxcContainer {
         out
     }
 
+    fn validate_id_map(mapping: &str) -> Result<bool, String> {
+        if mapping.is_empty() {
+            return Err("empty ID map".to_owned());
+        }
+
+        let mut root_is_shifted = false;
+        for (index, line) in mapping.lines().enumerate() {
+            let row = index + 1;
+            let columns = line
+                .split_whitespace()
+                .map(|column| {
+                    if !column.bytes().all(|digit| digit.is_ascii_digit()) {
+                        return Err(format!("row {row}: invalid ID or length {column:?}"));
+                    }
+                    column
+                        .parse::<u32>()
+                        .map_err(|error| format!("row {row}: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let [inside, outside, count] = columns.as_slice() else {
+                return Err(format!(
+                    "row {row}: expected three unsigned decimal numbers"
+                ));
+            };
+            if *count == 0
+                || inside.checked_add(*count).is_none()
+                || outside.checked_add(*count).is_none()
+            {
+                return Err(format!("row {row}: invalid or overflowing ID range"));
+            }
+            if *outside == 0 {
+                return Err(format!("row {row}: maps to outside ID 0"));
+            }
+            root_is_shifted |= *inside == 0;
+        }
+        Ok(root_is_shifted)
+    }
+
+    fn validate_id_maps(proc_directory: &std::path::Path) -> Result<(), String> {
+        for filename in ["uid_map", "gid_map"] {
+            let path = proc_directory.join(filename);
+            let mapping = std::fs::read_to_string(&path)
+                .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+            let root_is_shifted = Self::validate_id_map(&mapping)
+                .map_err(|error| format!("Invalid {}: {error}", path.display()))?;
+            if filename == "uid_map" && !root_is_shifted {
+                return Err("no unprivileged root UID mapping".to_owned());
+            }
+        }
+        Ok(())
+    }
+
     fn validate_unprivileged(&self) -> Result<(), String> {
         let validation = (|| {
             let pid = self.init_pid().ok_or_else(|| {
                 format!(
-                    "Failed to get container '{}' init PID to inspect UID map",
+                    "Failed to get container '{}' init PID to inspect UID/GID maps",
                     self.name
                 )
             })?;
-            let mapping =
-                std::fs::read_to_string(format!("/proc/{pid}/uid_map")).map_err(|error| {
-                    format!(
-                        "Failed to read container '{}' UID map for init PID {pid}: {error}",
-                        self.name
-                    )
-                })?;
-            let root_is_shifted = mapping.lines().any(|line| {
-                let columns = line
-                    .split_whitespace()
-                    .map(str::parse::<u32>)
-                    .collect::<Result<Vec<_>, _>>();
-                matches!(
-                    columns.as_deref(),
-                    Ok([0, outside, count]) if *outside != 0 && *count != 0
-                )
-            });
-            if !root_is_shifted {
-                return Err(format!(
-                    "Container '{}' has no unprivileged root UID mapping.  MXC will not run the requested command.",
+            Self::validate_id_maps(std::path::Path::new(&format!("/proc/{pid}"))).map_err(|error| {
+                format!(
+                    "Container '{}': {error}.  MXC will not run the requested command.",
                     self.name
-                ));
-            }
-            Ok(())
+                )
+            })
         })();
 
         if let Err(error) = validation {
@@ -898,6 +932,10 @@ impl LxcContainer {
 #[cfg(test)]
 #[path = "lxc_network_startup_spec.rs"]
 mod network_startup_spec;
+
+#[cfg(test)]
+#[path = "lxc_container_id_map_spec.rs"]
+mod id_map_spec;
 
 #[cfg(test)]
 mod tests {
