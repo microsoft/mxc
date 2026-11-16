@@ -192,7 +192,8 @@ use windows::Win32::Foundation::{
 
 /// Checks for packaged applications and DLL initialization failures.
 fn check_exe_heuristics(exe_path: &Path, exit_code: Option<u32>) -> Option<LaunchDiagnostic> {
-    if is_packaged_app(exe_path) {
+    // A path-only launch heuristic must not override an observed process exit.
+    if exit_code.is_none() && is_packaged_app(exe_path) {
         return Some(LaunchDiagnostic {
             kind: "packaged_app",
             message: format!(
@@ -559,11 +560,22 @@ mod tests {
     }
 
     #[test]
-    fn packaged_app_exit_has_packaged_app_diagnostic() {
+    fn packaged_app_nonzero_exit_has_no_launch_diagnostic() {
         let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
-        let diag = diagnose_process_exit(cmd, 1);
-        assert!(diag.is_some());
-        assert_eq!(diag.unwrap().kind, "packaged_app");
+        for exit_code in [1, 7] {
+            assert!(
+                diagnose_process_exit(cmd, exit_code).is_none(),
+                "an ordinary exit code does not mean process creation failed"
+            );
+        }
+    }
+
+    #[test]
+    fn dll_init_failed_packaged_app_preserves_exit_diagnostic() {
+        let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
+        let diag = diagnose_process_exit(cmd, STATUS_DLL_INIT_FAILED.0 as u32)
+            .expect("a recognized exit status must retain its diagnostic");
+        assert_eq!(diag.kind, "dll_init_failed_ui_required");
     }
 
     // -- extract_exe_from_command_line tests --

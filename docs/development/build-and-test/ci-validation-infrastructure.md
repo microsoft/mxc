@@ -196,6 +196,13 @@ checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement
 and fixture security on supported and unsupported hosts.
 
+The policy suite also checks issue #1784 through
+`run_processcontainer_launch_diagnostics_test.ps1`: a real Windows PowerShell
+copy under a temporary `WindowsApps` directory must preserve zero/nonzero exit
+codes, stdout, stderr and a host-observed file without a false launch diagnostic.
+This exercises the path heuristic without requiring Store provisioning; the
+runner's optional `-PackagedPowerShell` adds an installed MSIX PowerShell check.
+
 The policy suite also runs the native CLI contract boundary cases, including
 the six network-policy rejection shapes and a launched valid control for each
 minimum/stable/development contract, and issue #694's DOS/NT final-path

@@ -799,6 +799,9 @@ if ($facts.nativeCaptureAvailable) {
 $global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'run_processcontainer_contract_tests.ps1') -BinDir $BinDir
 if ($LASTEXITCODE -ne 0) { throw "Native CLI contract suite exited $LASTEXITCODE." }
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'run_processcontainer_launch_diagnostics_test.ps1') -BinDir $BinDir
+if ($LASTEXITCODE -ne 0) { throw "Native launch diagnostic suite exited $LASTEXITCODE." }
 $regression = Join-Path (Split-Path -Parent $PSScriptRoot) 'regression_tests\test_cases\Invoke-Issue694-GetFinalPathNameByHandle.ps1'
 $global:LASTEXITCODE = 0
 & $regression -WxcExec $WxcExec -WorkDirectory (Join-Path $ScratchRoot 'issue-694') -ProbeExe $FinalPathProbe
