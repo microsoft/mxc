@@ -90,8 +90,8 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 - Omitted fields keep their current WSLC defaults.
 
 - Changed operations: create-and-run, provision, start, exec, stop and
-  deprovision. Discovery adds the `WslcProxiedNetworking` capability; validation
-  is unchanged apart from the newly accepted values.
+  deprovision. Discovery is unchanged; validation is unchanged apart from the
+  newly accepted values.
 
 ### Egress filtering
 
@@ -290,12 +290,13 @@ These are rejected before the workload is created:
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
-| WSLC | Yes | WSL 3.0.5+ for in-SDK networking and host loopback (`WSLC_E_RUNTIME_UPDATE_NEEDED`); capability additions allowed for proxied `hostLoopback: allow` (`WSLC_E_CAPABILITY_ADDITIONS_DISABLED`) | WSLC available or unavailable, plus the new `WslcProxiedNetworking` capability on WSL 3.0.5 or later; see [`api.md`](api.md) |
+| WSLC | Yes | WSL 3.0.5+ for in-SDK networking and host loopback (`WSLC_E_RUNTIME_UPDATE_NEEDED`); capability additions allowed for proxied `hostLoopback: allow` (`WSLC_E_CAPABILITY_ADDITIONS_DISABLED`) | WSLC available or unavailable, as today |
 
 - WSLC can be available but unable to run proxied mode on WSL older than
-  3.0.5; it then omits `WslcProxiedNetworking`. Proxied host loopback under the
-  admin policy isn't reported. Both are detected when the session or
-  controller is created, before the workload exists, and fail closed.
+  3.0.5, and proxied host loopback under the admin policy isn't reported.
+  Both are detected when the session or controller is created, before the
+  workload exists, and fail closed. A later change will report feature
+  support from the detected WSL version.
 
 - Unenforceable policy is rejected as listed in
   [Rejected requests](#rejected-requests).
@@ -307,9 +308,9 @@ These are rejected before the workload is created:
   the development contract, as MicroVM provision has. SDKs send it once that
   contract is published.
 
-- **Public APIs:** additive only: a `WslcProxiedNetworking` capability value, and
-  `runtimeConfig` on Node's WSLC provision `network`. Rust and .NET provision
-  requests already carry it. See [`api.md`](api.md).
+- **Public APIs:** additive only: `runtimeConfig` on Node's WSLC provision
+  `network`. Rust and .NET provision requests already carry it. See
+  [`api.md`](api.md).
 
 - **Runtime behavior:** changes.
   - Previously rejected configs are accepted.
@@ -515,9 +516,6 @@ probes used direct TCP connections, ignoring the proxy variables.
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
   packaged as an image tar. No new crate. See
   [Controller image](#controller-image).
-
-- `mxc_engine/probe.rs`: report `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or
-  later.
 
 ### Controller image
 

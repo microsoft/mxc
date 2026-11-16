@@ -5,9 +5,9 @@
 - **Issue:** [#1462](https://github.com/microsoft/mxc/issues/1462)
 - **Feature design spec:** [`README.md`](README.md)
 
-Two additive v1 changes: a `WslcProxiedNetworking` backend capability, and
-`runtimeConfig` on Node's WSLC provision `network`. Otherwise WSLC accepts
-network values through the existing v1 types that it rejects today.
+One additive v1 change: `runtimeConfig` on Node's WSLC provision `network`.
+Otherwise WSLC accepts network values through the existing v1 types that it
+rejects today.
 
 ## Caller scenario
 
@@ -104,21 +104,11 @@ available in v1 SDKs; use [MXC request JSON](../../../../schema.md#mxc-request-j
 
 ## Proposed signatures and types
 
-- **Rust:** `mxc_sdk::v1`. Adds `BackendCapability::WslcProxiedNetworking`; the
-  enum is `#[non_exhaustive]`.
-- **.NET:** `Microsoft.Mxc.Sdk.V1`. Adds `BackendCapability.WslcProxiedNetworking`;
-  older SDKs read unknown values as `Unknown`.
-- **Node:** `@microsoft/mxc-sdk/v1`. Adds `'wslcProxiedNetworking'` to
-  `BackendCapability`. The WSLC provision `network` changes from
+- **Rust:** `mxc_sdk::v1`. No changes.
+- **.NET:** `Microsoft.Mxc.Sdk.V1`. No changes.
+- **Node:** `@microsoft/mxc-sdk/v1`. The WSLC provision `network` changes from
   `DirectionalNetworkConfig` to `NetworkPolicy`, which adds optional
   `runtimeConfig`.
-
-`WslcProxiedNetworking` means WSLC can run proxied mode: egress rules and
-mixed `egress`/`ingress`/`hostLoopback` defaults (WSL 3.0.5 or later). Like
-Bubblewrap's `ProxyEnforcement`, it's backend-specific and reported only
-because support varies by host; other backends enforce egress rules without
-reporting a capability. It doesn't cover proxied `hostLoopback: allow` under
-the `AllowWSLContainerPrivileged` admin policy, which still fails at run time.
 
 Existing types used: `NetworkPolicy`, `NetworkEgressPolicy` /
 `NetworkEgressConfig`, `NetworkIngressPolicy` / `NetworkIngressConfig`,
@@ -150,9 +140,9 @@ and cancellation are unchanged.
   to the container and are released by create-and-run cleanup or
   `deprovision`.
 
-- **Discovery:** WSLC reports `WslcProxiedNetworking` on WSL 3.0.5 or later, so
-  callers can check support before running. Without it, proxied configs fail
-  with `backend_unavailable`.
+- **Discovery:** unchanged. WSLC on WSL older than 3.0.5 can still report
+  available; proxied configs there fail with `backend_unavailable`. A later
+  change will report feature support from the detected WSL version.
 
 - **SDK differences:** Rust and .NET provision requests already carry
   `NetworkPolicy.runtime_config` / `RuntimeConfig`; Node's WSLC provision
@@ -164,11 +154,7 @@ and cancellation are unchanged.
 - Existing callers compile and behave the same, except for the
   [runtime behavior changes](README.md#contracts-apis-and-compatibility):
   previously rejected requests now run, and `BRIDGED` containers may gain
-  Windows loopback access. Code that matches every Node `BackendCapability`
-  value exhaustively must handle `'wslcProxiedNetworking'`. TypeScript can't
-  mark the union open, so this is a source break for that code; it's treated
-  as additive, like `'identitylessLoopbackProxy'` in v1.0.1
-  ([#1406](https://github.com/microsoft/mxc/pull/1406)).
+  Windows loopback access.
   
 - Request mapping is unchanged (contract `1.0.0`), apart from provision
   `runtimeConfig` in the development contract:
@@ -199,15 +185,11 @@ and cancellation are unchanged.
   - .NET `MxcContainerWslcE2ETests.cs` and `MxcLifecycleWslcE2ETests.cs`: one
     proxied create-and-run and one lifecycle run.
   - Error-code conversion for the new rejections in each SDK.
-  - Discovery reports `WslcProxiedNetworking` for WSLC on WSL 3.0.5 or later, in
-    each SDK.
   - Node provision `runtimeConfig` maps to the provision request.
 
-- References: update `BackendCapability` in
-  `docs/api-reference/{rust,dotnet,node}/v1/types.md`, and state in the Node
-  reference that `BackendCapability` may gain values in minor releases. Update
-  Node's WSLC provision `network` type. Update the WSLC notes in the Rust, .NET and Node
-  SDK READMEs if they describe WSLC networking as all-or-nothing.
+- References: update Node's WSLC provision `network` type. Update the WSLC
+  notes in the Rust, .NET and Node SDK READMEs if they describe WSLC
+  networking as all-or-nothing.
 
 ## Open questions
 
