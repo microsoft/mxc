@@ -1,0 +1,22 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c 'import socket\nfor label, port in [(\"LOOPBACK\", {{PORT}}), (\"PROXY\", {{PROXY_PORT}})]:\n s = socket.socket(); s.settimeout(2)\n print(label + (\"_OK\" if s.connect_ex((\"127.0.0.1\", port)) == 0 else \"_BLOCKED\"))\n s.close()'",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{DEVDIR}}"]
+    },
+    "network": {
+        "egress": { "default": "deny" },
+        "ingress": { "default": "allow", "hostLoopback": "deny" }
+    },
+    "seatbelt": {
+        "captureDenials": {
+            "mode": "allow",
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}

@@ -1,0 +1,17 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c 'for i in range({{COUNT}}):\n try: open(\"{{MANYDIR}}/%d\" % i).close()\n except OSError: pass\nprint(\"CAPTURE_UNIQUE_LOOP_DONE\")'; until [ -e {{TESTDIR}}/gate/many ]; do sleep 0.1; done",
+        "timeout": 120000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{DEVDIR}}", "{{TESTDIR}}/gate"]
+    },
+    "seatbelt": {
+        "captureDenials": {
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}

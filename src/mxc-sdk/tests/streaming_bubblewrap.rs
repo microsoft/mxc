@@ -12,6 +12,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod inherited_stdio_contract;
 mod unix_pty_contract;
 
 use mxc_sdk::v1::WaitResult;
@@ -28,6 +29,22 @@ fn bwrap_available() -> bool {
                 panic!("strict mode: {err}");
             }
             println!("SKIPPED: {err}");
+            false
+        }
+    }
+}
+
+fn bwrap_network_available() -> bool {
+    if !bwrap_available() {
+        return false;
+    }
+    match mxc_sdk::bwrap_common::proxy_network::probe_proxy_enforcement() {
+        Ok(_) => true,
+        Err(error) => {
+            if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+                panic!("strict mode: {error}");
+            }
+            println!("SKIPPED: {error}");
             false
         }
     }
@@ -56,7 +73,7 @@ fn proc_entry_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
-fn run_terminal_fixture(mut command: std::process::Command) {
+fn run_terminal_fixture(mut command: std::process::Command) -> String {
     use std::process::Stdio;
     use std::time::Duration;
 
@@ -89,6 +106,23 @@ fn run_terminal_fixture(mut command: std::process::Command) {
         matches!(&outcome, Ok(status) if status.success()),
         "terminal fixture failed: {outcome:?}\n{output}"
     );
+    output
+}
+
+#[test]
+fn bubblewrap_inherited_stdio_uses_caller_stdio() {
+    if !bwrap_available() {
+        return;
+    }
+    inherited_stdio_contract::assert_uses_caller_stdio(
+        "bubblewrap_inherited_stdio_uses_caller_stdio",
+        |command| bwrap_request(&command, 30_000),
+        |marker, exit_code| {
+            format!(
+                "IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit {exit_code}"
+            )
+        },
+    );
 }
 
 #[test]
@@ -111,6 +145,203 @@ fn streaming_bubblewrap_bidirectional_stdio() {
     assert!(out.contains("ping-pong"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
+
+#[test]
+fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        let mut request = bwrap_request("echo WORKLOAD_STARTED", 0);
+        request.network = Some(NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        for pty in [false, true] {
+            let result = if pty {
+                spawn_with_pty(request.clone(), Default::default()).map(|_| ())
+            } else {
+                spawn(request.clone(), Default::default()).map(|_| ())
+            };
+            let error = result.expect_err("a failed network namespace must not start the workload");
+            assert!(
+                error.message.contains("test: bwrap namespace refused")
+                    && error.message.contains("user.max_net_namespaces"),
+                "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
+            );
+        }
+        return;
+    }
+
+    if !bwrap_network_available() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("shim directory");
+    let shim = dir.path().join("bwrap");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+         echo 'test: bwrap namespace refused' >&2\nexit 1\n",
+    )
+    .expect("write bwrap shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        .expect("make bwrap shim executable");
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH")),
+    ))
+    .expect("shim PATH");
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "streaming_bubblewrap_reports_network_namespace_startup_failure",
+            "--nocapture",
+        ])
+        .env(FIXTURE_ENV, "1")
+        .env("PATH", path)
+        .output()
+        .expect("run startup failure fixture");
+    assert!(
+        output.status.success(),
+        "startup failure fixture exited {}:\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn streaming_bubblewrap_rule_failure_never_runs_workload() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use mxc_sdk::v1::{
+        run, spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy,
+        NetworkRuntimeConfig,
+    };
+    use nix::errno::Errno;
+    use nix::sys::prctl::set_child_subreaper;
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_RULE_FAILURE_FIXTURE";
+    const FIXTURE_DONE: &str = "BUBBLEWRAP_RULE_FAILURE_FIXTURE_DONE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        set_child_subreaper(true).expect("adopt sandbox children after startup failure");
+        let dir = tempfile::tempdir_in("/tmp").expect("workload marker directory");
+        let marker = dir.path().join("workload.started");
+        let mut started = Vec::new();
+        for mode in ["proxy", "firewall"] {
+            for api in ["run", "spawn", "pty"] {
+                let execute = |request| match api {
+                    "run" => run(request, Default::default()).map(|result| result.outcome),
+                    "spawn" => spawn(request, Default::default())
+                        .map(|mut process| process.wait().expect("wait for workload")),
+                    "pty" => spawn_with_pty(request, Default::default())
+                        .map(|process| process.wait().expect("wait for PTY workload")),
+                    _ => unreachable!(),
+                };
+                let mut request = bwrap_request(
+                    &format!("printf WORKLOAD_STARTED > '{}'", marker.display()),
+                    30_000,
+                );
+                assert_eq!(
+                    execute(request.clone()).expect("isolated control must run"),
+                    WaitResult::Exited(0),
+                    "{mode}/{api}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&marker).expect("control must write its marker"),
+                    "WORKLOAD_STARTED",
+                    "{mode}/{api}"
+                );
+                std::fs::remove_file(&marker).expect("remove control marker");
+
+                request.network = Some(NetworkPolicy {
+                    egress: Some(NetworkEgressPolicy {
+                        default: Some(if mode == "proxy" {
+                            NetworkAction::Deny
+                        } else {
+                            NetworkAction::Allow
+                        }),
+                        ..Default::default()
+                    }),
+                    runtime_config: (mode == "proxy").then(|| NetworkRuntimeConfig {
+                        network_proxy: Some("http://127.0.0.1:3128".to_string()),
+                    }),
+                    ..Default::default()
+                });
+                let error =
+                    execute(request).expect_err("rule installation failure must reject execution");
+                assert!(
+                    error.message.contains("test: rule installation refused"),
+                    "{mode}/{api} lost the rule failure diagnostic: {error:?}"
+                );
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                        Err(Errno::ECHILD) => break,
+                        Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => {}
+                        Ok(WaitStatus::StillAlive) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        status => panic!("{mode}/{api} left a sandbox child: {status:?}"),
+                    }
+                }
+                if marker.exists() {
+                    started.push(format!("{mode}/{api}"));
+                    std::fs::remove_file(&marker).expect("remove unexpected workload marker");
+                }
+            }
+        }
+        assert!(
+            started.is_empty(),
+            "workloads ran after rule installation failed: {started:?}"
+        );
+        println!("{FIXTURE_DONE}");
+        return;
+    }
+
+    if !bwrap_network_available() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("shim directory");
+    let shim = dir.path().join("iptables-restore");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'iptables v1.8.9 (nf_tables)'; exit 0; fi\n\
+         echo 'test: rule installation refused' >&2\nexit 1\n",
+    )
+    .expect("write restore shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        .expect("make restore shim executable");
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH")),
+    ))
+    .expect("shim PATH");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "streaming_bubblewrap_rule_failure_never_runs_workload",
+            "--nocapture",
+        ])
+        .env(FIXTURE_ENV, "1")
+        .env("PATH", path);
+    let output = run_terminal_fixture(command);
+    assert!(
+        output.contains(FIXTURE_DONE),
+        "rule-failure fixture did not complete its assertions:\n{output}"
+    );
 }
 
 #[test]

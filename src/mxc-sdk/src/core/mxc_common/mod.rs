@@ -15,6 +15,7 @@ pub mod exec_stream;
 pub mod filesystem_access;
 pub mod filesystem_canonical;
 pub mod filesystem_object;
+pub(crate) mod filesystem_probe;
 pub mod filesystem_resolve;
 pub mod hashing;
 pub mod id;
@@ -23,6 +24,7 @@ pub mod logger;
 #[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
 pub mod microvm_staging;
 pub mod models;
+pub(crate) mod module_lifetime;
 pub mod mxc_error;
 pub mod network_blocks;
 pub(crate) mod network_parser;
@@ -47,6 +49,7 @@ pub mod validator;
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
 // Public only for the cross-crate Rust SDK adapter; not an external wire API.
 pub(crate) mod wire;
+pub(crate) mod worker_gate;
 
 // Adapters that map specific JSON contracts into the internal config input.
 pub(crate) mod config_contract_adapters;

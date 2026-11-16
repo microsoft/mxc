@@ -533,16 +533,18 @@ fn run_state_aware_main(
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
 
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
         parsed.phase(),
         sandbox_id.as_deref(),
+    );
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
     );
 
     // Attribute out-of-band emit paths (the console-control handler installed in
@@ -563,6 +565,15 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend,
+            phase,
+            correlation_vector: &correlation,
+        },
+    );
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
     let diagnostics_active = logger.has_diagnostic_sink();
@@ -627,6 +638,16 @@ fn run_state_aware_main(
                 &outcome,
             );
         }
+    } else if matches!(phase, "start" | "exec" | "stop") {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                dry_run,
+                outcome.is_ok(),
+            );
+        }
     }
 
     // Record only a constant backend marker. Lifecycle ids can contain
@@ -682,6 +703,7 @@ fn run_state_aware_main(
             eprintln!("\n{}", json);
             process::exit(exit_code);
         }
+        StateAwareExit::UndeliverableExecError(exit_code) => process::exit(exit_code),
     }
 }
 
@@ -698,6 +720,8 @@ enum StateAwareExit {
     Error(String, i32),
     /// Print this JSON error envelope to stderr, then exit with the code's status.
     ExecError(String, i32),
+    /// Stderr could not drain; another diagnostic write would block exit again.
+    UndeliverableExecError(i32),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
@@ -719,7 +743,14 @@ fn finalize_state_aware_outcome(
             // so an envelope appended there would corrupt both. A dry run
             // streams nothing and keeps its envelope on stdout.
             if phase == "exec" && !dry_run {
-                StateAwareExit::ExecError(json, exit_code)
+                if e.details
+                    .as_ref()
+                    .is_some_and(|details| details["hostStderrUnavailable"] == true)
+                {
+                    StateAwareExit::UndeliverableExecError(exit_code)
+                } else {
+                    StateAwareExit::ExecError(json, exit_code)
+                }
             } else {
                 StateAwareExit::Error(json, exit_code)
             }
@@ -1200,12 +1231,11 @@ fn main() {
                 }
             };
         let mut parsed = parsed;
-        let telemetry_active = parsed
-            .request()
-            .telemetry
-            .as_ref()
-            .map(|config| telemetry::init(config, &mut logger))
-            .unwrap_or(false);
+        let telemetry_active = telemetry::init_for_request(
+            parsed.request().telemetry.as_ref(),
+            parsed.request().source_contract,
+            &mut logger,
+        );
         parsed.set_experimental_enabled(cli.experimental);
         parsed.set_dry_run(cli.dry_run);
         run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
@@ -1249,15 +1279,31 @@ fn main() {
     request.dry_run = cli.dry_run;
 
     // ── Telemetry init ──────────────────────────────────────────────
-    let telemetry_active = request
-        .telemetry
-        .as_ref()
-        .map(|c| telemetry::init(c, &mut logger))
-        .unwrap_or(false);
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let telemetry_active = telemetry::init_for_request(
+        request.telemetry.as_ref(),
+        request.source_contract,
+        &mut logger,
+    );
+    let learning_mode_requested = {
+        #[cfg(target_os = "windows")]
+        {
+            DiagnosticConfig::force_learning_mode()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    };
+    let learning_mode = telemetry::LearningMode::for_request(&request)
+        .with_overrides(cli.audit, learning_mode_requested);
+    let _session = telemetry::session::start_with_learning_mode(
+        telemetry_active,
+        "",
+        request.source_contract,
+        learning_mode,
+        &mut logger,
+    );
+    let requested_sandbox_kind = request.requested_sandbox_kind;
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -1267,6 +1313,16 @@ fn main() {
         telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
+
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
@@ -1345,16 +1401,6 @@ fn main() {
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_requested = {
-        #[cfg(target_os = "windows")]
-        {
-            DiagnosticConfig::force_learning_mode()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            false
-        }
-    };
     let learning_mode_injected = if learning_mode_requested
         && !request.policy.capabilities.iter().any(|c| {
             c.eq_ignore_ascii_case("learningModeLogging")

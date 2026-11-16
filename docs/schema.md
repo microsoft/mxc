@@ -8,6 +8,7 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+
 For self-contained references to what each supported version accepts, see
 [containment policy language](containment-policy/README.md).
 
@@ -26,6 +27,15 @@ production configs and the dev schema when working on experimental features:
 // Development (experimental features)
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
+
+The development contract accepts experimental W365 provision settings
+`w365Agents.provision.poolId`, optional `userType` (`"Local"`, `"HumanUser"`, or `"Agentic"`) and
+optional `userObjectId`. Service configuration is environment-only; later
+lifecycle phases reject `w365Agents`. The
+[W365 backend guide](backends/w365agents/w365agents-backend.md) describes
+native checkout/readiness/execution/release, unavailable execution modes, cleanup identities
+and experimental Dev SDK JSON access. Acceptance by the development
+schema alone does not authorize execution or establish live-service compatibility.
 
 ### "MXC request JSON"
 
@@ -191,6 +201,8 @@ that can be executed independently.
     "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Optional externally assigned container ID.
                                            //  Omit it to use backend-defined internal naming.
+                                           //  Must not contain an embedded NUL (`\u0000`);
+                                           //  the executor rejects it rather than truncating.
     "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {
@@ -276,12 +288,21 @@ that can be executed independently.
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
+                                           // Not combinable with profileOverride.
+            "mode": "block",               // "block" (default) or "allow" (default-denied access is
+                                           // allowed and recorded; explicit denies still apply)
+            "outputPath": "~/denials.json",// Absolute or ~/ path; parent dir must exist. Omit for a
+                                           // temp file. Actual path is printed on stderr.
+            "retainEtl": false             // Keep the raw log as a .seatbelt.log and report its
+                                           // path as etlPath
+        }
     },
 
     "telemetry": {                         // Telemetry (Windows only)
-        "enabled": true                    // Request emission for this run; MXC-owned user consent
-                                           // and a permitting administrative policy are also required
+        "enabled": true                    // Accepted for compatibility; does not control
+                                           // the four Required events on supported Windows builds
     },
 
     "wslc": {                              // WSL Container settings (v0.9+)
@@ -317,6 +338,25 @@ that can be executed independently.
 > to MXC and is not a declared JSON request or response field. See
 > [Container lifecycle architecture](development/architecture/container-lifecycle.md)
 > and [telemetry architecture](development/architecture/telemetry.md).
+
+### IsolationSession Command-Line Quoting
+
+IsolationSession normally runs `process.commandLine` as
+`cmd.exe /c <commandLine>`, without adding quotes around the command.
+When the command starts with `"` (after any leading spaces or tabs), `cmd`
+normally removes the first and last quotes; see `cmd /?` for the exceptions.
+
+For execution without a caller-controlled terminal, adding an extra pair of
+outer quotes is a workaround for this bug. A fix is planned for a future
+major release, when IsolationSession will add these quotes automatically.
+When upgrading to that release, remove the extra outer quotes added for this
+workaround; keep quotes required around program paths and arguments.
+
+Caller-controlled terminal operations (such as Rust's `v1::spawn_with_pty`)
+prepend startup commands, so the supplied command's opening quote is not
+subject to this removal. Do not add the workaround quotes for these
+operations; they can break otherwise valid commands. Ordinary execution
+through `wxc-exec` can still be affected even when attached to a console.
 
 ### Working Directory
 
@@ -411,6 +451,14 @@ On Windows, `deniedPaths` is enforced natively when PSEC advertises
 `PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
 rejected before execution.
 
+Windows BaseContainer can also receive access through Windows permissions granted
+to `ALL_APPLICATION_PACKAGES`. An applicable explicit `deniedPaths` rule takes
+precedence over access supplied by that group. See
+[ProcessContainer filesystem access](backends/process-container/filesystem.md)
+for implicit grants, their interaction with explicit policy, and an observed
+common baseline. Baseline fragments are documentation, not replacement policies;
+overlapping explicit grants and denies follow the rules below.
+
 #### Overlapping paths for Windows BaseContainer
 
 When paths overlap across `readwritePaths` and `deniedPaths`:
@@ -422,6 +470,46 @@ When paths overlap across `readwritePaths` and `deniedPaths`:
 
 Denying a parent does not cancel a more specific child grant. To block the
 child, remove its grant or add the child itself to `deniedPaths`.
+
+#### Filesystem probe timeouts
+
+Bubblewrap, LXC, and WSLC check filesystem policy just before enforcement.
+Listed aliases of the same object are tightened to the most restrictive intent
+(`denied` > `readonly` > `readwrite`), then delegation checks require read access
+for read-only grants and read/write access for writable grants. Missing paths
+are skipped; other access-check failures reject the request. Object identities
+that cannot be determined reject the request when denied paths are present,
+and otherwise produce a warning. These checks do not eliminate races between
+validation and mounting.
+
+Each policy-path probe has a **five-second deadline**, including time waiting
+for a worker. This also covers the parser's advisory existence probes on all
+backends, Bubblewrap and LXC mask-target resolution, Bubblewrap grant
+resolution, and WSLC overlap canonicalization (including missing-tail ancestor
+lookup). A timeout or worker
+failure **rejects startup**, even without denied paths; it never treats the path
+as missing or skips a security check. The error names the path and the failure.
+Ordinary missing-path warnings and returned filesystem-error handling remain
+unchanged. The deadline is internal and independent of `process.timeout`,
+including when script execution has no timeout.
+
+Blocking filesystem calls cannot be cancelled reliably. A timed-out worker may
+remain blocked until the filesystem recovers, but at most **16 probe workers**
+can exist per process. A blocked worker retains its slot; repeated timeouts do
+not create unlimited threads. If all slots are occupied, later probes fail
+within the same deadline. Restore the inaccessible filesystem or restart the
+host process to recover capacity. Workers are reused within each validation
+pass, and Windows probes retain the caller's impersonation identity.
+
+Before starting a probe worker, MXC keeps its containing native library loaded
+for the rest of the process lifetime. Closing a caller's library handle after a
+timeout therefore cannot unload code beneath a blocked worker. If that lifetime
+protection cannot be established, the probe fails without starting a worker.
+
+On Unix, delegation uses the real UID/GID; a root-running LXC executor still
+checks root's access, not a pre-elevation user's access. These deadlines bound
+policy probes, not total sandbox startup, backend mount operations, or workload
+I/O if the filesystem becomes unavailable after validation.
 
 #### Path grants and root directories for Windows BaseContainer
 

@@ -363,31 +363,12 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn record_capture_signature(&mut self, signature: CaptureVerboseLoggingSignature) {
-        let actionable = signature.reason.is_actionable();
-        if self.network_verbose_logging_actionable_only_saturated && actionable {
-            self.network_verbose_logging
-                .record_actionable_after_saturation(signature);
-            return;
-        }
-        let overflow_before = self.network_verbose_logging.overflow_occurrences;
-        self.network_verbose_logging.record_with_byte_budget(
+        self.network_verbose_logging.record_with_saturation(
             signature,
             &mut self.network_verbose_logging_signature_bytes,
             MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+            &mut self.network_verbose_logging_actionable_only_saturated,
         );
-        if actionable
-            && self.network_verbose_logging.overflow_occurrences > overflow_before
-            && (self.network_verbose_logging.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
-                || self.network_verbose_logging_signature_bytes
-                    >= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES)
-            && self
-                .network_verbose_logging
-                .signatures
-                .iter()
-                .all(|group| group.signature.reason.is_actionable())
-        {
-            self.network_verbose_logging_actionable_only_saturated = true;
-        }
     }
 
     fn begin_event(&mut self) -> bool {

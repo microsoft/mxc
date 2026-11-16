@@ -183,6 +183,7 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        capture_denials: None,
     }
 }
 
@@ -280,6 +281,7 @@ pub(super) fn into_common_request_ir(
         test_feature: None,
         windows_sandbox: None,
         hyperlight: None,
+        microvm: None,
     }
 }
 

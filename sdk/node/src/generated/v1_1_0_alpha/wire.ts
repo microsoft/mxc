@@ -140,6 +140,8 @@ export interface Filesystem {
 
 export type HyperlightRuntime = "agent" | "python" | "python-shell" | "node" | "bash" | "dotnet-jit";
 
+export type ImageReference = string;
+
 export type IsolationSessionContainment = "isolation_session";
 
 /**
@@ -260,6 +262,34 @@ export interface Lxc {
   release: string;
 }
 
+export type MicroVmContainment = "microvm";
+
+/**
+ * MicroVM creation settings shared by create-and-run and provision requests.
+ */
+export interface MicroVmProvision {
+  /**
+   * Guest memory in MiB. Zero is rejected by semantic validation.
+   */
+  memoryMib?: number;
+}
+
+/**
+ * A complete development provision request for the MicroVM backend.
+ */
+export interface MicroVmProvisionRequest {
+  $schema?: string;
+  _comment?: unknown;
+  containment: MicroVmContainment;
+  filesystem?: Filesystem;
+  microvm: StateAwareMicroVm;
+  network?: Network;
+  phase: ProvisionPhase;
+  runtimeConfig?: RuntimeConfig;
+  telemetry?: Telemetry;
+  version: Version;
+}
+
 /**
  * Network access policy shared by the stable containment backends.
  */
@@ -371,6 +401,20 @@ export interface OneShotHyperlight {
 }
 
 /**
+ * Creation settings for the development MicroVM backend.
+ */
+export interface OneShotMicroVm {
+  /**
+   * Image reference including its registry, resolved by the signed NVX agent.
+   */
+  image: ImageReference;
+  /**
+   * Optional settings applied when creating the MicroVM.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
  * A complete one-shot `1.1.0-alpha` configuration request.
  */
 export interface OneShotRequest {
@@ -410,6 +454,10 @@ export interface OneShotRequest {
    * Optional LXC distribution settings.
    */
   lxc?: Lxc;
+  /**
+   * Required image selection when containment is MicroVM.
+   */
+  microvm?: OneShotMicroVm;
   /**
    * Optional network policy.
    */
@@ -659,6 +707,10 @@ export interface RuntimeConfig {
  */
 export interface Seatbelt {
   /**
+   * Records sandbox denials to a JSON report.
+   */
+  captureDenials?: SeatbeltCaptureDenials;
+  /**
    * Additional Mach service global names the process may resolve.
    */
   extraMachLookups?: string[];
@@ -678,6 +730,24 @@ export interface Seatbelt {
    * Optional override of the generated sandbox profile.
    */
   profileOverride?: string;
+}
+
+/**
+ * macOS Seatbelt denial-capture settings.
+ */
+export interface SeatbeltCaptureDenials {
+  /**
+   * How each ungranted access is handled while it is recorded.
+   */
+  mode?: CaptureDenialsMode;
+  /**
+   * Optional absolute file path for the denial report; may start with `~/`.
+   */
+  outputPath?: string;
+  /**
+   * Whether to keep the run's raw `log stream` lines as `.seatbelt.log` next to the report. The trace can contain sensitive paths; callers are responsible for deleting it.
+   */
+  retainEtl?: boolean;
 }
 
 export type StartPhase = "start";
@@ -720,6 +790,30 @@ export interface StateAwareIsolationSession {
    * Optional provision-phase settings.
    */
   provision?: IsolationSessionProvision;
+}
+
+/**
+ * State-aware MicroVM settings.
+ */
+export interface StateAwareMicroVm {
+  /**
+   * Image reference including its registry, fixed for this container's lifetime.
+   */
+  image: ImageReference;
+  /**
+   * Optional provision-phase settings.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
+ * A closed W365 settings object containing only checkout settings.
+ */
+export interface StateAwareW365AgentsProvision {
+  /**
+   * Optional provision settings; an empty wrapper remains distinct from omission.
+   */
+  provision?: W365AgentsProvision;
 }
 
 /**
@@ -814,6 +908,64 @@ export interface Ui {
 export type UiClipboard = "none" | "read" | "write" | "all";
 
 export type Version = "1.1.0-alpha";
+
+export type W365AgentsContainment = "w365_agents";
+
+export type W365AgentsGuid = string;
+
+/**
+ * W365 checkout settings. Defaults and resolved service validation belong to the backend.
+ */
+export interface W365AgentsProvision {
+  /**
+   * Required pool identifier; no automatic pool selection.
+   */
+  poolId: W365AgentsGuid;
+  /**
+   * Optional user object identifier.
+   */
+  userObjectId?: W365AgentsGuid;
+  /**
+   * Optional user type.
+   */
+  userType?: W365AgentsUserType;
+}
+
+/**
+ * The complete development W365 provision request, excluding unenforceable local policy.
+ */
+export interface W365AgentsProvisionRequest {
+  /**
+   * Optional editor schema reference.
+   */
+  $schema?: string;
+  /**
+   * Optional annotation.
+   */
+  _comment?: unknown;
+  /**
+   * W365 containment marker.
+   */
+  containment: W365AgentsContainment;
+  /**
+   * Provision phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry settings.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Development contract version.
+   */
+  version: Version;
+  /**
+   * Optional provision settings; missing configuration is not defaulted by parsing.
+   */
+  w365Agents?: StateAwareW365AgentsProvision;
+}
+
+export type W365AgentsUserType = "Local" | "HumanUser" | "Agentic";
 
 export type WindowsSandboxContainment = "windows_sandbox";
 
@@ -926,6 +1078,10 @@ export interface WslcProvisionRequest {
    */
   phase: ProvisionPhase;
   /**
+   * Optional runtime settings fixed at provision time.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
    * Optional telemetry configuration.
    */
   telemetry?: Telemetry;
@@ -979,4 +1135,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | W365AgentsProvisionRequest | WslcProvisionRequest | MicroVmProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

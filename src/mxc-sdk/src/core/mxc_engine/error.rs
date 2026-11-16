@@ -91,13 +91,14 @@ impl From<MxcErrorCode> for ErrorCode {
 
 /// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
-/// Details such as `operation` and `native_code` are top-level fields, not
-/// nested in another object. The Node and .NET SDKs and errors returned through
-/// `mxc_ffi` expose the same fields.
+/// `operation`, `native_code`, and `remediation` are top-level fields also
+/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
+/// in Rust errors and executor JSON error envelopes. The C error structure
+/// does not expose them.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Error {
     /// The SDK error code.
@@ -113,6 +114,22 @@ pub struct Error {
     pub native_code: Option<String>,
     /// An actionable "how to fix it" hint, when the failure carries one.
     pub remediation: Option<String>,
+    /// Backend-specific structured context. May contain sensitive recovery
+    /// identifiers; inspect it explicitly rather than logging it wholesale.
+    pub details: Option<Box<serde_json::Value>>,
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Error")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("operation", &self.operation)
+            .field("native_code", &self.native_code)
+            .field("remediation", &self.remediation)
+            .field("details", &self.details.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Error {
@@ -125,6 +142,7 @@ impl Error {
             operation: None,
             native_code: None,
             remediation: None,
+            details: None,
         }
     }
 }
@@ -163,6 +181,7 @@ impl From<MxcError> for Error {
             operation,
             native_code,
             remediation: error.remediation,
+            details: error.details.map(Box::new),
         }
     }
 }
@@ -176,8 +195,6 @@ impl Error {
     /// MxcError`: a second `MxcError: From<_>` impl makes `?` ambiguous
     /// wherever the error type is inferred.
     ///
-    /// `MxcError::details` has no facade counterpart and does not survive the
-    /// round trip.
     #[doc(hidden)]
     pub fn into_mxc_error(self) -> MxcError {
         let mut error = MxcError::new(self.code.to_internal(), self.message);
@@ -189,6 +206,7 @@ impl Error {
         if let Some(remediation) = self.remediation {
             error = error.with_remediation(remediation);
         }
+        error.details = self.details.map(|details| *details);
         error
     }
 }

@@ -42,6 +42,9 @@ CheckRoundTrip(new Dev.PtyJsonOptions(),
 CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },
     x => x.Experimental && x.Size == initialPtySize,
     "dev PTY options experimental authorization and initial dimensions");
+CheckRoundTrip(new Dev.SpawnExtendedJsonOptions { Experimental = true, Stdio = SpawnStdio.Inherit },
+    x => x.Experimental && x.Stdio == SpawnStdio.Inherit,
+    "dev extended spawn options experimental authorization and stdio");
 CheckRoundTrip(new TelemetryConfig(), x => x.Enabled is null, "omitted telemetry enabled");
 CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false, "explicit disabled telemetry");
 foreach (var enabled in new bool?[] { null, true, false })
@@ -55,6 +58,9 @@ foreach (var enabled in new bool?[] { null, true, false })
         new SpawnWithPtyOptions { Size = initialPtySize, Telemetry = telemetry },
         x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
+    CheckRoundTrip(new SpawnExtendedOptions { Telemetry = telemetry, Stdio = SpawnStdio.Inherit },
+        x => x.Telemetry?.Enabled == enabled && x.Stdio == SpawnStdio.Inherit,
+        "extended spawn options, telemetry, and stdio");
 }
 CheckRoundTrip(new ProvisionOptions(), x => x.Telemetry is null, "provision options");
 CheckRoundTrip(new StartOptions(), x => x.Telemetry is null, "start options");
@@ -171,17 +177,21 @@ using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(wslcRequest)))
 const string backendsJson = """
 [
   {"backend":"processcontainer","tier":"base-container","capabilities":["captureDenials"]},
-  {"backend":"lxc"}
+  {"backend":"lxc"},
+  {"backend":"microvm"}
 ]
 """;
 var backends = MxcJson.Deserialize<NativeAvailableBackend[]>(backendsJson);
-Check(backends is { Length: 2 }, "two backends parsed");
+Check(backends is { Length: 3 }, "three backends parsed");
 Check(backends![0].Capabilities.Length == 1, "first backend capability parsed");
 Check(backends[1].Capabilities.Length == 0, "omitted capabilities default to empty, not null");
 Check(backends[1].Warnings.Length == 0, "omitted warnings default to empty, not null");
 var publicBackends = MxcPlatform.ParseAvailableBackends(backendsJson);
-Check(publicBackends.Count == 2, "root discovery facade parses both backends");
+Check(publicBackends.Count == 3, "root discovery facade parses all backends");
 Check(publicBackends[1].Backend == ContainmentBackend.Lxc, "root discovery maps LXC");
+Check(publicBackends[2].Backend == ContainmentBackend.MicroVm, "root discovery maps NVX");
+Check(publicBackends[2].Tier is null && publicBackends[2].Capabilities.Count == 0
+    && publicBackends[2].Warnings.Count == 0, "NVX discovery preserves omitted optional fields");
 
 // 4. Deserialize platform support.
 const string supportJson = """{"isSupported":true,"availableMethods":["processcontainer"]}""";

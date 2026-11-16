@@ -7,9 +7,9 @@ use schemars::{gen::SchemaGenerator, JsonSchema};
 use serde_json::{json, Value};
 
 use super::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest,
-    WslcProvisionRequest, WslcProvisionSessionRequest,
+    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, MicroVmProvisionRequest,
+    OneShotRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
+    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -35,7 +35,13 @@ fn branch(condition: Value, selected: Value, otherwise: Value) -> Value {
     })
 }
 
-fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Value) -> Value {
+fn provision_dispatch(
+    windows_sandbox: Value,
+    isolation_session: Value,
+    microvm: Value,
+    wslc: Value,
+    w365_agents: Value,
+) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
         windows_sandbox,
@@ -43,9 +49,17 @@ fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Va
             discriminator("containment", "isolation_session"),
             isolation_session,
             branch(
-                discriminator("containment", "wslc"),
-                wslc,
-                Value::Bool(false),
+                discriminator("containment", "microvm"),
+                microvm,
+                branch(
+                    discriminator("containment", "wslc"),
+                    wslc,
+                    branch(
+                        discriminator("containment", "w365_agents"),
+                        w365_agents,
+                        Value::Bool(false),
+                    ),
+                ),
             ),
         ),
     )
@@ -63,6 +77,11 @@ fn one_shot_dispatch(one_shot: Value) -> Value {
     json!({
         "allOf": [
             one_shot,
+            branch(
+                discriminator("containment", "microvm"),
+                json!({"required": ["microvm"]}),
+                json!({"not": {"required": ["microvm"]}})
+            ),
             branch(
                 discriminator("containment", "isolation_session"),
                 json!({
@@ -154,14 +173,22 @@ pub fn development_schema() -> Value {
     let wslc_session = subschema::<WslcProvisionSessionRequest>(&mut generator);
     let windows_sandbox = subschema::<WindowsSandboxProvisionRequest>(&mut generator);
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
+    let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
+    let w365_agents = subschema::<super::W365AgentsProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
     let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
+    let provision = provision_dispatch(
+        windows_sandbox,
+        isolation_session,
+        microvm,
+        wslc,
+        w365_agents,
+    );
     let state_aware = phase_dispatch(
         session_dispatch(wslc_session),
         provision,
@@ -199,7 +226,9 @@ mod tests {
         "WslcProvisionSessionRequest",
         "WindowsSandboxProvisionRequest",
         "IsolationSessionProvisionRequest",
+        "MicroVmProvisionRequest",
         "WslcProvisionRequest",
+        "W365AgentsProvisionRequest",
         "StartRequest",
         "ExecRequest",
         "StopRequest",
@@ -218,7 +247,9 @@ mod tests {
                 ("WslcProvisionSessionRequest", "provision-session"),
                 ("WindowsSandboxProvisionRequest", "provision"),
                 ("IsolationSessionProvisionRequest", "provision"),
+                ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
+                ("W365AgentsProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
@@ -229,7 +260,9 @@ mod tests {
                 ("WslcProvisionSessionRequest", "wslc"),
                 ("WindowsSandboxProvisionRequest", "windows_sandbox"),
                 ("IsolationSessionProvisionRequest", "isolation_session"),
+                ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
+                ("W365AgentsProvisionRequest", "w365_agents"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,

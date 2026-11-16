@@ -24,13 +24,30 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   payload keeps the project version; the internal-test payload includes the
   unique Azure Pipelines build ID in its prerelease version so repeated
   publications do not collide.
+- The .NET packaging job configures Cargo's dependency mirror for SBOM
+  generation: the authenticated internal feed in official builds and the public
+  mirror in unofficial builds. Official SBOM errors and timeouts fail the job
+  before the NuGet artifact is uploaded. Public release validation requires
+  the generated `_manifest` directory in `mxc-dotnet-sdk-nuget`.
 - A fast .NET pipeline validation stage runs in parallel with the Rust builds.
-  It verifies the .NET SDK/runtime setup and packs both NuGet variants with
+  It verifies the .NET 10 SDK/runtime setup and packs both NuGet variants with
   synthetic native inputs so pipeline and package-contract failures surface
   without waiting for the cross-platform Rust artifacts.
-- `1ES.Release.Nuget.yml` lets the runner publish the signed .NET SDK package to
-  the internal `Mxc-Azure-Feed` by default, or to NuGet.org through ESRP.
-- `1ES.Release.Npm.yml` publishes the signed npm SDK package through ESRP.
+  Both variants contain managed assemblies under `lib/net8.0` and `lib/net10.0`;
+  applications targeting .NET 8 or .NET 9 use the .NET 8 assembly.
+- `1ES.Release.Nuget.yml` publishes the signed .NET SDK and optional NVX runtime
+  packages to the internal `Mxc-Azure-Feed` by default, or to NuGet.org through
+  ESRP. Both packages are selected by default.
+  If a release partially succeeds, select only the unpublished package when
+  retrying. Use the same build artifact and version for both packages: the NVX
+  runtime depends on the matching SDK, and the pipeline cannot check an
+  already-published package on NuGet.org.
+  `scripts/ci/test-nuget-release-selection.ps1` exercises package selection and
+  validation without publishing.
+- `1ES.Release.Npm.yml` publishes the signed SDK and optional NVX runtime npm
+  packages through ESRP. Both are selected by default.
+  When retrying a partial release, select only the unpublished package from
+  the same build and version.
 
 ### Rust crates.io release
 

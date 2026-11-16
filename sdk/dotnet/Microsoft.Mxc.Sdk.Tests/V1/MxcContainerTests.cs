@@ -469,6 +469,22 @@ public class MxcContainerTests
         }
     }
 
+    [Fact]
+    public void PlatformSupport_ProjectsMicroVmOnlyAndUnavailableHosts()
+    {
+        var available = MxcPlatform.ParsePlatformSupport(
+            """{"isSupported":true,"reason":null,"availableMethods":["microvm"]}""");
+        Assert.True(available.IsSupported);
+        Assert.Null(available.Reason);
+        Assert.Equal(new[] { ContainmentBackend.MicroVm }, available.AvailableMethods);
+
+        var unavailable = MxcPlatform.ParsePlatformSupport(
+            """{"isSupported":false,"reason":"unavailable","availableMethods":[]}""");
+        Assert.False(unavailable.IsSupported);
+        Assert.Equal("unavailable", unavailable.Reason);
+        Assert.Empty(unavailable.AvailableMethods);
+    }
+
     [Theory]
     [InlineData("processcontainer", ContainmentBackend.ProcessContainer)]
     [InlineData("windows_sandbox", ContainmentBackend.WindowsSandbox)]
@@ -478,6 +494,7 @@ public class MxcContainerTests
     [InlineData("isolation_session", ContainmentBackend.IsolationSession)]
     [InlineData("bubblewrap", ContainmentBackend.Bubblewrap)]
     [InlineData("hyperlight", ContainmentBackend.Hyperlight)]
+    [InlineData("microvm", ContainmentBackend.MicroVm)]
     public void Discovery_MapsEveryNativeBackend(
         string wireName,
         ContainmentBackend expected)

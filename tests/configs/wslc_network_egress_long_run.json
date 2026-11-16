@@ -1,0 +1,15 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-long-run",
+  "containment": "wslc",
+  "process": { "commandLine": "echo LONG_RUN_STARTED; sleep 300" },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "1.1.1.1/32" }], "ports": [{ "port": 443, "protocol": "tcp" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}

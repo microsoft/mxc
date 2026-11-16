@@ -42,6 +42,39 @@ pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), Str
     Ok(())
 }
 
+/// Mach name prefix reserved for MXC's per-run process cleanup rules.
+pub const RUN_MARKER_NAME_PREFIX: &str = "com.microsoft.mxc.run.";
+
+/// Reject caller-supplied names in the reserved cleanup prefix. The rules MXC
+/// appends to every profile override them, so they could never take effect.
+pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    if config
+        .profile_override
+        .as_deref()
+        .is_some_and(|profile| profile.contains(RUN_MARKER_NAME_PREFIX))
+    {
+        return Err(format!(
+            "Seatbelt: seatbelt.profileOverride contains '{RUN_MARKER_NAME_PREFIX}', which \
+             MXC reserves for its process cleanup rules. Remove those rules (they are \
+             specific to the run that printed them); MXC adds this run's own."
+        ));
+    }
+    if let Some(name) = config
+        .extra_mach_lookups
+        .iter()
+        .find(|name| name.starts_with(RUN_MARKER_NAME_PREFIX))
+    {
+        return Err(format!(
+            "Seatbelt: seatbelt.extraMachLookups entry '{name}' uses the prefix \
+             '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules."
+        ));
+    }
+    Ok(())
+}
+
 /// Effective outbound posture; omission defaults to deny.
 pub fn egress_allowed(policy: &ContainerPolicy) -> bool {
     policy
@@ -120,6 +153,23 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
         }
     }
 
+    Ok(())
+}
+
+/// `seatbelt.captureDenials` relies on tagging the rules of the generated
+/// profile, so a replacement profile cannot be captured.
+pub fn validate_seatbelt_capture_denials(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    if config.capture_denials.is_some() && config.profile_override.is_some() {
+        return Err("Seatbelt: seatbelt.captureDenials cannot be combined with \
+                    seatbelt.profileOverride. Capture tags the rules in MXC's generated \
+                    profile to find this run's log entries, and MXC does not rewrite a \
+                    custom profile. Remove profileOverride, or add your own \
+                    (with message ...) tags and read them with `log stream`"
+            .to_string());
+    }
     Ok(())
 }
 
@@ -247,11 +297,67 @@ mod tests {
         assert!(validate_seatbelt_ui_policy(&ExecutionRequest::default()).is_ok());
     }
 
+    fn seatbelt_request(config: SeatbeltConfig) -> ExecutionRequest {
+        ExecutionRequest {
+            seatbelt: Some(config),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_reserved_cleanup_names() {
+        let copied_rule = "(version 1)(allow default)\n\
+             (allow mach-lookup (global-name \"com.microsoft.mxc.run.0123\"))";
+        let msg = validate_seatbelt_reserved_names(&seatbelt_request(SeatbeltConfig {
+            profile_override: Some(copied_rule.into()),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(msg.contains("profileOverride"), "got: {msg}");
+
+        let msg = validate_seatbelt_reserved_names(&seatbelt_request(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.example.service".into(),
+                "com.microsoft.mxc.run.0123".into(),
+            ],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(msg.contains("extraMachLookups"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_names_outside_the_reserved_prefix() {
+        assert!(validate_seatbelt_reserved_names(&ExecutionRequest::default()).is_ok());
+        let request = seatbelt_request(SeatbeltConfig {
+            profile_override: Some("(version 1)(allow default)".into()),
+            extra_mach_lookups: vec!["com.microsoft.mxc.runner".into()],
+            ..Default::default()
+        });
+        assert!(validate_seatbelt_reserved_names(&request).is_ok());
+    }
+
     #[test]
     fn gui_access_effective_requires_both_flags() {
         assert!(gui_access_effective(&gui_request(true, false)));
         assert!(!gui_access_effective(&gui_request(true, true)));
         assert!(!gui_access_effective(&gui_request(false, false)));
         assert!(!gui_access_effective(&ExecutionRequest::default()));
+    }
+
+    #[test]
+    fn capture_denials_requires_generated_profile() {
+        let mut r = ExecutionRequest {
+            seatbelt: Some(SeatbeltConfig {
+                capture_denials: Some(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_seatbelt_capture_denials(&r).is_ok());
+
+        r.seatbelt.as_mut().unwrap().profile_override = Some("(version 1)".into());
+        let msg = validate_seatbelt_capture_denials(&r).unwrap_err();
+        assert!(msg.contains("profileOverride"), "got: {msg}");
     }
 }

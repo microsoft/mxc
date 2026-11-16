@@ -29,6 +29,7 @@ terms, plain-English alternatives, and guidance on naming specific types.
 - [Schema code generation](build-and-test/schema-codegen.md)
 - [Fuzzing](build-and-test/fuzzing.md)
 - [WSLC SDK bindings runbook](build-and-test/wslc-sdk-bindings.md)
+- [WSLC gateway image](build-and-test/wslc-gateway-image.md)
 - [Host-dependent backend test suites](../../tests/scripts/README.md)
 
 ## Contributor guides
@@ -46,5 +47,4 @@ terms, plain-English alternatives, and guidance on naming specific types.
 
 - [Backend support probe API](plans/backend-support-probe-api.md)
 - [Bubblewrap backend feasibility](plans/bubblewrap-backend.md)
-- [Linux and WSL roadmap](plans/linux-wsl-roadmap-june-2026.md)
 - [Nanvix integration](plans/nanvix-integration.md)

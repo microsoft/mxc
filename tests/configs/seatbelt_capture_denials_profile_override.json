@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo CAPTURE_OVERRIDE_RAN",
+        "timeout": 20000
+    },
+    "seatbelt": {
+        "profileOverride": "(version 1)\n(allow default)\n",
+        "captureDenials": {}
+    }
+}

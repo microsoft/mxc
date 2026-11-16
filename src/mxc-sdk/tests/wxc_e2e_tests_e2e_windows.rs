@@ -933,6 +933,16 @@ fn hyperlight_suite() {
             expected_exit: 0,
             output_contains: Some("hello from plain python"),
         },
+        // Regression: output with no trailing newline must reach the host
+        // when the call ends, not be dropped on exit (microsoft/mxc#1680,
+        // fixed in the driver by hyperlight-unikraft v0.19.0).
+        HyperlightCase {
+            config: "hyperlight_python_flush.json",
+            runtime: "python",
+            description: "no-newline stdout is flushed at call end",
+            expected_exit: 0,
+            output_contains: Some("flush-no-newline-ok"),
+        },
         HyperlightCase {
             config: "hyperlight_node_hello.json",
             runtime: "node",

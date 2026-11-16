@@ -1,0 +1,10 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "microvm",
+  "microvm": {
+    "image": " "
+  },
+  "process": {
+    "commandLine": "echo hello"
+  }
+}

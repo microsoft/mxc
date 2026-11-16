@@ -1,5 +1,5 @@
 {
-  "resourceVersion": 3,
+  "resourceVersion": 4,
   "locale": "en-US",
   "messages": {
     "title": {
@@ -8,7 +8,7 @@
     },
     "body": {
       "id": "telemetry-consent-body",
-      "text": "Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.\n\nIf enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content."
+      "text": "Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.\n\nIf enabled, MXC sends diagnostic information about product usage, performance, and reliability, including a random session ID that links events from the same container lifecycle. MXC does not send your commands, full file paths, credentials, or other customer content."
     },
     "affirmativeLabel": {
       "id": "telemetry-consent-affirmative-label",

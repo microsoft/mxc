@@ -485,8 +485,8 @@ impl IngressManager {
             "-A",
             chain,
             "-m",
-            "state",
-            "--state",
+            "conntrack",
+            "--ctstate",
             "ESTABLISHED,RELATED",
             "-j",
             accept,
@@ -508,7 +508,14 @@ impl IngressManager {
         }
 
         body.push(argv(&[
-            "-A", chain, "-m", "state", "--state", "NEW", "-j", drop,
+            "-A",
+            chain,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "NEW",
+            "-j",
+            drop,
         ]));
 
         body.push(argv(&["-A", chain, "-j", drop]));
@@ -1080,11 +1087,29 @@ mod tests {
         let rules = build();
         assert!(has(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP"
+            ]
         ));
         assert!(!has(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "ACCEPT"]
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "ACCEPT"
+            ]
         ));
     }
 
@@ -1097,8 +1122,8 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
@@ -1107,7 +1132,16 @@ mod tests {
         .expect("ESTABLISHED,RELATED rule must be emitted");
         let new = pos(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
         )
         .expect("NEW rule must be emitted");
         assert!(
@@ -1165,13 +1199,22 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
             ],
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
             &["-A", "MXC-t", "-j", "DROP"],
             &["-I", "INPUT", "-j", "MXC-t"],
         ];
@@ -1263,7 +1306,16 @@ mod tests {
         let rules = build_family(IpFamily::V6);
         let new = pos(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
         )
         .expect("NEW rule must be emitted");
         let terminal = rules
@@ -1324,7 +1376,16 @@ mod tests {
         assert!(
             has(
                 &rules,
-                &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+                &[
+                    "-A",
+                    "MXC-t",
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "NEW",
+                    "-j",
+                    "DROP"
+                ]
             ),
             "IPv6 chain must still drop NEW inbound by default"
         );
@@ -2054,8 +2115,8 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
@@ -2180,7 +2241,16 @@ mod tests {
                 "-j",
                 "ACCEPT",
             ],
-            vec!["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            vec![
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
             vec!["-A", "MXC-t", "-j", "DROP"],
         ];
         let want: Vec<Vec<String>> = want

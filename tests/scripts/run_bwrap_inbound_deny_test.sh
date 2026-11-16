@@ -199,8 +199,8 @@ assert_ingress_chain() {
     # the rendered text.
     for expected in \
         "-A $INGRESS_CHAIN -i lo -j ACCEPT" \
-        "-A $INGRESS_CHAIN -m state --state RELATED,ESTABLISHED -j ACCEPT" \
-        "-A $INGRESS_CHAIN -m state --state NEW -j DROP" \
+        "-A $INGRESS_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT" \
+        "-A $INGRESS_CHAIN -m conntrack --ctstate NEW -j DROP" \
         "-A $INGRESS_CHAIN -j DROP"; do
         grep -Fxq -- "$expected" <<<"$chain_rules" \
             || fail "$tool: $INGRESS_CHAIN is missing the rule '$expected'. Installed:
@@ -228,7 +228,7 @@ assert_ingress_chain ip6tables
 # Exact counters (-x): a truncated '1K' would not compare.
 drop_packets() {
     in_sandbox_net iptables -L "$INGRESS_CHAIN" -n -v -x 2>/dev/null \
-        | awk '/DROP/ && /state NEW/ {print $1; exit}'
+        | awk '/DROP/ && /ctstate NEW/ {print $1; exit}'
 }
 
 DROPS_BEFORE="$(drop_packets)"

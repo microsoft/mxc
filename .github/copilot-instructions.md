@@ -13,7 +13,7 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 ## Architecture invariants
 
 - `mxc_sdk::mxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
-- Keep implementation dependencies internal to `mxc-sdk` as Rust modules in the `mxc-sdk` crate, not as separate workspace crates.
+- Keep implementation dependencies internal to `mxc-sdk` as Rust modules in the `mxc-sdk` crate, not as separate workspace crates. The exception is the WSLC gateway (`src/tools/wslc_gateway`).
 - Backend modules generally depend on `mxc_sdk::mxc_common`; avoid cross-dependencies between backend modules. The optional `nanvix_common` module supplies shared MicroVM data/constants rather than backend dispatch.
 - `mxc_sdk::mxc_engine` is the single execution engine. Executor binaries and the public SDK facade delegate backend routing to it.
 - Keep `wxc`, `lxc`, and `mxc_darwin` thin. Do not add backend-selection matches to the binaries.
@@ -49,11 +49,19 @@ ordinary Cargo binary targets. Workspace builds compile the targets whose
 `required-features` are enabled; do not invoke Cargo recursively from
 `mxc-sdk/build.rs`. Build a sidecar directly with
 `cargo build -p mxc-sdk --bin <target>`. The `wxc-wslc-daemon` target requires
-`--features wslc`. Keep version-resource generation and dependency staging in
+`--features wslc`. The WSLC gateway is a separate, unpublished
+`src/tools/wslc_gateway` crate that ships as committed Linux images; see
+`docs/development/build-and-test/wslc-gateway-image.md`. Keep version-resource generation and dependency staging in
 the package build script, and keep artifact copying/signing in the repository
 build and CI entry points.
 
 ### Targeted validation
+
+The .NET SDK, behavioral tests, and Native AOT smoke test target `net8.0` and
+`net10.0`; samples and the console driver target `net10.0`. The root
+`global.json` selects a stable .NET 10 SDK and the Microsoft.Testing.Platform
+test runner. Windows test bundles explicitly publish `net10.0`; the Azure
+two-branch template falls back to `net8.0` for older checkouts.
 
 ```text
 # From src/
@@ -67,7 +75,7 @@ cargo test -p mxc-sdk --lib -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 
@@ -105,7 +113,7 @@ See [`docs/development/build-and-test/schema-codegen.md`](../docs/development/bu
 - Preserve panic containment across `mxc_ffi`; no panic may unwind through the C ABI.
 - Preserve exact resource ownership and cleanup contracts, especially for processes, jobs, traces, sessions, and native handles.
 - Do not weaken validation or convert failures into success-shaped fallbacks.
-- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry.md`](../docs/telemetry.md).
+- Telemetry is Windows-only and fails closed on build/provider unavailability. Supported contracts emit only the four Required events regardless of request opt-in, consent, or administrative policy. Unattributed internal requests retain consent and policy gates; administrative policy may never grant consent. See [`docs/telemetry.md`](../docs/telemetry.md).
 
 ## Documentation
 

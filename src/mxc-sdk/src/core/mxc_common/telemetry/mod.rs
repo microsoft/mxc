@@ -19,6 +19,8 @@ pub mod correlation_state;
 pub mod correlation_vector;
 pub mod events;
 pub mod policy;
+#[doc(hidden)]
+pub mod session;
 
 use std::time::Duration;
 
@@ -31,12 +33,14 @@ use crate::mxc_common::models::{
 };
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::state_aware_dispatch::DispatchOutcome;
+use crate::mxc_contract::ContractVersion;
 
 pub use consent::ConsentState;
 pub use events::{
-    log_config_rejected, log_error, log_execution, log_network_policy_applied, log_policy_hash,
-    log_process_event, log_sandbox_torn_down, log_verbose, ExecutionEvent, FailureReason,
-    ProcessEvent, TelemetryContext, VerboseEvent,
+    log_config_rejected, log_error, log_execution_end, log_execution_start,
+    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
+    log_verbose, ExecutionEvent, FailureReason, LearningMode, ProcessEvent, TelemetryContext,
+    VerboseEvent,
 };
 pub use policy::PolicyState;
 
@@ -109,14 +113,32 @@ fn emit_active() -> bool {
     crate::mxc_telemetry::is_active()
 }
 
-/// Evaluate consent and policy for one complete logical emission.
+/// Evaluate authorization for one complete logical emission.
+///
+/// Supported-contract requests emit Required diagnostics: no consent,
+/// request opt-in or administrative policy, only build eligibility. Other
+/// requests need consent and policy.
 fn authorization_allows_emission() -> bool {
     #[cfg(test)]
     if let Some(allowed) = TEST_AUTHORIZATION_OVERRIDE.with(|value| value.get()) {
         return allowed;
     }
 
+    if session::critical_events() {
+        return required_collection_allowed();
+    }
     consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
+}
+
+fn required_collection_allowed() -> bool {
+    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
+}
+
+pub(super) fn uses_required_events(source_contract: Option<ContractVersion>) -> bool {
+    matches!(
+        source_contract,
+        Some(ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha)
+    )
 }
 
 fn invocation_can_emit(active: bool) -> bool {
@@ -124,7 +146,7 @@ fn invocation_can_emit(active: bool) -> bool {
 }
 
 fn process_can_emit() -> bool {
-    emit_active() && authorization_allows_emission()
+    !session::invocation_disabled() && emit_active() && authorization_allows_emission()
 }
 
 /// Proof that one complete logical telemetry emission is authorized.
@@ -180,6 +202,7 @@ fn reset_for_test() {
         .unwrap_or_else(|e| e.into_inner()) = None;
     TEST_FORCE_ACTIVE.with(|f| f.set(false));
     TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(None));
+    session::reset_process();
     events::test_sink::clear();
 }
 
@@ -225,7 +248,30 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
         log_suppression_reason(config, logger);
         return false;
     }
+    activate_provider(logger)
+}
 
+/// Initialize the provider for one request, selecting the gate by contract.
+///
+/// Supported-contract requests collect Required diagnostics regardless of
+/// the request's telemetry object, MXC consent or administrative policy, when
+/// the build is eligible. All other requests use [`init`].
+pub fn init_for_request(
+    config: Option<&TelemetryConfig>,
+    source_contract: Option<ContractVersion>,
+    logger: &mut Logger,
+) -> bool {
+    if uses_required_events(source_contract) {
+        if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
+            logger.log_line("telemetry: Required diagnostics are not collected by this build");
+            return false;
+        }
+        return activate_provider(logger);
+    }
+    config.is_some_and(|config| init(config, logger))
+}
+
+fn activate_provider(logger: &mut Logger) -> bool {
     let activated = crate::mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
     if !activated && cfg!(target_os = "windows") {
         logger.warning_line(
@@ -234,9 +280,8 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
     }
     if activated && !crate::mxc_telemetry::IS_UTC_ROUTED {
         logger.warning_line(
-            "telemetry: events are emitted to local ETW only; this build has no provider group \
-             GUID, so nothing is routed to the Microsoft pipeline (set \
-             MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time for an internal build)",
+            "telemetry: events are emitted to local ETW only; internal WinExt routing \
+             requires MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time",
         );
     }
     activated
@@ -284,6 +329,30 @@ fn classify_failure(phase: &FailurePhase) -> FailureReason {
         FailurePhase::Timeout => FailureReason::Timeout,
         FailurePhase::ProcessExited | FailurePhase::None => FailureReason::ProcessError,
     }
+}
+
+/// Emit the start of an authorized invocation before dispatch.
+///
+/// Result fields are placeholders, not a successful process exit. This neither
+/// claims the terminal slot nor releases the invocation's provider reference.
+pub fn emit_execution_start(
+    active: bool,
+    requested_sandbox_kind: Option<&str>,
+    ctx: TelemetryContext<'_>,
+) {
+    let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
+        return;
+    };
+    log_execution_start(&ExecutionEvent {
+        backend: ctx.backend,
+        sandbox_kind: sandbox_kind_for(ctx.backend, requested_sandbox_kind),
+        exit_code: 0,
+        outcome: "started",
+        duration_ms: 0,
+        failure_reason: None,
+        phase: ctx.phase,
+        correlation_vector: ctx.correlation_vector,
+    });
 }
 
 /// Emit completion telemetry for an executor invocation.
@@ -336,7 +405,7 @@ fn emit_completion_event(
     let outcome = if failed { "failure" } else { "success" };
     let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
 
-    log_execution(&ExecutionEvent {
+    log_execution_end(&ExecutionEvent {
         backend,
         sandbox_kind,
         exit_code: response.exit_code,
@@ -437,7 +506,7 @@ fn emit_early_exit_event(
     let backend = containment.wire_name();
     let sandbox_kind = sandbox_kind_for(backend, requested_sandbox_kind);
 
-    log_execution(&ExecutionEvent {
+    log_execution_end(&ExecutionEvent {
         backend,
         sandbox_kind,
         exit_code: 1,
@@ -491,9 +560,12 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
 
 /// Emit one verbose-document chunk under a fresh live authorization decision.
 ///
-/// Returns `false` when collection is no longer authorized, allowing a caller
-/// to stop emitting the remaining chunks immediately.
+/// Returns `false` when the contract excludes verbose events or collection is
+/// no longer authorized, allowing a caller to stop emitting remaining chunks.
 pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> Result<bool, u32> {
+    if !session::legacy_events_enabled() {
+        return Ok(false);
+    }
     let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
         return Ok(false);
     };
@@ -519,6 +591,7 @@ pub fn set_process_context_with_kind(
     containment: &ContainmentBackend,
     requested_sandbox_kind: Option<&'static str>,
 ) {
+    session::remember_process();
     let backend = containment.wire_name();
     let mut slot = PROCESS_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_none() {
@@ -597,6 +670,7 @@ fn process_phase() -> &'static str {
 /// seeded/spun MS-CV for this phase (see [`correlation_vector`]). One-shot
 /// executions never call this. Later calls are ignored (the value is set-once).
 pub fn set_process_correlation_vector(correlation_vector: &str) {
+    session::remember_process();
     // Allocate the owned copy *before* taking the lock so the critical section
     // does no allocation — a panic mid-allocation while holding the lock would
     // otherwise deadlock the panic hook's `process_correlation_vector` reader.
@@ -725,7 +799,7 @@ fn emit_crash(
     reason: FailureReason,
 ) {
     let plan = plan_crash_with_kind(ctx, sandbox_kind, exit_code, reason);
-    log_execution(&plan.execution);
+    log_execution_end(&plan.execution);
     log_error(ctx, sandbox_kind, plan.error, plan.exit_code);
 }
 
@@ -742,6 +816,7 @@ fn emit_crash(
 /// where the OS reclaims the ETW registration at process exit. It also carries
 /// **no** panic message text, which can contain paths or other PII.
 pub fn emit_panic() {
+    let _session = session::resume_process();
     let Some(auth) = EmissionAuthorization::for_process() else {
         return;
     };
@@ -776,6 +851,7 @@ pub fn emit_panic() {
 /// tears the process down via `ExitProcess`, and the main thread may still be
 /// live. It is allocation-light and emits no free-form text.
 pub fn emit_cancellation() {
+    let _session = session::resume_process();
     let Some(auth) = EmissionAuthorization::for_process() else {
         return;
     };
@@ -964,7 +1040,7 @@ fn emit_state_aware_event(
         }
     }
 
-    log_execution(&plan.execution);
+    log_execution_end(&plan.execution);
     if let Some(reason) = plan.error {
         log_error(ctx, sandbox_kind, reason, plan.execution.exit_code);
     }
@@ -1018,7 +1094,7 @@ pub fn emit_sdk_state_aware_typed(
             Ok(()) => (0, "success", None),
             Err(error) => (1, "failure", Some(classify_mxc_error(error))),
         };
-        log_execution(&ExecutionEvent {
+        log_execution_end(&ExecutionEvent {
             backend: ctx.backend,
             sandbox_kind,
             exit_code,
@@ -1071,7 +1147,7 @@ pub fn emit_sdk_cancellation_with_kind(
     emit_sdk_with_release(active, |auth| {
         let _auth = auth;
         let sandbox_kind = sandbox_kind_for(ctx.backend, requested_sandbox_kind);
-        log_execution(&ExecutionEvent {
+        log_execution_end(&ExecutionEvent {
             backend: ctx.backend,
             sandbox_kind,
             exit_code: CANCELLED_EXIT_CODE,
@@ -1138,14 +1214,290 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::events::test_sink::TEST_LOCK;
     use super::test_support::TelemetryTestEnv;
     use super::*;
 
-    /// Serializes tests that touch the process-global emit slot / context
-    /// (`HAS_EMITTED`, `PROCESS_BACKEND`, `PROCESS_PHASE`, `PROCESS_CORRELATION_VECTOR`)
-    /// or drive the emit paths, so their global state can't leak across tests.
-    /// Mirrors the `TEST_LOCK` pattern in `mxc_telemetry`.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    #[test]
+    fn execution_start_uses_placeholders_and_does_not_claim_the_terminal_slot() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let _session = session::start_with_learning_mode(
+            true,
+            "",
+            None,
+            LearningMode::PermissiveLearning,
+            &mut logger,
+        );
+        let expected_id = session::current().unwrap().to_string();
+        let ctx = TelemetryContext {
+            backend: "processcontainer",
+            phase: "",
+            correlation_vector: "",
+        };
+        emit_execution_start(true, Some("process"), ctx);
+        assert!(!HAS_EMITTED.load(Ordering::SeqCst));
+        assert!(events::test_sink::take_executions().is_empty());
+
+        emit_completion_with_kind(
+            true,
+            &ContainmentBackend::ProcessContainer,
+            Some("process"),
+            &ScriptResponse {
+                exit_code: 0,
+                ..Default::default()
+            },
+            Duration::from_millis(25),
+        );
+        let starts = events::test_sink::take_starts();
+        let ends = events::test_sink::take_executions();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(starts[0].outcome, "started");
+        assert_eq!(starts[0].exit_code, 0);
+        assert_eq!(starts[0].duration_ms, 0);
+        assert_eq!(starts[0].failure_reason, None);
+        assert_eq!(starts[0].session_id, expected_id);
+        assert_eq!(starts[0].session_id, ends[0].session_id);
+        assert_eq!(starts[0].learning_mode, "allow-and-record");
+        assert_eq!(starts[0].learning_mode, ends[0].learning_mode);
+        assert_eq!(starts[0].backend, ends[0].backend);
+        assert_eq!(starts[0].sandbox_kind, ends[0].sandbox_kind);
+        assert_eq!(ends[0].outcome, "success");
+        assert_eq!(ends[0].duration_ms, 25);
+        reset_for_test();
+    }
+
+    #[test]
+    fn execution_start_honors_initial_and_live_authorization() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        let ctx = TelemetryContext {
+            backend: "isolation_session",
+            phase: "exec",
+            correlation_vector: "synthetic-correlation",
+        };
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+        emit_execution_start(false, None, ctx);
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(false)));
+        emit_execution_start(true, None, ctx);
+        assert!(events::test_sink::take_starts().is_empty());
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+        emit_execution_start(true, Some("vm"), ctx);
+        let starts = events::test_sink::take_starts();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].sandbox_kind, "vm");
+        assert_eq!(starts[0].phase, ctx.phase);
+        assert_eq!(starts[0].correlation_vector, ctx.correlation_vector);
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(false)));
+        emit_sdk_state_aware(
+            true,
+            ctx,
+            &Ok(DispatchOutcome::ExecCompleted { exit_code: 0 }),
+            Duration::from_millis(1),
+        );
+        assert!(events::test_sink::take_executions().is_empty());
+        assert!(events::test_sink::take_errors().is_empty());
+        reset_for_test();
+    }
+
+    #[test]
+    fn executor_early_exit_panic_and_cancellation_end_an_existing_start() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for reason in [
+            FailureReason::InitError,
+            FailureReason::InternalError,
+            FailureReason::Cancelled,
+        ] {
+            reset_for_test();
+            events::test_sink::install();
+            TEST_FORCE_ACTIVE.with(|value| value.set(true));
+            TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            let _session = session::start(true, "", None, &mut logger);
+            set_process_context_with_kind(&ContainmentBackend::IsolationSession, Some("vm"));
+            set_process_phase("exec");
+            set_process_correlation_vector("synthetic-correlation");
+            emit_execution_start(
+                true,
+                Some("vm"),
+                TelemetryContext {
+                    backend: "isolation_session",
+                    phase: "exec",
+                    correlation_vector: "synthetic-correlation",
+                },
+            );
+            match reason {
+                FailureReason::InitError => emit_state_aware_with_kind(
+                    true,
+                    Some("vm"),
+                    TelemetryContext {
+                        backend: "isolation_session",
+                        phase: "exec",
+                        correlation_vector: "synthetic-correlation",
+                    },
+                    &Err(MxcError::backend_unavailable("synthetic")),
+                    Duration::ZERO,
+                ),
+                FailureReason::InternalError => emit_panic(),
+                FailureReason::Cancelled => emit_cancellation(),
+                _ => unreachable!(),
+            }
+            // A second terminal path must not duplicate the End.
+            emit_panic();
+            let starts = events::test_sink::take_starts();
+            let ends = events::test_sink::take_executions();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(ends.len(), 1);
+            assert_eq!(events::test_sink::take_errors().len(), 1);
+            assert_eq!(ends[0].failure_reason, Some(reason));
+            assert_eq!(starts[0].session_id, ends[0].session_id);
+            assert_eq!(starts[0].backend, ends[0].backend);
+            assert_eq!(starts[0].sandbox_kind, ends[0].sandbox_kind);
+            assert_eq!(starts[0].phase, ends[0].phase);
+            assert_eq!(starts[0].correlation_vector, ends[0].correlation_vector);
+        }
+        reset_for_test();
+    }
+
+    #[test]
+    fn out_of_band_execution_end_recovers_the_selected_learning_mode() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for emit in [emit_panic as fn(), emit_cancellation as fn()] {
+            reset_for_test();
+            events::test_sink::install();
+            TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+            let start = {
+                let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+                let _scope = session::start_with_learning_mode(
+                    true,
+                    "",
+                    None,
+                    LearningMode::PermissiveLearning,
+                    &mut logger,
+                );
+                set_process_context(&ContainmentBackend::ProcessContainer);
+                emit_execution_start(
+                    true,
+                    None,
+                    TelemetryContext {
+                        backend: "processcontainer",
+                        phase: "",
+                        correlation_vector: "",
+                    },
+                );
+                events::test_sink::take_starts().pop().unwrap()
+            };
+            let end = std::thread::spawn(move || {
+                assert_eq!(session::current(), None);
+                events::test_sink::install();
+                TEST_FORCE_ACTIVE.with(|value| value.set(true));
+                TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
+                emit();
+                let mut ends = events::test_sink::take_executions();
+                assert_eq!(ends.len(), 1);
+                events::test_sink::clear();
+                ends.pop().unwrap()
+            })
+            .join()
+            .unwrap();
+            assert_eq!(start.learning_mode, "allow-and-record");
+            assert_eq!(start.learning_mode, end.learning_mode);
+            assert_eq!(start.session_id, end.session_id);
+        }
+        reset_for_test();
+    }
+
+    #[test]
+    fn out_of_band_contract_end_uses_required_gate_on_a_fresh_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for (contract, emit) in [
+            ContractVersion::V0_9_0Alpha,
+            ContractVersion::V1_0_0,
+            ContractVersion::V1_1_0Alpha,
+        ]
+        .into_iter()
+        .flat_map(|contract| {
+            [emit_panic as fn(), emit_cancellation as fn()].map(|emit| (contract, emit))
+        }) {
+            reset_for_test();
+            events::test_sink::install();
+            {
+                let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+                let _scope = session::start(true, "", Some(contract), &mut logger);
+                set_process_context(&ContainmentBackend::ProcessContainer);
+            }
+            // No authorization override: the real gate runs with consent
+            // undetermined, which a supported contract must not need.
+            let ends = std::thread::spawn(move || {
+                assert!(!session::critical_events());
+                events::test_sink::install();
+                TEST_FORCE_ACTIVE.with(|value| value.set(true));
+                emit();
+                events::test_sink::take_executions()
+            })
+            .join()
+            .unwrap();
+            let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+            assert_eq!(ends.len(), expected);
+        }
+        reset_for_test();
+    }
+
+    #[test]
+    fn init_for_request_ignores_request_flag_consent_and_policy_for_supported_contracts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = TelemetryTestEnv::new(tmp.path());
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let enabled = TelemetryConfig {
+            enabled: Some(true),
+        };
+
+        assert!(!init_for_request(Some(&enabled), None, &mut logger));
+        assert!(!init_for_request(None, None, &mut logger));
+        for consent in [None, Some(false)] {
+            if let Some(granted) = consent {
+                let result = consent::set_consent(granted, "test");
+                if cfg!(target_os = "windows") {
+                    result.unwrap();
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+            for contract in [
+                ContractVersion::V0_9_0Alpha,
+                ContractVersion::V1_0_0,
+                ContractVersion::V1_1_0Alpha,
+            ] {
+                for policy in [0, 1, 7] {
+                    env.set_policy_value(policy);
+                    for config in [
+                        None,
+                        Some(TelemetryConfig::default()),
+                        Some(TelemetryConfig {
+                            enabled: Some(false),
+                        }),
+                        Some(enabled.clone()),
+                    ] {
+                        let active = init_for_request(config.as_ref(), Some(contract), &mut logger);
+                        assert_eq!(active, crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                        if active {
+                            crate::mxc_telemetry::shutdown();
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn is_enabled_explicit_true_alone_does_not_bypass_consent() {
@@ -1156,9 +1508,36 @@ mod tests {
         let _env = TelemetryTestEnv::new(tmp.path());
         let config = TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn earlier_notice_grant_cannot_authorize_session_correlation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        let dir = tmp.path().join("mxc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("telemetry-consent.json"),
+            r#"{"schemaVersion":2,"consent":"granted","promptResourceVersion":3,"promptLocale":"en-US"}"#,
+        )
+        .unwrap();
+
+        let status = consent::get_status();
+        assert_eq!(status.stored_state, consent::ConsentState::Granted);
+        assert_eq!(status.effective_state, consent::ConsentState::Undetermined);
+        assert_eq!(
+            status.reason,
+            Some(consent::ConsentStatusReason::PromptVersionUnsupported)
+        );
+        let config = TelemetryConfig {
+            enabled: Some(true),
+        };
+        assert!(!is_enabled(&config));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        assert!(!init(&config, &mut logger));
     }
 
     #[cfg(target_os = "windows")]
@@ -1170,7 +1549,6 @@ mod tests {
         // An explicit opt-in is required in addition to consent.
         assert!(is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1186,7 +1564,6 @@ mod tests {
 
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1203,7 +1580,6 @@ mod tests {
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         assert!(!is_enabled(&TelemetryConfig {
             enabled: Some(true),
-            ..Default::default()
         }));
     }
 
@@ -1223,7 +1599,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "denied consent must win over explicit enable under policy {policy_value:?}"
             );
@@ -1248,7 +1623,6 @@ mod tests {
             assert!(
                 !is_enabled(&TelemetryConfig {
                     enabled: Some(true),
-                    ..Default::default()
                 }),
                 "undetermined consent must block an explicit enable under policy {policy_value:?}"
             );
@@ -1264,7 +1638,6 @@ mod tests {
         consent::set_consent(true, "cli").unwrap();
         let config = TelemetryConfig {
             enabled: Some(false),
-            ..Default::default()
         };
         assert!(!is_enabled(&config));
     }
@@ -1292,10 +1665,7 @@ mod tests {
         assert_eq!(consent::get_consent(), consent::ConsentState::Granted);
         assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
         // Every other gate is open; only the omitted opt-in keeps it off.
-        assert!(!is_enabled(&TelemetryConfig {
-            enabled: None,
-            ..Default::default()
-        }));
+        assert!(!is_enabled(&TelemetryConfig { enabled: None }));
     }
 
     #[test]
@@ -1392,15 +1762,20 @@ mod tests {
         events::test_sink::install();
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let scope = session::start(true, "", None, &mut logger);
+        let expected_session = session::current().unwrap().to_string();
         set_process_context_with_kind(&ContainmentBackend::IsolationSession, Some("vm"));
         set_process_phase("exec");
         set_process_correlation_vector("iso:wxc-abcd");
+        drop(scope);
 
         emit_panic();
 
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1, "panic emits exactly one Execution");
         let exec = &execs[0];
+        assert_eq!(exec.session_id, expected_session);
         assert_eq!(exec.backend, "isolation_session");
         assert_eq!(exec.sandbox_kind, "vm");
         assert_eq!(exec.exit_code, PANIC_EXIT_CODE);
@@ -1412,6 +1787,7 @@ mod tests {
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1, "panic emits exactly one Error");
         let error = &errors[0];
+        assert_eq!(error.session_id, expected_session);
         assert_eq!(error.backend, "isolation_session");
         assert_eq!(error.sandbox_kind, "vm");
         assert_eq!(error.error_type, FailureReason::InternalError);
@@ -1431,15 +1807,20 @@ mod tests {
         events::test_sink::install();
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let scope = session::start(true, "", None, &mut logger);
+        let expected_session = session::current().unwrap().to_string();
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("start");
         set_process_correlation_vector("iso:wxc-abcd");
+        drop(scope);
 
         emit_cancellation();
 
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1);
         let exec = &execs[0];
+        assert_eq!(exec.session_id, expected_session);
         assert_eq!(exec.exit_code, CANCELLED_EXIT_CODE);
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::Cancelled));
@@ -1448,6 +1829,7 @@ mod tests {
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].session_id, expected_session);
         assert_eq!(errors[0].error_type, FailureReason::Cancelled);
         assert_eq!(errors[0].exit_code, CANCELLED_EXIT_CODE);
 
@@ -2114,7 +2496,7 @@ mod tests {
     /// the second write in a pair, the second write must still fire (they
     /// share the one decision proven by the `EmissionAuthorization` token).
     /// This structurally forbids a revocation-race window between the paired
-    /// `log_execution` and `log_error` calls, without re-introducing blocking
+    /// `log_execution_end` and `log_error` calls, without re-introducing blocking
     /// consent/policy I/O on the hot path.
     #[test]
     fn paired_write_shares_single_authorization_decision() {
@@ -2165,7 +2547,7 @@ mod tests {
     }
 
     /// Regression: a denied initial authorization must skip the pair entirely
-    /// — neither `log_execution` nor `log_error` may fire when the token
+    /// — neither `log_execution_end` nor `log_error` may fire when the token
     /// cannot be minted.
     #[test]
     fn paired_write_denies_pair_when_token_cannot_be_minted() {

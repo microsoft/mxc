@@ -927,8 +927,11 @@ impl IngressPlan {
         vec![
             // The sandbox's own loopback, which never leaves the sandbox.
             "-i lo -j ACCEPT".to_string(),
-            "-m state --state ESTABLISHED,RELATED -j ACCEPT".to_string(),
-            format!("-m state --state NEW -j {}", self.new_inbound.target()),
+            "-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT".to_string(),
+            format!(
+                "-m conntrack --ctstate NEW -j {}",
+                self.new_inbound.target()
+            ),
             "-j DROP".to_string(),
         ]
     }
@@ -955,7 +958,7 @@ struct ChainSection {
 ///   are redirected only once every rule is already installed. Until then the
 ///   custom chains exist but nothing jumps to them.
 /// * **An unsupported rule still fails closed.** A line the host kernel cannot
-///   apply -- the `state` match without `nf_conntrack`, say -- rejects its whole
+///   apply -- the `conntrack` match without `nf_conntrack`, say -- rejects its whole
 ///   transaction, the supervisor aborts, and the workload is never released.
 ///
 /// Later transactions rely on `iptables-restore -n`, which appends rather than
@@ -1317,7 +1320,7 @@ mod tests {
         assert!(
             plan.chain_lines(RuleFamily::V4)
                 .iter()
-                .any(|line| line == "-m state --state NEW -j ACCEPT"),
+                .any(|line| line == "-m conntrack --ctstate NEW -j ACCEPT"),
             "an allow posture must reach the chain as an ACCEPT"
         );
     }
@@ -2258,8 +2261,8 @@ mod tests {
                 ingress_body(family),
                 vec![
                     "-i lo -j ACCEPT".to_string(),
-                    "-m state --state ESTABLISHED,RELATED -j ACCEPT".to_string(),
-                    "-m state --state NEW -j DROP".to_string(),
+                    "-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT".to_string(),
+                    "-m conntrack --ctstate NEW -j DROP".to_string(),
                     "-j DROP".to_string(),
                 ],
                 "{family:?}"
@@ -2320,7 +2323,7 @@ mod tests {
         let body = chain_body(&rendered, INGRESS);
 
         assert!(
-            body.contains(&"-m state --state NEW -j ACCEPT".to_string()),
+            body.contains(&"-m conntrack --ctstate NEW -j ACCEPT".to_string()),
             "{body:?}"
         );
         assert_eq!(

@@ -42,7 +42,8 @@
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
-//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
+//! | `source_contract` | Contract attribution used only for diagnostics and telemetry. |
+//! | `requested_sandbox_kind` | Caller-requested containment used only for telemetry attribution. |
 //!
 //! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
 //! `windowsSandbox` root keys.
@@ -78,7 +79,7 @@ use serde_json::{Map, Value};
 
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
     WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -166,10 +167,23 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             Value::Object(config)
         }
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(
+            MicroVmProvisionConfig { image, memory_mib },
+        ))) => {
+            let mut config = Map::new();
+            config.insert("image".into(), Value::String(image.clone()));
+            if let Some(memory_mib) = memory_mib {
+                config.insert("memoryMib".into(), Value::from(*memory_mib));
+            }
+            Value::Object(config)
+        }
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
-            | StateAwareProvision::Wslc(None),
+            | StateAwareProvision::MicroVm(None)
+            | StateAwareProvision::Wslc(None)
+            // Pool/account coordinates are not containment policy.
+            | StateAwareProvision::W365Agents(_),
         ) => Value::Null,
 
         StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
@@ -231,6 +245,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         // External contract provenance is diagnostics/telemetry attribution,
         // not enforcement.
         source_contract: _excluded_source_contract,
+        // Requested containment is telemetry attribution, not the resolved policy.
+        requested_sandbox_kind: _excluded_requested_sandbox_kind,
         container_id,
         working_directory,
         script_timeout,
@@ -242,6 +258,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        microvm_image,
+        microvm_memory_mib,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -262,6 +280,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     } = request;
 
     let mut root = Map::new();
+    if let Some(image) = microvm_image {
+        let mut config = serde_json::json!({"image": image});
+        if let Some(memory) = microvm_memory_mib {
+            config["provision"] = serde_json::json!({"memoryMib": memory});
+        }
+        root.insert("microvm".into(), config);
+    }
 
     root.insert(
         "containment".into(),
@@ -303,10 +328,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         "lxc".into(),
         serde_json::to_value(lxc_config).unwrap_or(Value::Null),
     );
-    root.insert(
-        "seatbelt".into(),
-        serde_json::to_value(seatbelt).unwrap_or(Value::Null),
-    );
+    let mut seatbelt_value = serde_json::to_value(seatbelt).unwrap_or(Value::Null);
+    if let Value::Object(seatbelt_map) = &mut seatbelt_value {
+        if let Some(Value::Object(cd)) = seatbelt_map.get_mut("captureDenials") {
+            cd.remove("output_path");
+        }
+    }
+    root.insert("seatbelt".into(), seatbelt_value);
     root.insert(
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
@@ -519,6 +547,26 @@ mod tests {
     }
 
     #[test]
+    fn creation_memory_is_hashed_at_its_permanent_optional_location() {
+        let mut request = request();
+        request.microvm_image = Some("docker.io/library/python:3.12-alpine".to_owned());
+        let absent = policy_projection(&request);
+        assert_eq!(
+            absent["microvm"],
+            serde_json::json!({"image":"docker.io/library/python:3.12-alpine"})
+        );
+        request.microvm_memory_mib = Some(512);
+        let explicit = policy_projection(&request);
+        assert_eq!(
+            explicit["microvm"],
+            serde_json::json!({
+                "image":"docker.io/library/python:3.12-alpine","provision":{"memoryMib":512}
+            })
+        );
+        assert_ne!(absent, explicit);
+    }
+
+    #[test]
     fn backend_policy_uses_root_keys() {
         let mut request = request();
         let wslc = crate::mxc_common::models::WslcConfig {
@@ -711,12 +759,37 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_capture_denials_output_path_does_not_change_the_hash() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode, SeatbeltConfig};
+
+        let with_path = |output_path: Option<&str>, mode| {
+            let mut r = request();
+            r.seatbelt = Some(SeatbeltConfig {
+                capture_denials: Some(CaptureDenialsConfig {
+                    mode,
+                    output_path: output_path.map(str::to_string),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let base = with_path(None, CaptureDenialsMode::Block);
+        assert_eq!(
+            base,
+            with_path(Some("/tmp/denials.json"), CaptureDenialsMode::Block)
+        );
+        assert_ne!(base, with_path(None, CaptureDenialsMode::Allow));
+    }
+
+    #[test]
     fn telemetry_settings_do_not_change_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
+        changed.requested_sandbox_kind = Some("process");
+        assert_eq!(baseline, policy_hash(&changed));
         changed.telemetry = Some(crate::mxc_common::models::TelemetryConfig {
             enabled: Some(true),
-            requested_sandbox_kind: Some("process"),
         });
         assert_eq!(
             baseline,

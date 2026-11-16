@@ -3,6 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::ContainerPolicy;
@@ -61,6 +62,9 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 /// Resolve a denied host path to the real target to mask, because the kernel
 /// refuses to mount over or through a symlink.
 fn resolve_denied_host_path(host_path: &str) -> Result<String, String> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("lxc-denied", host_path);
+
     match resolve_through_symlinks(Path::new(host_path)) {
         Some(resolved) => {
             let real = resolved.to_str().ok_or_else(|| {
@@ -96,6 +100,9 @@ fn has_rebound_descendant(container_path: &str, rebound: &[String]) -> bool {
 /// The container-side forms of a re-bound path to compare against denied
 /// directories: the path as written, and its symlink-resolved target.
 fn rebound_comparison_paths(host_path: &str) -> Vec<String> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("lxc-rebound", host_path);
+
     let original = host_path.trim_start_matches('/').to_string();
     let mut out = Vec::with_capacity(2);
     if let Some(resolved) = resolve_through_symlinks(Path::new(host_path)) {
@@ -115,14 +122,18 @@ pub fn configure_filesystem_mounts(
     policy: &ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<(), String> {
+    let mut probe = FilesystemProbe::default();
     let mounts = resolve_mount_order(policy);
     let mut entries: Vec<String> = Vec::new();
 
-    let rebound_container_paths: Vec<String> = mounts
+    let mut rebound_container_paths = Vec::new();
+    for mount in mounts
         .iter()
         .filter(|m| matches!(m.intent, FsIntent::ReadWrite | FsIntent::ReadOnly))
-        .flat_map(|m| rebound_comparison_paths(&m.path))
-        .collect();
+    {
+        validate_path(&mount.path)?;
+        rebound_container_paths.extend(probe.run(&mount.path, rebound_comparison_paths)?);
+    }
 
     for mount in &mounts {
         let host_path = &mount.path;
@@ -147,7 +158,11 @@ pub fn configure_filesystem_mounts(
                 entries.push(mount_entry);
             }
             FsIntent::Denied => {
-                let real_host = resolve_denied_host_path(host_path)?;
+                let (real_host, is_file) = probe.run(host_path, |path| {
+                    let real_host = resolve_denied_host_path(path)?;
+                    let is_file = denied_path_is_file(&real_host);
+                    Ok::<_, String>((real_host, is_file))
+                })??;
                 if real_host != *host_path {
                     logger.log_line(&format!(
                         "Denied path {} resolves through a symlink; masking its real target {}",
@@ -156,10 +171,6 @@ pub fn configure_filesystem_mounts(
                 }
                 validate_path(&real_host)?;
                 let container_path = real_host.trim_start_matches('/');
-
-                // The container rootfs does not exist until mounts are applied,
-                // so the mask type is read off the host path instead.
-                let is_file = denied_path_is_file(&real_host);
 
                 let mount_entry = if is_file {
                     MASK_FILE.entry("/dev/null", container_path)

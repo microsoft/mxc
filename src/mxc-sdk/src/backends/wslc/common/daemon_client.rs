@@ -40,10 +40,10 @@ use serde::Serialize;
 
 use crate::wslc_common::container_steps::OutStream;
 use crate::wslc_common::daemon_protocol::{
-    encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig,
-    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecStdinConfig, ExecTerminal, ProvisionConfig,
-    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE,
-    MAX_STDIN_CHUNK_BYTES, PROTOCOL_VERSION,
+    encode_frame, CancelExecConfig, DaemonApiFailure, DaemonRequest, DaemonResponse,
+    DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecStdinConfig,
+    ExecTerminal, ProvisionConfig, ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame,
+    MAX_FRAME_SIZE, MAX_STDIN_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 use crate::wslc_common::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -190,11 +190,15 @@ impl AdmittedExec {
                 StreamFrame::Exit { code } => DaemonExecOutcome::Exited(code),
                 StreamFrame::TimedOut => DaemonExecOutcome::TimedOut,
                 StreamFrame::Cancelled => DaemonExecOutcome::Cancelled,
-                StreamFrame::Error { message } => {
-                    return Err(DaemonError::transport(format!(
-                        "exec failed: {message}{}",
-                        truncation_suffix(truncated)
-                    )))
+                StreamFrame::Error {
+                    message,
+                    api_failure,
+                } => {
+                    return Err(DaemonError::Daemon {
+                        kind: ErrKind::Backend,
+                        message: format!("exec failed: {message}{}", truncation_suffix(truncated)),
+                        api_failure,
+                    })
                 }
                 StreamFrame::Stdin { .. } => {
                     return Err(DaemonError::transport(
@@ -225,8 +229,12 @@ pub(crate) fn truncation_suffix(truncated: bool) -> &'static str {
 /// which map to a generic backend error.
 #[derive(Debug)]
 pub enum DaemonError {
-    /// The daemon returned a structured [`DaemonResponse::Err`].
-    Daemon { kind: ErrKind, message: String },
+    /// The daemon returned a structured [`DaemonResponse::Err`] or [`StreamFrame::Error`].
+    Daemon {
+        kind: ErrKind,
+        message: String,
+        api_failure: Option<DaemonApiFailure>,
+    },
     /// A transport / protocol failure (connect, framing, or an unexpected
     /// reply shape).
     Transport(anyhow::Error),
@@ -241,7 +249,9 @@ impl DaemonError {
 impl std::fmt::Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Daemon { kind, message } => write!(f, "daemon error [{kind:?}]: {message}"),
+            Self::Daemon { kind, message, .. } => {
+                write!(f, "daemon error [{kind:?}]: {message}")
+            }
             Self::Transport(e) => write!(f, "{e}"),
         }
     }
@@ -337,20 +347,14 @@ impl DaemonClient {
     pub fn ping(&self) -> DaemonResult<()> {
         match self.call(&DaemonRequest::Ping)? {
             DaemonResponse::Pong => Ok(()),
-            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
-            other => Err(DaemonError::transport(format!(
-                "unexpected reply to ping: {other:?}"
-            ))),
+            other => Err(reply_error("unexpected reply to ping", other)),
         }
     }
 
     pub fn provision_session(&self, config: ProvisionSessionConfig) -> DaemonResult<String> {
         match self.call(&DaemonRequest::ProvisionSession(config))? {
             DaemonResponse::SessionProvisioned { session_ref } => Ok(session_ref),
-            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
-            other => Err(DaemonError::transport(format!(
-                "unexpected reply to provision_session: {other:?}"
-            ))),
+            other => Err(reply_error("unexpected reply to provision_session", other)),
         }
     }
 
@@ -362,10 +366,7 @@ impl DaemonClient {
     pub fn provision(&self, config: ProvisionConfig) -> DaemonResult<String> {
         match self.call(&DaemonRequest::Provision(config))? {
             DaemonResponse::Provisioned { sandbox_id } => Ok(sandbox_id),
-            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
-            other => Err(DaemonError::transport(format!(
-                "unexpected reply to provision: {other:?}"
-            ))),
+            other => Err(reply_error("unexpected reply to provision", other)),
         }
     }
 
@@ -467,14 +468,7 @@ impl DaemonClient {
 
         match response {
             DaemonResponse::Ok => {}
-            DaemonResponse::Err { kind, message } => {
-                return Err(DaemonError::Daemon { kind, message })
-            }
-            other => {
-                return Err(DaemonError::transport(format!(
-                    "unexpected exec admission reply: {other:?}"
-                )))
-            }
+            other => return Err(reply_error("unexpected exec admission reply", other)),
         }
 
         Ok(AdmittedExec { pipe })
@@ -751,10 +745,22 @@ fn daemon_exe_path() -> Result<PathBuf> {
 fn expect_ok(response: DaemonResponse) -> DaemonResult<()> {
     match response {
         DaemonResponse::Ok => Ok(()),
-        DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
-        other => Err(DaemonError::transport(format!(
-            "unexpected reply (expected ok): {other:?}"
-        ))),
+        other => Err(reply_error("unexpected reply (expected ok)", other)),
+    }
+}
+
+fn reply_error(unexpected: &str, response: DaemonResponse) -> DaemonError {
+    match response {
+        DaemonResponse::Err {
+            kind,
+            message,
+            api_failure,
+        } => DaemonError::Daemon {
+            kind,
+            message,
+            api_failure,
+        },
+        other => DaemonError::transport(format!("{unexpected}: {other:?}")),
     }
 }
 
@@ -1027,19 +1033,30 @@ mod tests {
         let err = expect_ok(DaemonResponse::Err {
             kind: ErrKind::NotStarted,
             message: "sandbox not started".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcStartContainer".to_string(),
+                native_code: Some("0x80072740".to_string()),
+            }),
         })
         .unwrap_err();
-        assert!(matches!(
-            err,
+        match &err {
             DaemonError::Daemon {
                 kind: ErrKind::NotStarted,
+                api_failure: Some(api_failure),
                 ..
+            } => {
+                assert_eq!(api_failure.operation, "WslcStartContainer");
+                assert_eq!(api_failure.native_code.as_deref(), Some("0x80072740"));
             }
-        ));
+            other => panic!("unexpected error: {other:?}"),
+        }
         assert!(err.to_string().contains("NotStarted"));
         assert!(err.to_string().contains("sandbox not started"));
 
-        assert!(expect_ok(DaemonResponse::Pong).is_err());
+        assert_eq!(
+            expect_ok(DaemonResponse::Pong).unwrap_err().to_string(),
+            "unexpected reply (expected ok): Pong"
+        );
     }
 
     struct ScriptedInput<F>(F);
@@ -1131,6 +1148,7 @@ mod tests {
         let err = DaemonError::Daemon {
             kind: ErrKind::Busy,
             message: "single-flight slot held".to_string(),
+            api_failure: None,
         };
         let text = err.to_string();
         assert!(text.contains("Busy"));

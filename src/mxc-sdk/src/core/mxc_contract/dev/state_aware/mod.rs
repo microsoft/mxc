@@ -72,9 +72,14 @@ pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
+pub use provision::{
+    StateAwareW365AgentsProvision, W365AgentsContainment, W365AgentsGuid, W365AgentsProvision,
+    W365AgentsProvisionRequest, W365AgentsUserType,
+};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use provision_session::{

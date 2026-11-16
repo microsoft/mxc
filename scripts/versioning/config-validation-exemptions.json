@@ -13,6 +13,7 @@
     "tests/configs/lxc_network_retired_v07.json",
     "tests/configs/lxc_network_retired_v08.json",
     "tests/configs/rejected_version_too_old.json",
+    "tests/configs/seatbelt_capture_denials_v1_0.json",
     "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
     "tests/configs/wslc_state_aware_provision_rejected_proxy.json"
   ]

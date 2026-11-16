@@ -31,7 +31,7 @@ pub(crate) struct BackendRegistration {
     pub(crate) probe_coverage: ProbeCoverage,
 }
 
-static BACKENDS: [BackendRegistration; 10] = [
+static BACKENDS: [BackendRegistration; 11] = [
     BackendRegistration {
         backend: ContainmentBackend::ProcessContainer,
         experimental: false,
@@ -58,10 +58,7 @@ static BACKENDS: [BackendRegistration; 10] = [
     BackendRegistration {
         backend: ContainmentBackend::MicroVm,
         experimental: true,
-        probe_coverage: ProbeCoverage::NotDetected(
-            "no hypervisor-presence detector yet; see the follow-up items in \
-             docs/development/plans/backend-support-probe-api.md",
-        ),
+        probe_coverage: ProbeCoverage::Detected(&["windows"]),
     },
     BackendRegistration {
         backend: ContainmentBackend::Hyperlight,
@@ -88,6 +85,13 @@ static BACKENDS: [BackendRegistration; 10] = [
         experimental: false,
         probe_coverage: ProbeCoverage::Detected(&["linux"]),
     },
+    BackendRegistration {
+        backend: ContainmentBackend::W365Agents,
+        experimental: true,
+        probe_coverage: ProbeCoverage::NotDetected(
+            "remote service usability is not locally detectable",
+        ),
+    },
 ];
 
 /// Every registered backend, for callers that must stay exhaustive over them.
@@ -111,6 +115,7 @@ pub(crate) const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
     (ContainmentBackend::IsolationSession, "isolation_session"),
     (ContainmentBackend::Seatbelt, "seatbelt"),
     (ContainmentBackend::Bubblewrap, "bubblewrap"),
+    (ContainmentBackend::W365Agents, "w365_agents"),
 ];
 
 /// Every canonical backend wire name.
@@ -149,6 +154,7 @@ pub(crate) fn registration(backend: &ContainmentBackend) -> &'static BackendRegi
         ContainmentBackend::IsolationSession => 7,
         ContainmentBackend::Seatbelt => 8,
         ContainmentBackend::Bubblewrap => 9,
+        ContainmentBackend::W365Agents => 10,
     };
     &BACKENDS[index]
 }
@@ -165,7 +171,7 @@ mod tests {
             assert!(names.insert(entry.backend.wire_name()));
             assert!(std::ptr::eq(registration(&entry.backend), entry));
         }
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -177,7 +183,7 @@ mod tests {
             .collect();
         assert_eq!(
             experimental,
-            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox"])
+            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox", "w365_agents"])
         );
     }
 

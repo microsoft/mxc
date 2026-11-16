@@ -10,11 +10,9 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::ProxyAddress;
+use crate::mxc_common::models::{LearningModeCapability, ProxyAddress};
 
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
-const CAP_LEARNING_MODE_LOGGING: &str = "learningModeLogging";
-const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
 const LEARNING_MODE_INFORMATION: &str =
     "learningModeLogging is ENABLED: failed access attempts are logged; accesses are still denied \
      (deny-and-record).";
@@ -148,12 +146,15 @@ enum LearningModeDiagnostic {
 }
 
 fn effective_learning_mode_diagnostic(capabilities: &[String]) -> Option<LearningModeDiagnostic> {
-    let learning = capabilities
-        .iter()
-        .any(|value| value.eq_ignore_ascii_case(CAP_LEARNING_MODE_LOGGING));
-    let permissive = capabilities
-        .iter()
-        .any(|value| value.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE));
+    let mut learning = false;
+    let mut permissive = false;
+    for capability in capabilities {
+        match LearningModeCapability::from_capability_name(capability) {
+            Some(LearningModeCapability::Learning) => learning = true,
+            Some(LearningModeCapability::Permissive) => permissive = true,
+            None => {}
+        }
+    }
 
     if permissive {
         Some(LearningModeDiagnostic::SecurityWarning(if learning {

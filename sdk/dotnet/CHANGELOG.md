@@ -9,20 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `MxcLifecycle.SpawnInContainerWithStdin` and
-  `SpawnInContainerWithStdinAsync` start a command in a container with a
-  writable `StandardInput`. For a WSLC container, disposing it, or waiting
-  before taking it, gives the command end-of-file; `SpawnInContainer` still
-  gives a WSLC command end-of-file at once.
-- `MxcContainer.SpawnWithStdin` and `SpawnWithStdinAsync` create a container
-  with a writable `StandardInput`. For a WSLC request, disposing it, or waiting
-  before taking it, gives the command end-of-file; `Spawn` and `Run` still give
-  a WSLC command end-of-file at once.
-
 ### Changed
 
+- `MxcContainer.Spawn` / `SpawnAsync` and `MxcLifecycle.SpawnInContainer` /
+  `SpawnInContainerAsync` expose a writable `StandardInput` for WSLC. Disposing
+  it gives the command end-of-file, and waiting before taking it also gives the
+  command end-of-file. `Run` and `RunInContainer` continue giving the command
+  end-of-file. Killing a WSLC `SpawnInContainer` command that is still running,
+  or reaching its timeout, deletes its container about a minute later, because
+  MXC does not signal a WSLC process that has stdin.
 - The managed V1 facade uses `MxcContainer` with `ContainerRequest` for
   complete requests, and `MxcLifecycle` with typed `ProvisionRequest`,
   `LifecycleContainmentKind`, `ContainerId`, and `ExecutionRequest` for
@@ -36,10 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `MxcProcess.Kill` returns at once when a wait has already seen the process
-  exit and is finishing its cleanup, instead of waiting for that cleanup. For a
-  WSLC command that left a large amount of stdin unread, the cleanup can take
-  about a minute.
+- `MxcProcess.Kill`, `Dispose`, `Warnings`, and `OutputMetadata` return at once
+  when a wait has already seen the process exit, or killed it at its timeout,
+  and is finishing its cleanup, and cancelling `WaitAsync` returns at once
+  during that cleanup. For a WSLC command that left a large amount of stdin
+  unread, the cleanup can take about a minute. During it, `Kill` does nothing,
+  `Warnings` returns the warnings from before the cleanup, `OutputMetadata` is
+  null, and `TryGetExitCode` returns `false` for a process killed at its
+  timeout. A `Dispose` during it releases the process when the cleanup
+  completes, before the wait returns, without waiting for output a descendant
+  process still holds open.
 
 Entries below describe historical release APIs, not the current V1 surface.
 

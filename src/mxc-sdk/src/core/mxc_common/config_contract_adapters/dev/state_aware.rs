@@ -6,7 +6,8 @@ use crate::mxc_common::config_contract_adapters::dev::common::{
 };
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::models::{
-    IsolationSessionProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
+    IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -119,6 +120,16 @@ fn convert_state_aware_wslc_session(
         .map(convert_wslc_provision_session)
 }
 
+fn convert_state_aware_microvm(value: contract::StateAwareMicroVm) -> MicroVmProvisionConfig {
+    let contract::StateAwareMicroVm { image, provision } = value;
+    MicroVmProvisionConfig {
+        image: image.into_inner(),
+        memory_mib: provision
+            .into_option()
+            .and_then(|config| config.memory_mib.into_option()),
+    }
+}
+
 fn state_aware_common(
     schema: contract::OptionalField<String>,
     comment: contract::OptionalField<serde_json::Value>,
@@ -147,6 +158,7 @@ fn state_aware_common(
         seatbelt: None,
         ui: None,
         hyperlight: None,
+        microvm: None,
     }
 }
 
@@ -179,8 +191,60 @@ pub(super) fn provision_into_input(
         contract::ProvisionRequest::WindowsSandbox(request) => {
             windows_sandbox_provision_into_input(request)
         }
+        contract::ProvisionRequest::MicroVm(request) => microvm_provision_into_input(request),
         contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
+        contract::ProvisionRequest::W365Agents(request) => {
+            w365_agents_provision_into_input(request)
+        }
     }
+}
+
+fn w365_agents_provision_into_input(
+    request: contract::W365AgentsProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::W365AgentsProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::W365AgentsContainment,
+        telemetry,
+        w365_agents,
+    } = request;
+    StateAwareInput::new(
+        state_aware_common(schema, comment, version, telemetry),
+        StateAwareOperation::Provision(StateAwareProvision::W365Agents(
+            w365_agents
+                .into_option()
+                .map(|wrapper| wrapper.provision.into_option().map(Into::into)),
+        )),
+    )
+}
+
+fn microvm_provision_into_input(
+    request: contract::MicroVmProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::MicroVmProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::MicroVmContainment,
+        filesystem,
+        network,
+        runtime_config,
+        telemetry,
+        microvm,
+    } = request;
+    let provision = Some(convert_state_aware_microvm(microvm));
+    let mut common = state_aware_common(schema, comment, version, telemetry);
+    common.filesystem = filesystem.into_option().map(convert_filesystem);
+    common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(provision)),
+    )
 }
 
 fn isolation_session_provision_into_input(
@@ -238,6 +302,7 @@ fn wslc_provision_into_input(
         containment: contract::WslcContainment,
         filesystem,
         network,
+        runtime_config,
         telemetry,
         wslc,
     } = request;
@@ -245,6 +310,7 @@ fn wslc_provision_into_input(
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.filesystem = filesystem.into_option().map(convert_filesystem);
     common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
     StateAwareInput::new(
         common,
         StateAwareOperation::Provision(StateAwareProvision::Wslc(provision)),

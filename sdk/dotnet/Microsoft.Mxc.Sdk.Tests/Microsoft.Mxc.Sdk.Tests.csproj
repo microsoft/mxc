@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <!-- xUnit v3 test projects are executables that run themselves. -->
     <OutputType>Exe</OutputType>
     <Nullable>enable</Nullable>
@@ -20,6 +20,7 @@
     <MxcTestCargoFeatures>dotnetsdk test-support</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
+    <MxcTestCargoFeatures Condition="'$(MxcWithMicrovm)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) mxc-sdk/microvm</MxcTestCargoFeatures>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="'$(MxcTestNativeFileName)' == ''">libmxc_ffi.so</MxcTestNativeFileName>
@@ -33,7 +34,7 @@
 
   <Target Name="BuildMxcTestSupportNativeLibrary"
           AfterTargets="Build"
-          Condition="'$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' != 'true'">
+          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' != 'true'">
     <Exec Command="rustc -vV"
           WorkingDirectory="$(MxcSrcDir)"
           ConsoleToMSBuild="true"
@@ -63,7 +64,7 @@
 
   <Target Name="StageMxcTestSupportNativeLibrary"
           AfterTargets="Build"
-          Condition="'$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' == 'true'">
+          Condition="'$(TargetFramework)' != '' and '$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' == 'true'">
     <Error Condition="!Exists('$(MxcTestPrebuiltNativeLibrary)')"
            Text="The prebuilt test-support native library does not exist at $(MxcTestPrebuiltNativeLibrary)." />
     <Copy SourceFiles="$(MxcTestPrebuiltNativeLibrary)"

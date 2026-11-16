@@ -432,6 +432,38 @@ pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn open_caller_stdio() -> [bool; 3] {
+    // SAFETY: F_GETFD only reads this process's descriptor flags.
+    std::array::from_fn(|fd| unsafe { libc::fcntl(fd as libc::c_int, libc::F_GETFD) } >= 0)
+}
+
+/// `caller_stdio` must come from [`open_caller_stdio`] before the launch opens any descriptors.
+#[cfg(unix)]
+pub fn keep_caller_stdio_across_exec(command: &mut std::process::Command, caller_stdio: [bool; 3]) {
+    use std::os::unix::process::CommandExt;
+
+    // Hosts such as Node mark their stdio close-on-exec, which would leave the
+    // workload with none. A slot the caller had closed may now hold the
+    // launch's own error pipe, which must still close on exec.
+    // SAFETY: fcntl is async-signal-safe and only changes the forked child's descriptors.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in (0..3).filter(|&fd| caller_stdio[fd]) {
+                let fd = fd as libc::c_int;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0
+                    && flags & libc::FD_CLOEXEC != 0
+                    && libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 /// `SIGKILL` `target` (a pid, or a negative pgid), treating the "already gone"
 /// outcomes as success. The caller only invokes this on its own still-unreaped
 /// child (so the pid/pgid can't have been recycled), which leaves two benign
@@ -584,9 +616,9 @@ pub trait SandboxBackend {
     /// stdio wired per `stdio`, returning a handle. On a validation or spawn
     /// failure returns a [`ScriptResponse`] carrying the error.
     ///
-    /// Implementations must apply shared validation and [`Self::validate`]
-    /// before performing any process-launch side effects. This keeps direct
-    /// streaming callers and the [`Runner`] bridge on the same safe path.
+    /// Implementations must apply shared and backend-specific request validation
+    /// before launching. Environmental checks may instead be enforced by the
+    /// actual sandbox setup, before the workload is allowed to run.
     fn spawn(
         &mut self,
         request: &ExecutionRequest,
@@ -637,7 +669,7 @@ impl<B: SandboxBackend> Runner<B> {
             Err(response) => return response,
         };
 
-        match child.wait() {
+        let mut response = match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
@@ -663,7 +695,7 @@ impl<B: SandboxBackend> Runner<B> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
                 exit_code: -1,
-                error_message: format!("script timed out after {}ms", request.script_timeout),
+                error_message: format!("script timed out after {}ms: {e}", request.script_timeout),
                 output_metadata: child.output_metadata().cloned().map(Box::new),
                 failure_phase: FailurePhase::Timeout,
                 ..Default::default()
@@ -673,7 +705,10 @@ impl<B: SandboxBackend> Runner<B> {
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
                 response
             }
-        }
+        };
+        // Backends report failures after exit, such as cleanup, here.
+        response.extend_warnings(child.warnings());
+        response
     }
 }
 
@@ -719,7 +754,11 @@ mod runner_tests {
 
     use super::*;
 
-    struct CompletedProcess;
+    #[derive(Default)]
+    struct CompletedProcess {
+        wait_error: Option<std::io::Error>,
+        warnings: Vec<String>,
+    }
 
     struct NativePipeSource;
 
@@ -840,6 +879,10 @@ mod runner_tests {
     }
 
     impl SandboxProcess for CompletedProcess {
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -865,7 +908,7 @@ mod runner_tests {
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
-            Ok(0)
+            self.wait_error.take().map_or(Ok(0), Err)
         }
     }
 
@@ -894,8 +937,77 @@ mod runner_tests {
             validate_common(request)?;
             self.validate(request)?;
             self.direct_spawns.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(CompletedProcess))
+            Ok(Box::new(CompletedProcess::default()))
         }
+    }
+
+    struct CleanupWarningBackend;
+
+    impl SandboxBackend for CleanupWarningBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            Ok(Box::new(CompletedProcess {
+                warnings: vec!["cleanup failed".to_string()],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[test]
+    fn runner_reports_process_warnings_with_the_exit_code() {
+        let mut runner = Runner::new(CleanupWarningBackend);
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.warnings(), ["cleanup failed"]);
+    }
+
+    #[test]
+    fn runner_capture_timeout_preserves_wait_diagnostics() {
+        let runner = Runner::new(CountingBackend {
+            validations: Arc::default(),
+            direct_spawns: Arc::default(),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest {
+            script_timeout: 1000,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let diagnostic =
+            "process timed out; captureDenials teardown also failed: report write failed";
+        let child = CompletedProcess {
+            wait_error: Some(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                diagnostic,
+            )),
+            warnings: vec!["capture failed after timeout".to_string()],
+        };
+
+        let response = runner.wait_for_child(&request, &mut logger, Ok(Box::new(child)));
+
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(response.failure_phase, FailurePhase::Timeout);
+        assert!(response
+            .error_message
+            .contains("script timed out after 1000ms"));
+        assert!(response.error_message.contains(diagnostic));
+        assert_eq!(response.warnings(), ["capture failed after timeout"]);
+        assert!(response.output_metadata.is_none());
     }
 
     #[test]
@@ -1010,9 +1122,54 @@ mod runner_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{wait_with_timeout, WaitError};
+    use super::{keep_caller_stdio_across_exec, open_caller_stdio, wait_with_timeout, WaitError};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn closed_caller_stdio_does_not_block_spawn() {
+        const HOST_ENV: &str = "MXC_CLOSED_STDIO_HOST";
+        let test_name = format!(
+            "{}::closed_caller_stdio_does_not_block_spawn",
+            module_path!().split_once("::").unwrap().1
+        );
+        if std::env::var_os(HOST_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture", "--test-threads=1"])
+                .env(HOST_ENV, "1")
+                .output()
+                .expect("run closed-stdio host");
+            assert!(
+                output.status.success(),
+                "closed-stdio host failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "closed-stdio host did not run the test"
+            );
+            return;
+        }
+
+        // With fds 0 and 1 closed, Rust's launch-error pipe takes both slots.
+        // SAFETY: closes this child host's own stdin and stdout.
+        unsafe {
+            libc::close(0);
+            libc::close(1);
+        }
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        keep_caller_stdio_across_exec(&mut command, open_caller_stdio());
+        let started = Instant::now();
+        let mut child = command.spawn().expect("spawn sleep");
+        let elapsed = started.elapsed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "spawn blocked for {elapsed:?} until the workload exited"
+        );
+    }
 
     #[test]
     fn wait_with_timeout_detects_quick_exit_promptly() {

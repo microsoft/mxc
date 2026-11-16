@@ -5,5 +5,8 @@
         "commandLine": "a=0; b=1; i=0; while [ \"$i\" -lt 10 ]; do printf 'fib(%d) = %d\\n' \"$i\" \"$a\"; next=$((a + b)); a=$b; b=$next; i=$((i + 1)); done",
         "timeout": 30000
     },
-    "containment": "microvm"
+    "containment": "microvm",
+    "microvm": {
+        "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+    }
 }

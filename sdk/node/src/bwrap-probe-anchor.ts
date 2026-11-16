@@ -11,6 +11,7 @@ delete spawnEnv.NODE_OPTIONS;
 const helperPath = process.argv[2];
 const timeoutMs = Number(process.argv[3]);
 const outputLimit = process.argv[4];
+const fallbackDirectories = process.argv[5] ?? '';
 let resultWritten = false;
 let resultFlushed = false;
 let shuttingDown = false;
@@ -69,7 +70,7 @@ function emitFailure(detail: string): void {
 
 const helperProcess = spawn(
   process.execPath,
-  [helperPath, String(timeoutMs), outputLimit],
+  [helperPath, String(timeoutMs), outputLimit, fallbackDirectories],
   { detached: false, stdio: ['ignore', 'pipe', 'ignore'], env: spawnEnv },
 );
 helperProcess.stdout.setEncoding('utf8');

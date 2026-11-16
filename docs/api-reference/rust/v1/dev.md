@@ -10,6 +10,8 @@ unknown fields, and malformed JSON.
 `JsonOptions { experimental: bool }` authorizes experimental backends
 independently of the JSON version. `PtyJsonOptions` also carries
 `size: MxcPtySize` (24 rows by 80 columns by default).
+`SpawnExtendedJsonOptions` carries `experimental` and `stdio: SpawnStdio`;
+like `SpawnExtendedOptions`, it is `#[non_exhaustive]`.
 Result and process types belong to `mxc_sdk::v1`.
 
 `run_json` and `run_in_container_json` return byte-preserving
@@ -26,6 +28,8 @@ pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Err
 pub fn spawn_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error>;
 pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions)
     -> Result<MxcPtyProcess, Error>;
+pub fn spawn_with_extended_options_json(json: &str, options: SpawnExtendedJsonOptions)
+    -> Result<MxcProcess, Error>;
 
 pub fn run_in_container_json(json: &str, options: JsonOptions)
     -> Result<ExecutionResult, Error>;
@@ -44,14 +48,30 @@ pub fn validate_deprovision_json(json: &str, options: JsonOptions) -> Result<Str
 pub fn validate_process_json(json: &str, options: JsonOptions) -> Result<String, Error>;
 ```
 
-`run_json` uses pipe-backed execution or backend-owned capture. MicroVM
-provides captured output without live pipes; it requires Windows x64, a build
-with the `microvm` Cargo feature, experimental authorization, and the signed
-NVX bundle and host prerequisites described in the
-[MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md). Missing platform or build
-support returns `BackendUnavailable`.
+`run_json` uses pipe-backed execution or backend-owned capture. MicroVM supports
+captured and live stdout/stderr and the JSON lifecycle functions above, but
+not writable stdin or PTY. It requires Windows x64, the `microvm` Cargo feature,
+experimental authorization, and the signed NVX bundle. Without platform/build
+support, `run_json` returns `BackendUnavailable`, `spawn_json` returns
+`UnsupportedContainment`, and lifecycle functions return `UnsupportedPhase`.
+Missing runtime prerequisites on a supported build return `BackendUnavailable`.
+See the [MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for the 64 MiB capture limit, caller-owned streams, and sensitive
+`Error.details.nvxRecovery` information when provision succeeds but cleanup fails.
 
 Pipe and PTY spawns and existing-container capture require the selected
-backend's corresponding I/O and lifecycle support. MicroVM does not support
-these operations. Unsupported modes fail rather than switching to another
-I/O mode.
+backend's corresponding I/O and lifecycle support. Unsupported modes fail
+rather than switching to another I/O mode. `spawn_with_extended_options_json`
+with `SpawnStdio::Inherit` attaches the workload to the calling process's
+stdin, stdout, and stderr and supports ProcessContainer, Bubblewrap, and Seatbelt.
+
+Captured existing-container execution closes unused stdin automatically.
+With live execution, drop any stdin writer you take when the workload needs EOF.
+
+On WSLC, a process from `spawn_json`, `spawn_with_extended_options_json` with
+`SpawnStdio::Pipes`, or `spawn_in_container_json` has a writable stdin.
+Dropping it, or waiting without taking it, gives the process end-of-file;
+`run_json` and `run_in_container_json` give the process end-of-file. Killing a
+`spawn_in_container_json` process that is still running, or reaching its
+timeout, deletes its container about a minute later, because MXC does not
+signal a WSLC process that has stdin.

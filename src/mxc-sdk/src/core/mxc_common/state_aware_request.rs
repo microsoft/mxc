@@ -76,6 +76,23 @@ impl std::fmt::Display for Phase {
     }
 }
 
+impl std::str::FromStr for Phase {
+    type Err = MxcError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "provision-session" => Ok(Self::ProvisionSession),
+            "provision" => Ok(Self::Provision),
+            "start" => Ok(Self::Start),
+            "exec" => Ok(Self::Exec),
+            "stop" => Ok(Self::Stop),
+            "deprovision" => Ok(Self::Deprovision),
+            "deprovision-session" => Ok(Self::DeprovisionSession),
+            _ => Err(MxcError::unsupported_phase("unknown lifecycle operation")),
+        }
+    }
+}
+
 impl From<crate::mxc_common::wire::Phase> for Phase {
     fn from(phase: crate::mxc_common::wire::Phase) -> Self {
         match phase {

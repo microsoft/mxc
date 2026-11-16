@@ -31,9 +31,6 @@ jobs:
     outputDirectory: $(Build.SourcesDirectory)/out
     sdkDirectory: $(Build.SourcesDirectory)/sdk/node
     artifactBaseName: mxc-npm-sdk-package
-    # Cache npm package downloads across runs to avoid re-fetching every dependency
-    # tarball from the Azure Artifacts feed on each pipeline invocation.
-    npm_config_cache: $(Pipeline.Workspace)/.npm
 
   steps:
     - checkout: self
@@ -49,14 +46,6 @@ jobs:
       displayName: Use Node.js 24
       inputs:
         version: '24.x'
-
-    - task: Cache@2
-      displayName: Cache npm
-      inputs:
-        key: 'npm | "$(Agent.OS)" | sdk/node/package-lock.json'
-        restoreKeys: |
-          npm | "$(Agent.OS)"
-        path: $(npm_config_cache)
 
     # Download all artifacts dynamically
     - ${{ each target in parameters.targets }}:
@@ -76,9 +65,12 @@ jobs:
         find $(sdkDirectory)/bin -name unix-test-proxy -exec chmod +x {} +
       displayName: Restore execute permission on unix-test-proxy
 
-    # Drop symbol files from the npm package — symbols ship separately.
-    - script: rm -rf $(sdkDirectory)/bin/*/symbols
-      displayName: Strip symbols/ from npm package
+    # NVX runtime assets and symbols ship separately from the base SDK.
+    - script: |
+        set -euo pipefail
+        mv "$(sdkDirectory)/bin/x64/aci-edge-sandboxes" "$(Build.SourcesDirectory)/sdk/node-nvx-runtime/aci-edge-sandboxes"
+        rm -rf "$(sdkDirectory)"/bin/*/aci-edge-sandboxes "$(sdkDirectory)"/bin/*/symbols
+      displayName: Stage NVX runtime and strip symbols from base SDK
 
     - script: |
         set -euo pipefail
@@ -106,9 +98,23 @@ jobs:
       workingDirectory: $(sdkDirectory)
       displayName: npm run build
 
-    - script: npm pack
+    - script: |
+        set -euo pipefail
+        package="$(npm pack --silent)"
+        contents="$(tar -tzf "$package")"
+        if [[ "$contents" == *aci-edge-sandboxes* ]]; then
+          echo "Base SDK package unexpectedly contains NVX runtime assets" >&2
+          exit 1
+        fi
       workingDirectory: $(sdkDirectory)
-      displayName: npm pack
+      displayName: Pack and verify base SDK
+
+    - script: |
+        set -euo pipefail
+        cp "$(Build.SourcesDirectory)/LICENSE.md" "$(Build.SourcesDirectory)/sdk/node-nvx-runtime/"
+        npm pack
+      workingDirectory: $(Build.SourcesDirectory)/sdk/node-nvx-runtime
+      displayName: Pack optional NVX runtime
 
     - task: CopyFiles@2
       displayName: Copy npm package
@@ -116,6 +122,20 @@ jobs:
         sourceFolder: $(sdkDirectory)
         contents: |
           *.tgz
+        targetFolder: '$(outputDirectory)/packages'
+
+    - task: CopyFiles@2
+      displayName: Copy optional NVX npm package
+      inputs:
+        sourceFolder: $(Build.SourcesDirectory)/sdk/node-nvx-runtime
+        contents: '*.tgz'
+        targetFolder: '$(outputDirectory)/packages/nvx'
+
+    - task: CopyFiles@2
+      displayName: Copy npm release selector
+      inputs:
+        sourceFolder: $(Build.SourcesDirectory)/.azure-pipelines/scripts
+        contents: select-npm-packages.ps1
         targetFolder: '$(outputDirectory)/packages'
 
     - task: 1ES.PublishPipelineArtifact@1

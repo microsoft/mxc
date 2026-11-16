@@ -30,7 +30,7 @@ The workspace members and shared Rust dependencies are declared in
 | `mxc-sdk` | Public Rust API and the internal engine, exact contracts, shared runtime, backend implementations, telemetry, build support, and schema support |
 | `mxc_ffi` | C ABI shared/static library used by language SDKs |
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
-| Tools | Diagnostics, schema generation, and test executables |
+| Tools | Diagnostics, schema generation, and test executables, plus the WSLC gateway (`tools/wslc_gateway`), an unpublished Linux binary shipped as a container image. It shares `mxc-sdk`'s `gateway_policy.rs` through `#[path]` instead of linking `mxc-sdk` |
 
 Within `mxc-sdk`, `mxc_common` remains the backend-neutral foundation and
 `mxc_engine` owns dispatch. Backend modules depend on shared modules through
@@ -49,7 +49,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
-| NVX MicroVM | SDK backend modules under `backends/nvx/`; signed-bundle staging in `build/build_nvx_bundled.rs` |
+| NVX MicroVM | SDK backend modules under `backends/nvx/`; bundle staging owned by `aci_edge_sandboxes`; independent file-hash and signature checks shared by the runtime and `build/verify_nvx_runtime_signatures.rs` |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
 Shared parsing and normalization live in the `mxc_common` module; backend-specific policy

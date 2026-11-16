@@ -1,41 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Object-based filesystem-policy normalization (roadmap item D6 —
-//! "object-based policy validation").
-//!
-//! The string-level `crate::mxc_common::config_parser::normalize_filesystem_paths` already
-//! resolves *same path string* appearing in multiple lists via
-//! most-restrictive-wins (`deny` > `readonly` > `readwrite`). This module
-//! handles the harder case: two **different** path strings that resolve to the
-//! **same filesystem object** (via bind mounts, symlinks, or hard links) but
-//! carry conflicting intents — e.g. `readwritePaths: ["/mnt/storage/data"]` and
-//! `deniedPaths: ["/data"]` where `/data` is a bind mount of the former. The
-//! agent could reach the "denied" object through the read-write alias.
-//!
-//! Because Linux mount namespaces (and the WSLC SDK) are *path*-based, denying
-//! one path to an object cannot deny another path to the same object (that's the
-//! non-actionable "object-based enforcement" gap). The best we can do at config
-//! time is **normalize**: detect aliases of the same object and tighten every
-//! alias to the strictest intent among them, emitting a warning per tightened
-//! path. Conflicting intents are resolved deterministically rather than erroring.
-//!
-//! **Fail-closed exception.** The normalization above relies on resolving each
-//! path to an object identity. When a path cannot be resolved (permission
-//! denied, unreachable mount, I/O error — as opposed to *cleanly missing*) and
-//! `deniedPaths` are present, MXC cannot prove that path is not an undetectable
-//! alias that would bypass a deny. Rather than proceed looser than intended, the
-//! run is **refused** (fail closed): a path the caller cannot access is a policy
-//! rejection, and any other unexaminable path is a host fault. Cleanly-missing
-//! paths do not trigger this — they are genuinely absent, so there is nothing to
-//! alias.
-//!
-//! This does file I/O (`stat`/`CreateFile`), so — per design review — it lives
-//! here in `mxc_common` and is invoked by each backend runner close to the
-//! point of enforcement (NOT in `config_parser`, which stays string-only). This
-//! both honors that separation and shrinks the TOCTOU window between the check
-//! and the backend actually building its mounts.
+//! Tighten conflicting policy paths that refer to the same filesystem object.
 
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ScriptResponse};
 use std::path::Path;
@@ -143,6 +111,10 @@ pub enum ExistingObjectComparison {
 #[cfg(unix)]
 fn resolve_object(path: &Path) -> PathResolution {
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("object", path);
+
     // `metadata` follows symlinks, giving the target object's identity.
     match std::fs::metadata(path) {
         Ok(md) => PathResolution::Object(ObjectId {
@@ -172,6 +144,9 @@ fn resolve_object(path: &Path) -> PathResolution {
         FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         OPEN_EXISTING,
     };
+
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("object", path);
 
     let wide: Vec<u16> = path
         .as_os_str()
@@ -295,28 +270,20 @@ fn compare_resolved_filesystem_objects(
     }
 }
 
-/// Detect cross-path object conflicts and return a tightened copy of `policy`.
-///
-/// For each set of policy paths that resolve to the same filesystem object but
-/// carry differing intents, the looser-intent paths are moved into the strictest
-/// intent's list (`deny` > `readonly` > `readwrite`) and a warning is logged for
-/// each moved path. Cleanly-missing paths are left as-is.
-///
-/// Returns:
-/// - `Ok(Some(new_policy))` when at least one path's intent was tightened.
-/// - `Ok(None)` when there is nothing to change (the common case — no
-///   symlink / hard-link / bind-mount aliases), so callers can avoid cloning the
-///   request entirely.
-/// - `Err(_)` when the run must be **refused**: a path could not be resolved to
-///   an object (permission denied, unreachable mount, I/O error — *not* cleanly
-///   missing) while `deniedPaths` are present, so an alias that would bypass a
-///   deny cannot be ruled out (fail closed).
-///
-/// Run this *after* the string-level normalization in `config_parser`, close to
-/// where the backend builds its mounts.
 pub fn normalize_object_conflicts(
     policy: &ContainerPolicy,
     logger: &mut Logger,
+) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
+    let mut probe = FilesystemProbe::default();
+    normalize_object_conflicts_with(policy, logger, |path| {
+        probe.run(path, |path| resolve_object(Path::new(path)))
+    })
+}
+
+fn normalize_object_conflicts_with(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+    mut resolve: impl FnMut(&str) -> Result<PathResolution, String>,
 ) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
     let total =
         policy.readwrite_paths.len() + policy.readonly_paths.len() + policy.denied_paths.len();
@@ -351,7 +318,7 @@ pub fn normalize_object_conflicts(
     let has_denied = !policy.denied_paths.is_empty();
     let mut groups: HashMap<ObjectId, Vec<usize>> = HashMap::new();
     for (i, (path, intent)) in entries.iter().enumerate() {
-        match resolve_object(Path::new(path)) {
+        match resolve(path).map_err(FilesystemPolicyError::Host)? {
             PathResolution::Object(id) => {
                 groups.entry(id).or_default().push(i);
             }
@@ -511,6 +478,35 @@ mod tests {
         let p = ContainerPolicy::default();
         let mut logger = Logger::new(Mode::Buffer);
         assert!(normalize_ok(&p, &mut logger).is_none());
+    }
+
+    #[test]
+    fn probe_failure_rejects_even_without_denied_paths() {
+        for p in [
+            policy(&["slow"], &["readable"], &[]),
+            policy(&["slow"], &[], &["denied"]),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let error = normalize_object_conflicts_with(&p, &mut logger, |path| {
+                Err(format!("probe for {path} timed out"))
+            })
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FilesystemPolicyError::Host("probe for slow timed out".to_string())
+            );
+            assert!(logger.get_buffer().is_empty());
+        }
+    }
+
+    #[test]
+    fn single_path_does_not_start_a_probe() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let result =
+            normalize_object_conflicts_with(&policy(&["single"], &[], &[]), &mut logger, |_| {
+                panic!("one path cannot alias another policy entry")
+            });
+        assert!(result.unwrap().is_none());
     }
 
     #[test]

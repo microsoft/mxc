@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/ungranted/secret.txt && echo CAPTURE_READ_OK || echo CAPTURE_READ_BLOCKED; cat {{TESTDIR}}/denied/secret.txt && echo CAPTURE_EXPLICIT_READ_OK || echo CAPTURE_EXPLICIT_READ_BLOCKED",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "deniedPaths": ["{{TESTDIR}}/denied/secret.txt"]
+    },
+    "seatbelt": {
+        "captureDenials": {
+            "mode": "allow",
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}

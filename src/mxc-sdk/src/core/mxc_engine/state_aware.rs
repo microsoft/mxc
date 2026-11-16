@@ -108,6 +108,15 @@ pub fn run_state_aware(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            let mut runner = crate::backend_modules::W365AgentsRunner;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            )
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
@@ -137,6 +146,11 @@ pub fn run_state_aware(
                 bound,
                 dry_run,
             )
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            crate::backend_modules::nvx::state_aware::dispatch(bound, dry_run)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -337,18 +351,28 @@ fn run_state_aware_typed(
 /// caller's stdio. The streaming counterpart of the exec arm of
 /// [`run_state_aware`].
 ///
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file;
-/// IsolationSession always provides one.
+/// `wslc_stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// other backends ignore it.
 ///
 /// Backends without a state-aware impl return an [`MxcError`] with
 /// `unsupported_phase`.
 pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
-    #[cfg_attr(
-        not(all(target_os = "windows", feature = "wslc")),
-        expect(unused_variables, reason = "only WSLc stdin is optional")
-    )]
-    stdin: bool,
+    wslc_stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    exec_state_aware_with_capture_mode(parsed, wslc_stdin, false)
+}
+
+fn exec_state_aware_capture(
+    parsed: ParsedStateAwareRequest,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    exec_state_aware_with_capture_mode(parsed, false, true)
+}
+
+fn exec_state_aware_with_capture_mode(
+    parsed: ParsedStateAwareRequest,
+    _wslc_stdin: bool,
+    _capture_output: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
     crate::mxc_engine::experimental::require_experimental_optin(
@@ -356,6 +380,16 @@ pub fn exec_state_aware(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut crate::backend_modules::W365AgentsRunner,
+                bound,
+            )?;
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
@@ -384,7 +418,7 @@ pub fn exec_state_aware(
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
-            let mut runner = if stdin {
+            let mut runner = if _wslc_stdin {
                 crate::wslc_common::WslcStateAwareRunner::with_piped_stdin()
             } else {
                 crate::wslc_common::WslcStateAwareRunner::new()
@@ -396,6 +430,11 @@ pub fn exec_state_aware(
             Ok(Box::new(
                 crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            crate::backend_modules::nvx::state_aware::dispatch_exec(bound, _capture_output)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -422,6 +461,14 @@ pub fn exec_state_aware_pty(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
+                &mut crate::backend_modules::W365AgentsRunner,
+                bound,
+                size,
+            )
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
@@ -606,17 +653,12 @@ fn exec_state_aware_attached_parsed(
     exec_attached_gate(host_is_interactive)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     surface_attached_warnings(logger, |warning| {
         let _ = writeln!(std::io::stderr().lock(), "{warning}");
     });
@@ -624,7 +666,22 @@ fn exec_state_aware_attached_parsed(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     let dispatched =
         with_attached_exec_claim(|| run_state_aware(parsed, false)).unwrap_or_else(|| {
             Err(MxcError::malformed_request(
@@ -633,6 +690,17 @@ fn exec_state_aware_attached_parsed(
                  a time. Nothing has been run.",
             ))
         });
+    if dispatched.is_ok() {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                false,
+                true,
+            );
+        }
+    }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
         requested_sandbox_kind,
@@ -669,23 +737,33 @@ fn run_state_aware_envelope(
     let phase = parsed.phase();
     let phase_name = phase.as_str();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase_name,
+            correlation_vector: &correlation,
+        },
+    );
     let mut outcome = run_state_aware(parsed, dry_run);
     inject_warnings(&mut outcome, &init_warnings);
     match phase {
@@ -706,14 +784,21 @@ fn run_state_aware_envelope(
                 );
             }
         }
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    dry_run,
+                    outcome.is_ok(),
+                );
+            }
+        }
 
         // Lifecycle records are keyed by sandbox ID, so a session phase has
         // nothing to persist against and nothing to recall.
-        Phase::ProvisionSession
-        | Phase::DeprovisionSession
-        | Phase::Start
-        | Phase::Exec
-        | Phase::Stop => {}
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
@@ -738,9 +823,18 @@ fn run_state_aware_envelope(
 fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware(parsed, stdin))
+    exec_state_aware_process_parsed(parsed, logger, |parsed| {
+        exec_state_aware(parsed, wslc_stdin)
+    })
+}
+
+fn exec_state_aware_capture_parsed(
+    parsed: ParsedStateAwareRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    exec_state_aware_process_parsed(parsed, logger, exec_state_aware_capture)
 }
 
 fn exec_state_aware_pty_parsed(
@@ -764,26 +858,45 @@ fn exec_state_aware_process_parsed(
     }
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     match start(parsed) {
         Ok(process) => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    false,
+                    true,
+                );
+            }
             let process = crate::mxc_engine::ProcessWithWarnings::wrap(process, init_warnings);
             Ok(wrap_state_aware_telemetry_process_with_kind(
                 process,
@@ -824,23 +937,33 @@ pub fn run_typed_state_aware_request(
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, &mut logger))
-        .unwrap_or(false);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+    );
     let mut outcome = run_state_aware_typed(parsed, dry_run);
     if let Ok(result) = &mut outcome {
         for warning in init_warnings {
@@ -871,14 +994,21 @@ pub fn run_typed_state_aware_request(
                 );
             }
         }
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(sandbox_id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    sandbox_id,
+                    &correlation,
+                    dry_run,
+                    status.is_ok(),
+                );
+            }
+        }
 
         // Lifecycle records are keyed by sandbox ID, so a session phase has
         // nothing to persist against and nothing to recall.
-        Phase::ProvisionSession
-        | Phase::DeprovisionSession
-        | Phase::Start
-        | Phase::Exec
-        | Phase::Stop => {}
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_typed(
         telemetry_active,
@@ -895,15 +1025,15 @@ pub fn run_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
-/// model as a live streaming process, with a writable WSLc stdin if `stdin`.
+/// model as a live streaming process, with a writable WSLc stdin if `wslc_stdin`.
 pub fn exec_typed_state_aware_request(
     input: SdkStateAwareInput,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
@@ -965,15 +1095,24 @@ pub fn run_state_aware_json(
 /// streaming process, returning a [`SandboxProcess`] handle.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]; `stdin` is as for [`exec_state_aware`].
+/// [`run_state_aware_json`]; `wslc_stdin` is as for [`exec_state_aware`].
 pub fn exec_state_aware_json(
     request_json: &str,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
+}
+
+pub fn exec_state_aware_capture_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    exec_state_aware_capture_parsed(parsed, &mut logger)
 }
 
 /// Run a raw state-aware exec request with a caller-controlled PTY.
@@ -1106,8 +1245,8 @@ mod tests {
         );
         assert_eq!(
             typed.request().source_contract,
-            None,
-            "typed SDK input has no external exact-contract source"
+            exact.request().source_contract,
+            "typed SDK input must retain its selected contract"
         );
         assert_eq!(request_intent(&typed), request_intent(&exact));
     }
@@ -1432,22 +1571,22 @@ mod tests {
     }
 
     #[test]
-    fn later_phase_without_a_persisted_record_seeds_a_disconnected_vector() {
+    fn later_phase_without_a_persisted_record_establishes_a_stable_root() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
 
         let a = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
+        telemetry::correlation_state::on_lifecycle_outcome(true, "wsb:abcdef01", &a, false, true);
         let b = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
 
         assert!(telemetry::correlation_vector::is_relayable(&a));
         assert!(telemetry::correlation_vector::is_relayable(&b));
-        // No provision ever persisted a root for this sandbox_id, so each call
-        // seeds its own fresh, disconnected vector instead of sharing a base.
+        // The first authorized phase establishes a root for later processes.
         let base_of = |cv: &str| cv.split('.').next().unwrap().to_string();
-        assert_ne!(
+        assert_eq!(
             base_of(&a),
             base_of(&b),
-            "with no persisted record, repeated calls must not coincidentally share a base"
+            "late-enabled telemetry must retain its newly established root"
         );
     }
 
@@ -1949,6 +2088,151 @@ mod tests {
             }
         }
         value.to_string()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lifecycle_raw_and_typed_dispatch_emit_matching_execution_pairs() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
+        let _correlation_store = StoreDirGuard::set(store.path());
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let id = "wslc:00000000000000000000000000000000";
+        for typed in [false, true] {
+            for phase in [
+                Phase::ProvisionSession,
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+                Phase::DeprovisionSession,
+            ] {
+                let succeeded = if typed {
+                    let mut input = match phase {
+                        Phase::ProvisionSession => SdkStateAwareInput::new(
+                            ContractVersion::V1_1_0Alpha,
+                            StateAwareOperation::ProvisionSession(None),
+                        )
+                        .unwrap(),
+                        Phase::Provision => wslc_provision(None, None, Some(true)),
+                        Phase::Start => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Start { sandbox_id }
+                        }),
+                        Phase::Exec => exec_input(id, "echo synthetic", Some(true)),
+                        Phase::Stop => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Stop { sandbox_id }
+                        }),
+                        Phase::Deprovision => lifecycle_input(id, Some(true), |sandbox_id| {
+                            StateAwareOperation::Deprovision { sandbox_id }
+                        }),
+                        Phase::DeprovisionSession => SdkStateAwareInput::new(
+                            ContractVersion::V1_1_0Alpha,
+                            StateAwareOperation::DeprovisionSession {
+                                session_id: "wslcsess:00000000000000000000000000000000".to_string(),
+                            },
+                        )
+                        .unwrap(),
+                    };
+                    input.telemetry_opt_in = Some(false);
+                    run_typed_state_aware_request(input, true, true).is_ok()
+                } else {
+                    let mut request: serde_json::Value = match phase {
+                        Phase::ProvisionSession => serde_json::json!({
+                            "version": "1.1.0-alpha",
+                            "containment": "wslc",
+                            "phase": phase.as_str()
+                        }),
+                        Phase::DeprovisionSession => serde_json::json!({
+                            "version": "1.1.0-alpha",
+                            "containment": "wslc",
+                            "phase": phase.as_str(),
+                            "sessionId": "wslcsess:00000000000000000000000000000000"
+                        }),
+                        _ => serde_json::from_str(&lifecycle_fixture("wslc", id, phase)).unwrap(),
+                    };
+                    request["telemetry"] = serde_json::json!({ "enabled": false });
+                    run_state_aware_json(&request.to_string(), true, true).is_ok()
+                };
+                let starts = test_sink::take_starts();
+                let ends = test_sink::take_executions();
+                let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                assert_eq!(starts.len(), expected, "typed={typed}, phase={phase:?}");
+                assert_eq!(ends.len(), expected, "typed={typed}, phase={phase:?}");
+                if expected == 0 {
+                    test_sink::take_errors();
+                    continue;
+                }
+                assert_eq!(starts[0].outcome, "started");
+                assert_eq!(
+                    ends[0].outcome,
+                    if succeeded { "success" } else { "failure" }
+                );
+                assert_eq!(starts[0].phase, phase.as_str());
+                assert_eq!(starts[0].phase, ends[0].phase);
+                assert_eq!(starts[0].backend, ends[0].backend);
+                assert_eq!(starts[0].sandbox_kind, ends[0].sandbox_kind);
+                assert_eq!(starts[0].session_id, ends[0].session_id);
+                assert_eq!(starts[0].learning_mode, "not_applicable");
+                assert_eq!(starts[0].learning_mode, ends[0].learning_mode);
+                assert_eq!(starts[0].correlation_vector, ends[0].correlation_vector);
+                assert!(!starts[0].correlation_vector.is_empty());
+                test_sink::take_errors();
+            }
+        }
+        test_sink::clear();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lifecycle_streaming_start_is_emitted_before_a_failed_spawn() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
+        let _correlation_store = StoreDirGuard::set(store.path());
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let mut logger = Logger::new(Mode::Buffer);
+        let parsed = normalize_sdk_state_aware(
+            exec_input(
+                "wslc:00000000000000000000000000000000",
+                "echo synthetic",
+                Some(false),
+            ),
+            true,
+            &mut logger,
+        )
+        .unwrap();
+        let mut start = None;
+        let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+        let result = exec_state_aware_process_parsed(parsed, &mut logger, |_| {
+            let starts = test_sink::take_starts();
+            assert_eq!(starts.len(), expected);
+            assert!(test_sink::take_executions().is_empty());
+            start = starts.first().cloned();
+            Err(MxcError::backend_unavailable("synthetic"))
+        });
+        assert!(result.is_err());
+        let ends = test_sink::take_executions();
+        assert_eq!(ends.len(), expected);
+        if let Some(start) = start {
+            assert_eq!(start.session_id, ends[0].session_id);
+            assert_eq!(start.phase, ends[0].phase);
+            assert_eq!(start.correlation_vector, ends[0].correlation_vector);
+            assert_eq!(
+                ends[0].failure_reason,
+                Some(telemetry::FailureReason::InitError)
+            );
+        }
+        test_sink::clear();
     }
 
     #[test]

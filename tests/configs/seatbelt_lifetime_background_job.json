@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/bin/sh {{TESTDIR}}/background_job.sh {{TESTDIR}}/background.started",
+        "timeout": 20000
+    },
+    "filesystem": { "readwritePaths": ["{{TESTDIR}}"] }
+}

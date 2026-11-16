@@ -536,6 +536,7 @@ mod tests {
         assert_exact_root::<crate::mxc_contract::dev::OneShotRequest>();
         assert_exact_root::<crate::mxc_contract::dev::WindowsSandboxProvisionRequest>();
         assert_exact_root::<crate::mxc_contract::dev::IsolationSessionProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::MicroVmProvisionRequest>();
         assert_exact_root::<crate::mxc_contract::dev::WslcProvisionRequest>();
         assert_exact_root::<crate::mxc_contract::dev::StartRequest>();
         assert_exact_root::<crate::mxc_contract::dev::ExecRequest>();

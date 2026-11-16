@@ -367,6 +367,16 @@ impl VerboseLoggingDocument {
 ///
 /// Returns an error when `output_path` has no usable file name.
 pub fn verbose_logging_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
+    capture_sibling_path(output_path, "verbose.json")
+}
+
+/// Derives a sibling of a denials output path that shares its stem, e.g.
+/// `denials.<id>.json` with `suffix` `seatbelt.log` → `denials.<id>.seatbelt.log`.
+///
+/// # Errors
+///
+/// Returns an error when `output_path` has no usable file name.
+pub fn capture_sibling_path(output_path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let file_name = output_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -380,7 +390,7 @@ pub fn verbose_logging_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(file_name);
-    let sibling = format!("{stem}.verbose.json");
+    let sibling = format!("{stem}.{suffix}");
     Ok(match output_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(sibling),
         _ => PathBuf::from(sibling),

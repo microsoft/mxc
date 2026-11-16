@@ -28,7 +28,8 @@ requiring root privileges or a container runtime.
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
   cannot generate the required seccomp program.
-- **Bubblewrap** installed and on PATH:
+- **Bubblewrap** installed (see [Host tool lookup](#host-tool-lookup) for where
+  MXC looks for it):
   ```bash
   # Debian/Ubuntu
   sudo apt install bubblewrap
@@ -39,11 +40,16 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add bubblewrap
   ```
-  The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
-  environment is built with `--clearenv` (bwrap 0.5.0+). The address-family
-  filter uses `--seccomp FD`, which predates that release, so **bwrap 0.5.0 or
-  newer** remains the requirement. Platform detection probes `bwrap --version`
+  The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
+  additionally require **bwrap 0.11.0+** and unprivileged OverlayFS support.
+  When an overlay is needed, execution rejects a setuid `bwrap` before launch.
+  If the host kernel or source filesystem does not support unprivileged
+  OverlayFS, Bubblewrap can fail with an overlay-mount error such as
+  `Invalid argument`; use a kernel and filesystem that support unprivileged
+  OverlayFS. A missing denied target beneath a read-only source with nested
+  host mounts is rejected before launch because the overlay cannot preserve
+  those mounts. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -51,14 +57,15 @@ requiring root privileges or a container runtime.
   alive. Successful Rust-executor advisory results are cached for the process
   lifetime; Rust failures are not cached, and execution validation probes again
   before launch so a changed PATH target cannot reuse an advisory result. The
+  launch then runs the same `bwrap` file that validation checked. The
   Node SDK caches the complete `getPlatformSupport()` result, including
   failures, for the module lifetime; restart the Node process after remediating
   the host.
-- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
-  and on PATH, plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
+- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed,
+  plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
-  `sh` (the supervisor runs as `sh -c`), and the
+  `sh` and `sleep` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
@@ -111,6 +118,29 @@ requiring root privileges or a container runtime.
   # Check: should print "1"
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
+
+### Host tool lookup
+
+MXC finds `bwrap` and the network tools above in this order, both for the
+availability checks (including the Node SDK's `getPlatformSupport()`) and for
+the launch:
+
+1. The directories on the calling process's `PATH`, in order.
+2. `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, and
+   `/bin`, in that order.
+
+A desktop session or service whose `PATH` leaves out `/usr/sbin` therefore
+still finds `iptables` there. MXC uses the first executable file with the
+tool's name and launches it from the path its checks approved. If that file
+cannot start, is too old, or uses an iptables backend the sandbox cannot drive,
+the request fails; MXC does not try another copy. The error names the file for
+the network tools, and for a `bwrap` that is not executable, is missing its
+interpreter or loader, or is too old. Empty and relative `PATH` entries are
+ignored, so a tool is never taken from the current directory.
+
+The lookup applies only to the host programs that set up the sandbox. The
+command inside the sandbox gets its own `PATH`; see
+[Process environment](#process-environment).
 
 ## Quick Start
 
@@ -199,7 +229,8 @@ enables its parent-death cleanup. CLI execution uses `--new-session` instead.
 
 CLI execution still inherits its standard input, output, and error
 descriptors, but the workload cannot reopen the host terminal through
-`/dev/tty` or use it for terminal job control. For programs that need a
+`/dev/tty` or use it for terminal job control. SDK inherited-stdio execution
+(`spawn_with_extended_options` with `SpawnStdio::Inherit`) behaves the same way. For programs that need a
 controlling terminal, use the SDK's PTY execution API, which allocates a
 separate terminal and supports resizing and merged output.
 ### Deny-by-default filesystem
@@ -324,12 +355,16 @@ whatever MXC passed.
 
 ### Filesystem Policy
 
+Policy validation and the resolution of denied and granted paths use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts).
+A stalled probe rejects startup rather than leaving a policy check unenforced.
+
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
-| `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
-| `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory or missing path) | `--tmpfs <path>`, then `--remount-ro <path>` | Masked with a read-only tmpfs |
-| `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
+| `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
+| `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
+| `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
+| `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
 no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
@@ -338,6 +373,14 @@ tmpfs would replace it with an empty *directory*, changing its type). Paths that
 cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
 The masks are remounted after policy mounts are created, so a more specific
 allowed child remains accessible with its own permissions.
+
+When a missing denied path needs a private overlay, the executor masks the
+overlay backing directory at its normal path and at any writable bind-mount
+alias found in `/proc/self/mountinfo`. The mount list is read with the
+filesystem-probe deadline and bounded to 1 MiB and 4096 entries; startup fails
+closed if it cannot be read or parsed. If the read-only source contains a
+nested host mount, startup also fails before the workload starts rather than
+exposing the directory underneath that mount.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
@@ -349,8 +392,61 @@ ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
 filesystem path before mounting — canonicalizing the deepest existing ancestor
 (following symlinks at every level) and re-appending any not-yet-created trailing
 components — so the mask lands on the real object and its file/directory type is
-classified from that target. Dangling links, loops, and other paths that cannot
-be resolved fail before the sandbox starts.
+classified from that target. Relative entries are resolved from MXC's working
+directory. Dangling links, loops, and other paths that cannot be resolved fail
+before the sandbox starts.
+
+**Grants are mounted at their real paths too.** `readwritePaths` and
+`readonlyPaths` entries are resolved the same way, so the more specific entry
+wins whichever spelling the policy or the workload uses: a denied or read-only
+path inside a grant applies, and a grant inside a denied directory stays
+visible. Each host symlink that an entry is named through is recreated inside
+the sandbox, so the caller's spelling still works, including as `process.cwd`.
+For example, when `/home/alice/app` is a symlink to `/data/repos/app`, this
+policy mounts `/data/repos/app`, masks `/data/repos/app/.env`, and links
+`/home/alice/app` to `/data/repos/app`, so `.env` is hidden under both paths:
+
+```json
+"filesystem": {
+  "readwritePaths": ["/home/alice/app"],
+  "deniedPaths": ["/home/alice/app/.env"]
+}
+```
+
+A symlink that is already visible through another mount, such as one inside
+a granted directory, is used as it is, and any other symlinks it leads through
+are recreated as well. Where the sandbox has its own directory at the
+symlink's path, such as its private `/tmp` on a host whose `/tmp` is a symlink
+to `/var/tmp`, the sandbox keeps that directory and recreates the next part of
+the path inside it, so a grant of `/tmp/project` is still reachable as
+`/tmp/project`. A grant of that whole `/tmp` replaces the private `/tmp` with
+the symlink, so `/tmp` in the sandbox is the host's `/var/tmp`. Where the
+sandbox has its own symlink at that path pointing somewhere else, such as its
+`/var/run -> /run` on a host whose `/var/run` points elsewhere, the next part of
+the path is recreated where the sandbox's symlink leads.
+
+A directory that a path or symlink climbs out of with `..`, such as `staging` in
+`/data/staging/../app`, is created empty inside the sandbox if it is not already
+there, so the path still works without showing that directory's contents. A
+symlink that cannot be recreated at all, such as one under `/dev` or `/proc`,
+leaves paths through it unavailable inside the sandbox. Whenever a spelling is
+unavailable, Bubblewrap reports a warning naming the real path to use. A grant
+that cannot be resolved, such as a dangling symlink or a symlink loop, stops
+the sandbox from starting.
+
+Only symlinks are followed. A hard link, or a host bind mount that shows the
+same files under a second path, stays a separate path inside the sandbox: a
+rule on a file or directory inside one of them does not apply to the same
+files reached through the other.
+
+On merged-/usr hosts, baseline entries such as `/bin`, `/sbin`, and `/lib*` are
+symlinks into `/usr`. The sandbox recreates each one as a relative symlink to
+the mounted directory instead of mounting that directory a second time, so
+denying `/usr/bin/cat` or `/bin/cat` hides the file under both spellings. If one
+of these symlinks cannot be followed, for example because of a permission error
+or a symlink loop, the sandbox does not start. A baseline symlink whose target
+lies outside the baseline is still mounted at its own path, where a mask on the
+target's real path does not apply.
 
 Example:
 ```json
@@ -534,8 +630,8 @@ hooked into `INPUT`, for both families:
 
 ```
 -i lo -j ACCEPT
--m state --state ESTABLISHED,RELATED -j ACCEPT
--m state --state NEW -j DROP
+-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-m conntrack --ctstate NEW -j DROP
 -j DROP
 ```
 
@@ -738,10 +834,11 @@ shared-host-network behavior.
 
 ### How it works
 
-0. Before anything is launched, `validate` probes the host tools this mode
+0. Before a launch, the runner checks the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
-   `ip6tables-restore` — so a host that is
+   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`,
+   `ip6tables-restore`, and `sleep`, found as described in
+   [Host tool lookup](#host-tool-lookup) — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
    enough: the probe also reads the backend from the version banner and refuses
@@ -750,9 +847,15 @@ shared-host-network behavior.
    probe is bounded by a short timeout, and runs in its own process group so a
    backgrounded descendant that inherited the probe's output cannot outlive it:
    a wedged binary is reported as hung and named, instead of stalling every
-   proxy-mode execution on the host indefinitely. A successful probe is cached
-   for the life of the process; failures are not, so installing the missing
-   tool takes effect without a restart.
+   proxy-mode execution on the host indefinitely. A successful probe is reused
+   for the life of the process while the lookup keeps selecting the same paths;
+   a different path is probed again before it runs, and failures are not
+   reused, so installing the missing tool takes effect without a restart. The
+   supervisor runs each tool from the path the probe checked.
+   Standalone validation and dry runs also
+   try creating disposable user and network namespaces and running `sh`. A
+   launch does not repeat that allocation: it checks namespace availability
+   when it starts the supervisor and Bubblewrap.
 1. The caller starts the proxy and names its loopback endpoint with
    `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
    or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
@@ -784,7 +887,11 @@ shared-host-network behavior.
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
-   rule aborts the supervisor rather than starting an unenforced sandbox.
+   rule aborts startup. The runner terminates Bubblewrap and its blocked
+   sandbox child while the startup barrier is still held, then reaps the
+   launcher, cleans up the network helpers, and returns the setup error.
+   This also applies to create-and-run execution, streaming, and PTY execution
+   in both proxy-only and firewall-enforced modes.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the
@@ -980,7 +1087,7 @@ Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; proxy-only and firewall-enforced modes add a user/network-namespace supervisor, `slirp4netns`, and namespace-local firewall chains |
 | Network isolation | iptables + veth | `--unshare-net` for ruleless deny; private netns + slirp4netns and namespace-local iptables for proxy or firewall-enforced policies |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh` and `sleep`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
@@ -1031,6 +1138,8 @@ These failures carry the `backend_error` code and exit `-1`.
 | `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network |
 | `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
 | `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
+| `could not resolve the host's /bin` (or another system directory) | A merged-/usr symlink such as `/bin -> usr/bin` could not be followed; check that the link and its target are readable |
+| `readwritePaths entry '…' could not be resolved` (or `readonlyPaths`, `deniedPaths`) | The path goes through a dangling symlink, a symlink loop, or a directory the caller cannot search; fix the path or remove the entry |
 | `failed to wrap stdio pipes` | The sandbox started and then faulted |
 
 ## Limitations

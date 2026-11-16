@@ -4,6 +4,7 @@
 mod common;
 mod one_shot;
 mod state_aware;
+pub(crate) mod w365_agents;
 
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::state_aware_input::StateAwareInput;

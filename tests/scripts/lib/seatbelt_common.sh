@@ -127,6 +127,19 @@ render() {
     echo "$dst"
 }
 
+# Apply a Python statement to a rendered config's `config` dict, in place.
+edit_config() {
+    /usr/bin/python3 - "$1" "$2" <<'EOF' || fail "could not edit config $1"
+import json, sys
+path, edit = sys.argv[1:]
+with open(path) as source:
+    config = json.load(source)
+exec(edit)
+with open(path, "w") as output:
+    json.dump(config, output)
+EOF
+}
+
 # Run a config. Sets OUT and RC; never aborts, so callers assert on both.
 run_config() {
     local config_path="$1"

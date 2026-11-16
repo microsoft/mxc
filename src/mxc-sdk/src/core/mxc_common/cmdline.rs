@@ -36,9 +36,9 @@ impl CommandLineContext {
     /// `process.commandLine`.
     pub fn for_backend(backend: &ContainmentBackend) -> Self {
         match backend {
-            ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
-                Self::WindowsCommandProcessor
-            }
+            ContainmentBackend::IsolationSession
+            | ContainmentBackend::WindowsSandbox
+            | ContainmentBackend::W365Agents => Self::WindowsCommandProcessor,
             ContainmentBackend::Wslc
             | ContainmentBackend::Lxc
             | ContainmentBackend::Seatbelt
