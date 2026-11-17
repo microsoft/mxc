@@ -636,3 +636,52 @@ fn a_failed_preparation_releases_a_shared_ancestor_too() {
         "a failed preparation left the ancestor its siblings shared on the host"
     );
 }
+
+#[test]
+fn a_creation_guard_cleans_up_whatever_it_still_owns() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+
+    // What the creation job holds while it runs. A result that never reaches
+    // the caller — a probe timeout drops it — takes the guard's drop with it.
+    let mut owned = PendingCreations::default();
+    owned.record(create_mount_point(&target, false));
+    assert!(target.is_dir());
+    drop(owned);
+
+    assert!(
+        !target.exists(),
+        "a creation guard that never handed its levels back left them on the host"
+    );
+}
+
+#[test]
+fn dbg_probe_timing() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    let mut probe = FilesystemProbe::for_test(std::time::Duration::from_millis(1));
+    let t = target.clone();
+    let started = std::time::Instant::now();
+    let outcome = probe.run("job", move |_| {
+        eprintln!("DBG job start");
+        let r = create_mount_point(&t, false);
+        eprintln!("DBG created {:?} exists={}", r, t2_exists(&t));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        eprintln!("DBG job end");
+        r
+    });
+    eprintln!(
+        "DBG outcome_err={} elapsed={:?}",
+        outcome.is_err(),
+        started.elapsed()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    eprintln!("DBG final exists={}", target.exists());
+}
+fn t2_exists(p: &Path) -> bool {
+    p.exists()
+}

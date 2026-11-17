@@ -239,6 +239,18 @@ impl PendingCreations {
         self.levels.extend(created);
     }
 
+    /// Take over a guard the creation job handed back. Its levels become this
+    /// preparation's, so a later failure still removes them.
+    fn adopt(&mut self, handed_back: PendingCreations) {
+        self.levels.extend(handed_back.release());
+    }
+
+    /// Give up ownership without removing anything.
+    fn release(mut self) -> Vec<(PathBuf, ObjectId)> {
+        self.taken = true;
+        std::mem::take(&mut self.levels)
+    }
+
     fn take(&mut self) -> Vec<(PathBuf, ObjectId)> {
         self.taken = true;
         std::mem::take(&mut self.levels)
@@ -339,14 +351,22 @@ pub(crate) fn prepare(
             // the same path while the sandbox runs.
             let is_file = denied_files.contains(&denied.source);
             let display = host_target.display().to_string();
+            // The guard travels with the result: a creation that outlives the
+            // probe deadline still owns what it made, because the dropped result
+            // takes the guard's drop with it. Only a successful hand-off below
+            // releases that ownership to this thread.
             let created_levels = probe
-                .run(&display, move |_| create_mount_point(&host_target, is_file))
+                .run(&display, move |_| {
+                    let mut owned = PendingCreations::default();
+                    owned.record(create_mount_point(&host_target, is_file));
+                    owned
+                })
                 .map_err(|error| FilesystemPolicyError::Host(format!("Bubblewrap: {error}")))?;
             // Nothing to create means bwrap will make the mount point itself,
             // and this run has no way to tell it from an object the caller puts
             // there later. Leaving it is worse than trying to remove it, so the
             // entry is not recorded and nothing is removed afterwards.
-            pending.record(created_levels);
+            pending.adopt(created_levels);
         }
     }
     let first_overlay = overlays
