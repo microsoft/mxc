@@ -63,11 +63,18 @@ case "$backend" in
                  "and inbound default-deny tests." >&2
             exit 2
         fi
+        capability_log="$(mktemp)"
         if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
-            bash "$test_script_root/run_bwrap_capabilities_test.sh"; then
+            bash "$test_script_root/run_bwrap_capabilities_test.sh" | tee "$capability_log"; then
             echo "The Bubblewrap root capability test failed or skipped." >&2
             exit 1
         fi
+        if [[ "$(tail -n 1 "$capability_log")" != \
+            "Bubblewrap capability test complete: isolated, firewall, proxy." ]]; then
+            echo "The Bubblewrap root capability test did not complete every mode." >&2
+            exit 1
+        fi
+        rm -f "$capability_log"
 
         # A skip here means a prerequisite is missing on the runner, not that
         # the assertion passed. Translate it into an explicit failure so the

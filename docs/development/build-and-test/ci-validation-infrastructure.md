@@ -245,7 +245,10 @@ isolated, firewall, and proxy cases require empty workload capability sets,
 denied privileged socket creation and read-only bind remounts. The
 network-enabled modes also require working supervisor-provided connectivity,
 and a live blocked endpoint that stays blocked after the workload tries to
-flush its firewall.
+flush its firewall. Each case is repeated through a `bwrap` wrapper whose
+seccomp filter refuses `capset` and the bounding-set drop; that launch must
+fail without running the workload. The test's last line names the modes that
+passed, and CI requires all three.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

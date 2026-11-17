@@ -334,11 +334,21 @@ jobs:
 
       - name: Test Bubblewrap workload capabilities (unprivileged and root)
         working-directory: ${{ github.workspace }}
+        shell: bash
         env:
           LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
         run: |
-          bash tests/scripts/run_bwrap_capabilities_test.sh
-          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_capabilities_test.sh
+          set -euo pipefail
+          expected="Bubblewrap capability test complete: isolated, firewall, proxy."
+          bash tests/scripts/run_bwrap_capabilities_test.sh | tee "$RUNNER_TEMP/capabilities-user.log"
+          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_capabilities_test.sh \
+            | tee "$RUNNER_TEMP/capabilities-root.log"
+          for log in "$RUNNER_TEMP/capabilities-user.log" "$RUNNER_TEMP/capabilities-root.log"; do
+            if [ "$(tail -n 1 "$log")" != "$expected" ]; then
+              echo "::error::$(basename "$log") did not end with: $expected"
+              exit 1
+            fi
+          done
 
       - name: Upload binaries
         if: matrix.upload_artifacts

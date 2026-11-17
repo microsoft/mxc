@@ -39,7 +39,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, lifetime_spawner, missing_denials, network_rules,
+    bwrap_version, capability_check, lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::{self, ResolverFile},
@@ -678,15 +678,16 @@ impl BubblewrapScriptRunner {
         if stdio == StdioMode::Inherit {
             args.insert(0, "--new-session".into());
         }
-        let mut network_startup = match proxy_network.as_ref() {
-            Some(network) => match network.configure_bwrap(&mut args, logger) {
-                Ok(startup) => Some(startup),
-                Err(error) => {
-                    stop_proxy_network(&mut proxy_network, logger);
-                    return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
-                }
-            },
-            None => None,
+        let startup = match proxy_network.as_ref() {
+            Some(network) => network.configure_bwrap(&mut args, logger),
+            None => proxy_network::BwrapStartup::configure(&mut args),
+        };
+        let mut startup = match startup {
+            Ok(startup) => startup,
+            Err(error) => {
+                stop_proxy_network(&mut proxy_network, logger);
+                return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
+            }
         };
         let _ = writeln!(
             logger,
@@ -743,7 +744,7 @@ impl BubblewrapScriptRunner {
 
         // Keep namespace init in the killable group before parent-death cleanup is armed.
         // SAFETY: setsid is async-signal-safe and runs only in the forked child.
-        if stdio == StdioMode::Pipes || (stdio == StdioMode::Inherit && network_startup.is_some()) {
+        if matches!(stdio, StdioMode::Pipes | StdioMode::Inherit) {
             unsafe {
                 command.pre_exec(|| {
                     nix::unistd::setsid()
@@ -752,9 +753,7 @@ impl BubblewrapScriptRunner {
                 });
             }
         }
-        if let Some(startup) = network_startup.as_ref() {
-            startup.prepare_command(&mut command);
-        }
+        startup.prepare_command(&mut command);
         let mut descriptors = vec![seccomp_filter.as_raw_fd()];
         if let Some(fd) = resolver_file.as_ref().and_then(ResolverFile::snapshot_fd) {
             descriptors.push(fd);
@@ -774,52 +773,53 @@ impl BubblewrapScriptRunner {
             }
         };
 
-        if let Some(mut startup) = network_startup.take() {
-            startup.child_spawned();
-            if let Some(network) = proxy_network.as_mut() {
-                network.userns_handed_off();
-            }
-            let startup_result = startup
-                .child_pid(&child)
-                .map_err(|error| {
-                    format!(
-                        "{error}. If Bubblewrap cannot create a network namespace, \
-                         check user.max_net_namespaces and the host's namespace policy"
-                    )
-                })
-                .and_then(|child_pid| {
-                    let network = proxy_network.as_mut().ok_or_else(|| {
-                        "Bubblewrap: proxy network lifecycle disappeared during startup".to_string()
-                    })?;
-                    network.attach(child_pid, logger)?;
-                    network.check_alive()
-                })
-                .and_then(|()| startup.release());
+        startup.child_spawned();
+        if let Some(network) = proxy_network.as_mut() {
+            network.userns_handed_off();
+        }
+        let startup_result = startup
+            .child_pid(&child)
+            .map_err(|error| {
+                format!(
+                    "{error}. If Bubblewrap cannot create a network namespace, \
+                     check user.max_net_namespaces and the host's namespace policy"
+                )
+            })
+            .and_then(|child_pid| {
+                capability_check::wait_for_capability_drop(child_pid, &child)?;
+                match proxy_network.as_mut() {
+                    Some(network) => {
+                        network.attach(child_pid, logger)?;
+                        network.check_alive()
+                    }
+                    None => Ok(()),
+                }
+            })
+            .and_then(|()| startup.release());
 
-            // Closing --block-fd releases the child before --die-with-parent is armed.
-            if let Err(mut error) = startup_result {
-                if let Err(cleanup_error) = group_kill(&mut child) {
-                    error.push_str(&format!(
-                        "; failed to terminate Bubblewrap startup: {cleanup_error}"
-                    ));
-                }
-                if let Err(cleanup_error) = child.wait() {
-                    error.push_str(&format!(
-                        "; failed to reap Bubblewrap startup: {cleanup_error}"
-                    ));
-                }
-                drop(startup);
-                let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
-                    Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
-                    Ok(_) => error,
-                    Err(detail) => format!("{error}; {detail}"),
-                };
-                stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::failed(
-                    FailurePhase::PostLaunchFailed,
-                    &error,
+        // Closing --block-fd releases the child before --die-with-parent is armed.
+        if let Err(mut error) = startup_result {
+            if let Err(cleanup_error) = group_kill(&mut child) {
+                error.push_str(&format!(
+                    "; failed to terminate Bubblewrap startup: {cleanup_error}"
                 ));
             }
+            if let Err(cleanup_error) = child.wait() {
+                error.push_str(&format!(
+                    "; failed to reap Bubblewrap startup: {cleanup_error}"
+                ));
+            }
+            drop(startup);
+            let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
+                Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
+                Ok(_) => error,
+                Err(detail) => format!("{error}; {detail}"),
+            };
+            stop_proxy_network(&mut proxy_network, logger);
+            return Err(ScriptResponse::failed(
+                FailurePhase::PostLaunchFailed,
+                &error,
+            ));
         }
 
         let (stdin, stdout, stderr) = match stdio {
