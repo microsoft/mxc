@@ -86,21 +86,18 @@ fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() 
     // The grant is bound from the host as it is, so Bubblewrap leaves the mount
     // point it needs for `tools/missing` in the caller's own directory.
     assert_eq!(
-        preparation.mount_points.len(),
+        preparation.created_levels.len(),
         1,
         "a missing target under a writable grant still needs its mount point taken back"
     );
     // This run creates the mount point itself, which is what makes it ours: an
     // object that merely happens to sit at the same path is not.
     assert_eq!(
-        preparation.mount_points[0].created_levels.len(),
+        preparation.created_levels.len(),
         1,
         "only the missing level is this run's"
     );
-    assert_eq!(
-        preparation.mount_points[0].created_levels[0].0,
-        root.join("tools/missing")
-    );
+    assert_eq!(preparation.created_levels[0].0, root.join("tools/missing"));
     assert!(root.join("tools/missing").is_dir());
 }
 
@@ -117,22 +114,19 @@ fn an_empty_directory_the_caller_already_had_is_not_a_placeholder() {
     ];
     let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
     assert_eq!(
-        preparation.mount_points.len(),
+        preparation.created_levels.len(),
         1,
         "only the missing level is Bubblewrap's to take back"
     );
     assert_eq!(
-        preparation.mount_points[0].created_levels.len(),
+        preparation.created_levels.len(),
         1,
         "cleanup must stop at the directory that was already there"
     );
-    assert_eq!(
-        preparation.mount_points[0].created_levels[0].0,
-        grant.join("sub/nested")
-    );
+    assert_eq!(preparation.created_levels[0].0, grant.join("sub/nested"));
 
     // The preparation already created it, standing in for what bwrap reuses.
-    remove_mount_points(&preparation.mount_points);
+    remove_levels(&preparation.created_levels);
 
     assert!(
         !grant.join("sub/nested").exists(),
@@ -170,7 +164,7 @@ fn only_the_objects_this_run_created_are_removed() {
     assert!(grant.join("missing/deep").is_dir());
     assert!(grant.join("planted.json").is_file());
 
-    remove_mount_points(&preparation.mount_points);
+    remove_levels(&preparation.created_levels);
 
     assert!(
         !grant.join("missing").exists(),
@@ -195,7 +189,7 @@ fn caller_content_written_into_a_placeholder_stops_the_removal() {
     // The workload wrote into the mount point while the sandbox ran.
     std::fs::write(grant.join("missing/deep/written-by-workload"), "data").unwrap();
 
-    remove_mount_points(&preparation.mount_points);
+    remove_levels(&preparation.created_levels);
 
     assert!(
         grant.join("missing/deep/written-by-workload").exists(),
@@ -225,9 +219,9 @@ fn an_object_the_caller_replaced_is_left_alone() {
     std::fs::remove_dir(grant.join("missing")).unwrap();
     std::fs::rename(&elsewhere, grant.join("missing")).unwrap();
     let replacement = id_of(&grant.join("missing"));
-    assert_ne!(replacement, preparation.mount_points[0].created_levels[0].1);
+    assert_ne!(replacement, preparation.created_levels[0].1);
 
-    remove_mount_points(&preparation.mount_points);
+    remove_levels(&preparation.created_levels);
 
     assert!(
         grant.join("missing").is_dir(),
@@ -249,10 +243,10 @@ fn a_preexisting_denied_path_is_never_a_mount_point() {
     ];
     let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
     assert!(
-        preparation.mount_points.is_empty(),
+        preparation.created_levels.is_empty(),
         "an existing denied path is masked in place and needs no cleanup"
     );
-    remove_mount_points(&preparation.mount_points);
+    remove_levels(&preparation.created_levels);
     assert_eq!(
         std::fs::read_to_string(root.join("tools/config.json")).unwrap(),
         "keep me"
@@ -453,35 +447,29 @@ fn a_denied_parent_is_not_a_host_grant_to_clean_under() {
     // `data/hidden` itself still needs its mount point taken back: bwrap makes it
     // in the caller's `data` directory before masking it with a tmpfs.
     assert_eq!(
-        preparation.mount_points.len(),
+        preparation.created_levels.len(),
         1,
         "{:?}",
-        preparation.mount_points
+        preparation.created_levels
     );
-    assert_eq!(
-        preparation.mount_points[0].created_levels[0].0,
-        root.join("data/hidden")
-    );
+    assert_eq!(preparation.created_levels[0].0, root.join("data/hidden"));
     // `data/hidden/new` is created inside that tmpfs, so nothing of it reaches
     // the host. Recording it would delete whatever the caller creates at that
     // path while the sandbox is running.
     assert!(
         preparation
-            .mount_points
+            .created_levels
             .iter()
-            .flat_map(|mount| &mount.created_levels)
             .all(|(path, _)| *path != root.join("data/hidden/new")),
         "a path inside a denied parent never reaches the host: {:?}",
-        preparation.mount_points
+        preparation.created_levels
     );
 }
 
 fn prepared(levels: Vec<(PathBuf, (u64, u64))>) -> DenyPreparation {
     DenyPreparation {
         _storage: None,
-        mount_points: vec![HostMountPoint {
-            created_levels: levels,
-        }],
+        created_levels: levels,
         armed: true,
     }
 }
@@ -556,5 +544,65 @@ fn a_handed_off_preparation_still_cleans_up_in_the_background() {
     assert!(
         !path.exists(),
         "handing the cleanup off left the mount point on the host"
+    );
+}
+
+#[test]
+fn sibling_denials_share_an_ancestor_that_is_removed_once() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("missing/a"), FsIntent::Denied),
+        mount(&grant.join("missing/b"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(grant.join("missing/a").is_dir());
+    assert!(grant.join("missing/b").is_dir());
+
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        !grant.join("missing").exists(),
+        "the ancestor the siblings shared is still on the host"
+    );
+}
+
+#[test]
+fn a_level_another_process_created_is_not_recorded() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    // Stand in for a competing creation: the deepest level already exists, so
+    // this run's create fails with AlreadyExists and must not claim it.
+    std::fs::create_dir_all(grant.join("missing/deep")).unwrap();
+    let theirs = id_of(&grant.join("missing/deep"));
+
+    let created = create_mount_point(&grant.join("missing/deep"), false);
+
+    assert!(
+        created.is_empty(),
+        "a level another process made is not this run's: {created:?}"
+    );
+    assert_eq!(id_of(&grant.join("missing/deep")), theirs);
+}
+
+#[test]
+fn a_preparation_that_fails_later_takes_its_creations_back() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+
+    // A preparation that gives up partway: the guard still holds what it made.
+    let mut pending = PendingCreations::default();
+    pending.record(levels);
+    drop(pending);
+
+    assert!(
+        !path.exists(),
+        "a failed preparation left the mount point it already created on the host"
     );
 }
