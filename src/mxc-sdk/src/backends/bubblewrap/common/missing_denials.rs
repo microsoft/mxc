@@ -78,7 +78,40 @@ pub(crate) struct DenyPreparation {
 
     /// Mount points Bubblewrap will make on the host for denied entries that do
     /// not exist yet beneath a read-write grant.
-    pub(crate) mount_points: Vec<HostMountPoint>,
+    mount_points: Vec<HostMountPoint>,
+
+    /// Cleared once the sandbox owns the cleanup. Until then, dropping this
+    /// removes the mount points, so a startup path that gives up after bwrap
+    /// already created its masks does not leave them behind.
+    armed: bool,
+}
+
+impl DenyPreparation {
+    /// Hand the cleanup to whoever now owns the sandbox. That owner calls
+    /// [`Self::remove_placeholders`] once the sandbox has stopped; until it
+    /// does, dropping this no longer removes anything.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove the mount points now. Safe to call more than once, and callable
+    /// after [`Self::disarm`]: handing the cleanup over changes who calls this,
+    /// not whether it may run.
+    pub(crate) fn remove_placeholders(&mut self) {
+        if self.mount_points.is_empty() {
+            return;
+        }
+        remove_mount_points(&self.mount_points);
+        self.mount_points.clear();
+    }
+}
+
+impl Drop for DenyPreparation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.remove_placeholders();
+        }
+    }
 }
 
 /// A mount point Bubblewrap creates on the host for a missing denied entry
@@ -91,9 +124,14 @@ pub(crate) struct HostMountPoint {
     pub(crate) path: PathBuf,
 
     /// The deepest directory that already existed when the policy was
-    /// prepared. Removal stops here: everything below it is this run's
-    /// placeholder, everything at or above it is the caller's, whether or not
-    /// it happens to be empty.
+    /// prepared, spelled the way this run spells it. Removal stops here:
+    /// everything below it is this run's placeholder, everything at or above it
+    /// is the caller's, whether or not it happens to be empty.
+    pub(crate) spelled_ancestor: PathBuf,
+
+    /// The same directory, resolved to the entity it was at preparation.
+    /// Removal compares against this, so an ancestor the caller replaced with a
+    /// symlink in the meantime does not redirect it.
     pub(crate) existing_ancestor: PathBuf,
 }
 
@@ -131,30 +169,73 @@ fn deepest_existing_ancestor(
 /// directory the workload wrote into, or a file with content, is left alone
 /// together with everything above it, so this never deletes anything the caller
 /// or the workload owns.
+///
+/// The path is re-resolved for every removal and must still be the same entity
+/// the preparation recorded. `symlink_metadata` only refuses to follow the last
+/// component: an ancestor replaced by a symlink while the sandbox ran would
+/// otherwise redirect the removal to wherever that link points.
+///
+/// Runs on the same bounded worker startup uses. Teardown walks filesystems the
+/// caller granted, and one that stops answering would otherwise hold the handle
+/// and a timed-out sandbox's return open indefinitely; a probe that does not
+/// answer within its deadline leaves the objects in place instead.
 pub(crate) fn remove_mount_points(mount_points: &[HostMountPoint]) {
+    let mut probe = FilesystemProbe::default();
     for mount_point in mount_points {
-        let mut current = mount_point.path.as_path();
-        while current != mount_point.existing_ancestor
-            && current.starts_with(&mount_point.existing_ancestor)
-        {
-            if !remove_placeholder(current) {
-                break;
-            }
-            let Some(parent) = current.parent() else {
-                break;
-            };
-            current = parent;
+        let relative = match mount_point.path.strip_prefix(&mount_point.spelled_ancestor) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => continue,
+        };
+        let spelled = mount_point.path.clone();
+        let ancestor = mount_point.existing_ancestor.clone();
+        let display = spelled.display().to_string();
+        // One probe per placeholder, so a stalled filesystem costs a deadline
+        // once instead of once per level. A probe that does not answer leaves
+        // the objects in place, which is the safe outcome.
+        let _ = probe.run(&display, move |_| {
+            remove_below(&spelled, &ancestor, &relative)
+        });
+    }
+}
+
+/// Walk up from `spelled`, removing empty placeholders until the spelled
+/// ancestor or the first path that is no longer ours.
+fn remove_below(spelled: &Path, resolved_ancestor: &Path, relative: &Path) {
+    let mut spelled = spelled.to_path_buf();
+    let mut relative = relative.to_path_buf();
+    while !relative.as_os_str().is_empty() {
+        if !remove_placeholder(&spelled, resolved_ancestor, &relative) {
+            return;
         }
+        let (Some(parent), Some(up)) = (
+            spelled.parent().map(Path::to_path_buf),
+            relative.parent().map(Path::to_path_buf),
+        ) else {
+            return;
+        };
+        spelled = parent;
+        relative = up;
     }
 }
 
 /// Remove an empty placeholder: a directory Bubblewrap made for a `--tmpfs`
 /// mask, or the empty file it made for a `--ro-bind /dev/null` mask.
-fn remove_placeholder(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir(path).is_ok(),
+///
+/// `spelled` is removed only when resolving it lands exactly on `relative`
+/// below `resolved_ancestor`, the entity recorded at preparation. A path that
+/// now resolves elsewhere — an ancestor replaced by a symlink, or a component
+/// that became a link — is left alone: this run did not make what is there now.
+fn remove_placeholder(spelled: &Path, resolved_ancestor: &Path, relative: &Path) -> bool {
+    let Ok(resolved) = std::fs::canonicalize(spelled) else {
+        return false;
+    };
+    if resolved != resolved_ancestor.join(relative) {
+        return false;
+    }
+    match std::fs::symlink_metadata(spelled) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir(spelled).is_ok(),
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
-            std::fs::remove_file(path).is_ok()
+            std::fs::remove_file(spelled).is_ok()
         }
         _ => false,
     }
@@ -184,7 +265,10 @@ pub(crate) fn prepare(
         let parent = baseline.iter().chain(&mounts[..index]).rfind(|mount| {
             target != Path::new(&mount.destination) && target.starts_with(&mount.destination)
         });
-        let Some(parent) = parent else {
+        // A denied parent is masked with its own tmpfs, so a denied entry below
+        // it is created inside that tmpfs and never reaches the host. A denied
+        // parent has no host directory to prepare against either.
+        let Some(parent) = parent.filter(|parent| parent.intent != FsIntent::Denied) else {
             continue;
         };
         let relative = target.strip_prefix(&parent.destination).map_err(|error| {
@@ -211,8 +295,16 @@ pub(crate) fn prepare(
                 .push(relative.to_path_buf());
         } else {
             let grant = Path::new(&parent.source);
+            let spelled_ancestor = deepest_existing_ancestor(&mut probe, &host_target, grant)?;
             mount_points.push(HostMountPoint {
-                existing_ancestor: deepest_existing_ancestor(&mut probe, &host_target, grant)?,
+                existing_ancestor: std::fs::canonicalize(&spelled_ancestor).map_err(|error| {
+                    FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: could not resolve '{}' above a missing deniedPaths entry: \
+                         {error}",
+                        spelled_ancestor.display()
+                    ))
+                })?,
+                spelled_ancestor,
                 path: host_target,
             });
         }
@@ -229,6 +321,7 @@ pub(crate) fn prepare(
         return Ok(DenyPreparation {
             _storage: None,
             mount_points,
+            armed: true,
         });
     };
 
@@ -336,6 +429,7 @@ pub(crate) fn prepare(
     Ok(DenyPreparation {
         _storage: Some(directory),
         mount_points,
+        armed: true,
     })
 }
 

@@ -560,7 +560,9 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
-        let deny_preparation =
+        // Armed until the sandbox takes the cleanup over, so every startup path
+        // that gives up after bwrap created its masks still removes them.
+        let mut deny_preparation =
             missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
                 .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
@@ -865,6 +867,8 @@ impl BubblewrapScriptRunner {
             .and_then(|network| network.take_liveness_watch())
             .map(|watch| ProviderMonitor::watch(watch, Arc::clone(&child), group));
 
+        deny_preparation.disarm();
+
         Ok(BwrapChild {
             child,
             stdin,
@@ -880,7 +884,7 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
-            _deny_mountpoints: deny_preparation,
+            deny_mountpoints: deny_preparation,
         })
     }
 }
@@ -890,7 +894,7 @@ impl BubblewrapScriptRunner {
 struct BwrapChild {
     /// Private deny-mountpoint storage, held for the sandbox's lifetime, and the
     /// host mount points to take back once it exits.
-    _deny_mountpoints: missing_denials::DenyPreparation,
+    deny_mountpoints: missing_denials::DenyPreparation,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -929,7 +933,7 @@ impl BwrapChild {
         // Bubblewrap made these on the host as mount points for denied entries
         // that did not exist yet. It never removes them, so a denied path would
         // otherwise outlive the sandbox as a directory or an empty file.
-        missing_denials::remove_mount_points(&self._deny_mountpoints.mount_points);
+        self.deny_mountpoints.remove_placeholders();
     }
 }
 
@@ -1137,7 +1141,13 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 "Bubblewrap: script timed out",
             ));
         }
-        if let Some(status) = self.inner.lock_child().try_wait()? {
+        let exited = self.inner.lock_child().try_wait()?;
+        if let Some(status) = exited {
+            // The sandbox is gone, so the mount points it made for denied paths
+            // that did not exist are no longer in use. A caller that keeps this
+            // handle alive would otherwise still find a directory where it
+            // expects to create a file.
+            self.run_teardown();
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self

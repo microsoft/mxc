@@ -35,10 +35,7 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&root.join("nested/secret"), FsIntent::Denied),
     ];
-    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
-        .unwrap()
-        ._storage
-        .unwrap();
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
     let overlay = mounts[0].readonly_overlay.as_ref().unwrap();
     assert!(Path::new(overlay).join(".env.local").is_dir());
     assert!(Path::new(overlay).join("nested/secret").is_dir());
@@ -55,8 +52,9 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
         .unwrap()
         .readonly_overlay
         .is_none());
-    drop(storage);
-    assert!(!Path::new(overlay).exists());
+    let overlay = overlay.clone();
+    drop(preparation);
+    assert!(!Path::new(&overlay).exists());
 }
 
 #[test]
@@ -137,18 +135,22 @@ fn placeholders_left_by_bubblewrap_are_removed_and_caller_content_is_kept() {
     let kept = grant.join("has-content");
     std::fs::create_dir(&kept).unwrap();
     std::fs::write(kept.join("written-by-workload"), "data").unwrap();
+    let canonical = std::fs::canonicalize(&grant).unwrap();
     let mount_points = vec![
         HostMountPoint {
             path: grant.join("missing/deep"),
-            existing_ancestor: grant.clone(),
+            spelled_ancestor: grant.clone(),
+            existing_ancestor: canonical.clone(),
         },
         HostMountPoint {
             path: grant.join("planted.json"),
-            existing_ancestor: grant.clone(),
+            spelled_ancestor: grant.clone(),
+            existing_ancestor: canonical.clone(),
         },
         HostMountPoint {
             path: grant.join("has-content"),
-            existing_ancestor: grant.clone(),
+            spelled_ancestor: grant.clone(),
+            existing_ancestor: canonical.clone(),
         },
     ];
 
@@ -305,10 +307,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         ..Default::default()
     };
     let mut mounts = bwrap_command::policy_mounts(&request.policy);
-    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
-        .unwrap()
-        ._storage
-        .unwrap();
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
     let args = bwrap_command::build_args_classified_with_mode(
         &request,
         None,
@@ -348,7 +347,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
             ]),
         "the host source must be the top layer so shared directories keep host metadata: {args:?}"
     );
-    let hidden = std::fs::canonicalize(storage.path()).unwrap();
+    let hidden = std::fs::canonicalize(preparation._storage.as_ref().unwrap().path()).unwrap();
     let hidden = hidden.to_str().unwrap();
     assert!(args
         .windows(2)
@@ -356,4 +355,139 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
     assert!(args
         .windows(2)
         .any(|args| args[0] == "--remount-ro" && args[1] == hidden));
+}
+
+#[test]
+fn a_denied_parent_is_not_a_host_grant_to_clean_under() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("data")).unwrap();
+    // `/data/hidden` is denied and missing on the host, so bwrap masks it with a
+    // tmpfs. `/data/hidden/new` is then created inside that tmpfs, never on the
+    // host. Recording the host path for it would make cleanup delete whatever
+    // the caller creates there while the sandbox runs.
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("data"), FsIntent::ReadWrite),
+        mount(&root.join("data/hidden"), FsIntent::Denied),
+        mount(&root.join("data/hidden/new"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
+    // `data/hidden` itself still needs its mount point taken back: bwrap makes it
+    // in the caller's `data` directory before masking it with a tmpfs.
+    assert_eq!(
+        preparation.mount_points.len(),
+        1,
+        "{:?}",
+        preparation.mount_points
+    );
+    assert_eq!(preparation.mount_points[0].path, root.join("data/hidden"));
+    // `data/hidden/new` is created inside that tmpfs, so nothing of it reaches
+    // the host. Recording it would delete whatever the caller creates at that
+    // path while the sandbox is running.
+    assert!(
+        preparation
+            .mount_points
+            .iter()
+            .all(|mount| mount.path != root.join("data/hidden/new")),
+        "a path inside a denied parent never reaches the host: {:?}",
+        preparation.mount_points
+    );
+}
+
+fn prepared(mount_points: Vec<HostMountPoint>) -> DenyPreparation {
+    DenyPreparation {
+        _storage: None,
+        mount_points,
+        armed: true,
+    }
+}
+
+#[test]
+fn an_abandoned_preparation_takes_its_placeholders_back() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    std::fs::create_dir(grant.join("missing")).unwrap();
+    let path = grant.join("missing");
+
+    // A startup path that gives up before the sandbox owns the cleanup.
+    let canonical = std::fs::canonicalize(&grant).unwrap();
+    drop(prepared(vec![HostMountPoint {
+        spelled_ancestor: grant,
+        existing_ancestor: canonical,
+        path: path.clone(),
+    }]));
+
+    assert!(
+        !path.exists(),
+        "a startup failure after the masks were created left the mount point on the host"
+    );
+}
+
+#[test]
+fn a_disarmed_preparation_leaves_cleanup_to_the_sandbox() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    std::fs::create_dir(grant.join("missing")).unwrap();
+    let path = grant.join("missing");
+
+    let canonical = std::fs::canonicalize(&grant).unwrap();
+    let mut handed_over = prepared(vec![HostMountPoint {
+        spelled_ancestor: grant.clone(),
+        existing_ancestor: canonical.clone(),
+        path: path.clone(),
+    }]);
+    handed_over.disarm();
+    drop(handed_over);
+    assert!(
+        path.exists(),
+        "dropping a disarmed preparation must not touch the host"
+    );
+
+    // The sandbox removes them itself once it has stopped. A disarmed
+    // preparation must still be able to do that: handing the cleanup over
+    // changes who calls it, not whether it works.
+    let mut owned = prepared(vec![HostMountPoint {
+        spelled_ancestor: grant,
+        existing_ancestor: canonical,
+        path: path.clone(),
+    }]);
+    owned.remove_placeholders();
+    assert!(!path.exists());
+    // Idempotent: a second call after teardown is a no-op.
+    owned.remove_placeholders();
+}
+
+#[test]
+fn a_replaced_ancestor_does_not_redirect_the_removal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    let elsewhere = fixture.path().join("elsewhere");
+    std::fs::create_dir(&grant).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    let ancestor = std::fs::canonicalize(&grant).unwrap();
+    let original = grant.clone();
+    let path = grant.join("missing");
+    std::fs::create_dir(&path).unwrap();
+    // Something the caller owns, at the same name under a different directory.
+    let stranger = elsewhere.join("missing");
+    std::fs::create_dir(&stranger).unwrap();
+
+    // While the sandbox ran, the caller replaced the grant with a symlink to
+    // another directory that happens to hold an empty `missing`.
+    std::fs::remove_dir_all(&grant).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &grant).unwrap();
+
+    remove_mount_points(&[HostMountPoint {
+        spelled_ancestor: original,
+        existing_ancestor: ancestor,
+        path,
+    }]);
+
+    assert!(
+        stranger.is_dir(),
+        "the removal followed a replaced ancestor and deleted an unrelated directory"
+    );
 }
