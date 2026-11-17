@@ -9,7 +9,7 @@ fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
-) -> Result<Option<tempfile::TempDir>, FilesystemPolicyError> {
+) -> Result<DenyPreparation, FilesystemPolicyError> {
     super::prepare(mounts, baseline_links, version, false)
 }
 
@@ -37,6 +37,7 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
     ];
     let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
         .unwrap()
+        ._storage
         .unwrap();
     let overlay = mounts[0].readonly_overlay.as_ref().unwrap();
     assert!(Path::new(overlay).join(".env.local").is_dir());
@@ -70,10 +71,124 @@ fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() 
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&root.join("tools/missing"), FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .unwrap()
-        .is_none());
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(preparation._storage.is_none());
     assert!(mounts.iter().all(|mount| mount.readonly_overlay.is_none()));
+    // The grant is bound from the host as it is, so Bubblewrap leaves the mount
+    // point it needs for `tools/missing` in the caller's own directory.
+    assert_eq!(
+        preparation.mount_points.len(),
+        1,
+        "a missing target under a writable grant still needs its mount point taken back"
+    );
+    assert_eq!(preparation.mount_points[0].path, root.join("tools/missing"));
+    assert_eq!(
+        preparation.mount_points[0].existing_ancestor,
+        root.join("tools")
+    );
+}
+
+#[test]
+fn an_empty_directory_the_caller_already_had_is_not_a_placeholder() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let grant = root.join("tools");
+    std::fs::create_dir_all(grant.join("sub")).unwrap();
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("sub/nested"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert_eq!(
+        preparation.mount_points.len(),
+        1,
+        "only the missing level is Bubblewrap's to take back"
+    );
+    assert_eq!(
+        preparation.mount_points[0].existing_ancestor,
+        grant.join("sub"),
+        "cleanup must stop at the directory that was already there"
+    );
+
+    // What Bubblewrap leaves behind, and then the cleanup.
+    std::fs::create_dir(grant.join("sub/nested")).unwrap();
+    remove_mount_points(&preparation.mount_points);
+
+    assert!(
+        !grant.join("sub/nested").exists(),
+        "the placeholder Bubblewrap made is still on the host"
+    );
+    assert!(
+        grant.join("sub").is_dir(),
+        "cleanup removed an empty directory the caller already had"
+    );
+}
+
+#[test]
+fn placeholders_left_by_bubblewrap_are_removed_and_caller_content_is_kept() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    // What Bubblewrap leaves for a `--tmpfs` mask on a path that did not exist.
+    std::fs::create_dir_all(grant.join("missing/deep")).unwrap();
+    // What it leaves for a `--ro-bind /dev/null` mask.
+    std::fs::write(grant.join("planted.json"), "").unwrap();
+    let kept = grant.join("has-content");
+    std::fs::create_dir(&kept).unwrap();
+    std::fs::write(kept.join("written-by-workload"), "data").unwrap();
+    let mount_points = vec![
+        HostMountPoint {
+            path: grant.join("missing/deep"),
+            existing_ancestor: grant.clone(),
+        },
+        HostMountPoint {
+            path: grant.join("planted.json"),
+            existing_ancestor: grant.clone(),
+        },
+        HostMountPoint {
+            path: grant.join("has-content"),
+            existing_ancestor: grant.clone(),
+        },
+    ];
+
+    remove_mount_points(&mount_points);
+
+    assert!(
+        !grant.join("missing").exists(),
+        "placeholder left on the host"
+    );
+    assert!(
+        !grant.join("planted.json").exists(),
+        "empty file left on the host"
+    );
+    assert!(
+        kept.join("written-by-workload").exists(),
+        "a directory the workload wrote into is not a placeholder"
+    );
+}
+
+#[test]
+fn a_preexisting_denied_path_is_never_a_mount_point() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("tools")).unwrap();
+    std::fs::write(root.join("tools/config.json"), "keep me").unwrap();
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("tools"), FsIntent::ReadWrite),
+        mount(&root.join("tools/config.json"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
+    assert!(
+        preparation.mount_points.is_empty(),
+        "an existing denied path is masked in place and needs no cleanup"
+    );
+    remove_mount_points(&preparation.mount_points);
+    assert_eq!(
+        std::fs::read_to_string(root.join("tools/config.json")).unwrap(),
+        "keep me"
+    );
 }
 
 #[test]
@@ -121,6 +236,7 @@ fn setuid_bwrap_is_rejected_only_when_an_overlay_is_needed() {
     assert!(
         super::prepare(&mut existing, &[], BwrapVersion::new(0, 5, 0), true)
             .unwrap()
+            ._storage
             .is_none()
     );
 }
@@ -170,9 +286,8 @@ fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
         mount(Path::new("/"), FsIntent::ReadWrite),
         mount(Path::new(&target), FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .unwrap()
-        .is_none());
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(preparation._storage.is_none());
 }
 
 #[test]
@@ -192,6 +307,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
     let mut mounts = bwrap_command::policy_mounts(&request.policy);
     let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
         .unwrap()
+        ._storage
         .unwrap();
     let args = bwrap_command::build_args_classified_with_mode(
         &request,

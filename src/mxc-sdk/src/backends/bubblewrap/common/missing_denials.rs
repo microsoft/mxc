@@ -69,17 +69,113 @@ fn baseline_mounts(
     Ok(mounts)
 }
 
+/// What a policy needs before Bubblewrap can enforce its deny masks.
+#[derive(Debug)]
+pub(crate) struct DenyPreparation {
+    /// Private storage backing the read-only overlays, held so the overlays
+    /// stay mounted for as long as the sandbox runs.
+    pub(crate) _storage: Option<TempDir>,
+
+    /// Mount points Bubblewrap will make on the host for denied entries that do
+    /// not exist yet beneath a read-write grant.
+    pub(crate) mount_points: Vec<HostMountPoint>,
+}
+
+/// A mount point Bubblewrap creates on the host for a missing denied entry
+/// beneath a read-write grant.
+#[derive(Debug)]
+pub(crate) struct HostMountPoint {
+    /// The deepest path Bubblewrap creates. Its parents below
+    /// `existing_ancestor` are new too when the entry names more than one
+    /// missing level.
+    pub(crate) path: PathBuf,
+
+    /// The deepest directory that already existed when the policy was
+    /// prepared. Removal stops here: everything below it is this run's
+    /// placeholder, everything at or above it is the caller's, whether or not
+    /// it happens to be empty.
+    pub(crate) existing_ancestor: PathBuf,
+}
+
+/// The deepest directory at or above `path` that exists right now.
+///
+/// `path` itself is known to be missing, so this starts at its parent and walks
+/// up to `stop_at`. Returns `stop_at` when nothing below it exists: the grant is
+/// the caller's own directory, and Bubblewrap fails on a grant it cannot bind.
+fn deepest_existing_ancestor(
+    probe: &mut FilesystemProbe,
+    path: &Path,
+    stop_at: &Path,
+) -> Result<PathBuf, FilesystemPolicyError> {
+    let mut current = path.parent();
+    while let Some(candidate) = current.filter(|candidate| *candidate != stop_at) {
+        match inspect_path(probe, candidate.to_path_buf()).map_err(FilesystemPolicyError::Host)? {
+            Ok(()) => return Ok(candidate.to_path_buf()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(FilesystemPolicyError::Host(format!(
+                    "Bubblewrap: could not inspect '{}' above a missing deniedPaths entry: {error}",
+                    candidate.display()
+                )))
+            }
+        }
+        current = candidate.parent();
+    }
+    Ok(stop_at.to_path_buf())
+}
+
+/// Remove the mount points Bubblewrap created for missing denied entries.
+///
+/// Only placeholders this run left behind are removed, walking up from each one
+/// to the ancestor that already existed when the policy was prepared. A
+/// directory the workload wrote into, or a file with content, is left alone
+/// together with everything above it, so this never deletes anything the caller
+/// or the workload owns.
+pub(crate) fn remove_mount_points(mount_points: &[HostMountPoint]) {
+    for mount_point in mount_points {
+        let mut current = mount_point.path.as_path();
+        while current != mount_point.existing_ancestor
+            && current.starts_with(&mount_point.existing_ancestor)
+        {
+            if !remove_placeholder(current) {
+                break;
+            }
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent;
+        }
+    }
+}
+
+/// Remove an empty placeholder: a directory Bubblewrap made for a `--tmpfs`
+/// mask, or the empty file it made for a `--ro-bind /dev/null` mask.
+fn remove_placeholder(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir(path).is_ok(),
+        Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
+            std::fs::remove_file(path).is_ok()
+        }
+        _ => false,
+    }
+}
+
 /// Keep missing deny mountpoints off the host and out of read-only binds.
-/// The returned directory must outlive the sandbox's overlay mounts.
+///
+/// A read-only parent can be overlaid privately, so nothing is created on the
+/// host. A read-write parent is bound from the host as it is, which leaves the
+/// mount point Bubblewrap needs in that same directory; those entries are
+/// reported in [`DenyPreparation::mount_points`] for the sandbox to remove.
 pub(crate) fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
     bwrap_is_setuid: bool,
-) -> Result<Option<TempDir>, FilesystemPolicyError> {
+) -> Result<DenyPreparation, FilesystemPolicyError> {
     let mut probe = FilesystemProbe::default();
     let baseline = baseline_mounts(BASELINE_RO_BIND_PATHS, baseline_links, &mut probe)?;
     let mut overlays = BTreeMap::<(String, String), Vec<PathBuf>>::new();
+    let mut mount_points = Vec::new();
     for (index, denied) in mounts.iter().enumerate() {
         if denied.intent != FsIntent::Denied {
             continue;
@@ -88,7 +184,7 @@ pub(crate) fn prepare(
         let parent = baseline.iter().chain(&mounts[..index]).rfind(|mount| {
             target != Path::new(&mount.destination) && target.starts_with(&mount.destination)
         });
-        let Some(parent) = parent.filter(|parent| parent.intent == FsIntent::ReadOnly) else {
+        let Some(parent) = parent else {
             continue;
         };
         let relative = target.strip_prefix(&parent.destination).map_err(|error| {
@@ -98,7 +194,7 @@ pub(crate) fn prepare(
             ))
         })?;
         let host_target = Path::new(&parent.source).join(relative);
-        match inspect_path(&mut probe, host_target).map_err(FilesystemPolicyError::Host)? {
+        match inspect_path(&mut probe, host_target.clone()).map_err(FilesystemPolicyError::Host)? {
             Ok(()) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -108,10 +204,18 @@ pub(crate) fn prepare(
                 )))
             }
         }
-        overlays
-            .entry((parent.source.clone(), parent.destination.clone()))
-            .or_default()
-            .push(relative.to_path_buf());
+        if parent.intent == FsIntent::ReadOnly {
+            overlays
+                .entry((parent.source.clone(), parent.destination.clone()))
+                .or_default()
+                .push(relative.to_path_buf());
+        } else {
+            let grant = Path::new(&parent.source);
+            mount_points.push(HostMountPoint {
+                existing_ancestor: deepest_existing_ancestor(&mut probe, &host_target, grant)?,
+                path: host_target,
+            });
+        }
     }
     let first_overlay = overlays
         .iter()
@@ -122,7 +226,10 @@ pub(crate) fn prepare(
                 .map(|path| (destination.clone(), path.clone()))
         });
     let Some((first_destination, first_path)) = first_overlay else {
-        return Ok(None);
+        return Ok(DenyPreparation {
+            _storage: None,
+            mount_points,
+        });
     };
 
     #[cfg(target_os = "linux")]
@@ -226,7 +333,10 @@ pub(crate) fn prepare(
         readonly_overlay: None,
     });
     mounts.sort_by_key(|mount| Path::new(&mount.destination).components().count());
-    Ok(Some(directory))
+    Ok(DenyPreparation {
+        _storage: Some(directory),
+        mount_points,
+    })
 }
 
 #[cfg(target_os = "linux")]
