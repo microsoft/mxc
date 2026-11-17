@@ -3,15 +3,20 @@
 
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::io::{self, ErrorKind, IoSliceMut, Read};
+use std::mem::offset_of;
+use std::net::Shutdown;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{kill, pthread_sigmask, SigSet, SigmaskHow, Signal};
+use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use nix::unistd::{geteuid, getuid, Pid};
 
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
@@ -28,6 +33,7 @@ const BWRAP_LAUNCH_GID: u32 = 0;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ALLOCATION_BYTES: u64 = 4 * 1024 * 1024;
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RootIdentity {
@@ -48,7 +54,8 @@ impl RootIdentity {
                 );
             }
         }
-        FilesystemProbe::default().run("/etc/subuid and /etc/subgid", |_| {
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        FilesystemProbe::default().run("/etc/subuid and /etc/subgid", move |_| {
             for path in ["/proc/self/uid_map", "/proc/self/gid_map"] {
                 let contents = std::fs::read_to_string(path)
                     .map_err(|error| format!("Bubblewrap: could not read {path}: {error}"))?;
@@ -62,8 +69,8 @@ impl RootIdentity {
             }
             let subuid = read_allocations("/etc/subuid")?;
             let subgid = read_allocations("/etc/subgid")?;
-            let passwd = account_database("passwd")?;
-            let group = account_database("group")?;
+            let passwd = account_database("passwd", deadline)?;
+            let group = account_database("group", deadline)?;
             Self::from_databases(&subuid, &subgid, &passwd, &group).map(Some)
         })?
     }
@@ -168,80 +175,83 @@ impl RootIdentity {
         self,
         policy: &ContainerPolicy,
     ) -> Result<(), FilesystemPolicyError> {
-        let mut probe = FilesystemProbe::default();
-        for (paths, list, mask) in [
-            (&policy.readonly_paths, "readonlyPaths", libc::R_OK),
-            (
-                &policy.readwrite_paths,
-                "readwritePaths",
-                libc::R_OK | libc::W_OK,
-            ),
-        ] {
-            for path in paths {
-                let result = self
-                    .probe_access(&mut probe, path, mask)
-                    .map_err(FilesystemPolicyError::Host)?;
-                match result {
-                    Ok(()) => {}
-                    Err(error)
-                        if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => {}
-                    Err(error) => {
-                        let message = format!(
-                            "Filesystem path '{path}' ({list}): mapped Bubblewrap UID {} / GID {} \
-                             with no supplementary groups cannot use this grant ({error}); \
-                             provision access for that identity without changing the root caller",
-                            self.uid_base + WORKLOAD_ID,
-                            self.gid_base + WORKLOAD_ID,
-                        );
-                        return Err(
-                            if matches!(
-                                error.raw_os_error(),
-                                Some(libc::EACCES | libc::EPERM | libc::EROFS | libc::EINVAL)
-                            ) {
-                                FilesystemPolicyError::Policy(message)
-                            } else {
-                                FilesystemPolicyError::Host(message)
-                            },
-                        );
-                    }
-                }
-            }
+        let grants: Vec<_> = policy
+            .readonly_paths
+            .iter()
+            .map(|path| (path, "readonlyPaths", libc::R_OK))
+            .chain(
+                policy
+                    .readwrite_paths
+                    .iter()
+                    .map(|path| (path, "readwritePaths", libc::R_OK | libc::W_OK)),
+            )
+            .collect();
+        let paths: Vec<_> = grants.iter().map(|(path, ..)| path.to_string()).collect();
+        let requests = grants
+            .iter()
+            .map(|(path, _, mask)| (CString::new(path.as_str()).ok(), *mask))
+            .collect();
+        let (uid, gid) = (self.uid_base + WORKLOAD_ID, self.gid_base + WORKLOAD_ID);
+        let results = FilesystemProbe::default()
+            .run_batch(
+                &paths,
+                |result: &io::Result<()>| result.as_ref().is_err_and(|error| !is_missing(error)),
+                move |report| check_access_as(uid, gid, requests, report),
+            )
+            .map_err(FilesystemPolicyError::Host)?;
+        for ((path, list, _), result) in grants.into_iter().zip(results) {
+            let error = match result {
+                Err(error) if !is_missing(&error) => error,
+                _ => continue,
+            };
+            return Err(
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EACCES | libc::EPERM | libc::EROFS | libc::EINVAL)
+                ) {
+                    FilesystemPolicyError::Policy(format!(
+                        "Filesystem path '{path}' ({list}): mapped Bubblewrap UID {uid} / GID \
+                         {gid} with no supplementary groups cannot use this grant ({error}); \
+                         provision access for that identity without changing the root caller"
+                    ))
+                } else {
+                    FilesystemPolicyError::Host(format!(
+                        "Filesystem path '{path}' ({list}): could not check access for mapped \
+                         Bubblewrap UID {uid} / GID {gid} ({error}); refusing sandbox startup"
+                    ))
+                },
+            );
         }
         Ok(())
     }
 
-    pub(crate) fn check_read(self, path: &str) -> Result<(), String> {
-        match self.probe_access(&mut FilesystemProbe::default(), path, libc::R_OK)? {
-            Ok(()) => Ok(()),
-            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => {
-                Ok(())
-            }
-            Err(error) => Err(format!(
-                "mapped Bubblewrap UID {} / GID {} cannot read {path}: {error}",
-                self.uid_base + WORKLOAD_ID,
-                self.gid_base + WORKLOAD_ID,
-            )),
-        }
-    }
-
-    fn probe_access(
-        self,
-        probe: &mut FilesystemProbe,
-        path: &str,
-        mask: i32,
-    ) -> Result<io::Result<()>, String> {
-        probe.run(path, move |path| {
-            let path =
-                CString::new(path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-            let mut child = IdentityChild::start(ChildOperation::Access {
-                uid: self.uid_base + WORKLOAD_ID,
-                gid: self.gid_base + WORKLOAD_ID,
-                path,
-                mask,
-            })?;
-            let result = child.result();
-            child.finish()?;
-            result
+    fn open(self, path: &Path, flags: libc::c_int) -> io::Result<File> {
+        let shown = path.display().to_string();
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
+        let (uid, gid) = (self.uid_base + WORKLOAD_ID, self.gid_base + WORKLOAD_ID);
+        let opened = FilesystemProbe::default()
+            .run(&shown, move |_| {
+                let mut child = IdentityChild::start(ChildOperation::Open {
+                    uid,
+                    gid,
+                    path,
+                    flags,
+                })?;
+                let result = child.result();
+                child.finish()?;
+                result?.ok_or_else(|| io::Error::other("identity helper returned no descriptor"))
+            })
+            .map_err(io::Error::other)?;
+        opened.map(File::from).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => error,
+            kind => io::Error::new(
+                kind,
+                format!(
+                    "{error}; opened as mapped Bubblewrap UID {uid} / GID {gid} with no \
+                     supplementary groups"
+                ),
+            ),
         })
     }
 
@@ -268,6 +278,51 @@ impl RootIdentity {
             ],
         );
     }
+}
+
+pub(crate) fn open_as_workload(
+    identity: Option<RootIdentity>,
+    path: &Path,
+    flags: libc::c_int,
+) -> io::Result<File> {
+    match identity {
+        Some(identity) => identity.open(path, flags),
+
+        // An unprivileged caller's workload keeps the caller's identity.
+        None => OpenOptions::new().read(true).custom_flags(flags).open(path),
+    }
+}
+
+pub(crate) fn read_as_workload(identity: Option<RootIdentity>, path: &Path) -> io::Result<String> {
+    let mut contents = String::new();
+    open_as_workload(identity, path, 0)?.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+fn check_access_as(
+    uid: u32,
+    gid: u32,
+    paths: Vec<(Option<CString>, i32)>,
+    report: &dyn Fn(io::Result<()>) -> bool,
+) {
+    let count = paths.len();
+    let mut child = match IdentityChild::start(ChildOperation::Access { uid, gid, paths }) {
+        Ok(child) => child,
+        Err(error) => {
+            report(Err(error));
+            return;
+        }
+    };
+    for _ in 0..count {
+        if !report(child.result().map(drop)) {
+            break;
+        }
+    }
+    let _ = child.finish();
+}
+
+fn is_missing(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
 }
 
 fn map_entries(contents: &str) -> Option<Vec<u32>> {
@@ -365,15 +420,12 @@ fn read_allocations(path: &str) -> Result<String, String> {
     Ok(contents)
 }
 
-fn account_database(database: &str) -> Result<String, String> {
+fn account_database(database: &str, deadline: Instant) -> Result<String, String> {
     let getent = host_tools::find("getent").map_err(|error| {
         format!("Bubblewrap: checking root's reserved IDs requires getent: {error}")
     })?;
-    let output = probe_exec::run_bounded(
-        Command::new(getent).arg(database),
-        Instant::now() + PROBE_TIMEOUT,
-    )
-    .map_err(|error| format!("Bubblewrap: could not check getent {database}: {error:?}"))?;
+    let output = probe_exec::run_bounded(Command::new(getent).arg(database), deadline)
+        .map_err(|error| format!("Bubblewrap: could not check getent {database}: {error:?}"))?;
     if !output.status.success() || output.stdout.truncated || output.stderr.truncated {
         return Err(format!(
             "Bubblewrap: getent {database} failed or returned an incomplete account database ({})",
@@ -394,8 +446,13 @@ enum ChildOperation {
     Access {
         uid: u32,
         gid: u32,
+        paths: Vec<(Option<CString>, i32)>,
+    },
+    Open {
+        uid: u32,
+        gid: u32,
         path: CString,
-        mask: i32,
+        flags: libc::c_int,
     },
 }
 
@@ -410,15 +467,6 @@ impl IdentityChild {
         let (parent, child) = UnixStream::pair()?;
         parent.set_read_timeout(Some(PROBE_TIMEOUT))?;
         let parent_pid = nix::unistd::getpid().as_raw();
-        let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
-
-        // SAFETY: getrlimit initializes the supplied record on success.
-        let max_fd = unsafe {
-            if libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            limit.assume_init().rlim_max.min(i32::MAX as libc::rlim_t) as u32
-        };
         let fd = child.as_raw_fd();
         let mut previous_signals = SigSet::empty();
 
@@ -433,21 +481,14 @@ impl IdentityChild {
         let pid = unsafe {
             let pid = libc::fork();
             if pid == 0 {
-                let result = close_child_descriptors(fd, max_fd)
+                let entered = close_child_descriptors(fd)
                     .and_then(|()| arm_parent_death(parent_pid))
-                    .and_then(|()| run_child_operation(&operation, parent_pid));
-
-                let status = match result {
-                    Ok(access_error) => [0, access_error],
-                    Err(setup_error) => [setup_error, 0],
-                };
-                let length = std::mem::size_of_val(&status);
-                let sent = libc::send(fd, status.as_ptr().cast(), length, libc::MSG_NOSIGNAL);
-                if sent == length as isize && matches!(operation, ChildOperation::Namespace) {
-                    let mut byte = 0_u8;
-                    while libc::read(fd, (&mut byte as *mut u8).cast(), 1) < 0
-                        && *libc::__errno_location() == libc::EINTR
-                    {}
+                    .and_then(|()| enter_identity(&operation, parent_pid));
+                match entered {
+                    Ok(()) => run_child_operation(&operation, fd),
+                    Err(setup_error) => {
+                        send_reply(fd, [setup_error, 0], None);
+                    }
                 }
                 libc::_exit(0);
             }
@@ -468,9 +509,48 @@ impl IdentityChild {
         Ok(helper)
     }
 
-    fn result(&mut self) -> io::Result<()> {
+    fn result(&mut self) -> io::Result<Option<OwnedFd>> {
         let mut code = [0_u8; 8];
-        self.channel.read_exact(&mut code)?;
+        let mut received = 0;
+        let mut file = None;
+        while received < code.len() {
+            let mut control = nix::cmsg_space!(libc::c_int);
+            let mut buffer = [IoSliceMut::new(&mut code[received..])];
+            let reply = match recvmsg::<()>(
+                self.channel.as_raw_fd(),
+                &mut buffer,
+                Some(&mut control),
+                MsgFlags::MSG_CMSG_CLOEXEC,
+            ) {
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EAGAIN) => {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "identity helper did not answer within {}s",
+                            PROBE_TIMEOUT.as_secs()
+                        ),
+                    ))
+                }
+                reply => reply?,
+            };
+            for item in reply.cmsgs()? {
+                if let ControlMessageOwned::ScmRights(descriptors) = item {
+                    for descriptor in descriptors {
+                        // SAFETY: the kernel installed this descriptor for this process only.
+                        let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+                        file.get_or_insert(descriptor);
+                    }
+                }
+            }
+            if reply.flags.contains(MsgFlags::MSG_CTRUNC) {
+                return Err(io::Error::other("identity helper reply was truncated"));
+            }
+            if reply.bytes == 0 {
+                return Err(ErrorKind::UnexpectedEof.into());
+            }
+            received += reply.bytes;
+        }
         let setup_error = i32::from_ne_bytes([code[0], code[1], code[2], code[3]]);
         if setup_error != 0 {
             return Err(io::Error::other(format!(
@@ -479,21 +559,21 @@ impl IdentityChild {
             )));
         }
         match i32::from_ne_bytes([code[4], code[5], code[6], code[7]]) {
-            0 => Ok(()),
+            0 => Ok(file),
             error => Err(io::Error::from_raw_os_error(error)),
         }
     }
 
     fn finish(mut self) -> io::Result<()> {
-        self.terminate()?;
+        self.terminate();
         self.reap()
     }
 
-    fn terminate(&self) -> io::Result<()> {
-        match kill(Pid::from_raw(self.pid), Signal::SIGKILL) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+    fn terminate(&self) {
+        // Root without CAP_KILL cannot signal a helper running as the mapped UID.
+        // Closing the socket makes that helper exit at its next reply instead.
+        let _ = kill(Pid::from_raw(self.pid), Signal::SIGKILL);
+        let _ = self.channel.shutdown(Shutdown::Both);
     }
 
     fn reap(&mut self) -> io::Result<()> {
@@ -517,13 +597,13 @@ impl IdentityChild {
 impl Drop for IdentityChild {
     fn drop(&mut self) {
         if !self.reaped {
-            let _ = self.terminate();
+            self.terminate();
             let _ = self.reap();
         }
     }
 }
 
-unsafe fn close_child_descriptors(keep: i32, max_fd: u32) -> Result<(), i32> {
+unsafe fn close_child_descriptors(keep: i32) -> Result<(), i32> {
     let mut supported = true;
     for (first, last) in [(0, keep as u32), (keep as u32 + 1, u32::MAX)] {
         if first < last && libc::syscall(libc::SYS_close_range, first, last - 1, 0_u32) != 0 {
@@ -535,17 +615,83 @@ unsafe fn close_child_descriptors(keep: i32, max_fd: u32) -> Result<(), i32> {
         }
     }
     if supported {
-        return Ok(());
+        Ok(())
+    } else {
+        close_listed_descriptors(keep)
     }
-    for fd in 0..max_fd {
-        if fd != keep as u32 && libc::close(fd as i32) != 0 {
-            let error = *libc::__errno_location();
-            if error != libc::EBADF && error != libc::EINTR {
-                return Err(error);
-            }
+}
+
+// Kernels before 5.9 lack close_range, so close what /proc/self/fd lists rather
+// than every number up to the descriptor limit.
+unsafe fn close_listed_descriptors(keep: i32) -> Result<(), i32> {
+    #[repr(C, align(8))]
+    struct Listing([u8; 1024]);
+
+    let directory = libc::open(
+        c"/proc/self/fd".as_ptr(),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+    );
+    if directory < 0 {
+        return Err(*libc::__errno_location());
+    }
+    let mut listing = Listing([0; 1024]);
+    let result = 'listing: loop {
+        let length = libc::syscall(
+            libc::SYS_getdents64,
+            directory,
+            listing.0.as_mut_ptr(),
+            listing.0.len(),
+        );
+        if length <= 0 {
+            break if length == 0 {
+                Ok(())
+            } else {
+                Err(*libc::__errno_location())
+            };
         }
+        let mut closed = false;
+        let mut offset = 0;
+        while offset < length as usize {
+            let record = listing.0.as_ptr().add(offset);
+            let size = usize::from(
+                record
+                    .add(offset_of!(libc::dirent64, d_reclen))
+                    .cast::<u16>()
+                    .read_unaligned(),
+            );
+            if size == 0 {
+                break 'listing Err(libc::EIO);
+            }
+            if let Some(fd) = descriptor_number(record.add(offset_of!(libc::dirent64, d_name))) {
+                if fd != keep && fd != directory {
+                    libc::close(fd);
+                    closed = true;
+                }
+            }
+            offset += size;
+        }
+
+        // Closing descriptors changes the listing, so read it again from the start.
+        if closed && libc::lseek(directory, 0, libc::SEEK_SET) != 0 {
+            break Err(*libc::__errno_location());
+        }
+    };
+    libc::close(directory);
+    result
+}
+
+unsafe fn descriptor_number(mut name: *const u8) -> Option<i32> {
+    if !(*name).is_ascii_digit() {
+        return None;
     }
-    Ok(())
+    let mut number = 0_i32;
+    while (*name).is_ascii_digit() {
+        number = number
+            .checked_mul(10)?
+            .checked_add(i32::from(*name - b'0'))?;
+        name = name.add(1);
+    }
+    (*name == 0).then_some(number)
 }
 
 unsafe fn arm_parent_death(parent: libc::pid_t) -> Result<(), i32> {
@@ -558,53 +704,120 @@ unsafe fn arm_parent_death(parent: libc::pid_t) -> Result<(), i32> {
     Ok(())
 }
 
-unsafe fn run_child_operation(operation: &ChildOperation, parent: libc::pid_t) -> Result<i32, i32> {
+unsafe fn enter_identity(operation: &ChildOperation, parent: libc::pid_t) -> Result<(), i32> {
     if libc::setgroups(0, std::ptr::null()) != 0 {
         return Err(*libc::__errno_location());
     }
-    match operation {
+    let (uid, gid) = match operation {
         ChildOperation::Namespace => {
             if libc::unshare(libc::CLONE_NEWUSER) != 0 {
                 return Err(*libc::__errno_location());
             }
+            return Ok(());
         }
-        ChildOperation::Access {
-            uid,
-            gid,
-            path,
-            mask,
-        } => {
-            if libc::setresgid(*gid, *gid, *gid) != 0 || libc::setresuid(*uid, *uid, *uid) != 0 {
-                return Err(*libc::__errno_location());
-            }
-            arm_parent_death(parent)?;
+        ChildOperation::Access { uid, gid, .. } | ChildOperation::Open { uid, gid, .. } => {
+            (*uid, *gid)
+        }
+    };
+    if libc::setresgid(gid, gid, gid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
+        return Err(*libc::__errno_location());
+    }
+    arm_parent_death(parent)?;
+    let header = [LINUX_CAPABILITY_VERSION_3, 0];
+    let capabilities = [0_u32; 6];
+    if libc::syscall(libc::SYS_capset, header.as_ptr(), capabilities.as_ptr()) != 0 {
+        return Err(*libc::__errno_location());
+    }
+    Ok(())
+}
 
-            // Linux capability ABI v3 takes a two-word header and two three-word records.
-            let header = [0x2008_0522_u32, 0];
-            let capabilities = [0_u32; 6];
-            if libc::syscall(libc::SYS_capset, header.as_ptr(), capabilities.as_ptr()) != 0 {
-                return Err(*libc::__errno_location());
+unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
+    match operation {
+        ChildOperation::Namespace => {
+            if send_reply(socket, [0, 0], None) {
+                let mut byte = 0_u8;
+                while libc::read(socket, (&mut byte as *mut u8).cast(), 1) < 0
+                    && *libc::__errno_location() == libc::EINTR
+                {}
             }
-            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-            if libc::stat(path.as_ptr(), stat.as_mut_ptr()) != 0 {
-                return Ok(*libc::__errno_location());
+        }
+        ChildOperation::Access { paths, .. } => {
+            for (path, mask) in paths {
+                let error = match path {
+                    Some(path) => check_access(path, *mask),
+                    None => libc::EINVAL,
+                };
+                if !send_reply(socket, [0, error], None) {
+                    break;
+                }
             }
-            let mask = if stat.assume_init().st_mode & libc::S_IFMT == libc::S_IFDIR {
-                *mask | libc::X_OK
+        }
+        ChildOperation::Open { path, flags, .. } => {
+            let file = libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOCTTY | flags,
+            );
+            if file < 0 {
+                send_reply(socket, [0, *libc::__errno_location()], None);
             } else {
-                *mask
-            };
-            if libc::access(path.as_ptr(), mask) != 0 {
-                return Ok(*libc::__errno_location());
+                send_reply(socket, [0, 0], Some(file));
             }
         }
     }
-    Ok(0)
+}
+
+unsafe fn check_access(path: &CString, mask: i32) -> i32 {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if libc::stat(path.as_ptr(), stat.as_mut_ptr()) != 0 {
+        return *libc::__errno_location();
+    }
+    let mask = if stat.assume_init().st_mode & libc::S_IFMT == libc::S_IFDIR {
+        mask | libc::X_OK
+    } else {
+        mask
+    };
+    if libc::access(path.as_ptr(), mask) != 0 {
+        *libc::__errno_location()
+    } else {
+        0
+    }
+}
+
+unsafe fn send_reply(socket: libc::c_int, status: [i32; 2], file: Option<libc::c_int>) -> bool {
+    #[repr(C, align(8))]
+    struct Control([u8; 64]);
+
+    let mut control = Control([0; 64]);
+    let mut buffer = libc::iovec {
+        iov_base: status.as_ptr().cast_mut().cast(),
+        iov_len: std::mem::size_of_val(&status),
+    };
+    let mut message: libc::msghdr = std::mem::zeroed();
+    message.msg_iov = &mut buffer;
+    message.msg_iovlen = 1;
+    if let Some(file) = file {
+        let length = std::mem::size_of::<libc::c_int>() as u32;
+        message.msg_control = control.0.as_mut_ptr().cast();
+        message.msg_controllen = libc::CMSG_SPACE(length) as _;
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(length) as _;
+        libc::CMSG_DATA(header)
+            .cast::<libc::c_int>()
+            .write_unaligned(file);
+    }
+    libc::sendmsg(socket, &message, libc::MSG_NOSIGNAL) == buffer.iov_len as isize
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner;
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::ExecutionRequest;
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
     const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nuser:x:1000:1000::/home/user:/bin/sh\n";
     const GROUP: &str = "root:x:0:\nuser:x:1000:\n";
@@ -619,8 +832,10 @@ mod tests {
         let mut child = IdentityChild::start(ChildOperation::Access {
             uid: uid.as_raw(),
             gid: gid.as_raw(),
-            path: CString::new("/mxc-identity-probe-does-not-exist/path").unwrap(),
-            mask: libc::R_OK,
+            paths: vec![(
+                Some(CString::new("/mxc-identity-probe-does-not-exist/path").unwrap()),
+                libc::R_OK,
+            )],
         })
         .unwrap();
         let error = child.result().unwrap_err();
@@ -638,6 +853,46 @@ mod tests {
         assert_eq!(getuid(), uid);
         assert_eq!(nix::unistd::getgid(), gid);
         assert_eq!(nix::unistd::getgroups().unwrap(), groups);
+    }
+
+    #[test]
+    fn descriptor_fallback_closes_everything_but_the_reply_socket() {
+        let (parent, child) = UnixStream::pair().unwrap();
+        let extra = File::open("/dev/null").unwrap();
+        let keep = child.as_raw_fd();
+        let closed = [
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            libc::STDERR_FILENO,
+            parent.as_raw_fd(),
+            extra.as_raw_fd(),
+        ];
+
+        // SAFETY: the child calls only syscalls before _exit.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                let passed = close_listed_descriptors(keep).is_ok()
+                    && closed.iter().all(|&fd| {
+                        libc::fcntl(fd, libc::F_GETFD) == -1
+                            && *libc::__errno_location() == libc::EBADF
+                    })
+                    && libc::fcntl(keep, libc::F_GETFD) != -1;
+                let answer = [u8::from(passed)];
+                libc::write(keep, answer.as_ptr().cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        assert!(pid > 0, "{}", io::Error::last_os_error());
+        drop((child, extra));
+        let mut answer = [0_u8; 1];
+        let read = (&parent).read_exact(&mut answer);
+        let mut status = 0;
+
+        // SAFETY: pid is this test's unreaped child.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        read.unwrap();
+        assert_eq!(answer, [1]);
     }
 
     #[test]
@@ -667,6 +922,17 @@ mod tests {
             }),
             ..ContainerRequest::new(command)
         };
+        const GID_FIXTURE: &str = "MXC_BWRAP_ROOT_GID_FIXTURE";
+        if std::env::var_os(GID_FIXTURE).is_some() {
+            // The Rust runtime reopens a closed stdin at startup, so close it here.
+            // SAFETY: this re-executed process runs only this test.
+            unsafe { libc::close(libc::STDIN_FILENO) };
+            assert_eq!(
+                unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFD) },
+                -1
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        }
         let mut process = spawn(request(command), Default::default()).expect("mapped pipe launch");
         let mut input = process.take_stdin().unwrap();
         input.write_all(b"pipes\n").unwrap();
@@ -713,106 +979,115 @@ mod tests {
         assert_eq!(nix::unistd::getgid(), gid);
         assert_eq!(nix::unistd::getgroups().unwrap(), groups);
         assert_eq!(std::fs::read_link("/proc/self/ns/user").unwrap(), namespace);
-        if std::env::var_os("MXC_BWRAP_ROOT_GID_FIXTURE").is_none() {
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
+        if std::env::var_os(GID_FIXTURE).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--ignored",
                     "root_sdk_streaming_and_pty_use_mapped_identity",
                     "--nocapture",
                 ])
-                .env("MXC_BWRAP_ROOT_GID_FIXTURE", "1")
-                .gid(WORKLOAD_ID);
-
-            // SAFETY: close runs only in the fixture child, before exec.
-            unsafe {
-                command.pre_exec(|| {
-                    libc::close(libc::STDIN_FILENO);
-                    Ok(())
-                });
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "root caller with GID 1000 failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+                .env(GID_FIXTURE, "1")
+                .gid(WORKLOAD_ID)
+                .output()
+                .unwrap();
+            assert_one_test_passed(output);
         }
+    }
+
+    fn reran_in_private_mount_namespace(test: &str) -> bool {
+        const PARENT_MOUNT: &str = "MXC_BWRAP_PARENT_MOUNT_NAMESPACE";
+        let namespace = std::fs::read_link("/proc/self/ns/mnt").unwrap();
+        if let Some(parent) = std::env::var_os(PARENT_MOUNT) {
+            assert_ne!(namespace, std::path::PathBuf::from(parent));
+            return false;
+        }
+        let output = Command::new(host_tools::find("unshare").unwrap())
+            .args(["--mount", "--propagation", "private", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--ignored", test, "--nocapture"])
+            .env(PARENT_MOUNT, namespace)
+            .output()
+            .unwrap();
+        assert_one_test_passed(output);
+        true
+    }
+
+    fn assert_one_test_passed(output: std::process::Output) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn bind_fixture(directory: &Path, target: &Path, mode: u32, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = directory.join(uuid::Uuid::new_v4().simple().to_string());
+        std::fs::write(&fixture, contents).unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(mode)).unwrap();
+        nix::mount::mount(
+            Some(fixture.as_path()),
+            target,
+            None::<&str>,
+            nix::mount::MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .unwrap();
+    }
+
+    fn run_backend(
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<(i32, String), String> {
+        let mut process = BubblewrapScriptRunner::new()
+            .spawn(request, logger, StdioMode::Pipes)
+            .map_err(|response| response.error_message)?;
+        let mut stdout = process.take_stdout().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut output = String::new();
+            stdout.read_to_string(&mut output).unwrap();
+            output
+        });
+        let status = process.wait().unwrap();
+        Ok((status, reader.join().unwrap()))
     }
 
     #[test]
     #[ignore = "requires root with subordinate ranges and Bubblewrap network prerequisites"]
     fn root_backend_hostname_pin_uses_mapped_identity() {
         use std::net::{TcpListener, TcpStream};
-        use std::os::unix::fs::PermissionsExt;
-        use std::path::{Path, PathBuf};
 
-        use nix::mount::{mount, umount, MsFlags};
+        use crate::mxc_common::models::ProxyAddress;
 
-        use crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner;
-        use crate::mxc_common::logger::{Logger, Mode};
-        use crate::mxc_common::models::{ExecutionRequest, ProxyAddress};
-        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
-
-        const PARENT_MOUNT: &str = "MXC_BWRAP_PIN_PARENT_MOUNT";
         assert!(getuid().is_root());
         RootIdentity::for_caller().unwrap().expect("root identity");
-        let mount_namespace = std::fs::read_link("/proc/self/ns/mnt").unwrap();
-        let Some(parent_mount) = std::env::var_os(PARENT_MOUNT) else {
-            let output = Command::new(host_tools::find("unshare").unwrap())
-                .args(["--mount", "--propagation", "private", "--"])
-                .arg(std::env::current_exe().unwrap())
-                .args([
-                    "--ignored",
-                    "root_backend_hostname_pin_uses_mapped_identity",
-                    "--nocapture",
-                ])
-                .env(PARENT_MOUNT, mount_namespace)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if reran_in_private_mount_namespace("root_backend_hostname_pin_uses_mapped_identity") {
             return;
-        };
-        assert_ne!(mount_namespace, PathBuf::from(parent_mount));
+        }
         let directory = tempfile::tempdir().unwrap();
-        let bind_text = |name: &str, target: &str, contents: &str| {
-            let path = directory.path().join(name);
-            std::fs::write(&path, contents).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            mount(
-                Some(path.as_path()),
-                Path::new(target),
-                None::<&str>,
-                MsFlags::MS_BIND,
-                None::<&str>,
-            )
-            .unwrap();
-        };
+        let hosts = Path::new("/etc/hosts");
         let hostname = format!("mxc-{}.invalid", uuid::Uuid::new_v4().simple());
-        bind_text(
-            "hosts",
-            "/etc/hosts",
-            &format!(
-                "{}\n127.0.0.1 {hostname}\n",
-                std::fs::read_to_string("/etc/hosts").unwrap()
-            ),
+        let pinned_hosts = format!(
+            "{}\n127.0.0.1 {hostname}\n",
+            std::fs::read_to_string(hosts).unwrap()
         );
+        bind_fixture(directory.path(), hosts, 0o644, &pinned_hosts);
         let nsswitch = Path::new("/etc/nsswitch.conf");
-        let has_nsswitch = nsswitch.exists();
-        if has_nsswitch {
+        if nsswitch.exists() {
             let contents = std::fs::read_to_string(nsswitch).unwrap();
             let mut lines: Vec<_> = contents
                 .lines()
                 .filter(|line| line.split(':').next().unwrap_or("").trim() != "hosts")
                 .collect();
             lines.push("hosts: files dns");
-            bind_text("nsswitch", "/etc/nsswitch.conf", &(lines.join("\n") + "\n"));
+            bind_fixture(
+                directory.path(),
+                nsswitch,
+                0o644,
+                &(lines.join("\n") + "\n"),
+            );
         }
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -837,23 +1112,124 @@ mod tests {
             port,
         ));
         let mut logger = Logger::new(Mode::Buffer);
-        let mut process = BubblewrapScriptRunner::new()
-            .spawn(&request, &mut logger, StdioMode::Pipes)
-            .expect("mapped backend hostname launch");
-        let mut stdout = process.take_stdout().unwrap();
-        let reader = std::thread::spawn(move || {
-            let mut output = String::new();
-            stdout.read_to_string(&mut output).unwrap();
-            output
-        });
-        let status = process.wait().unwrap();
-        let output = reader.join().unwrap();
-        if has_nsswitch {
-            umount(nsswitch).unwrap();
-        }
-        umount("/etc/hosts").unwrap();
+        let (status, output) =
+            run_backend(&request, &mut logger).expect("mapped backend hostname launch");
         assert_eq!(status, 0, "{output}\n{}", logger.get_buffer());
         assert!(output.contains("MAPPED_HOSTNAME_PIN"), "{output}");
+
+        nix::mount::umount(hosts).unwrap();
+        bind_fixture(directory.path(), hosts, 0o600, &pinned_hosts);
+        let error = run_backend(&request, &mut Logger::new(Mode::Buffer))
+            .expect_err("an unreadable hosts file must reject the pin before launch");
+        assert!(
+            error.contains("/etc/hosts") && error.contains("mapped Bubblewrap UID"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires root with subordinate ranges and Bubblewrap network prerequisites"]
+    fn root_resolver_inputs_use_mapped_identity() {
+        use crate::bwrap_common::bwrap_command::BASELINE_RO_BIND_PATHS;
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
+
+        assert!(getuid().is_root());
+        RootIdentity::for_caller().unwrap().expect("root identity");
+        if reran_in_private_mount_namespace("root_resolver_inputs_use_mapped_identity") {
+            return;
+        }
+        let resolver = std::fs::canonicalize("/etc/resolv.conf").unwrap();
+        assert!(
+            !BASELINE_RO_BIND_PATHS
+                .iter()
+                .any(|root| resolver.starts_with(root)),
+            "/etc/resolv.conf must link to a runtime resolver file that MXC copies, not {}",
+            resolver.display()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let marker = format!("mxc-{}.invalid", uuid::Uuid::new_v4().simple());
+        let mut request = ExecutionRequest {
+            script_code: "set -e; test \"$(id -u)\" = 1000; cat /etc/resolv.conf || true".into(),
+            script_timeout: 15_000,
+            ..Default::default()
+        };
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        for (mode, readable) in [(0o644, true), (0o600, false)] {
+            bind_fixture(
+                directory.path(),
+                &resolver,
+                mode,
+                &format!("nameserver 127.0.0.53\nsearch {marker}\n"),
+            );
+            let mut logger = Logger::new(Mode::Buffer);
+            let result = run_backend(&request, &mut logger);
+            nix::mount::umount(resolver.as_path()).unwrap();
+            let (status, output) = result.unwrap();
+            assert_eq!(status, 0, "{output}\n{}", logger.get_buffer());
+            assert_eq!(
+                output.contains(&marker),
+                readable,
+                "mode {mode:o}: {output}"
+            );
+            assert_eq!(
+                logger
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("mapped Bubblewrap UID")),
+                !readable,
+                "{:?}",
+                logger.warnings()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires root with subordinate ranges"]
+    fn root_account_lookups_stop_at_the_validation_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const SLOW_GETENT: &str = "MXC_BWRAP_SLOW_GETENT";
+        const TEST: &str = "root_account_lookups_stop_at_the_validation_deadline";
+        assert!(getuid().is_root());
+        let Some(shim) = std::env::var_os(SLOW_GETENT) else {
+            let directory = tempfile::tempdir().unwrap();
+            let shim = directory.path().join("getent");
+            let script = format!(
+                "#!/bin/sh\ntouch \"$0.$1.started\"\nsleep 3\ntouch \"$0.$1.finished\"\n\
+                 exec {} \"$@\"\n",
+                host_tools::find("getent").unwrap().display()
+            );
+            std::fs::write(&shim, script).unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::iter::once(directory.path().to_str().unwrap())
+                .chain(host_tools::FALLBACK_DIRECTORIES)
+                .collect::<Vec<_>>()
+                .join(":");
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", TEST, "--nocapture"])
+                .env(SLOW_GETENT, &shim)
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            assert_one_test_passed(output);
+            return;
+        };
+        let marker = |name: &str| {
+            let mut path = shim.clone();
+            path.push(format!(".group.{name}"));
+            std::path::PathBuf::from(path)
+        };
+        let error = RootIdentity::for_caller()
+            .expect_err("account lookups past the validation deadline must reject startup");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(marker("started").exists(), "{error}");
+        assert!(
+            !marker("finished").exists(),
+            "getent group kept running after the validation deadline: {error}"
+        );
     }
 
     #[test]
@@ -868,26 +1244,48 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_or_conflicting_allocations_are_rejected() {
-        for allocation in [
-            "",
-            "user:100000:65536\n",
-            "root:100000:65535\n",
-            "root:0:65536\n",
-            "root:4294960000:65536\n",
-            "root:100000:0\n",
-            "root:100000:-1\n",
-            "root:+100000:65536\n",
-            "root:100000:65536:extra\n",
-            "root:100000:65536\nuser:165535:65536\n",
-            "root:100000:65536\n0:100000:65536\n",
-            "root:100000:65536\nbroken\n",
-        ] {
-            assert!(
-                RootIdentity::from_databases(allocation, "root:300000:65536\n", PASSWD, GROUP)
-                    .is_err(),
-                "{allocation}"
-            );
+    fn allocation_files_match_the_shared_ci_fixtures() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/bubblewrap/root_allocations.json"
+        ))
+        .unwrap();
+        let passwd = fixtures["passwd"].as_str().unwrap();
+        let group = fixtures["group"].as_str().unwrap();
+        let other = "root:400000:65536\n";
+        for case in fixtures["cases"].as_array().unwrap() {
+            let allocations = case["allocations"].as_str().unwrap();
+            for uid in [true, false] {
+                let (subuid, subgid) = if uid {
+                    (allocations, other)
+                } else {
+                    (other, allocations)
+                };
+                let result =
+                    RootIdentity::from_databases(subuid, subgid, passwd, group).map(|identity| {
+                        if uid {
+                            identity.uid_base
+                        } else {
+                            identity.gid_base
+                        }
+                    });
+                match (&case["expect"], &result) {
+                    (serde_json::Value::Number(base), Ok(selected)) => {
+                        assert_eq!(base.as_u64(), Some(u64::from(*selected)), "{allocations:?}");
+                    }
+                    (serde_json::Value::String(kind), Err(error))
+                        if kind == "missing" || kind == "invalid" =>
+                    {
+                        assert_eq!(
+                            kind == "missing",
+                            error.contains("requires a reserved allocation"),
+                            "{allocations:?}: {error}"
+                        );
+                    }
+                    (expected, result) => {
+                        panic!("{allocations:?}: expected {expected}, got {result:?}")
+                    }
+                }
+            }
         }
     }
 
@@ -919,10 +1317,10 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_ranges_and_accounts_outside_the_mapping_are_allowed() {
+    fn accounts_outside_the_mapping_are_allowed() {
         let passwd = format!("{PASSWD}outside:x:165536:365536::/:/bin/sh\n");
         assert!(RootIdentity::from_databases(
-            "user:34464:65536\nroot:100000:65536\nother:165536:65536\n",
+            "root:100000:65536\n",
             "root:300000:65536\n",
             &passwd,
             GROUP

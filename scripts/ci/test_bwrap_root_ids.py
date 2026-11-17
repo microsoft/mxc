@@ -8,13 +8,30 @@ import tempfile
 import unittest
 from unittest import mock
 
-SCRIPT = Path(__file__).with_name("bwrap-root-ids.py")
+SCRIPT = Path(__file__).resolve().with_name("bwrap-root-ids.py")
 SPEC = importlib.util.spec_from_file_location("bwrap_root_ids", SCRIPT)
 ids = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ids)
+FIXTURES = SCRIPT.parents[2] / "src/mxc-sdk/tests/fixtures/bubblewrap/root_allocations.json"
 
 
 class RootIdFixtures(unittest.TestCase):
+    def test_existing_allocations_match_the_runtime_fixtures(self):
+        fixtures = json.loads(FIXTURES.read_text())
+        names, uids, gids = ids.accounts(fixtures["passwd"], fixtures["group"])
+        for case in fixtures["cases"]:
+            for occupied in (uids, gids):
+                with self.subTest(allocations=case["allocations"]):
+                    if case["expect"] == "invalid":
+                        with self.assertRaises(ValueError):
+                            ids.existing_range(ids.allocations(case["allocations"]), occupied, names)
+                    else:
+                        expected = None if case["expect"] == "missing" else case["expect"]
+                        self.assertEqual(
+                            ids.existing_range(ids.allocations(case["allocations"]), occupied, names),
+                            expected,
+                        )
+
     def test_selects_independent_nonconflicting_ranges(self):
         records = ids.allocations("user:100000:65536\n")
         self.assertEqual(ids.free_range(records, {0, 1000}, 100000, 500000), 165536)
@@ -22,16 +39,11 @@ class RootIdFixtures(unittest.TestCase):
         with self.assertRaises(ValueError):
             ids.free_range(records, set(), 100000, 200000)
 
-    def test_reuses_only_a_safe_existing_root_allocation(self):
-        records = ids.allocations("user:100000:65536\nroot:300000:65536\n")
-        self.assertEqual(ids.existing_range(records, {1000}, {"root"}), 300000)
-        for records, occupied in (
-            (ids.allocations("root:100000:65536\nuser:165535:65536\n"), set()),
-            (ids.allocations("root:100000:65536\n"), {101000}),
-            (ids.allocations("0:100000:65536\nroot:100000:65536\n"), set()),
-        ):
-            with self.assertRaises(ValueError):
-                ids.existing_range(records, occupied, {"root"})
+    def test_existing_root_allocation_must_not_contain_host_accounts(self):
+        records = ids.allocations("root:100000:65536\n")
+        self.assertEqual(ids.existing_range(records, {1000, 165536}, {"root"}), 100000)
+        with self.assertRaises(ValueError):
+            ids.existing_range(records, {101000}, {"root"})
 
     def test_validates_both_account_databases_and_the_pool(self):
         names, uids, gids = ids.accounts("root:x:0:0::/:/bin/sh\nu:x:1000:300000::/:/bin/sh\n",
@@ -39,15 +51,10 @@ class RootIdFixtures(unittest.TestCase):
         self.assertEqual(names, {"root"})
         self.assertEqual(uids, {0, 1000})
         self.assertEqual(gids, {0, 300000, 400000})
-        self.assertFalse(ids.is_root("1000", {"1000"}))
         for text in ("", "SUB_UID_MIN 100000\nSUB_UID_MAX 100001\n",
                      "SUB_UID_MIN 100000\nSUB_UID_MIN 200000\nSUB_UID_MAX 500000\n"):
             with self.assertRaises(ValueError):
                 ids.pool_limits(text, "subuid")
-        for text in ("root:0:65536", "root:4294960000:65536", "root:1:-1",
-                     "root:100000:65536\nbroken"):
-            with self.assertRaises(ValueError):
-                ids.allocations(text)
 
     def test_configuration_restores_contents_modes_and_original_absence(self):
         with tempfile.TemporaryDirectory(prefix="mxc-bwrap-ci-ids-") as directory:

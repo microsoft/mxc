@@ -27,7 +27,10 @@ def allocations(contents):
         fields = line.split(":")
         if len(fields) != 3 or not fields[0] or fields[0] != fields[0].strip():
             raise ValueError("Malformed subordinate allocation")
-        owner, start, count = fields[0], number(fields[1]), number(fields[2])
+        owner = fields[0]
+        if owner.isascii() and owner.isdecimal():
+            owner = number(owner)
+        start, count = number(fields[1]), number(fields[2])
         if start == 0 or count == 0 or start + count > MAX_ID:
             raise ValueError("Invalid subordinate allocation range")
         result.append((owner, start, start + count))
@@ -57,7 +60,7 @@ def accounts(passwd, group):
 
 
 def is_root(owner, names):
-    return number(owner) == 0 if owner.isascii() and owner.isdecimal() else owner in names
+    return owner == 0 if isinstance(owner, int) else owner in names
 
 
 def existing_range(records, occupied, root_names):

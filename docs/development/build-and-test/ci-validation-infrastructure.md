@@ -252,10 +252,20 @@ fail without running the workload. The test's last line names the modes that
 passed, and CI requires all three.
 Root cases also require the configured UID/GID mappings, empty supplementary
 groups, denial of root-only files and grants, and shifted ownership of newly
-created files.
+created files. The isolated root case is repeated without `CAP_KILL` in the
+caller's capability sets; its grants must still be accepted. In the root
+firewall and proxy cases, the script inspects the live process tree: the
+network supervisor must stay root in the caller's user namespace, while the
+workload runs in its own user namespace as the mapped host UID/GID.
 Only the firewall case needs a non-loopback host IPv4 address
 outside slirp's subnet; if unavailable, isolated and proxy cases still run,
 then the script reports exit 77. A failed workload takes precedence over skips.
+
+The root lanes also run `run_bwrap_dns_test.sh` and
+`run_bwrap_resolver_isolation_test.sh` as root; any nonzero exit, including a
+prerequisite skip, fails the job. The resolver fixture copies root's allocation
+files into its private `/etc`, launches once to learn the mapped workload
+owner, and gives that owner the fixtures its cases write.
 
 The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts.
 It reuses valid root allocations or selects free 65,536-ID blocks from the
@@ -267,22 +277,38 @@ jobs restore the original contents, metadata, and file absence in `always()`
 cleanup steps, including after test failures. A failed restoration retains the
 backups and fails the job. Run `python3 scripts/ci/test_bwrap_root_ids.py` for
 the selection and backup/restore fixtures; they never modify host configuration.
+The allocation-file cases in
+`src/mxc-sdk/tests/fixtures/bubblewrap/root_allocations.json` run against both
+this helper and the runtime's `identity` unit tests to keep the two allocation
+validators in agreement.
 
 This CI provisioning is not for persistent hosts. Production and manual root
 validation still require administrator-reserved ranges; see
 [Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers).
-`run_bwrap_identity_rejection_test.sh` supplies invalid allocation and account
-fixtures in a private mount namespace, without editing host configuration.
+`run_bwrap_identity_rejection_test.sh` writes fixed account databases and
+allocation files in a private mount namespace, without editing host
+configuration. A valid baseline must launch; each case then changes one
+setting and must reject startup.
+It also places a `getent` shim first on `PATH`: a complete lookup must launch,
+while a nonzero exit or output past the 64 KiB capture limit must reject
+startup. `root_account_lookups_stop_at_the_validation_deadline` slows both
+lookups and checks that `getent group` is stopped at the shared five-second
+account-validation deadline.
 The staged `mxc-filesystem-probe-tests` payload also runs the ignored
 `backend_modules::bubblewrap::common::identity::tests::root_sdk_streaming_and_pty_use_mapped_identity`
 case as root. It exercises public SDK pipes, PTY input/output and resizing,
 and verifies that the SDK host's identity, groups, and user namespace stay
-unchanged. Both the build and scheduled validation require these cases;
-missing prerequisites do not count as passing coverage.
+unchanged. It then repeats as a root caller whose primary GID is 1000 and
+whose standard input is closed. Both the build and scheduled validation
+require these cases; missing prerequisites do not count as passing coverage.
 The same payload runs `root_backend_hostname_pin_uses_mapped_identity` against
 private mount fixtures. It checks hostname pins from private supervisor storage
 through the backend's programmatic request path; request JSON still restricts
-proxy hosts to loopback names and addresses.
+proxy hosts to loopback names and addresses. A `0600` hosts file must then
+reject the launch. `root_resolver_inputs_use_mapped_identity` binds readable
+and `0600` fixtures over the host's resolver file in firewall mode; only the
+readable contents may reach the workload. It requires `/etc/resolv.conf` to
+link outside `/etc`, as it does with systemd-resolved or WSL.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

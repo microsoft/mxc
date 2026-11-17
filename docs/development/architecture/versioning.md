@@ -379,6 +379,13 @@ must provision the ranges and filesystem access for the mapped identity;
 missing or conflicting allocations reject startup. Unprivileged callers
 retain their existing identity behavior.
 
+For existing V1 root callers, workloads now run as sandbox UID/GID 1000
+without supplementary groups or capabilities, so commands that need root
+inside the sandbox fail. Root-only grants are rejected before launch, and
+files created through writable grants belong to the mapped host identity.
+Before upgrading, reserve the ranges and give the mapped identity access to
+each granted path.
+
 This containment correction does not change request JSON or add SDK fields.
 See [Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers)
 for prerequisites and ownership semantics.

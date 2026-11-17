@@ -18,7 +18,7 @@ use std::fmt::Write as FmtWrite;
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -568,19 +568,7 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
-        let resolver_readable =
-            match root_identity.map(|identity| identity.check_read("/etc/resolv.conf")) {
-                Some(Err(error)) => {
-                    logger.warning_line(&format!(
-                    "WARNING: Bubblewrap: {error}. No resolver snapshot or pin will be supplied."
-                ));
-                    false
-                }
-                _ => true,
-            };
-        let resolver_file = resolver_readable
-            .then(|| ResolverFile::for_host(&request.policy, logger))
-            .flatten();
+        let resolver_file = ResolverFile::for_host(&request.policy, root_identity, logger);
         let mut mounts = bwrap_command::policy_mounts(&request.policy);
         let resolver_args = match &resolver_file {
             Some(resolver) => resolver
@@ -614,13 +602,6 @@ impl BubblewrapScriptRunner {
             // the egress rule must open.
             Some(resolved) => {
                 let egress = resolved.egress();
-                if egress.pin().is_some() {
-                    if let Some(identity) = root_identity {
-                        identity.check_read("/etc/hosts").map_err(|error| {
-                            ScriptResponse::failed(FailurePhase::LaunchFailed, &error)
-                        })?;
-                    }
-                }
 
                 // A proxied chain opens no port 53, so the workload resolves
                 // through the proxy rather than a nameserver of its own.
@@ -634,6 +615,7 @@ impl BubblewrapScriptRunner {
                     logger,
                     request.script_timeout,
                     workload_userns.as_ref(),
+                    root_identity,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -655,9 +637,12 @@ impl BubblewrapScriptRunner {
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
-                let resolver = resolver_readable
-                    .then(|| proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger))
-                    .flatten();
+                let resolver = proxy_network::ResolverPin::for_host(
+                    &request.policy,
+                    &mounts,
+                    root_identity,
+                    logger,
+                );
                 match proxy_network::ProxyNetworkNamespace::start(
                     checked_network_tools()?,
                     &plan,
@@ -667,6 +652,7 @@ impl BubblewrapScriptRunner {
                     logger,
                     request.script_timeout,
                     workload_userns.as_ref(),
+                    root_identity,
                 ) {
                     Ok(network) => {
                         warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
@@ -751,14 +737,18 @@ impl BubblewrapScriptRunner {
         if let Some(identity) = root_identity {
             identity.configure_command(&mut command);
         }
+        let mut pipes = None;
         let pty = match stdio {
-            StdioMode::Pipes => {
-                command
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                None
-            }
+            StdioMode::Pipes => match attach_stdio_pipes(&mut command) {
+                Ok(parent_ends) => {
+                    pipes = Some(parent_ends);
+                    None
+                }
+                Err(error) => {
+                    stop_proxy_network(&mut proxy_network, logger);
+                    return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
+                }
+            },
             StdioMode::Inherit => {
                 // The child (bwrap) inherits the binary's stdio directly — a
                 // TTY when the binary has one.
@@ -830,6 +820,11 @@ impl BubblewrapScriptRunner {
                 ));
             }
         };
+        if let Some((stdin, stdout, stderr)) = pipes {
+            child.stdin = Some(stdin);
+            child.stdout = Some(stdout);
+            child.stderr = Some(stderr);
+        }
 
         startup.child_spawned();
         if let Some(network) = proxy_network.as_mut() {
@@ -1369,6 +1364,25 @@ fn stop_proxy_network(
     if let Some(mut network) = network.take() {
         network.stop(logger);
     }
+}
+
+// When the host has descriptor 0, 1 or 2 closed, `Stdio::piped()` can hand the
+// child that number with close-on-exec still set.
+fn attach_stdio_pipes(
+    command: &mut Command,
+) -> Result<(ChildStdin, ChildStdout, ChildStderr), String> {
+    let (stdin_reader, stdin_writer) = proxy_network::pipe_above_stdio()?;
+    let (stdout_reader, stdout_writer) = proxy_network::pipe_above_stdio()?;
+    let (stderr_reader, stderr_writer) = proxy_network::pipe_above_stdio()?;
+    command
+        .stdin(stdin_reader)
+        .stdout(stdout_writer)
+        .stderr(stderr_writer);
+    Ok((
+        stdin_writer.into(),
+        stdout_reader.into(),
+        stderr_reader.into(),
+    ))
 }
 
 /// Outcome of resolving and classifying `deniedPaths` in a single pass.

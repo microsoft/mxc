@@ -61,7 +61,7 @@ fn user_can_access(path: &str, mode: AccessMode) -> Access {
         AccessMode::ReadWrite => libc::R_OK | libc::W_OK,
     };
 
-    // access(2) checks the caller's real IDs.
+    // access(2) checks the caller's real IDs, so a root caller passes regardless of file mode.
     // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of the call.
     let rc = unsafe { libc::access(c_path.as_ptr(), mask) };
     if rc == 0 {

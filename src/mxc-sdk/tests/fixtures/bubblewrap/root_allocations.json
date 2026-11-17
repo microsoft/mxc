@@ -1,0 +1,28 @@
+{
+  "passwd": "root:x:0:0::/root:/bin/sh\ntoor:x:0:0::/root:/bin/sh\n4242:x:0:0::/root:/bin/sh\nuser:x:1000:1000::/home/user:/bin/sh\n",
+  "group": "root:x:0:\nuser:x:1000:\n",
+  "cases": [
+    { "allocations": "root:100000:65536\n", "expect": 100000 },
+    { "allocations": "0:100000:65536\n", "expect": 100000 },
+    { "allocations": "toor:100000:65536\n", "expect": 100000 },
+    { "allocations": "user:100000:65536\nroot:300000:65536\n", "expect": 300000 },
+    { "allocations": "root:100000:65535\nroot:200000:65536\n", "expect": 200000 },
+    { "allocations": "user:34464:65536\nroot:100000:65536\nother:165536:65536\n", "expect": 100000 },
+    { "allocations": "# reserved for MXC\n\n  root:100000:65536  \n", "expect": 100000 },
+    { "allocations": "", "expect": "missing" },
+    { "allocations": "user:100000:65536\n", "expect": "missing" },
+    { "allocations": "4242:100000:65536\n", "expect": "missing" },
+    { "allocations": "root:100000:65535\n", "expect": "missing" },
+    { "allocations": "root:100000:65536\n4294967295:300000:65536\n", "expect": "invalid" },
+    { "allocations": "root :100000:65536\n", "expect": "invalid" },
+    { "allocations": "root:0:65536\n", "expect": "invalid" },
+    { "allocations": "root:4294960000:65536\n", "expect": "invalid" },
+    { "allocations": "root:100000:0\n", "expect": "invalid" },
+    { "allocations": "root:100000:-1\n", "expect": "invalid" },
+    { "allocations": "root:+100000:65536\n", "expect": "invalid" },
+    { "allocations": "root:100000:65536:extra\n", "expect": "invalid" },
+    { "allocations": "root:100000:65536\nbroken\n", "expect": "invalid" },
+    { "allocations": "root:100000:65536\nuser:165535:65536\n", "expect": "invalid" },
+    { "allocations": "0:100000:65536\nroot:100000:65536\n", "expect": "invalid" }
+  ]
+}

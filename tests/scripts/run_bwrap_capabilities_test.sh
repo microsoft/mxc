@@ -12,7 +12,7 @@ if [ ! -x "$LXC_EXEC" ]; then
     exit 1
 fi
 tools=(bwrap python3 slirp4netns unshare nsenter ip iptables ip6tables iptables-restore ip6tables-restore)
-if [ "$(id -u)" -eq 0 ]; then tools+=(getent); fi
+if [ "$(id -u)" -eq 0 ]; then tools+=(getent setpriv); fi
 for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "SKIPPED: $tool is required for the Bubblewrap capability tests."
@@ -27,12 +27,15 @@ import os
 from pathlib import Path
 import platform
 import pwd
+import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 SYSCALLS = {"x86_64": (0xC000003E, 126, 157), "aarch64": (0xC00000B7, 91, 167)}
 if platform.machine() not in SYSCALLS:
@@ -48,6 +51,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 
 fixture = Path(sys.argv[1])
@@ -78,6 +82,14 @@ if uid_base:
         pass
     else:
         raise AssertionError("workload changed to namespace root")
+    if mode != "isolated":
+        namespaces = (os.readlink("/proc/self/ns/user"), os.readlink("/proc/self/ns/net"))
+        print("NAMESPACES", *namespaces, flush=True)
+        release = writable / f"{mode}.release"
+        deadline = time.monotonic() + 20
+        while not release.exists():
+            assert time.monotonic() < deadline, "the harness did not inspect the supervisor"
+            time.sleep(0.05)
 status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
 for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
     assert int(status[name].strip(), 16) == 0, f"{mode}: {name} retained {status[name].strip()}"
@@ -182,6 +194,88 @@ skipped = []
 passed = []
 root_caller = os.getuid() == 0
 uid_base = gid_base = 0
+
+
+def descendants(parent):
+    children = {}
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdecimal():
+            try:
+                ppid = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(entry.name))
+    found, pending = [], [parent]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child)
+    return found
+
+
+def separation_problem(executor, namespaces, mode):
+    caller = os.readlink("/proc/self/ns/user")
+    supervisors, workloads = [], []
+    for pid in descendants(executor):
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            userns = os.readlink(f"/proc/{pid}/ns/user")
+            netns = os.readlink(f"/proc/{pid}/ns/net")
+            status = dict(line.split(":", 1)
+                          for line in Path(f"/proc/{pid}/status").read_text().splitlines())
+        except OSError:
+            continue
+        if b"mxc-bwrap-proxy-supervisor" in argv:
+            supervisors.append((pid, userns, status["Uid"].split()))
+        elif [userns, netns] == namespaces:
+            workloads.append((pid, status["Uid"].split(), status["Gid"].split()))
+    if not supervisors:
+        return "no live network supervisor was found"
+    for pid, userns, uids in supervisors:
+        if userns != caller or uids != ["0"] * 4:
+            return f"supervisor {pid} runs as {uids} in {userns}, not as root in {caller}"
+    if namespaces[0] == caller:
+        return "the workload shares the caller's user namespace"
+    if not workloads:
+        return "no live workload process was found"
+    for pid, uids, gids in workloads:
+        if uids != [str(uid_base + 1000)] * 4 or gids != [str(gid_base + 1000)] * 4:
+            return f"workload process {pid} runs as host {uids}/{gids}"
+    print(f"PASS: {mode} supervisor stays root in the caller's user namespace {caller}; "
+          f"workload runs in {namespaces[0]} as host {uid_base + 1000}:{gid_base + 1000}",
+          flush=True)
+    return None
+
+
+def run_with_supervisor_check(command, mode, release):
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = b""
+    try:
+        namespaces = None
+        deadline = time.monotonic() + 30
+        while namespaces is None and time.monotonic() < deadline:
+            if select.select([child.stdout], [], [], 0.1)[0]:
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                output += chunk
+                match = re.search(rb"^NAMESPACES (\S+) (\S+)$", output, re.M)
+                namespaces = match and [value.decode() for value in match.groups()]
+            elif child.poll() is not None:
+                break
+        problem = separation_problem(child.pid, namespaces, mode) if namespaces else \
+            "the workload did not report its namespaces"
+        if problem:
+            return 1, f"{problem}\n{output.decode(errors='replace')}"
+        release.touch()
+        rest, _ = child.communicate(timeout=60)
+        return child.returncode, (output + rest).decode(errors="replace")
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
+
+
 if root_caller:
     root_names = {entry.pw_name for entry in pwd.getpwall() if entry.pw_uid == 0} | {"0"}
 
@@ -246,7 +340,7 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
     # Bubblewrap stops a non-root launch itself; MXC must stop a root one.
     refusal = "still held capabilities" if root_caller else "capset failed"
 
-    def launch(mode, address, port, command, environment=None):
+    def launch(mode, address, port, command, environment=None, release=None, prefix=()):
         config = {
             "version": "1.0.0",
             "containerId": f"bwrap-capabilities-{mode}",
@@ -266,12 +360,15 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
             config["runtimeConfig"] = {"networkProxy": f"http://127.0.0.1:{port}"}
         config_path = root / f"{mode}.json"
         config_path.write_text(json.dumps(config))
+        arguments = [*prefix, sys.argv[1], "--experimental", str(config_path)]
+        if release:
+            return run_with_supervisor_check(arguments, mode, release)
         result = subprocess.run(
-            [sys.argv[1], "--experimental", str(config_path)],
-            capture_output=True, text=True, timeout=60, env=environment,
+            arguments, capture_output=True, text=True, timeout=60, env=environment,
         )
         return result.returncode, result.stdout + result.stderr
 
+    commands = {}
     for mode in ("isolated", "firewall", "proxy"):
         address, port = "10.0.2.2", proxy_port
         if mode == "firewall":
@@ -304,7 +401,9 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
             f"{port} {blocked_port} {mode} {address} {uid_base} {gid_base} <<'WORKLOAD'\n"
             + workload + "\nWORKLOAD"
         )
-        returncode, output = launch(mode, address, port, command)
+        commands[mode] = command
+        release = writable / f"{mode}.release" if root_caller and mode != "isolated" else None
+        returncode, output = launch(mode, address, port, command, release=release)
         if returncode != 0 or f"CAPABILITIES_DROPPED_{mode}" not in output:
             print(f"FAIL: {mode}, caller UID {os.getuid()}\n{output}", flush=True)
             failed.append(mode)
@@ -327,6 +426,22 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
         assert (fixture / "sentinel").read_text() == "unchanged", "host fixture changed"
 
     if root_caller:
+        without_kill = ["setpriv", "--inh-caps=-kill", "--ambient-caps=-kill",
+                        "--bounding-set=-kill", "--"]
+        status = subprocess.run(without_kill + ["cat", "/proc/self/status"],
+                                capture_output=True, text=True, check=True).stdout
+        CAP_KILL = 1 << 5
+        assert not any(int(line.split()[1], 16) & CAP_KILL
+                       for line in status.splitlines() if line.startswith("Cap")), \
+            "setpriv did not remove CAP_KILL"
+        returncode, output = launch(
+            "isolated", "10.0.2.2", proxy_port, commands["isolated"], prefix=without_kill)
+        if returncode != 0 or "CAPABILITIES_DROPPED_isolated" not in output:
+            print(f"FAIL: isolated, root caller without CAP_KILL\n{output}", flush=True)
+            failed.append("isolated without CAP_KILL")
+        else:
+            print("PASS: isolated, root caller without CAP_KILL", flush=True)
+
         for field, path in (
             ("readonlyPaths", fixture / "root-secret"),
             ("readonlyPaths", fixture / "root-group-secret"),

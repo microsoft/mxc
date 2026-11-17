@@ -358,8 +358,13 @@ jobs:
               exit 1
             fi
           done
+          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_dns_test.sh
+          sudo -n env LXC_EXEC="$LXC_EXEC" bash tests/scripts/run_bwrap_resolver_isolation_test.sh
           payload="src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
-          for case in root_sdk_streaming_and_pty_use_mapped_identity root_backend_hostname_pin_uses_mapped_identity; do
+          for case in root_sdk_streaming_and_pty_use_mapped_identity \
+              root_backend_hostname_pin_uses_mapped_identity \
+              root_resolver_inputs_use_mapped_identity \
+              root_account_lookups_stop_at_the_validation_deadline; do
             test_name="backend_modules::bubblewrap::common::identity::tests::$case"
             "$payload" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
             sudo -n "$payload" --ignored --exact "$test_name"

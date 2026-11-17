@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 use std::collections::{HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{ErrorKind, Seek};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{fcntl, FcntlArg, SealFlag};
@@ -20,6 +20,7 @@ use super::bwrap_command::{
     path_intent, path_is_denied, PolicyMount, BASELINE_RO_BIND_PATHS, COMPAT_RUN_LINK,
     COMPAT_RUN_TARGET, RESOLVER_DIRS, WSL_RESOLV_CONF,
 };
+use super::identity::{open_as_workload, RootIdentity};
 use super::proxy_network::above_stdio;
 
 // Linux path_resolution(7) limits a lookup to 40 symbolic links.
@@ -47,8 +48,12 @@ struct ResolverLayout {
 }
 
 impl ResolverFile {
-    pub(crate) fn for_host(policy: &ContainerPolicy, logger: &mut Logger) -> Option<Self> {
-        match Self::from_resolver(Path::new("/etc/resolv.conf"), policy, |target| {
+    pub(crate) fn for_host(
+        policy: &ContainerPolicy,
+        identity: Option<RootIdentity>,
+        logger: &mut Logger,
+    ) -> Option<Self> {
+        match Self::from_resolver(Path::new("/etc/resolv.conf"), policy, identity, |target| {
             implicit_source_paths(target)
                 .iter()
                 .any(|source| !path_is_denied(policy, source))
@@ -67,6 +72,7 @@ impl ResolverFile {
     fn from_resolver(
         path: &Path,
         policy: &ContainerPolicy,
+        identity: Option<RootIdentity>,
         is_visible: impl FnOnce(&Path) -> bool,
     ) -> Result<Option<Self>, String> {
         let destination = match fs::canonicalize(path) {
@@ -99,7 +105,7 @@ impl ResolverFile {
         let snapshot = if supplied || in_baseline {
             None
         } else {
-            Some(snapshot_file(&destination)?)
+            Some(snapshot_file(path, &destination, identity)?)
         };
         Ok(Some(Self {
             snapshot,
@@ -233,20 +239,29 @@ impl ResolverFile {
     }
 }
 
-fn snapshot_file(source: &Path) -> Result<File, String> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(source)
-        .map_err(|error| format!("could not open {}: {error}", source.display()))?;
-    if !file
+fn snapshot_file(
+    path: &Path,
+    source: &Path,
+    identity: Option<RootIdentity>,
+) -> Result<File, String> {
+    // Opening the original path checks every link in its chain with the workload's access.
+    let mut file = open_as_workload(identity, path, libc::O_NONBLOCK)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let opened = file
         .metadata()
-        .map_err(|error| format!("could not inspect {}: {error}", source.display()))?
-        .is_file()
-    {
+        .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
+    if !opened.is_file() {
         return Err(format!(
             "{} is not a regular resolver file",
             source.display()
+        ));
+    }
+    let checked = fs::symlink_metadata(source)
+        .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
+    if (opened.dev(), opened.ino()) != (checked.dev(), checked.ino()) {
+        return Err(format!(
+            "{} changed while preparing its resolver mount",
+            path.display()
         ));
     }
     let fd = memfd_create(
@@ -408,6 +423,7 @@ mod tests {
         let resolver = ResolverFile::from_resolver(
             &root.join("etc/resolv.conf"),
             &ContainerPolicy::default(),
+            None,
             |_| true,
         )
         .unwrap()
@@ -437,7 +453,7 @@ mod tests {
         let path = dir.path().join("resolv.conf");
         fs::write(&path, "nameserver 192.0.2.53\n").unwrap();
         let mut resolver =
-            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), |_| true)
+            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), None, |_| true)
                 .unwrap()
                 .unwrap();
         fs::remove_file(&path).unwrap();
@@ -466,7 +482,8 @@ mod tests {
         let _listener = UnixListener::bind(&socket).unwrap();
         for path in [dir.path(), fifo.as_path(), socket.as_path()] {
             assert!(
-                ResolverFile::from_resolver(path, &ContainerPolicy::default(), |_| true).is_err(),
+                ResolverFile::from_resolver(path, &ContainerPolicy::default(), None, |_| true)
+                    .is_err(),
                 "accepted {}",
                 path.display()
             );
@@ -478,12 +495,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("resolv.conf");
         assert!(
-            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), |_| true)
+            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), None, |_| true)
                 .unwrap()
                 .is_none()
         );
         symlink("resolv.conf", &path).unwrap();
-        assert!(ResolverFile::from_resolver(&path, &ContainerPolicy::default(), |_| true).is_err());
+        assert!(
+            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), None, |_| true)
+                .is_err()
+        );
         assert!(implicit_source_paths(&path).is_empty());
     }
 
@@ -493,7 +513,7 @@ mod tests {
         let path = dir.path().join("resolv.conf");
         fs::write(&path, "nameserver 192.0.2.53\n").unwrap();
         assert!(
-            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), |target| {
+            ResolverFile::from_resolver(&path, &ContainerPolicy::default(), None, |target| {
                 !implicit_source_paths(target).is_empty()
             })
             .unwrap()
@@ -515,7 +535,7 @@ mod tests {
             readonly_paths: vec![target.to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let mount = ResolverFile::from_resolver(&resolver, &policy, |_| false)
+        let mount = ResolverFile::from_resolver(&resolver, &policy, None, |_| false)
             .unwrap()
             .unwrap();
         assert!(mount.snapshot.is_none());
@@ -634,6 +654,7 @@ mod tests {
         let resolver = ResolverFile::from_resolver(
             &root.join("etc/resolv.conf"),
             &ContainerPolicy::default(),
+            None,
             |_| true,
         )
         .unwrap()

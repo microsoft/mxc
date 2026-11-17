@@ -29,6 +29,7 @@ use tempfile::TempDir;
 
 use crate::bwrap_common::bwrap_command::{path_is_denied, PolicyMount, COMMAND_TAIL};
 use crate::bwrap_common::host_tools::{self, LookupError};
+use crate::bwrap_common::identity::{read_as_workload, RootIdentity};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
@@ -159,7 +160,8 @@ ip6tables_restore="$7"
 sleep="$8"
 
 # Dash redirections need fixed single-digit descriptors.
-# 3 carries the sandbox PID; 4 controls slirp's lifetime.
+# 3 carries the sandbox PID and reaches EOF if the parent exits before sending it.
+# 4 controls slirp's lifetime.
 printf ready > "$state_dir/userns.ready"
 if ! IFS= read -r child_pid <&3; then
     child_pid="${child_pid:-}"
@@ -202,10 +204,12 @@ conntrack_hint="mxc: could not install the sandbox network policy. If the error 
 'Invalid argument', this host is missing the nf_conntrack kernel module that the inbound \
 connection-state match requires, and an unprivileged sandbox cannot load it."
 
+# One restore is one bounded kernel transaction, so large rule sets arrive in several.
 # The final transaction installs the hooks after the earlier rules exist.
 for payload in "$state_dir"/rules.v4.*; do
 
-    # Wait for the legacy lock and preserve earlier transactions.
+    # -w waits for the host's legacy xtables lock, which concurrent sandboxes share
+    # because nsenter keeps the host's mount namespace. -n preserves earlier transactions.
     "$nsenter" --net="$ns" -- "$iptables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 
@@ -776,6 +780,7 @@ impl ProxyNetworkNamespace {
         logger: &mut Logger,
         script_timeout_ms: u32,
         workload_userns: Option<&File>,
+        identity: Option<RootIdentity>,
     ) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
@@ -887,7 +892,7 @@ impl ProxyNetworkNamespace {
         let hosts = match pin {
             Some(pin) => {
                 let path = state_dir.path().join("hosts");
-                if let Err(error) = write_pinned_hosts(&path, pin) {
+                if let Err(error) = write_pinned_hosts(&path, pin, identity) {
                     let _ = supervisor.terminate();
                     return Err(error);
                 }
@@ -1355,10 +1360,14 @@ fn namespace_probe_error(status: ExitStatus, shell: &Path, use_case: PrivateNetw
 /// The host's other entries are kept so the sandbox retains the mappings a
 /// workload expects (`localhost` above all). They are read before the file is
 /// created, so a read failure cannot leave a half-written pin behind.
-fn write_pinned_hosts(path: &Path, pin: &ProxyHostPin) -> Result<(), String> {
+fn write_pinned_hosts(
+    path: &Path,
+    pin: &ProxyHostPin,
+    identity: Option<RootIdentity>,
+) -> Result<(), String> {
     // The host file is optional: a host without one simply contributes no
     // entries, which is not a reason to refuse to pin.
-    let existing = match fs::read_to_string(SANDBOX_HOSTS_PATH) {
+    let existing = match read_as_workload(identity, Path::new(SANDBOX_HOSTS_PATH)) {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => {
@@ -1457,19 +1466,27 @@ impl ResolverPin {
     pub(crate) fn for_host(
         policy: &ContainerPolicy,
         mounts: &[PolicyMount],
+        identity: Option<RootIdentity>,
         logger: &mut Logger,
     ) -> Option<Self> {
-        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, mounts, logger)
+        Self::from_resolver(
+            Path::new(SANDBOX_RESOLV_CONF_PATH),
+            policy,
+            mounts,
+            identity,
+            logger,
+        )
     }
 
     pub(crate) fn from_resolver(
         resolver_path: &Path,
         policy: &ContainerPolicy,
         mounts: &[PolicyMount],
+        identity: Option<RootIdentity>,
         logger: &mut Logger,
     ) -> Option<Self> {
         let shown = resolver_path.display();
-        let host_contents = match fs::read_to_string(resolver_path) {
+        let host_contents = match read_as_workload(identity, resolver_path) {
             Ok(contents) => contents,
             // No resolver file is not a loopback stub to rescue, and is normal
             // on a host that configures DNS some other way.
@@ -2117,7 +2134,7 @@ pub(crate) fn probe_private_namespaces(
 }
 
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xcfed_f5bc_5ecb_05ca;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0x6363_6f1a_0211_7a36;
 
 /// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
 /// pre-flight walk must check.
@@ -2420,7 +2437,7 @@ pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
+pub(crate) fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
     let (reader, writer) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
     let lift = |end: OwnedFd| {
@@ -3007,7 +3024,7 @@ mod tests {
         // below), but the pin still leads the file so the intent is legible.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(
@@ -3066,7 +3083,7 @@ mod tests {
         // End-to-end twin of the unit tests above, against the real host file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         let matches = written
@@ -3090,7 +3107,7 @@ mod tests {
         // and the loopback exemption both rely on.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         let host_file = fs::read_to_string(SANDBOX_HOSTS_PATH).unwrap_or_default();
@@ -3299,9 +3316,14 @@ mod tests {
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
 
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         assert_eq!(pin.destination, resolver);
         assert!(pin.contents.contains("nameserver 10.0.2.3"));
@@ -3320,6 +3342,7 @@ mod tests {
             &resolver,
             &ContainerPolicy::default(),
             &[],
+            None,
             &mut logger
         )
         .is_none());
@@ -3334,10 +3357,14 @@ mod tests {
         let absent = dir.path().join("absent.conf");
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &[], &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &absent,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger
+        )
+        .is_none());
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
 
@@ -3353,7 +3380,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], None, &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
     }
@@ -3391,6 +3418,7 @@ mod tests {
                 &resolver,
                 &ContainerPolicy::default(),
                 &mounts,
+                None,
                 &mut logger,
             );
             assert_eq!(pin.is_some(), pinned, "{mounts:?}");
@@ -3410,7 +3438,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], None, &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(
             out.contains("loopback"),
@@ -3446,7 +3474,7 @@ mod tests {
             ] {
                 let mut logger = buffer_logger();
                 assert!(
-                    ResolverPin::from_resolver(&link, &policy, &[], &mut logger).is_none(),
+                    ResolverPin::from_resolver(&link, &policy, &[], None, &mut logger).is_none(),
                     "a grant on {} is the caller claiming the resolver",
                     grant.display()
                 );
@@ -3466,10 +3494,14 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &[], &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &first,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger
+        )
+        .is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("could not be read"), "got: {out}");
     }
@@ -3494,8 +3526,14 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &[], &mut logger)
-                .is_none(),
+            ResolverPin::from_resolver(
+                &root.join("link/stub.conf"),
+                &policy,
+                &[],
+                None,
+                &mut logger
+            )
+            .is_none(),
             "a denial of the canonical directory must stop the pin reached by an alias"
         );
         let out = logger.warnings().join("\n");
@@ -3510,9 +3548,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         let staged = stage_resolver(
             Some(&pin),
@@ -3540,9 +3583,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         let staging = tempfile::tempdir().unwrap();
         let (source, destination) = stage_resolver(Some(&pin), staging.path(), &mut logger)

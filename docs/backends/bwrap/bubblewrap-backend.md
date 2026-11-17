@@ -155,8 +155,10 @@ belong to the mapped host identity.
 The trusted root network supervisor stays in the host user namespace and
 enters only the workload's network namespace to install policy. Its private
 state directory is not granted to the workload. Generated hosts and resolver
-files are passed by descriptor and copied read-only into the sandbox; their
-host inputs must be readable by the mapped identity.
+files are passed by descriptor and copied read-only into the sandbox. MXC
+reads their host inputs as the mapped identity. If that identity cannot read
+the resolver file, MXC supplies no resolver copy and logs a warning. If it
+cannot read `/etc/hosts` while pinning a proxy hostname, startup fails.
 
 Unprivileged callers keep their existing UID/GID behavior and do not require
 subordinate allocations.

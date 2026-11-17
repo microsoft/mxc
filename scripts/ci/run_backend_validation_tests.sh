@@ -80,7 +80,17 @@ case "$backend" in
             exit 1
         fi
         rm -f "$capability_log"
-        for case in root_sdk_streaming_and_pty_use_mapped_identity root_backend_hostname_pin_uses_mapped_identity; do
+        for script in run_bwrap_dns_test.sh run_bwrap_resolver_isolation_test.sh; do
+            if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
+                bash "$test_script_root/$script"; then
+                echo "The Bubblewrap root test $script failed or skipped." >&2
+                exit 1
+            fi
+        done
+        for case in root_sdk_streaming_and_pty_use_mapped_identity \
+            root_backend_hostname_pin_uses_mapped_identity \
+            root_resolver_inputs_use_mapped_identity \
+            root_account_lookups_stop_at_the_validation_deadline; do
             identity_test="backend_modules::bubblewrap::common::identity::tests::$case"
             "$binary_directory/mxc-filesystem-probe-tests" --list --ignored --exact "$identity_test" \
                 | grep -Fx "$identity_test: test"
