@@ -606,3 +606,33 @@ fn a_preparation_that_fails_later_takes_its_creations_back() {
         "a failed preparation left the mount point it already created on the host"
     );
 }
+
+#[test]
+fn a_failed_preparation_releases_a_shared_ancestor_too() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    // Built by hand so the preparation's own drop cannot clean them first: the
+    // list is in creation order, exactly what a preparation that failed partway
+    // would hold.
+    let shared = grant.join("missing");
+    std::fs::create_dir_all(shared.join("a")).unwrap();
+    std::fs::create_dir_all(shared.join("b")).unwrap();
+    // The order the real preparation produces: each entry carries its own
+    // levels deepest-first, and the shared ancestor appears with whichever
+    // entry created it.
+    let levels = vec![
+        (shared.join("a"), id_of(&shared.join("a"))),
+        (shared.clone(), id_of(&shared)),
+        (shared.join("b"), id_of(&shared.join("b"))),
+    ];
+
+    let mut pending = PendingCreations::default();
+    pending.record(levels);
+    drop(pending);
+
+    assert!(
+        !shared.exists(),
+        "a failed preparation left the ancestor its siblings shared on the host"
+    );
+}

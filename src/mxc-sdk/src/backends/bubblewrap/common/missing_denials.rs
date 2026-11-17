@@ -252,12 +252,10 @@ impl Drop for PendingCreations {
         }
         // The preparation failed. Remove what it already created, on this
         // thread: the caller is unwinding and nothing else will look again.
+        // The same walk as a successful teardown, so siblings that share an
+        // ancestor still release it.
         let levels = std::mem::take(&mut self.levels);
-        let mut probe = FilesystemProbe::default();
-        for (path, created) in levels {
-            let display = path.display().to_string();
-            let _ = probe.run(&display, move |_| remove_level(&path, created));
-        }
+        remove_levels(&levels);
     }
 }
 
