@@ -89,8 +89,8 @@ pub struct SdkRuntimeConfigInput {
 
 /// Common fields supplied by a trusted typed Rust SDK lifecycle request.
 ///
-/// Exact contract metadata and one-shot-only backend sections are deliberately
-/// absent. The operation remains the sole phase and routing authority.
+/// The selected contract is retained for compatibility, diagnostics, and
+/// telemetry. The operation remains the sole phase and routing authority.
 #[derive(Debug, Clone)]
 pub struct SdkStateAwareInput {
     version: ContractVersion,

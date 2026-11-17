@@ -123,8 +123,8 @@ impl CaptureSession {
 
     /// Event sources collected by the native trace.
     ///
-    /// Callers can use this to distinguish a legacy access-only trace from an
-    /// option-aware trace that also collected network decisions.
+    /// Callers can use this to distinguish an access-only fallback trace from an
+    /// option-aware trace with verified support for network decisions.
     #[must_use]
     pub fn trace_sources(&self) -> LearningModeTraceSources {
         self.trace

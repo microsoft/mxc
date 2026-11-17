@@ -90,8 +90,7 @@ pub(crate) enum OneShotExecution {
 /// Selects the containment backend for the host, spawns the sandboxed process
 /// with piped stdio, and returns the handle. No pty is allocated. Backends
 /// without a streaming implementation return an [`Error`] with
-/// [`ErrorCode::UnsupportedContainment`]. `stdin` is as for
-/// [`spawn_one_shot_json`].
+/// [`ErrorCode::UnsupportedContainment`].
 ///
 /// # Safety / lifetime contract for library-context callers
 ///
@@ -110,25 +109,23 @@ pub(crate) enum OneShotExecution {
 /// spawns from the same load are safe as long as the library outlives them.
 pub fn spawn_execution_request(
     request: &ExecutionRequest,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer), stdin)
+    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer), wslc_stdin)
 }
 
 /// Spawn a raw exact-version one-shot JSON request as a streaming process.
 ///
 /// `experimental` is the caller's runtime opt-in. It is a parameter rather than
 /// a JSON field so that a configuration cannot grant itself experimental access.
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file. The
-/// same library-lifetime contract as [`spawn_execution_request`] applies.
+/// The same library-lifetime contract as [`spawn_execution_request`] applies.
 pub fn spawn_one_shot_json(
     request_json: &str,
     experimental: bool,
-    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
-    spawn_execution_request_with_logger(&request, logger, stdin)
+    spawn_execution_request_with_logger(&request, logger, true)
 }
 
 #[doc(hidden)]
@@ -197,10 +194,10 @@ fn parse_one_shot_json(
 fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
     logger: Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     spawn_execution_request_with_logger_and(request, logger, |request, logger| {
-        dispatch::spawn_runner(request, logger, stdin)
+        dispatch::spawn_runner(request, logger, wslc_stdin)
     })
 }
 
@@ -238,10 +235,7 @@ fn invoke_execution_request(
         telemetry::LearningMode::for_request(request),
         &mut logger,
     );
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
@@ -323,6 +317,29 @@ pub fn spawn_one_shot_pty_json(
     spawn_execution_request_with_logger_and(&request, logger, |request, logger| {
         dispatch::spawn_pty_runner(request, logger, size)
     })
+}
+
+pub fn spawn_with_inherited_stdio(
+    request: &ExecutionRequest,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    spawn_execution_request_with_logger_and(
+        request,
+        Logger::new(Mode::Buffer),
+        dispatch::spawn_inherited_stdio_runner,
+    )
+}
+
+pub fn spawn_one_shot_inherited_stdio_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    spawn_execution_request_with_logger_and(
+        &request,
+        logger,
+        dispatch::spawn_inherited_stdio_runner,
+    )
 }
 
 pub(crate) struct TelemetryRegistration {
@@ -1152,7 +1169,6 @@ mod telemetry_process_tests {
         let mut request = ExecutionRequest {
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1244,6 +1260,51 @@ mod telemetry_process_tests {
             ends[0].failure_reason,
             Some(telemetry::FailureReason::InitError)
         );
+        test_sink::clear();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inherited_stdio_spawns_report_start_and_end() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+
+        let request = ExecutionRequest {
+            script_code: "exit 0".to_string(),
+            containment: ContainmentBackend::Vm,
+            telemetry: Some(crate::mxc_common::models::TelemetryConfig {
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let error = match spawn_with_inherited_stdio(&request) {
+            Ok(_) => panic!("inherited stdio must reject the vm backend"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+        let starts = test_sink::take_starts();
+        let ends = test_sink::take_executions();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].session_id, starts[0].session_id);
+        assert_eq!(ends[0].backend, "vm");
+        assert!(ends[0].failure_reason.is_some());
+        test_sink::take_errors();
+
+        // The development contract reports without consent on eligible builds.
+        telemetry::consent::set_consent(false, "test").unwrap();
+        let json =
+            r#"{"version":"1.1.0-alpha","containment":"vm","process":{"commandLine":"exit 0"}}"#;
+        assert!(spawn_one_shot_inherited_stdio_json(json, false).is_err());
+        let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+        assert_eq!(test_sink::take_starts().len(), expected);
+        assert_eq!(test_sink::take_executions().len(), expected);
         test_sink::clear();
     }
 
@@ -1496,7 +1557,6 @@ mod telemetry_process_tests {
             containment: ContainmentBackend::MicroVm,
             telemetry: Some(crate::mxc_common::models::TelemetryConfig {
                 enabled: Some(true),
-                ..Default::default()
             }),
             ..Default::default()
         };

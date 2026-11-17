@@ -66,8 +66,8 @@ public static class MxcPlatform
     }
 
     /// <summary>
-    /// Probe whether the public SDK can launch sandboxes on this host and which
-    /// backends it can launch.
+    /// Probe the backends available on this host. MicroVM is available through
+    /// the development JSON APIs, not typed V1 requests.
     /// </summary>
     public static PlatformSupport GetPlatformSupport()
     {
@@ -76,15 +76,20 @@ public static class MxcPlatform
             var json = ReadOwnedJson(
                 NativeMethods.mxc_platform_support_json(),
                 "probing platform support");
-            var support = MxcJson.Deserialize<NativePlatformSupport>(json)
-                ?? throw new JsonException("Native platform support returned null JSON.");
-            return new PlatformSupport
-            {
-                IsSupported = support.IsSupported,
-                Reason = support.Reason,
-                AvailableMethods = support.AvailableMethods.Select(ParseBackend).ToArray(),
-            };
+            return ParsePlatformSupport(json);
         }
+    }
+
+    internal static PlatformSupport ParsePlatformSupport(string json)
+    {
+        var support = MxcJson.Deserialize<NativePlatformSupport>(json)
+            ?? throw new JsonException("Native platform support returned null JSON.");
+        return new PlatformSupport
+        {
+            IsSupported = support.IsSupported,
+            Reason = support.Reason,
+            AvailableMethods = support.AvailableMethods.Select(ParseBackend).ToArray(),
+        };
     }
 
     internal static ContainmentBackend ParseBackend(string value) =>

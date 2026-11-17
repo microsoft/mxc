@@ -102,14 +102,28 @@ if (-not $SkipSetup) {
     }
 }
 
+# Probes maps each NAME=VALUE line the workload prints to a regex its value
+# must match. Returns the first mismatch, or "" when all match.
+function Test-WslcProbes([string]$Output, [System.Collections.IDictionary]$Probes) {
+    foreach ($name in $Probes.Keys) {
+        $m = [regex]::Match($Output, "(?m)^$([regex]::Escape($name))=(.*?)[ \t\r]*$")
+        if (-not $m.Success) { return "$name not printed" }
+        if ($m.Groups[1].Value -notmatch "^(?:$($Probes[$name]))$") {
+            return "$name expected '$($Probes[$name])', got '$($m.Groups[1].Value)'"
+        }
+    }
+    return ""
+}
+
 # Helper: run a single WSLC test config
 function Run-WslcTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [string]$OutputContains = "",
-        [string]$OutputNotContains = "",
+        [string[]]$OutputContains = @(),
+        [string[]]$OutputNotContains = @(),
         [string]$OutputMatches = "",
+        [System.Collections.IDictionary]$Probes = $null,
         [switch]$ForceDebug,
         [hashtable]$EnvVars = $null,
         [string]$As = "",
@@ -176,20 +190,29 @@ function Run-WslcTest {
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
 
-    if ($pass -and $OutputContains -and $output -notmatch [regex]::Escape($OutputContains)) {
-        $pass = $false
-        $reason = "Output missing '$OutputContains'"
+    foreach ($s in $OutputContains) {
+        if ($pass -and $s -and $output -notmatch [regex]::Escape($s)) {
+            $pass = $false
+            $reason = "Output missing '$s'"
+        }
     }
 
-    if ($pass -and $OutputNotContains -and $output -match [regex]::Escape($OutputNotContains)) {
-        $pass = $false
-        $reason = "Output unexpectedly contained '$OutputNotContains'"
+    foreach ($s in $OutputNotContains) {
+        if ($pass -and $s -and $output -match [regex]::Escape($s)) {
+            $pass = $false
+            $reason = "Output unexpectedly contained '$s'"
+        }
     }
 
     # OutputMatches is a regex pattern (no escaping).
     if ($pass -and $OutputMatches -and $output -notmatch $OutputMatches) {
         $pass = $false
         $reason = "Output did not match regex '$OutputMatches'"
+    }
+
+    if ($pass -and $Probes) {
+        $reason = Test-WslcProbes $output $Probes
+        $pass = -not $reason
     }
 
     # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
@@ -361,14 +384,6 @@ $null = $results.Add((Run-WslcTest "wslc_network_isolated.json" `
     -OutputContains "NET_EGRESS_BLOCKED" -OutputNotContains "NET_EGRESS_REACHED"))
 $null = $results.Add((Run-WslcTest "wslc_network_bridged.json" `
     -OutputContains "NET_EGRESS_REACHED"))
-# WSLc networking is all-or-nothing: it has no CAP_NET_ADMIN for in-container
-# rules, so a per-destination egress rule must be refused rather than quietly
-# widened to the posture's default.
-foreach ($ruleConfig in @("wslc_network_egress_rules_rejected.json", "wslc_network_egress_deny_rules_rejected.json")) {
-    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit 1 `
-        -OutputContains "network.egress allow/deny rules" `
-        -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
-}
 # `process.env` without `inheritDefaultEnv` is launched through `env -i NAME=VALUE`,
 # which puts the injected proxy URL in argv and therefore in /proc/<pid>/cmdline.
 $null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit 1 `
@@ -432,7 +447,7 @@ $null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ForceDebug `
 # The store is warm now, so a miss here can only come from the denied posture.
 Clear-ColdCacheStore
 $null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit 1 `
-    -OutputContains "declares no egress" -OutputNotContains "SHOULD_NOT_RUN"))
+    -OutputContains "egress default is deny" -OutputNotContains "SHOULD_NOT_RUN"))
 # `Check the image name and tag` is unique to the non-retryable arm; every arm
 # says `could not be pulled`.
 $null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit 1 `
@@ -451,8 +466,197 @@ Clear-ColdCacheStore
 # the real registry read through a redirected HKCU key. A release binary has no
 # override to point at a test key, which is what makes the policy trustworthy.
 
+Write-Host "`n--- Built-in Proxy Tests ---" -ForegroundColor Cyan
+# Egress rules run through the built-in proxy. Probes send a raw CONNECT and
+# print the proxy's status code; DIRECT checks there is no route around it.
+# Every run asserts its own teardown succeeded and, after the first, that the
+# previous run left nothing behind.
+$Leftover = "left by an earlier run"
+$Clean = "[WSLC] Cleanup complete"
+$NotClean = @($Leftover, "Cleanup failed")
+$ResolvConfs = { @(Get-ChildItem $env:TEMP -Filter "mxc-wslc-gw-*-resolv.conf" -ErrorAction SilentlyContinue).Count }
+$resolvConfsBefore = & $ResolvConfs
+# A record outlives its run only if cleanup didn't finish.
+$RecordsRoot = Join-Path $env:LOCALAPPDATA "Microsoft\MXC\wslc\stores"
+$Records = { @(Get-ChildItem $RecordsRoot -Recurse -Filter "*.json" -File -ErrorAction SilentlyContinue | ForEach-Object FullName) }
+$recordsBefore = & $Records
+
+function Add-WslcResult([string]$Name, [bool]$Pass, [string]$Reason, [string]$Output = "") {
+    Write-Host "  $Name ... " -NoNewline
+    if ($Pass) {
+        Write-Host "PASS" -ForegroundColor Green
+    } else {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "    Reason: $Reason" -ForegroundColor Red
+        $Output -split "`n" | Where-Object { $_.Trim() -ne "" } | Select-Object -Last 5 |
+            ForEach-Object { Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray }
+    }
+    $null = $results.Add(@{ Name = $Name; Pass = $Pass; Skipped = $false; Reason = $Reason })
+}
+
+# Start a --debug run without waiting for it.
+function Start-WslcBackgroundRun([string]$ConfigFile) {
+    $log = Join-Path $env:TEMP "mxc_wslc_$([guid]::NewGuid()).log"
+    $proc = Start-Process -FilePath $WxcExec -PassThru -NoNewWindow `
+        -ArgumentList @("--debug", "`"$(Join-Path $TestConfigs $ConfigFile)`"") `
+        -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+    $null = $proc.Handle
+    @{ Process = $proc; Log = $log }
+}
+
+function Complete-WslcBackgroundRun($Run) {
+    $Run.Process.WaitForExit()
+    $output = (Get-Content $Run.Log -Raw) + (Get-Content "$($Run.Log).err" -Raw)
+    Remove-Item $Run.Log, "$($Run.Log).err" -ErrorAction SilentlyContinue
+    @{ Exit = $Run.Process.ExitCode; Output = "$output" }
+}
+
+$null = $results.Add((Run-WslcTest "wslc_network_egress_allow_rules.json" -ForceDebug `
+    -OutputNotContains "Cleanup failed", 'DENY  "1.1.1.1:443"' `
+    -OutputContains "Built-in proxy ready at http://10.231.1.254:3128", $Clean `
+    -OutputMatches 'DENY  "8\.8\.8\.8:443" -> 8\.8\.8\.8 \(default\)' `
+    -Probes ([ordered]@{
+        PROXY_ENV = "OK"; RESOLV = "GATEWAY"; ALLOWED = "200"; ADJACENT = "403"
+        WRONG_PORT = "403"; OTHER = "403"; HTTP_WRONG_PORT = "403"; DIRECT = "BLOCKED"
+    })))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_port_ranges.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{
+        RANGE_START = "200"; RANGE_END = "200"; RANGE_BELOW = "403"; RANGE_ABOVE = "403"
+        RANGE_OUTSIDE = "403"; LIST_FIRST = "200"; LIST_SECOND = "200"; LIST_OTHER = "403"
+        ALL_PORTS_443 = "200"; ALL_PORTS_853 = "200"; UNLISTED = "403"
+    })))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cidr_except.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{
+        IN_RANGE = "200"; SECOND_TARGET = "200"; EXCEPT = "403"; DENY_WINS = "403"; OUTSIDE = "403"
+        NAME_ALLOWED = "200"; NAME_DENIED = "403"; DNS = "RESOLVED"; DIRECT = "BLOCKED"
+    })))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_deny_rules.json" -ForceDebug -OutputNotContains $NotClean `
+    -OutputContains "network.egress.deny entry for 'udp' has no effect", $Clean `
+    -Probes ([ordered]@{
+        DENIED = "403"; DENIED_ANY_PORT = "403"; NAME_DENIED = "403"; PORT_DENIED = "403"
+        PORT_OTHER = "200"; EXCEPT_ALLOWED = "200"; EXCEPT_SIBLING = "403"
+        ANY_PROTOCOL_DENIED = "403"; ANY_PROTOCOL_OTHER = "200"; NAME_ALLOWED = "200"
+        DNS = "RESOLVED"; UDP_DIRECT = "BLOCKED"; ICMP = "BLOCKED"; DIRECT = "BLOCKED"
+    })))
+# Proxied only because hostLoopback differs from the defaults. Reserved ranges
+# stay denied even under an allow default, and the exit code passes through.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_reserved.json" -ExpectedExit 7 -ForceDebug -OutputNotContains $NotClean `
+    -OutputContains 'DNS  "host.wslc.internal" refused (host loopback denied)', "network.ingress.default 'allow' has no effect", $Clean `
+    -Probes ([ordered]@{
+        DEFAULT = "200"; LOOPBACK = "403"; LOCALHOST = "403"; PROXY_SELF = "403"; GATEWAY_NET = "403"
+        LINK_LOCAL = "403"; MULTICAST = "403"; UNSPECIFIED = "403"; HOST_LOOPBACK = "403"
+        HOST_DNS = "REFUSED"; DIRECT = "BLOCKED"
+    })))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_timeout.json" -ExpectedExit -1 -ForceDebug -OutputNotContains $NotClean `
+    -OutputContains "TIMEOUT_STARTED", $Clean))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_allow_everything.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{ ALLOWED = "200"; LOOPBACK = "403"; PROXY_SELF = "403"; LINK_LOCAL = "403" })))
+# A real HTTPS client using the injected proxy variables and resolver.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_real_client.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{
+        TLS_IP = "200"; TLS_NAME = "200"; TLS_DENIED = "ERROR .*Tunnel connection failed: 403.*"
+        TLS_BYPASS = "ERROR .*"; RESOLVED = "1\.[01]\.[01]\.1"; UDP_DIRECT = "BLOCKED"
+        NODE_PROXY = "1"
+    })))
+# A raw frame handed to the gateway's MAC can't skip the proxy.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_raw_frame.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -Probes ([ordered]@{ RAW_SOCKET = "DENIED"; RAW_REPLY = "NONE" })))
+
+# Rejected before any container is created.
+$egressRejections = [ordered]@{
+    "allow_udp"           = "network.egress.allow supports only protocol 'tcp' (got 'udp')"
+    "allow_icmp"          = "network.egress.allow supports only protocol 'tcp' (got 'icmp')"
+    "allow_any_protocol"  = "network.egress.allow supports only protocol 'tcp' (got 'any')"
+    "allow_no_ports"      = "an entry without ports allows every protocol"
+    "allow_ipv6"          = "network.egress CIDR 2606:4700::/32 is IPv6"
+    "deny_ipv6"           = "network.egress CIDR 2001:db8::/32 is IPv6"
+    "reserved_subnet"     = "which the built-in proxy reserves for its own networks"
+    "network_proxy"       = "runtimeConfig.networkProxy cannot be combined with egress filtering"
+    "port_mappings"       = "wslc.portMappings cannot be combined with egress filtering"
+    "rules_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
+}
+foreach ($name in $egressRejections.Keys) {
+    $null = $results.Add((Run-WslcTest "wslc_network_egress_$($name)_rejected.json" -ExpectedExit 1 `
+        -OutputContains $egressRejections[$name] -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
+}
+
+# The proxy image is imported into each store on first use from the tar beside
+# wxc-exec. A copy of wxc-exec without the tar, then with the other
+# architecture's tar, must fail before the workload runs and remove what it
+# created; the import run that follows checks nothing was left.
+Clear-ColdCacheStore
+$ProxyBinDir = Join-Path $env:TEMP "mxc_wslc_proxy_bin_$([guid]::NewGuid())"
+$null = New-Item -ItemType Directory $ProxyBinDir
+Copy-Item $WxcExec, (Join-Path (Split-Path -Parent $WxcExec) "wslcsdk.dll") $ProxyBinDir
+$RealWxcExec = $WxcExec
+$WxcExec = Join-Path $ProxyBinDir (Split-Path -Leaf $RealWxcExec)
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cold_store.json" -ExpectedExit -1 `
+    -As "wslc_network_egress_cold_store.json (proxy image missing)" `
+    -OutputContains "is missing; reinstall MXC" -OutputNotContains "ALLOWED="))
+$otherArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'x86_64' } else { 'aarch64' }
+Copy-Item (Join-Path $RepoRoot "src\mxc-sdk\assets\mxc-wslc-gateway-$otherArch.tar") `
+    (Join-Path $ProxyBinDir "mxc-wslc-gateway.tar")
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cold_store.json" -ExpectedExit -1 `
+    -As "wslc_network_egress_cold_store.json (proxy image mismatch)" `
+    -OutputContains "is not the one this MXC build expects" -OutputNotContains "ALLOWED="))
+$WxcExec = $RealWxcExec
+Remove-Item $ProxyBinDir -Recurse -Force
+
+$coldStoreProbes = [ordered]@{ ALLOWED = "200"; DENIED = "403" }
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cold_store.json" -ForceDebug `
+    -As "wslc_network_egress_cold_store.json (proxy image import)" `
+    -OutputContains "Loading Docker image archive", $Clean -OutputNotContains $NotClean -Probes $coldStoreProbes))
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cold_store.json" -ForceDebug `
+    -As "wslc_network_egress_cold_store.json (proxy image cached)" `
+    -OutputContains $Clean -OutputNotContains (@("Loading Docker image archive") + $NotClean) -Probes $coldStoreProbes))
+
+# Two stores run their own proxies at the same time.
+$concurrent = Start-WslcBackgroundRun "wslc_network_egress_cold_store.json"
+$null = $results.Add((Run-WslcTest "wslc_network_egress_cidr_except.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
+    -As "wslc_network_egress_cidr_except.json (concurrent)" `
+    -Probes ([ordered]@{ IN_RANGE = "200"; EXCEPT = "403"; NAME_DENIED = "403"; DIRECT = "BLOCKED" })))
+$bg = Complete-WslcBackgroundRun $concurrent
+$reason = if ($bg.Exit -ne 0) { "Expected exit 0, got $($bg.Exit)" }
+    elseif (-not $bg.Output.Contains($Clean)) { "Output missing '$Clean'" }
+    else { Test-WslcProbes $bg.Output $coldStoreProbes }
+Add-WslcResult "wslc_network_egress_cold_store.json (concurrent)" (-not $reason) $reason $bg.Output
+Clear-ColdCacheStore
+
+$reason = if ((& $ResolvConfs) -ne $resolvConfsBefore) { "Temporary resolv.conf files left in $env:TEMP" } else { "" }
+Add-WslcResult "built-in proxy temporary files removed" (-not $reason) $reason
+
+# A killed run leaves its proxy in the store; the next run removes it. WSL
+# holds the store for a while after the client dies, so retry until it frees.
+$killed = Start-WslcBackgroundRun "wslc_network_egress_long_run.json"
+$deadline = (Get-Date).AddSeconds(120)
+while (-not $killed.Process.HasExited -and (Get-Date) -lt $deadline -and
+       -not (Select-String -Path $killed.Log -Pattern "Container started" -Quiet)) {
+    Start-Sleep 1
+}
+if (-not $killed.Process.HasExited) { $killed.Process.Kill() }
+$null = Complete-WslcBackgroundRun $killed
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+for ($i = 0; $i -lt 18; $i++) {
+    $output = & $WxcExec --debug (Join-Path $TestConfigs "wslc_network_egress_allow_everything.json") 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    if ($output -notmatch "already held by another live session|0x80070020") { break }
+    Start-Sleep 10
+}
+$ErrorActionPreference = $prevPref
+$reason = if ($exitCode -ne 0) { "Expected exit 0, got $exitCode" }
+    elseif ($output -notmatch "Removed the built-in proxy left by an earlier run") { "Output missing 'Removed the built-in proxy left by an earlier run'" }
+    elseif (-not $output.Contains($Clean)) { "Output missing '$Clean'" }
+    else { Test-WslcProbes $output ([ordered]@{ ALLOWED = "200" }) }
+Add-WslcResult "wslc_network_egress_long_run.json (killed, proxy removed)" (-not $reason) $reason $output
+
+$leftRecords = @(& $Records | Where-Object { $_ -notin $recordsBefore })
+$reason = if ($leftRecords) { "Ownership records left: $($leftRecords -join ', ')" } else { "" }
+Add-WslcResult "built-in proxy ownership records removed" (-not $reason) $reason
+
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
-$null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
+$null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -ForceDebug `
+    -OutputContains "Starting long task", $Clean -OutputNotContains "Cleanup failed"))
 
 Write-Host "`n--- Target OS Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_target_os_windows_rejected.json" `

@@ -122,7 +122,7 @@ public sealed class AvailableBackend
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 
-/// <summary>Support for the containment backends the public SDK can launch.</summary>
+/// <summary>Advisory support for the SDK's containment backends.</summary>
 public sealed class PlatformSupport
 {
     /// <summary>Whether the public SDK can launch a sandbox on this host.</summary>
@@ -131,7 +131,7 @@ public sealed class PlatformSupport
     /// <summary>Why the host is unsupported, when <see cref="IsSupported"/> is false.</summary>
     public string? Reason { get; init; }
 
-    /// <summary>Backends the public SDK can launch on this host.</summary>
+    /// <summary>Available backends; MicroVM requires the development JSON APIs.</summary>
     public IReadOnlyList<ContainmentBackend> AvailableMethods { get; init; } =
         Array.Empty<ContainmentBackend>();
 }

@@ -136,10 +136,6 @@ install_lxc() {
     if [[ "$package_manager" == "apt-get" ]]; then
         apt_update
         packages=(lxc dnsmasq-base iptables bridge-utils)
-        # Debian dropped lxc-utils; Ubuntu still ships it.
-        if apt-cache show lxc-utils >/dev/null 2>&1; then
-            packages+=(lxc-utils)
-        fi
     else
         install_epel
         packages=(lxc lxc-templates dnsmasq iptables)

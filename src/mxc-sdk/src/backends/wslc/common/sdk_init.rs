@@ -79,7 +79,7 @@ pub(crate) fn prerequisite_error(missing: WslcComponentFlags) -> String {
         );
     }
     if needs_wsl_package {
-        guidance.push("install WSL 3.0.3 or newer by running `wsl --update`".to_string());
+        guidance.push("install WSL 3.0.5 or newer by running `wsl --update`".to_string());
     }
     if needs_sdk_update {
         // MXC's vendored SDK is behind the installed WSL, so the fix is on MXC's

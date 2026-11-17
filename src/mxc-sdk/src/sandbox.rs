@@ -143,22 +143,10 @@ pub fn validate_deprovision(
 
 /// Spawn a workload in an existing container and return a live process.
 ///
-/// A WSLC process started this way reads end-of-file on stdin; use
-/// [`spawn_in_container_with_stdin`] to give it input.
+/// On WSLC, killing a workload that is still running, or reaching its timeout,
+/// deletes its container about a minute later, because MXC does not signal a
+/// WSLC process that has stdin.
 pub fn spawn_in_container(
-    container_id: &ContainerId,
-    request: ExecutionRequest,
-    options: SpawnInContainerOptions,
-) -> Result<MxcProcess, Error> {
-    let input = request
-        .into_sdk_input(container_id, options.telemetry)
-        .map_err(Error::from)?;
-    crate::mxc_engine::exec_typed_state_aware_request(input, false, false).map(MxcProcess::new)
-}
-
-/// Spawn a workload in an existing container with a writable stdin, which
-/// [`MxcProcess::take_stdin`] returns.
-pub fn spawn_in_container_with_stdin(
     container_id: &ContainerId,
     request: ExecutionRequest,
     options: SpawnInContainerOptions,
@@ -308,7 +296,8 @@ impl MxcProcess {
         self.inner.output_metadata()
     }
 
-    /// Take the child's stdin pipe. Returns `None` after the first call.
+    /// Take the child's stdin pipe; on WSLC, dropping it gives the child end-of-file.
+    /// Returns `None` after the first call.
     pub fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         if self.stdio_access == StdioAccess::Native {
             return None;
@@ -396,7 +385,8 @@ impl MxcProcess {
     }
 
     /// Wait for the child to exit, draining and discarding any untaken
-    /// stdout/stderr so it can't block on a full pipe.
+    /// stdout/stderr so it can't block on a full pipe. On WSLC, it also closes
+    /// a stdin the caller did not take, so the child reads end-of-file.
     ///
     /// Returns [`WaitResult::Exited`] with the exit code, or
     /// [`WaitResult::TimedOut`] if the request's `scriptTimeout` elapsed. `Err`

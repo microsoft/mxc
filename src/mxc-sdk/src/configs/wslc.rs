@@ -10,15 +10,15 @@
 ///
 /// # Network policy
 ///
-/// WSLC accepts the v1 directional network posture. It supports either
-/// all-deny isolation or all-allow bridged networking; filtering rules and
-/// mixed directional defaults fail closed because the backend cannot enforce
-/// them.
+/// WSLC accepts the v1 directional network posture. Create-and-run execution
+/// enforces egress rules and mixed directional defaults through the built-in
+/// proxy. Container lifecycle operations support only all-deny isolation or
+/// all-allow bridged networking, and reject any other posture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcConfig {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
     /// Pulled from its registry when the store misses, unless `image_tar_path`
-    /// supplies it or the request declares no egress, which refuses the pull.
+    /// supplies it or the request's egress default is deny, which refuses the pull.
     pub image: String,
     /// Path to a local tar (a `docker save` archive or a rootfs) imported as
     /// the image.

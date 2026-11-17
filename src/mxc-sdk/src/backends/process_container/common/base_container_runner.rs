@@ -3718,6 +3718,7 @@ mod tests {
 
     #[test]
     fn validate_runner_accepts_empty_policy() {
+        let _guard = crate::process_container_common::test_env::lock();
         let runner = BaseContainerRunner::new();
         let request = ExecutionRequest::default();
         // validate_runner may still surface the host-API-unavailable error on
@@ -3725,7 +3726,9 @@ mod tests {
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
         if BaseContainerRunner::is_base_container_api_present() {
-            assert!(runner.validate(&request).is_ok());
+            runner
+                .validate(&request)
+                .expect("an empty policy must validate when the host API is available");
         }
     }
 

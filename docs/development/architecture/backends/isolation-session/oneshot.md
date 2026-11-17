@@ -222,8 +222,8 @@ versions and stating that the bindings must be regenerated.
 
 - Single-shot `provision → start → run → stop → deprovision` lifecycle,
   selected directly by the exact v0.9 contract.
-- `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
-  — the same pattern the LXC runner uses with `/bin/sh -c`).
+- `process.commandLine` (passed as `cmd.exe /c <commandLine>`; see 
+  [command-line quoting](../../../../schema.md#isolationsession-command-line-quoting)).
 - `process.cwd` (working directory inside the session).
 - `process.env` with `process.inheritDefaultEnv: true` (the entries are layered
   over the agent user's default environment through the OS-side

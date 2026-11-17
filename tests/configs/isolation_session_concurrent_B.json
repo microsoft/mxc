@@ -4,8 +4,8 @@
   "containerId": "isolation-session-concurrent-B",
   "containment": "isolation_session",
   "process": {
-    "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\B.ps1",
-    "timeout": 30000
+    "commandLine": "echo B-started & set /p GO= & call echo B-released-%GO%",
+    "timeout": 180000
   },
   "network": {
     "egress": {

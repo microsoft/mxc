@@ -1973,6 +1973,10 @@
           "$ref": "#/definitions/ProvisionPhase",
           "description": "Exact `provision` phase marker."
         },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional runtime settings fixed at provision time."
+        },
         "telemetry": {
           "$ref": "#/definitions/Telemetry",
           "description": "Optional telemetry configuration."

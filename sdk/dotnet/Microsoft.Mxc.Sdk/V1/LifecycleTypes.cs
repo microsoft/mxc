@@ -102,7 +102,7 @@ public sealed class StartOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
 
@@ -112,7 +112,7 @@ public sealed class StopOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
 
@@ -122,7 +122,7 @@ public sealed class DeprovisionOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
 
@@ -132,7 +132,7 @@ public sealed class ExecutionRequest
 {
     internal string? Version { get; set; }
 
-    /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
+    /// <summary>Compatibility preference; does not control Required telemetry.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 
     /// <summary>Create an execution request for <paramref name="command"/>.</summary>

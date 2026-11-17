@@ -216,6 +216,29 @@ fn rejects_unknown_and_duplicate_port_mapping_fields() {
 }
 
 #[test]
+fn accepts_runtime_config() {
+    for field in [
+        r#""runtimeConfig": {}"#,
+        r#""runtimeConfig": {"networkProxy": "http://proxy.example:8080"}"#,
+    ] {
+        assert_valid(&request_with_additional_fields(field));
+    }
+}
+
+#[test]
+fn rejects_invalid_runtime_config() {
+    for field in [
+        r#""runtimeConfig": null"#,
+        r#""runtimeConfig": {"networkProxy": null}"#,
+        r#""runtimeConfig": {"networkProxy": 8080}"#,
+        r#""runtimeConfig": {"unknownField": true}"#,
+        r#""runtimeConfig": {}, "runtimeConfig": {}"#,
+    ] {
+        assert_invalid(&request_with_additional_fields(field));
+    }
+}
+
+#[test]
 fn phase_accepts_exact_and_escaped_spelling() {
     for phase in ["provision", "provis\\u0069on"] {
         assert_valid(&format!(

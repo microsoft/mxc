@@ -40,6 +40,44 @@ if ($probeResult.ExitCode -ne 0) { throw "Native host probe failed: $($probeResu
 $facts = ($probeResult.Stdout | ConvertFrom-Json).probes
 if (-not $facts.baseContainerApiPresent) { throw 'Native policy validation requires PSEC.' }
 
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class MxcPolicyLearningMode {
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private delegate bool IsSourceOptionSupported(int option);
+
+    public static bool[] Probe() {
+        if (!NativeLibrary.TryLoad("processmodel.dll", typeof(MxcPolicyLearningMode).Assembly,
+                DllImportSearchPath.System32, out IntPtr module)) {
+            throw new InvalidOperationException("Could not load processmodel.dll from System32.");
+        }
+        try {
+            bool optionsStart = NativeLibrary.TryGetExport(module, "StartLearningModeTraceWithOptions", out _);
+            bool sourceProbe = NativeLibrary.TryGetExport(module, "IsLearningModeTraceSourceOptionSupported", out IntPtr query);
+            bool network = sourceProbe && Marshal.GetDelegateForFunctionPointer<IsSourceOptionSupported>(query)(0x2);
+            bool legacyStart = NativeLibrary.TryGetExport(module, "StartLearningModeTrace", out _);
+            bool lifecycle = NativeLibrary.TryGetExport(module, "StopLearningModeTrace", out _) &&
+                NativeLibrary.TryGetExport(module, "CloseLearningModeTrace", out _);
+            return new[] { optionsStart, sourceProbe, network, legacyStart, lifecycle };
+        } finally {
+            NativeLibrary.Free(module);
+        }
+    }
+}
+'@
+$traceSourceSupport = [MxcPolicyLearningMode]::Probe()
+$accessOnlyFallback = $traceSourceSupport[0] -and -not $traceSourceSupport[2]
+Write-Host "Learning Mode host: optionsStart=$($traceSourceSupport[0]); sourceProbe=$($traceSourceSupport[1]); network=$($traceSourceSupport[2]); legacyStart=$($traceSourceSupport[3])"
+if ($accessOnlyFallback -and $traceSourceSupport[3] -and $traceSourceSupport[4] -and
+    -not $facts.nativeCaptureAvailable) {
+    throw 'Native capture must remain available through legacy access-only startup when NETWORK support is unverified or false.'
+}
+if (-not $accessOnlyFallback) {
+    Write-Host 'NOT EXERCISED: access-only fallback from the option-aware export is not required on this host.'
+}
+
 function New-PolicyRequest {
     param([string]$Mode, [string[]]$ProbeArguments = @())
     $command = @($WindowsPowerShell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -722,7 +760,8 @@ foreach ($atomCase in @(
 if ($facts.nativeCaptureAvailable) {
     $capture = New-PolicyRequest -Mode 'denial'
     $capture.processContainer.captureDenials = @{ outputPath = (Join-Path $ScratchRoot 'capture.json') }
-    $captureResult = Invoke-PolicyCase -Name 'native-denial-capture' -Request $capture -PassThru
+    $captureCase = if ($accessOnlyFallback) { 'native-denial-capture-access-only-fallback' } else { 'native-denial-capture' }
+    $captureResult = Invoke-PolicyCase -Name $captureCase -Request $capture -PassThru
     $documents = @(Get-ChildItem -LiteralPath $ScratchRoot -Filter 'capture.*.json' |
         Where-Object Name -NotLike '*.verbose.json')
     if ($documents.Count -ne 1) { throw 'Expected one native capture document.' }

@@ -138,6 +138,7 @@ export const EXPECTED_MACOS_BINARIES = [
 const OPTIONAL_BINARIES = [
   'wslcsdk.dll',          // Only built with --with-wslc
   'wxc-wslc-daemon.exe',  // Only built with --with-wslc
+  'mxc-wslc-gateway.tar', // Only built with --with-wslc
   'nanvixd.exe',           // Only built with --with-microvm
   'nanvix_rootfs.img',     // Only built with --with-microvm
   'python3.initrd',        // Only built with --with-microvm

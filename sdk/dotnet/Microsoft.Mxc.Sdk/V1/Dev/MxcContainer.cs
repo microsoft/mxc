@@ -64,6 +64,7 @@ public static class MxcContainer
     public static MxcProcess SpawnJson(string json, JsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnJson));
+        var waitClosesUntakenStdin = DevJsonRequest.TargetsWslc(request);
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -83,7 +84,10 @@ public static class MxcContainer
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    timeout,
+                    waitClosesUntakenStdin);
             }
         }
     }
@@ -121,6 +125,45 @@ public static class MxcContainer
                     }
                 }
                 return new MxcPtyProcess(MxcSandboxHandle.FromRaw(handle), timeout);
+            }
+        }
+    }
+
+    /// <summary>Spawn caller-authored exact JSON with stdio chosen in the options.</summary>
+    public static MxcProcess SpawnWithExtendedOptionsJson(
+        string json,
+        SpawnExtendedJsonOptions? options = null)
+    {
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithExtendedOptionsJson));
+        var waitClosesUntakenStdin = DevJsonRequest.TargetsWslc(request);
+        unsafe
+        {
+            fixed (byte* requestPtr = request)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_extended_json(
+                    requestPtr,
+                    options?.Experimental == true ? 1 : 0,
+                    (int)(options?.Stdio ?? SpawnStdio.Pipes),
+                    &handle,
+                    &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status, error, "spawning exact JSON with extended options failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new MxcProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    timeout,
+                    waitClosesUntakenStdin);
             }
         }
     }

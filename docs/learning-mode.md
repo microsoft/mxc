@@ -138,13 +138,14 @@ ungranted access is handled while it is recorded:
 
 > **Host selection.** MXC uses native capture when Windows exposes the PSEC
 > lifecycle plus a compatible Learning Mode lifecycle. It prefers
-> `StartLearningModeTraceWithOptions`, which requests `ACCESS | NETWORK`, and
-> falls back to access-only `StartLearningModeTrace` when the option-aware
-> export is absent. Both paths require `StopLearningModeTrace`,
+> `StartLearningModeTraceWithOptions`, which requests `ACCESS | NETWORK`, only
+> when `IsLearningModeTraceSourceOptionSupported(NETWORK)` returns true.
+> Otherwise, including when either export is absent, MXC falls back to
+> access-only `StartLearningModeTrace`. Both paths require `StopLearningModeTrace`,
 > `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
 > `QueryProcessSecurityEnvironmentSupport`, and
-> `CloseProcessSecurityEnvironment`. If the option-aware export exists but its
-> call fails, MXC reports the failure rather than silently downgrading. When
+> `CloseProcessSecurityEnvironment`. If the selected start call fails, MXC
+> reports the failure rather than retrying with different sources. When
 > native capture is unavailable or cannot fully honor the requested policy,
 > MXC rejects the request with `backend_unavailable` before creating a container.
 > There is no fallback to AppContainer filesystem brokering, host-DACL mutation,

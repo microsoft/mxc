@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-raw-frame",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport socket, struct, time\ndef csum(b):\n    s = sum(struct.unpack('!%dH' % (len(b) // 2), b))\n    s = (s >> 16) + (s & 0xffff)\n    return ~(s + (s >> 16)) & 0xffff\ngw = '10.231.1.254'\nu = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\nu.connect((gw, 9))\nown = u.getsockname()[0]\ntry:\n    socket.create_connection((gw, 3128), 3).close()\nexcept OSError:\n    pass\ntry:\n    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))\nexcept PermissionError:\n    print('RAW_SOCKET=DENIED')\n    print('RAW_REPLY=NONE')\n    raise SystemExit\nprint('RAW_SOCKET=OPEN')\ngw_mac = next(l.split()[3] for l in open('/proc/net/arp').read().splitlines()[1:] if l.split()[0] == gw)\nown_mac = open('/sys/class/net/eth0/address').read().strip()\ns.bind(('eth0', 0))\ns.settimeout(0.5)\ndef echo(dst):\n    icmp = struct.pack('!BBHHH', 8, 0, 0, 0x4d58, 1) + b'mxc-raw-frame-probe!'\n    icmp = icmp[:2] + struct.pack('!H', csum(icmp)) + icmp[4:]\n    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(icmp), 1, 0, 64, 1, 0, socket.inet_aton(own), socket.inet_aton(dst))\n    ip = ip[:10] + struct.pack('!H', csum(ip)) + ip[12:]\n    for _ in range(3):\n        s.send(bytes.fromhex(gw_mac.replace(':', '') + own_mac.replace(':', '')) + b'\\x08\\x00' + ip + icmp)\n    end = time.time() + 4\n    while time.time() < end:\n        try:\n            f = s.recv(2048)\n        except socket.timeout:\n            continue\n        if f[23] == 1 and f[34] == 0 and f[26:30] == socket.inet_aton(dst):\n            return 'RECEIVED'\n    return 'NONE'\nprint('RAW_CONTROL=' + echo(gw))\nprint('RAW_REPLY=' + echo('8.8.8.8'))\nEOF"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "1.1.1.1/32" }], "ports": [{ "port": 443, "protocol": "tcp" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "python:3.12-alpine" }
+}

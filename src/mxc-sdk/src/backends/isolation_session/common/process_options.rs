@@ -63,13 +63,11 @@ pub(super) fn build_process_options(
         .env_entries()
         .iter()
         .filter_map(|entry| {
-            let mut parts = entry.splitn(2, '=');
-            let name = parts.next()?.to_string();
-            let value = parts.next().unwrap_or("").to_string();
+            let (name, value) = entry.split_once('=')?;
             if name.is_empty() {
                 None
             } else {
-                Some((name, value))
+                Some((name.to_string(), value.to_string()))
             }
         })
         .collect();
@@ -387,6 +385,7 @@ mod tests {
             script_code: "echo hi".to_string(),
             env: Some(vec![
                 "GOOD=value".to_string(),
+                "TEMP".to_string(),
                 "=no_name".to_string(),
                 "ALSO_GOOD=".to_string(),
             ]),
