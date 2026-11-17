@@ -212,7 +212,8 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 - **Proxy URL with a hostname:** the workload's proxy URL is passed through
   unchanged. MXC resolves the name on Windows before creating the controller
   and passes the first IPv4 answer in the controller's policy. The
-  controller's DNS answers only that name, with the controller's own address,
+  controller's DNS answers only that name (and `host.wslc.internal` with
+  `hostLoopback: allow`), with the controller's own address,
   and the controller relays the proxy's port byte-for-byte to the resolved
   IP. It never resolves the name itself. TLS to an `https://` proxy therefore
   runs end to end and the certificate is checked against the proxy's name.
@@ -238,6 +239,12 @@ the proxy endpoint, and the custom proxy decides the final destinations.
   Windows `127.0.0.1`, independent of `hostLoopback`. No other host-loopback
   port opens. This matches Bubblewrap, Seatbelt and ProcessContainer, and
   requires [host loopback in WSL](#enabling-host-loopback-in-wsl).
+
+- **`hostLoopback: allow` with a custom proxy:** MXC sets `NO_PROXY` and
+  `no_proxy` to `host.wslc.internal` instead of empty, so HTTP clients reach
+  Windows loopback directly rather than through the custom proxy, which can't
+  reach this host's loopback. This applies in proxied and `BRIDGED` modes.
+  Other traffic still goes to the proxy.
 
 - **Bridged mode is unchanged:** a loopback proxy URL there is the container's
   own loopback.
@@ -684,6 +691,7 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
+| `networkProxy` plus `hostLoopback: allow`, proxied and `BRIDGED` | HTTP to a Windows loopback service through `host.wslc.internal` bypasses the proxy and succeeds; other HTTP goes through the proxy | Extend `run_wslc_proxy_test.ps1` |
 | Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
 | Controller image tar missing, or its loaded ID doesn't match the expected ID | Fails before any container exists; the next proxied run succeeds | Network Tests |
 | Proxied create fails after the controller starts (missing workload image) | Controller and networks deleted; the next proxied run succeeds | Extend Network Tests |
