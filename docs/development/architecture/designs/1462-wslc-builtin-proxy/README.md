@@ -114,6 +114,14 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 
 - Programs that don't use a proxy fail closed: the workload has no other route.
 
+- **Limits:** each listener accepts at most 512 connections; more wait in the
+  kernel's queue. At most 256 UDP DNS queries are in flight; more are dropped
+  and retried by the client. Request headers are limited to 16 KB and 10s,
+  upstream connections to 30s, idle connections to 10 minutes, and DNS
+  forwarding to 4s. Accept errors, including running out of descriptors, are
+  retried rather than stopping the controller. The SDK has no per-container
+  memory or CPU limit, only per session.
+
 - The controller always denies `169.254.0.0/16` and its own network subnets,
   even when an allow rule or `egress.default: allow` covers them.
 
@@ -266,7 +274,9 @@ These are rejected before the workload is created:
     `hostLoopback` value can share a session.
   - `provision`: creates the networks, controller and workload. Network
     posture is fixed here.
-  - `start`: starts the controller, then the workload. On WSL 3.0.5,
+  - `start`: starts the controller and waits up to 20s for it to report
+    ready, then starts the workload. If the controller reports a failure,
+    exits or times out, MXC stops it and returns its error. On WSL 3.0.5,
     starting a stopped container returns `E_ILLEGAL_METHOD_CALL` although it
     starts, so MXC accepts that error only when the container is then running.
   - `exec` in a proxied container: the daemon keeps the workload's proxy URL
@@ -279,9 +289,9 @@ These are rejected before the workload is created:
     [Contracts, APIs, and compatibility](#contracts-apis-and-compatibility).
   - `exec` credentials in a proxied container: `env -i` puts every variable
     in the command line, readable through `/proc/<pid>/cmdline`. Before
-    injecting, MXC runs `reject_proxy_credentials_in_argv` on the URL it will
-    inject, whether from the exec or from `provision`. A replaced environment
-    with a credential-bearing proxy URL is rejected.
+    injecting, the daemon checks the URL it will inject, whether from the
+    exec or from `provision`. A replaced environment with a
+    credential-bearing proxy URL is rejected.
   - `exec` in a `NONE` or `BRIDGED` container: unchanged; `networkProxy` is
     set per exec, as today.
   - `stop`: stops the workload, then the controller.
@@ -476,6 +486,10 @@ probes used direct TCP connections, ignoring the proxy variables.
 - Isolation changes. Proxied workloads have no direct routes; the controller
   is the only network path and the enforcement point.
 
+- Proxied workloads run without `NET_RAW` in create-and-run and lifecycle
+  operations, so raw sockets can't send packets to the controller outside
+  the proxy. Container creation fails if the drop can't be applied.
+
 - Only the controller gets `NET_ADMIN`, and only for `hostLoopback: allow`.
 
 - Session host loopback is always on (WSL 3.0.5 or later). Each controller,
@@ -483,9 +497,14 @@ probes used direct TCP connections, ignoring the proxy variables.
 
 - DNS is refused when nothing is allowed, so query names can't carry data out.
 
-- **Subnet overlap:** Docker's default subnets (`172.x`) can hide CIDR rules
-  for the same range. MXC sets subnets explicitly, the controller always
-  denies them, and MXC rejects CIDRs entirely inside them.
+- **Subnets:** Docker's default subnets (`172.x`) can hide CIDR rules for the
+  same range, so MXC gives each proxy's networks /24 subnets from
+  `10.231.0.0/16`. The controller always denies them, and MXC rejects CIDRs
+  entirely inside the /16. Create-and-run uses `10.231.0.0/24` (egress) and
+  `10.231.1.0/24` (internal). The daemon allocates two free /24s per proxied
+  container, skipping subnets used by the session's other networks, so a
+  session holds up to 128 proxied containers. When none are free, provision
+  fails with an error asking the caller to deprovision a container.
 
 ### Components
 
@@ -511,13 +530,15 @@ probes used direct TCP connections, ignoring the proxy variables.
   the controller's `NET_ADMIN`.
 
 - `bin/wslc_daemon/session_manager.rs`: track the controller, networks and
-  the workload's proxy URL in `ContainerEntry`.
+  the workload's proxy URL in `ContainerEntry`. At exec admission, the daemon
+  calls `resolve_exec_proxy` and injects the result.
 
-- `wslc/common/state_aware.rs`: `exec_config` applies the stored proxy URL
-  to every exec in a proxied container.
+- `wslc/common/state_aware.rs`: `exec_config` sends the exec's own proxy URL
+  in `ExecConfig.network_proxy`, separate from its environment.
 
-- `wslc/common/policy.rs`: `reject_proxy_credentials_in_argv` checks the
-  proxy URL that exec will inject, not only the exec request's own.
+- `wslc/common/policy.rs`: `resolve_exec_proxy` requires the exec URL to be
+  omitted or match the stored one, and rejects a credential-bearing URL when
+  the exec replaces the environment.
 
 - Controller binary `mxc-wslc-gateway`: a static Rust (musl) binary in the
   unpublished `src/tools/wslc_gateway` crate, packaged as an image tar. It
@@ -552,6 +573,10 @@ probes used direct TCP connections, ignoring the proxy variables.
   the loaded MXC module, like `wslcsdk.dll`. MXC never pulls the image:
   proxied mode exists for restricted egress, and a registry pull runs on the
   host's network outside any policy. The WSLC C SDK can't build images.
+  MXC checks the loaded image ID, so a missing or wrong-architecture tar
+  fails before the workload starts. Package verifiers check the tar is
+  present for both architectures: NuGet today, with the npm package and
+  release zips to be added.
 
 - **Integrity:** WSLC doesn't verify image signatures. The image ID is the
   SHA-256 of the image config, which lists the SHA-256 of the controller's
@@ -586,8 +611,13 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **One container operation at a time per session:** on WSL 3.0.5, creating
   and starting containers with volumes concurrently in one session sometimes
   fails with `E_UNEXPECTED`, and every proxied workload has a `resolv.conf`
-  volume. Create-and-run has its own session, and the daemon's worker thread
-  already runs create and start one at a time; keep it that way.
+  volume. Create-and-run has its own session. In the daemon:
+  - The session-boot thread sweeps leftovers and loads the controller image.
+  - Proxied `provision` and `start` run on a helper thread, which reports
+    back to the worker as pulls do, so the readiness wait (up to 20s) doesn't
+    block other sessions.
+  - Other container operations in that session wait for the helper, like
+    provisions parked behind a pull. Other sessions aren't affected.
 
 - **Delete order:** workload, then controller, then networks. Deleting a
   network fails while containers are attached.
@@ -600,8 +630,11 @@ probes used direct TCP connections, ignoring the proxy variables.
 
 - **Create-and-run:** the per-run session is terminated on exit.
 
-- **Daemon:** `ContainerEntry` tracks the controller and networks, and
-  `Worker::shutdown` deletes them with the workload.
+- **Daemon:** `ContainerEntry` tracks the controller and networks.
+  Deprovision, exec quarantine and `Worker::shutdown` share one cleanup that
+  deletes them with the workload and keeps the entry until all are deleted.
+  Before allocating subnets, the daemon retries cleanup of recorded proxies
+  that no live entry owns.
 
 - **Leftovers:** a crash leaves the workload, controller and networks in the
   store. A store admits one live session, so when MXC opens a session on a
@@ -645,19 +678,28 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | CIDR TCP allow rule | Allowed CIDR and port reached; others denied; direct connection without the proxy fails | Extend Network Tests (replaces `wslc_network_egress_rules_rejected.json`) |
 | Deny rule inside an allow range | Deny wins | Extend Network Tests (replaces `wslc_network_egress_deny_rules_rejected.json`) |
 | Mixed defaults, `egress.default: allow` | TCP works; UDP (other than DNS) and ICMP blocked | Proposed config |
+| Every egress/ingress/hostLoopback default combination, and omitted ingress | All deny: `NONE`. All allow: `BRIDGED`. Others: proxied; `ingress.default: allow` warns it has no effect; `hostLoopback: allow` rejected until proxied host loopback lands | Extend the create-and-run mode unit test; the daemon PR replaces the lifecycle D rejection loop |
 | Everything denied, with a port mapping | Windows `127.0.0.1:<port>` reaches the workload; workload egress and DNS refused | Proposed config |
 | `hostLoopback: allow` / `deny` | Windows loopback services reached, including on the controller's DNS and proxy ports; UDP to `host.wslc.internal` gets no answer / name and relay address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
 | Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
-| Controller image tar missing, or its loaded ID doesn't match the expected ID | Fails before any container exists | Proposed test |
+| Controller image tar missing, or its loaded ID doesn't match the expected ID | Fails before any container exists; the next proxied run succeeds | Network Tests |
+| Proxied create fails after the controller starts (missing workload image) | Controller and networks deleted; the next proxied run succeeds | Extend Network Tests |
+| Controller reports ready late, reports a setup failure, exits, or never reports ready | Waits for ready; otherwise returns the controller's error or a timeout, and no workload starts | Unit test of the readiness wait |
+| Slow proxied provision in one daemon session | Other sessions' operations proceed; the same session's wait | Daemon worker unit test with a slow fake controller |
+| Daemon session out of subnets, including subnets held by failed cleanups | Provision fails with the exhaustion error; once cleanup succeeds, the next provision allocates | Daemon worker unit test |
+| More connections than the controller's limit | Extra connections wait and are served once a slot frees; the controller keeps running | Controller unit test |
 | Committed controller tars rebuilt from source | Same image IDs | New CI check |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → start → exec → stop → deprovision (proxied) | Policy enforced on each exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
 | Provision with a credential-bearing proxy URL, then exec with a replaced environment and no `networkProxy` | Rejected; the error doesn't contain the password | Extend `run_wslc_state_aware_tests.ps1` |
-| Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
+| Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Network Tests (killed run); extend `run_wslc_state_aware_tests.ps1` (daemon) |
+| Controller stopped during a daemon lifecycle | The next exec has no network access; deprovision deletes everything | Extend `run_wslc_state_aware_tests.ps1` |
+| `start` returns `E_ILLEGAL_METHOD_CALL` | Accepted only if the container is then running; otherwise the error is returned | Daemon unit test |
+| Proxied container with a port mapping (lifecycles CP and CQ) | Another container can't claim its host port; deprovision releases it for reuse | Extend `run_wslc_state_aware_tests.ps1` |
 | Configs valid today (`wslc_network_bridged/isolated/proxy*`, `wslc_port_mapping_*`) | Unchanged results | Existing tests |
 | `BRIDGED` lifecycle provision without a proxy, then exec with `networkProxy` | Proxy variables injected, as today | Existing `run_wslc_state_aware_tests.ps1` lifecycle C |
 
@@ -667,6 +709,9 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 
 - **CI checks replaced:** the two egress-rules rejection tests become
   acceptance tests; rejection coverage moves to the new rejection configs.
+  The lifecycle D mixed-posture rejections in
+  `run_wslc_state_aware_tests.ps1` become the default-combination checks
+  above.
 
 - SDK tests are listed in [`api.md`](api.md#validation-and-documentation).
 
