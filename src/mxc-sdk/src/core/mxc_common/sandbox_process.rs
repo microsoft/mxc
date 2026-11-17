@@ -432,6 +432,38 @@ pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn open_caller_stdio() -> [bool; 3] {
+    // SAFETY: F_GETFD only reads this process's descriptor flags.
+    std::array::from_fn(|fd| unsafe { libc::fcntl(fd as libc::c_int, libc::F_GETFD) } >= 0)
+}
+
+/// `caller_stdio` must come from [`open_caller_stdio`] before the launch opens any descriptors.
+#[cfg(unix)]
+pub fn keep_caller_stdio_across_exec(command: &mut std::process::Command, caller_stdio: [bool; 3]) {
+    use std::os::unix::process::CommandExt;
+
+    // Hosts such as Node mark their stdio close-on-exec, which would leave the
+    // workload with none. A slot the caller had closed may now hold the
+    // launch's own error pipe, which must still close on exec.
+    // SAFETY: fcntl is async-signal-safe and only changes the forked child's descriptors.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in (0..3).filter(|&fd| caller_stdio[fd]) {
+                let fd = fd as libc::c_int;
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0
+                    && flags & libc::FD_CLOEXEC != 0
+                    && libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 /// `SIGKILL` `target` (a pid, or a negative pgid), treating the "already gone"
 /// outcomes as success. The caller only invokes this on its own still-unreaped
 /// child (so the pid/pgid can't have been recycled), which leaves two benign
@@ -1090,9 +1122,54 @@ mod runner_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{wait_with_timeout, WaitError};
+    use super::{keep_caller_stdio_across_exec, open_caller_stdio, wait_with_timeout, WaitError};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn closed_caller_stdio_does_not_block_spawn() {
+        const HOST_ENV: &str = "MXC_CLOSED_STDIO_HOST";
+        let test_name = format!(
+            "{}::closed_caller_stdio_does_not_block_spawn",
+            module_path!().split_once("::").unwrap().1
+        );
+        if std::env::var_os(HOST_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture", "--test-threads=1"])
+                .env(HOST_ENV, "1")
+                .output()
+                .expect("run closed-stdio host");
+            assert!(
+                output.status.success(),
+                "closed-stdio host failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "closed-stdio host did not run the test"
+            );
+            return;
+        }
+
+        // With fds 0 and 1 closed, Rust's launch-error pipe takes both slots.
+        // SAFETY: closes this child host's own stdin and stdout.
+        unsafe {
+            libc::close(0);
+            libc::close(1);
+        }
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        keep_caller_stdio_across_exec(&mut command, open_caller_stdio());
+        let started = Instant::now();
+        let mut child = command.spawn().expect("spawn sleep");
+        let elapsed = started.elapsed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "spawn blocked for {elapsed:?} until the workload exited"
+        );
+    }
 
     #[test]
     fn wait_with_timeout_detects_quick_exit_promptly() {

@@ -53,6 +53,11 @@ resources:
 
 variables:
   - group: MXC-ESRP-Signing
+  # Telemetry routing is read from the bundled signed component, not variables.
+  - name: MXC_TELEMETRY_PROVIDER_GROUP_GUID
+    value: ''
+  - name: MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID
+    value: ''
   - name: outputDirectory
     value: $(Build.SourcesDirectory)/out/iso-test-bundle
 

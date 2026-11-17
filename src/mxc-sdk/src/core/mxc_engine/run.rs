@@ -120,7 +120,7 @@ mod attribution_tests {
     use crate::mxc_common::state_aware_request::MxcRequest;
 
     #[test]
-    fn telemetry_attributes_exact_json_but_not_typed_sdk_requests() {
+    fn telemetry_attributes_contracts_but_not_unattributed_requests() {
         let mut logger = Logger::new(Mode::Buffer);
         let parsed = crate::mxc_common::config_parser::load_mxc_request_from_json(
             r#"{

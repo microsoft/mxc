@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-cidr-except",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho IN_RANGE=$(p 1.1.1.1:443)\necho SECOND_TARGET=$(p 1.0.0.1:443)\necho EXCEPT=$(p 1.1.1.2:443)\necho DENY_WINS=$(p 1.1.1.3:443)\necho OUTSIDE=$(p 1.1.2.1:443)\necho NAME_ALLOWED=$(p one.one.one.one:443)\necho NAME_DENIED=$(p dns.google:443)\nnslookup one.one.one.one >/tmp/ns 2>&1 && grep -q '1\\.[01]\\.[01]\\.1' /tmp/ns && echo DNS=RESOLVED || echo DNS=FAILED\nnc -z -w 3 1.0.0.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "1.1.1.0/24", "except": ["1.1.1.2/32"] }, { "cidr": "1.0.0.0/24" }],
+          "ports": [{ "port": 443, "protocol": "tcp" }]
+        }
+      ],
+      "deny": [{ "to": [{ "cidr": "1.1.1.3/32" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}

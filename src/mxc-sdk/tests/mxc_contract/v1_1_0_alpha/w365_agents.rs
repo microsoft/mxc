@@ -76,7 +76,7 @@ fn w365_agents_contract_acceptance_never_enables_execution() {
                 );
                 let telemetry = parsed.request().telemetry.as_ref().unwrap();
                 assert_eq!(telemetry.enabled, Some(false));
-                assert_eq!(telemetry.requested_sandbox_kind, Some("w365_agents"));
+                assert_eq!(parsed.request().requested_sandbox_kind, Some("w365_agents"));
                 if phase != "provision" { assert_eq!(parsed.sandbox_id(), Some(ID)); }
                 assert_eq!(
                     mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),
@@ -243,7 +243,7 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
     for experimental in [false, true] {
         for phase in PHASES {
             let mut value = request(phase);
-            if matches!(phase, "stop" | "deprovision") {
+            if phase != "provision" {
                 value["sandboxId"] = json!("w365:invalid");
             }
             let source = value.to_string();
@@ -258,8 +258,6 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
             };
             let expected = if !experimental {
                 mxc_sdk::v1::ErrorCode::BackendUnavailable
-            } else if matches!(phase, "start" | "exec") {
-                mxc_sdk::v1::ErrorCode::UnsupportedPhase
             } else if phase == "provision" {
                 // Missing settings must reach backend validation without service work.
                 mxc_sdk::v1::ErrorCode::PolicyValidation
@@ -270,7 +268,7 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
             if phase == "exec" {
                 let error = sdk::spawn_in_container_json(&source, options)
                     .err()
-                    .expect("piped spawn must also remain unavailable");
+                    .expect("piped spawn must enforce the same validation");
                 assert_eq!(error.code, expected);
             }
         }

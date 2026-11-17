@@ -33,7 +33,7 @@ The development contract accepts experimental W365 provision settings
 optional `userObjectId`. Service configuration is environment-only; later
 lifecycle phases reject `w365Agents`. The
 [W365 backend guide](backends/w365agents/w365agents-backend.md) describes
-Phase 2 checkout/release, unavailable execution modes, cleanup identities
+native checkout/readiness/execution/release, unavailable execution modes, cleanup identities
 and experimental Dev SDK JSON access. Acceptance by the development
 schema alone does not authorize execution or establish live-service compatibility.
 
@@ -301,8 +301,8 @@ that can be executed independently.
     },
 
     "telemetry": {                         // Telemetry (Windows only)
-        "enabled": true                    // Request emission for this run; MXC-owned user consent
-                                           // and a permitting administrative policy are also required
+        "enabled": true                    // Accepted for compatibility; does not control
+                                           // the four Required events on supported Windows builds
     },
 
     "wslc": {                              // WSL Container settings (v0.9+)
@@ -338,6 +338,25 @@ that can be executed independently.
 > to MXC and is not a declared JSON request or response field. See
 > [Container lifecycle architecture](development/architecture/container-lifecycle.md)
 > and [telemetry architecture](development/architecture/telemetry.md).
+
+### IsolationSession Command-Line Quoting
+
+IsolationSession normally runs `process.commandLine` as
+`cmd.exe /c <commandLine>`, without adding quotes around the command.
+When the command starts with `"` (after any leading spaces or tabs), `cmd`
+normally removes the first and last quotes; see `cmd /?` for the exceptions.
+
+For execution without a caller-controlled terminal, adding an extra pair of
+outer quotes is a workaround for this bug. A fix is planned for a future
+major release, when IsolationSession will add these quotes automatically.
+When upgrading to that release, remove the extra outer quotes added for this
+workaround; keep quotes required around program paths and arguments.
+
+Caller-controlled terminal operations (such as Rust's `v1::spawn_with_pty`)
+prepend startup commands, so the supplied command's opening quote is not
+subject to this removal. Do not add the workaround quotes for these
+operations; they can break otherwise valid commands. Ordinary execution
+through `wxc-exec` can still be affected even when attached to a console.
 
 ### Working Directory
 

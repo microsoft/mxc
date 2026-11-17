@@ -10,6 +10,7 @@ const {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } = require("node:fs");
@@ -37,13 +38,23 @@ let scratch;
 let fixture;
 let tools;
 
+function fixtureEnvironment(overrides = {}) {
+  return {
+    ...process.env,
+    TEMP: scratch,
+    TMP: scratch,
+    npm_config_cache: join(scratch, "npm-cache"),
+    ...overrides,
+  };
+}
+
 function runScript(script, args, env) {
   const result = spawnSync(
     "pwsh",
     ["-NoProfile", "-File", script, ...args],
     {
       cwd: root,
-      env: { ...process.env, ...env },
+      env: fixtureEnvironment(env),
       encoding: "utf8",
       timeout: 30_000,
     }
@@ -142,6 +153,25 @@ fn main() {
         }
         return;
     }
+    if exe.file_name().unwrap() == "Microsoft.Mxc.Sdk.Tests.exe" {
+        assert_eq!(env::var("MXC_ENABLE_NVX_TESTS").unwrap(), "1");
+        assert!(env::var("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR").unwrap_or_default().is_empty());
+        assert!(env::var("MXC_FFI_DIR").unwrap_or_default().is_empty());
+        let index = args.iter().position(|arg| arg == "-result-xml").unwrap();
+        let result = if mode == "managed-dotnet-skipped" { "Skip" } else { "Pass" };
+        std::fs::write(&args[index + 1], format!(r#"<assemblies><test type="Microsoft.Mxc.Sdk.Tests.V1.MxcLifecycleNvxE2ETests" method="DevJson_NvxLifecycleCaptureAndLiveStreams" result="{result}" /></assemblies>"#)).unwrap();
+        return;
+    }
+    if exe.file_name().unwrap() == "node.exe" {
+        assert_eq!(env::var("MXC_ENABLE_NVX_TESTS").unwrap(), "1");
+        assert!(env::var("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR").unwrap_or_default().is_empty());
+        assert!(env::var("MXC_FFI_DIR").unwrap_or_default().is_empty());
+        assert!(args.contains(&"--test".to_owned()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--test-reporter")));
+        println!("✔ V1.Dev NVX JSON lifecycle capture, live streams and overflow recovery (1ms)");
+        println!("ℹ pass 1\nℹ fail 0\nℹ skipped {}", if mode == "managed-node-skipped" { 1 } else { 0 });
+        return;
+    }
     if args.iter().any(|arg| arg == "crate_staged_bundle_opens_and_rejects_an_unverified_library") {
         if mode == "signature-failure" {
             eprintln!("fixture NVX signature validation failed");
@@ -152,6 +182,9 @@ fn main() {
         return;
     }
     if args == ["--list"] {
+        if mode != "missing-validation-discovery" {
+            println!("windows_x64::native_validation_rejects_requests_without_booting_a_vm: test");
+        }
         if mode != "missing-proxy-discovery" {
             println!("windows_x64::signed_agent_proxy_validation_withholds_credentials: test");
         }
@@ -170,11 +203,20 @@ fn main() {
         if mode != "missing-image-reuse-discovery" {
             println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
         }
+        if mode != "missing-platform-snapshots-discovery" {
+            println!("windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots: test");
+        }
+        if mode != "missing-snapshot-memory-discovery" {
+            println!("windows_x64::signed_bundle_snapshot_memory_capacity: test");
+        }
         if mode != "missing-discovery" {
             println!("windows_x64::signed_bundle_facade_create_and_run: test");
         }
         if mode != "missing-sdk-json-discovery" {
             println!("windows_x64::signed_bundle_sdk_json_capture: test");
+        }
+        if mode != "missing-sdk-lifecycle-discovery" {
+            println!("windows_x64::signed_bundle_sdk_json_lifecycle: test");
         }
         if mode != "missing-network-discovery" {
             println!("windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors: test");
@@ -186,6 +228,10 @@ fn main() {
             println!("windows_network::signed_bundle_deny_default_proxy_policy: test");
         }
         return;
+    }
+    if exe.file_name().unwrap() == "nvx-e2e-tests.exe" {
+        let expected = exe.parent().unwrap().join("aci-edge-sandboxes");
+        assert_eq!(Path::new(&env::var("ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR").unwrap()), expected);
     }
     assert!(args.contains(&"--include-ignored".to_owned()));
     assert!(args.contains(&"--nocapture".to_owned()));
@@ -204,8 +250,32 @@ fn main() {
     if mode != "missing-sdk-json" {
         println!("VM_EXECUTED SDK JSON binary capture timeout limit and cleanup");
     }
+    if mode != "missing-sdk-lifecycle" {
+        println!("VM_EXECUTED SDK JSON lifecycle clone start state reuse live-owner rejection and adoption");
+    }
+    if mode != "missing-sdk-clone-cleanup" {
+        println!("VM_EXECUTED SDK JSON lifecycle same-process clone cleanup lease release and reuse");
+    }
+    if mode != "missing-snapshot-memory" {
+        println!("VM_EXECUTED snapshot memory explicit 256 clone and 512 resource cold boot guest sizing both modes");
+    }
+    if mode != "missing-executor-lifecycle" {
+        println!("VM_EXECUTED executor lifecycle provision/dry-run clone start cross-process exec and cleanup");
+    }
+    if mode != "missing-platform-snapshots" {
+        println!("VM_EXECUTED executor platform snapshot NIC/noNIC clones stable templates and isolated VMs");
+    }
+    if mode != "missing-sdk-platform-snapshots" {
+        println!("VM_EXECUTED SDK JSON platform snapshot repeated capture/streaming clones and isolation");
+    }
+    if mode != "missing-snapshot-fallback" {
+        println!("VM_EXECUTED SDK JSON platform snapshot cold fallback capture/streaming warnings lifecycle diagnostics and recovery");
+    } else {
+        println!("VM_EXECUTED SDK JSON platform snapshot cold fallback warnings capture/streaming/lifecycle and recovery");
+    }
     if mode != "missing-json-image" {
-        println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
+        let suffix = if mode == "unconfirmed-filesystem" { "" } else { " confirmed clones" };
+        println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup{suffix}");
     }
     if mode != "missing-executor" {
         println!("VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup");
@@ -214,22 +284,30 @@ fn main() {
         println!("VM_EXECUTED executor configs all seven fixtures");
     }
     if mode != "missing-interruption" {
+        println!("VM_EXECUTED executor console interruption capture/startup/execution/owned-vmm/cleanup");
+    } else {
         println!("VM_EXECUTED executor console interruption startup/execution/owned-vmm/cleanup");
     }
     if mode != "missing-image-reuse" {
+        println!("VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation");
+    } else {
         println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
     }
     if mode != "missing-network" {
-        println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
+        let suffix = if mode == "unconfirmed-network" { "" } else { " confirmed clones" };
+        println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement{suffix}");
     }
     if mode != "missing-network-udp" {
-        println!("VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges");
+        let suffix = if mode == "unconfirmed-network-udp" { "" } else { " confirmed clones" };
+        println!("VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges{suffix}");
     }
     if mode != "missing-host-loopback" {
-        println!("VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls");
+        let suffix = if mode == "unconfirmed-host-loopback" { "" } else { " confirmed clones" };
+        println!("VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls{suffix}");
     }
     if mode != "missing-network-proxy" {
-        println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic");
+        let suffix = if mode == "unconfirmed-network-proxy" { "" } else { " confirmed clones" };
+        println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic{suffix}");
     }
     if mode == "skipped" {
         println!("SKIPPED: fixture VM unavailable");
@@ -241,7 +319,7 @@ fn main() {
   const build = spawnSync(
     "rustc",
     ["--edition=2021", "--crate-name", "mxc_ci_fixture", source, "-o", fixture],
-    { cwd: root, encoding: "utf8", timeout: 60_000 }
+    { cwd: root, env: fixtureEnvironment(), encoding: "utf8", timeout: 60_000 }
   );
   assert.ifError(build.error);
   assert.equal(build.status, 0, build.stdout + build.stderr);
@@ -273,6 +351,8 @@ function dispatch(directory, mode = "", architecture = "x64") {
     ],
     {
       MXC_CI_FIXTURE_MODE: mode,
+      ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR: "poisoned-runtime-override",
+      MXC_FFI_DIR: "poisoned-ffi-override",
     }
   );
 }
@@ -433,21 +513,31 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   writeFileSync(script, [
     "$ErrorActionPreference = 'Stop'",
     `Copy-Item -LiteralPath ${quote(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes"))} -Destination ${quote(x64)} -Recurse`,
+    `Copy-Item -LiteralPath ${quote(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes"))} -Destination ${quote(join(binaryRoot, "arm64"))} -Recurse`,
   ].join("\n"));
   const copied = runScript(script, [], {});
   assert.equal(copied.status, 0, copied.output);
   const packed = spawnSync("npm pack --ignore-scripts --offline --json", {
     cwd: packageRoot,
+    env: fixtureEnvironment(),
     shell: true,
     encoding: "utf8",
     timeout: 30_000,
   });
   assert.ifError(packed.error);
   assert.equal(packed.status, 0, packed.stdout + packed.stderr);
-  const files = JSON.parse(packed.stdout)[0].files.map(({ path }) => path).sort();
+  const packedInfo = JSON.parse(packed.stdout)[0];
+  const files = packedInfo.files.map(({ path }) => path).sort();
   assert.deepEqual(files, ["bin/x64/mxc_ffi.dll", "bin/x64/wxc-exec.exe", "package.json"]);
+  const archive = spawnSync("tar", ["-tzf", join(packageRoot, packedInfo.filename)], {
+    encoding: "utf8", timeout: 30_000,
+  });
+  assert.ifError(archive.error);
+  assert.equal(archive.status, 0, archive.stdout + archive.stderr);
+  assert.doesNotMatch(archive.stdout, /aci-edge-sandboxes/);
   const expected = fileDigests(result.bundle);
   assert.deepEqual(fileDigests(join(x64, "aci-edge-sandboxes")), expected);
+  assert.deepEqual(fileDigests(join(binaryRoot, "arm64", "aci-edge-sandboxes")), expected);
   assert.deepEqual(fileDigests(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes")), expected);
   assert.deepEqual(readFileSync(artifactSuite), validationSuite);
   assert.deepEqual(readFileSync(join(x64, "nvx-e2e-tests.exe")), validationSuite);
@@ -458,6 +548,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   rmSync(join(binaryRoot, ".npmignore"));
   const unfiltered = spawnSync("npm pack --ignore-scripts --offline --json", {
     cwd: packageRoot,
+    env: fixtureEnvironment(),
     shell: true,
     encoding: "utf8",
     timeout: 30_000,
@@ -469,12 +560,42 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   for (const { arch, name } of probeSuites) {
     assert.ok(unfilteredFiles.includes(`bin/${arch}/${name}`));
   }
-  assert.deepEqual(
-    unfilteredFiles
-      .filter((path) => path.startsWith("bin/x64/aci-edge-sandboxes/"))
-      .sort(),
-    result.inventory.map((path) => `bin/x64/aci-edge-sandboxes/${path}`).sort()
-  );
+  assert.deepEqual(unfilteredFiles.filter((path) => path.includes("aci-edge-sandboxes")), []);
+  assert.ok(unfilteredFiles.includes("bin/x64/mxc_ffi.dll"));
+  assert.ok(unfilteredFiles.includes("bin/x64/wxc-exec.exe"));
+
+  const runtimeRoot = join(result.directory, "node-nvx-runtime");
+  mkdirSync(runtimeRoot);
+  copyFileSync(join(root, "sdk", "node-nvx-runtime", "package.json"), join(runtimeRoot, "package.json"));
+  copyFileSync(join(root, "sdk", "node-nvx-runtime", "README.md"), join(runtimeRoot, "README.md"));
+  renameSync(join(x64, "aci-edge-sandboxes"), join(runtimeRoot, "aci-edge-sandboxes"));
+  assert.deepEqual(fileDigests(join(runtimeRoot, "aci-edge-sandboxes")), expected);
+  const runtimePack = spawnSync("npm pack --ignore-scripts --offline --json", {
+    cwd: runtimeRoot, shell: true, encoding: "utf8", timeout: 30_000,
+  });
+  assert.ifError(runtimePack.error);
+  assert.equal(runtimePack.status, 0, runtimePack.stdout + runtimePack.stderr);
+  const runtimeFiles = JSON.parse(runtimePack.stdout)[0].files.map(({ path }) => path);
+  assert.deepEqual(runtimeFiles.filter((path) => path.startsWith("aci-edge-sandboxes/")).sort(),
+    result.inventory.map((path) => `aci-edge-sandboxes/${path}`).sort());
+});
+
+test("npm pipelines stage NVX separately and inspect the base tarball before publishing", () => {
+  for (const file of [
+    [".github", "workflows", "Package.NpmSdk.Job.yml"],
+    [".azure-pipelines", "templates", "Package.NpmSdk.Job.yml"],
+  ]) {
+    const pipeline = readFileSync(join(root, ...file), "utf8");
+    const move = pipeline.indexOf("mv ");
+    const cleanup = pipeline.indexOf("rm -rf ", move);
+    const pack = pipeline.indexOf("npm pack --silent", cleanup);
+    const inspect = pipeline.indexOf("tar -tzf", pack);
+    assert.ok(move >= 0 && move < cleanup && cleanup < pack && pack < inspect, file.join("/"));
+    assert.match(pipeline.slice(move, cleanup), /bin\/x64\/aci-edge-sandboxes/);
+    assert.match(pipeline.slice(cleanup, pack), /bin\/\*\/aci-edge-sandboxes/);
+    assert.match(pipeline.slice(cleanup, pack), /bin\/\*\/symbols/);
+    assert.match(pipeline.slice(inspect), /\*aci-edge-sandboxes\*/);
+  }
 });
 
 for (const mode of ["absent", "empty", "missing-manifest"]) {
@@ -516,7 +637,7 @@ function verifyPackage(mode = "") {
   const packed = spawnSync(
     "tar",
     ["--create", "--gzip", "--file", archive, "--directory", inputs, "mxc-sdk-1.0.0"],
-    { encoding: "utf8", timeout: 30_000 }
+    { env: fixtureEnvironment(), encoding: "utf8", timeout: 30_000 }
   );
   assert.ifError(packed.error);
   assert.equal(packed.status, 0, packed.stdout + packed.stderr);
@@ -558,20 +679,27 @@ for (const [mode, message] of [
 }
 
 test("artifact dispatcher executes prebuilt SDK tests and preserves the log", () => {
-  const directory = artifact();
+  const directory = managedArtifact();
   const result = dispatch(directory);
   assert.equal(result.status, 0, result.output);
   const log = readFileSync(join(directory, "logs", "microvm-nvx.log"), "utf8");
   assert.match(log, /VM_EXECUTED facade /);
   assert.match(log, /VM_EXECUTED SDK JSON binary capture /);
-  assert.match(log, /VM_EXECUTED JSON selected-image filesystem /);
+  assert.match(log, /VM_EXECUTED SDK JSON lifecycle clone start state reuse live-owner rejection and adoption/);
+  assert.match(log, /VM_EXECUTED SDK JSON lifecycle same-process clone cleanup lease release and reuse/);
+  assert.match(log, /VM_EXECUTED snapshot memory explicit 256 clone and 512 resource cold boot guest sizing both modes/);
+  assert.match(log, /VM_EXECUTED executor lifecycle provision\/dry-run clone start cross-process exec and cleanup/);
+  assert.match(log, /VM_EXECUTED executor platform snapshot NIC\/noNIC clones stable templates and isolated VMs/);
+  assert.match(log, /VM_EXECUTED SDK JSON platform snapshot repeated capture\/streaming clones and isolation/);
+  assert.match(log, /VM_EXECUTED SDK JSON platform snapshot cold fallback capture\/streaming warnings lifecycle diagnostics and recovery/);
+  assert.match(log, /VM_EXECUTED JSON selected-image filesystem read\/write\/deny and cleanup confirmed clones/);
   assert.match(log, /VM_EXECUTED executor /);
-  assert.match(log, /VM_EXECUTED executor console interruption /);
-  assert.match(log, /VM_EXECUTED executor registered-image reuse offline and concurrent/);
-  assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement/);
-  assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
-  assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
-  assert.match(log, /VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic/);
+  assert.match(log, /VM_EXECUTED executor console interruption capture\/startup\/execution\/owned-vmm\/cleanup/);
+  assert.match(log, /VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation/);
+  assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement confirmed clones/);
+  assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges confirmed clones/);
+  assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls confirmed clones/);
+  assert.match(log, /VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic confirmed clones/);
 });
 
 for (const [mode, message] of [
@@ -579,6 +707,13 @@ for (const [mode, message] of [
   ["zero-tests", /executed no tests/],
   ["missing-facade", /did not execute the facade VM scenario/],
   ["missing-sdk-json", /did not execute the SDK JSON capture VM scenario/],
+  ["missing-sdk-lifecycle", /did not execute the SDK JSON lifecycle VM scenario/],
+  ["missing-sdk-clone-cleanup", /did not execute the SDK clone cleanup VM scenario/],
+  ["missing-snapshot-memory", /did not execute the snapshot memory VM scenario/],
+  ["missing-executor-lifecycle", /did not execute the executor lifecycle VM scenario/],
+  ["missing-platform-snapshots", /did not execute the executor platform snapshots VM scenario/],
+  ["missing-sdk-platform-snapshots", /did not execute the SDK platform snapshots VM scenario/],
+  ["missing-snapshot-fallback", /did not execute the snapshot fallback warnings VM scenario/],
   ["missing-json-image", /did not execute the JSON image and policy VM scenario/],
   ["missing-executor", /did not execute the executor VM scenario/],
   ["missing-configs", /did not execute the executor configs VM scenario/],
@@ -588,15 +723,88 @@ for (const [mode, message] of [
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
   ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
   ["missing-network-proxy", /did not execute the network proxy VM scenario/],
+  ["unconfirmed-filesystem", /did not execute the JSON image and policy VM scenario/],
+  ["unconfirmed-network", /did not execute the network rules VM scenario/],
+  ["unconfirmed-network-udp", /did not execute the UDP network rules VM scenario/],
+  ["unconfirmed-host-loopback", /did not execute the host-loopback ingress VM scenario/],
+  ["unconfirmed-network-proxy", /did not execute the network proxy VM scenario/],
   ["skipped", /skipped or filtered tests/],
   ["ignored", /skipped or filtered tests/],
 ]) {
   test(`artifact dispatcher fails closed for ${mode}`, () => {
-    const result = dispatch(artifact(), mode);
+    const result = dispatch(managedArtifact(), mode);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
   });
 }
+
+function managedArtifact() {
+  const directory = artifact();
+  const bundle = join(directory, "windows-sdk-bundle");
+  mkdirSync(join(bundle, "dotnet"), { recursive: true });
+  mkdirSync(join(bundle, "node"), { recursive: true });
+  mkdirSync(join(bundle, "sdk-integration", "dist"), { recursive: true });
+  copyFileSync(fixture, join(bundle, "dotnet", "Microsoft.Mxc.Sdk.Tests.exe"));
+  copyFileSync(fixture, join(bundle, "node", "node.exe"));
+  writeFileSync(join(bundle, "sdk-integration", "dist", "nvx-json.test.js"), "");
+  for (const relative of [
+    ["dotnet", "aci-edge-sandboxes"],
+    ["sdk-integration", "node_modules", "@microsoft", "mxc-sdk-nvx-runtime-win32-x64", "aci-edge-sandboxes"],
+  ]) {
+    const runtime = join(bundle, ...relative);
+    mkdirSync(join(runtime, "bin"), { recursive: true });
+    writeFileSync(join(runtime, "bundle-manifest.json"), "{}");
+    writeFileSync(join(runtime, "bin", "aci_edge_agent.dll"), "fixture");
+  }
+  writeFileSync(join(bundle, "sdk-integration", "node_modules", "@microsoft", "mxc-sdk-nvx-runtime-win32-x64", "package.json"), "{}");
+  return directory;
+}
+
+test("artifact dispatcher runs both managed NVX scenarios", () => {
+  const result = dispatch(managedArtifact());
+  assert.equal(result.status, 0, result.output);
+});
+
+for (const mode of ["managed-dotnet-skipped", "managed-node-skipped"]) {
+  test(`artifact dispatcher rejects ${mode}`, () => {
+    const result = dispatch(managedArtifact(), mode);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /NVX JSON/);
+  });
+}
+
+test("artifact dispatcher rejects a missing managed SDK bundle", () => {
+  const result = dispatch(artifact());
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /Required CI artifact file is missing:[\s\S]*Microsoft\.Mxc\.Sdk\.Tests\.exe/);
+});
+
+test("artifact dispatcher rejects an incomplete managed SDK bundle", () => {
+  const directory = artifact();
+  mkdirSync(join(directory, "windows-sdk-bundle"));
+  const result = dispatch(directory);
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /Required CI artifact file is missing:[\s\S]*Microsoft\.Mxc\.Sdk\.Tests\.exe/);
+});
+
+for (const missing of ["node/node.exe", "sdk-integration/dist/nvx-json.test.js"]) {
+  test(`artifact dispatcher rejects missing ${missing}`, () => {
+    const directory = managedArtifact();
+    rmSync(join(directory, "windows-sdk-bundle", ...missing.split("/")));
+    const result = dispatch(directory);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /Required CI artifact file is missing/);
+  });
+}
+
+test("scheduled MicroVM lane downloads the Windows SDK bundle", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Validation.Tests.Matrix.Job.yml"), "utf8");
+  const download = workflow.match(/- name: Download Windows SDK test bundle[\s\S]*?(?=\n      - name:)/);
+  assert.ok(download, "Windows SDK bundle download step is missing");
+  assert.match(download[0], /matrix\.backend == 'microvm'/);
+  assert.match(download[0], /name: windows-sdk-test-bundle-\$\{\{ matrix\.target \}\}/);
+  assert.match(download[0], /path: artifacts\/bin\/windows-sdk-bundle/);
+});
 
 test("artifact dispatcher rejects a missing test payload", () => {
   const directory = artifact();
@@ -671,13 +879,17 @@ test("staging uses Cargo's reported executable and checks VM test discovery", ()
 for (const [mode, message] of [
   ["cargo-failure", /cargo test --no-run failed with exit code 17/],
   ["cargo-no-artifact", /Expected one nvx_e2e test executable/],
+  ["missing-validation-discovery", /did not discover windows_x64::native_validation_rejects_requests_without_booting_a_vm/],
   ["missing-proxy-discovery", /did not discover windows_x64::signed_agent_proxy_validation_withholds_credentials/],
   ["missing-alias-discovery", /did not discover windows_x64::guest_path_resolves_windows_case_alias/],
   ["missing-executor-proxy-discovery", /did not discover windows_x64::signed_executor_proxy_validation_withholds_credentials/],
   ["missing-discovery", /did not discover windows_x64::signed_bundle_facade_create_and_run/],
   ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
+  ["missing-sdk-lifecycle-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
   ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
+  ["missing-platform-snapshots-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots/],
+  ["missing-snapshot-memory-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_snapshot_memory_capacity/],
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
   ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
@@ -690,13 +902,17 @@ for (const [mode, message] of [
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
     if (![
+      "missing-validation-discovery",
       "missing-proxy-discovery",
       "missing-alias-discovery",
       "missing-executor-proxy-discovery",
       "missing-discovery",
       "missing-sdk-json-discovery",
+      "missing-sdk-lifecycle-discovery",
       "missing-interruption-discovery",
       "missing-image-reuse-discovery",
+      "missing-platform-snapshots-discovery",
+      "missing-snapshot-memory-discovery",
       "missing-network-discovery",
       "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",

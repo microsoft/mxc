@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-real-client",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport os, socket, urllib.error, urllib.request\nprint('NODE_PROXY=' + os.environ.get('NODE_USE_ENV_PROXY', 'unset'))\ndef get(url, opener=urllib.request.build_opener()):\n    try:\n        with opener.open(url, timeout=10) as r:\n            return str(r.status)\n    except urllib.error.HTTPError as e:\n        return str(e.code)\n    except OSError as e:\n        return 'ERROR ' + str(e)\nprint('TLS_IP=' + get('https://1.1.1.1/cdn-cgi/trace'))\nprint('TLS_NAME=' + get('https://one.one.one.one/cdn-cgi/trace'))\nprint('TLS_DENIED=' + get('https://dns.google/'))\nprint('TLS_BYPASS=' + get('https://1.1.1.1/', urllib.request.build_opener(urllib.request.ProxyHandler({}))))\ntry:\n    print('RESOLVED=' + socket.gethostbyname('one.one.one.one'))\nexcept OSError as e:\n    print('RESOLVED=ERROR', e)\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ns.settimeout(3)\ntry:\n    s.sendto(bytes.fromhex('12340100000100000000000003777777076578616d706c6503636f6d0000010001'), ('1.1.1.1', 53))\n    s.recv(512)\n    print('UDP_DIRECT=REACHED')\nexcept OSError:\n    print('UDP_DIRECT=BLOCKED')\nEOF"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "1.1.1.0/24" }, { "cidr": "1.0.0.0/24" }],
+          "ports": [{ "port": 443, "protocol": "tcp" }]
+        }
+      ]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "python:3.12-alpine" }
+}

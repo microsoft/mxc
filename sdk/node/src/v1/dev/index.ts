@@ -7,10 +7,13 @@ import type { ExecutionResult } from '../types.js';
 import type { MxcProcess } from '../container-process.js';
 import type { MxcPtyProcess, MxcPtySize } from '../mxc-pty-process.js';
 import { MxcError } from '../errors.js';
+import { spawnStdio } from '../container.js';
+import type { SpawnStdio } from '../operation-options.js';
 import { captureProcessOutput } from '../capture.js';
 import { diagLog } from '../../diagnostic.js';
 import { runRawOneShotJsonAsync, type BindingRunResult } from '../../bindings/run.js';
 import {
+  spawnBindingInheritedStdioProcessJson,
   spawnBindingSandboxProcessJson,
   spawnStateAwareBindingSandboxProcessAsync,
 } from '../../bindings/streaming.js';
@@ -31,19 +34,31 @@ export interface PtyJsonOptions extends JsonOptions {
   size?: MxcPtySize;
 }
 
+/** Invocation controls for spawnWithExtendedOptionsJson. */
+export interface SpawnExtendedJsonOptions extends JsonOptions {
+  /** Defaults to `'pipes'`, which behaves like `spawnJson`. */
+  stdio?: SpawnStdio;
+}
+
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function checkOptions(name: string, options: JsonOptions, pty = false): void {
+function checkOptions(
+  name: string,
+  options: JsonOptions,
+  pty = false,
+  extended = false,
+): void {
   if (!isRecord(options)) {
     throw new MxcError('malformed_request', `${name} options must be an object`);
   }
   for (const [key, value] of Object.entries(options)) {
     if (key === 'experimental' && (value === undefined || typeof value === 'boolean')) continue;
     if (pty && key === 'size') continue;
+    if (extended && key === 'stdio') continue;
     throw new MxcError('malformed_request', `${name} does not support option '${key}'`);
   }
 }
@@ -80,9 +95,12 @@ function requestInfo(
     );
   }
   const timeout = isRecord(request.process) ? request.process.timeout : undefined;
+  // W365's native deadline includes output drain; a managed kill would cut it short.
+  const backendOwnsTimeout = phase === 'exec'
+    && typeof request.sandboxId === 'string' && request.sandboxId.startsWith('w365:');
   return {
     containment: request.containment,
-    timeoutMs: typeof timeout === 'number' && Number.isInteger(timeout)
+    timeoutMs: !backendOwnsTimeout && typeof timeout === 'number' && Number.isInteger(timeout)
       && timeout >= 0 && timeout <= 0xffff_ffff ? timeout : undefined,
   };
 }
@@ -144,6 +162,20 @@ export async function spawnJson(json: string, options: JsonOptions = {}): Promis
   return spawnBindingSandboxProcessJson(json, options.experimental === true, timeoutMs);
 }
 
+/** Spawn a one-shot request with stdio chosen in the options. */
+export async function spawnWithExtendedOptionsJson(
+  json: string,
+  options: SpawnExtendedJsonOptions = {},
+): Promise<MxcProcess> {
+  checkOptions('spawnWithExtendedOptionsJson', options, false, true);
+  const stdio = spawnStdio('spawnWithExtendedOptionsJson', options.stdio);
+  const { timeoutMs } = requestInfo(json, 'spawnWithExtendedOptionsJson');
+  const spawn = stdio === 'pipes'
+    ? spawnBindingSandboxProcessJson
+    : spawnBindingInheritedStdioProcessJson;
+  return spawn(json, options.experimental === true, timeoutMs);
+}
+
 /** Spawn a one-shot request with a PTY. */
 export async function spawnWithPtyJson(
   json: string,
@@ -171,7 +203,7 @@ export async function runInContainerJson(
   checkOptions('runInContainerJson', options);
   const { timeoutMs } = requestInfo(json, 'runInContainerJson', 'exec');
   const proc = await spawnStateAwareBindingSandboxProcessAsync(
-    json, options.experimental === true, timeoutMs,
+    json, options.experimental === true, timeoutMs, true, 'capture',
   );
   let failed = false;
   try {

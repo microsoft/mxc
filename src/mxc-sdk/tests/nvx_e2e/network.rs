@@ -8,10 +8,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::{__ffi, v1::WaitResult};
 use serde_json::{json, Value};
 
-use super::windows_x64::assert_no_run_state;
+use super::windows_x64::{assert_no_run_state, clone_policy_output};
 
 const GREETING: &[u8] = b"NVX_DIRECT_OK";
 const DIRECT_PROBE: &str = r#"import errno, json, os, socket
@@ -58,6 +57,7 @@ print(json.dumps({"tcp": direct, "udp": [datagram(port) for port in ports]}))
 struct ControlledServices {
     host: Ipv4Addr,
     ports: [u16; 2],
+    executor: bool,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<io::Result<()>>>,
     datagrams: [Arc<AtomicUsize>; 2],
@@ -127,7 +127,7 @@ fn host_only_controlled_ports_reserve_both_protocols_and_bound_retries() {
 }
 
 impl ControlledServices {
-    fn new(with_udp: bool) -> Self {
+    fn new(with_udp: bool, executor: bool) -> Self {
         let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         // Select a local route without sending traffic to this documentation-only address.
         route
@@ -162,6 +162,7 @@ impl ControlledServices {
         let mut services = Self {
             host,
             ports,
+            executor,
             stop: Arc::new(AtomicBool::new(false)),
             workers: Vec::new(),
             datagrams: std::array::from_fn(|_| Arc::new(AtomicUsize::new(0))),
@@ -236,10 +237,8 @@ impl ControlledServices {
 
     fn probe(&self, egress: Value) -> Value {
         let request = self.request("print(json.dumps(direct))", json!({"egress": egress}), None);
-        let result = __ffi::run_json(&request.to_string(), true).unwrap();
-        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
-        assert_no_run_state(std::process::id());
-        serde_json::from_slice(&result.stdout).expect("guest direct-connection outcomes")
+        let stdout = clone_policy_output(&request, self.executor);
+        serde_json::from_slice(&stdout).expect("guest direct-connection outcomes")
     }
 
     fn rule(&self, port: Option<u16>) -> Value {
@@ -263,11 +262,9 @@ impl ControlledServices {
                 "MXC_NVX_NETWORK_NONCE={}",
                 uuid::Uuid::new_v4()
             )));
-        let result = __ffi::run_json(&request.to_string(), true).unwrap();
-        assert_no_run_state(std::process::id());
-        assert_eq!(result.outcome, WaitResult::Exited(0), "{label}: {result:?}");
+        let stdout = clone_policy_output(&request, self.executor);
         assert_eq!(
-            serde_json::from_slice::<Value>(&result.stdout).expect("TCP/UDP outcomes"),
+            serde_json::from_slice::<Value>(&stdout).expect("TCP/UDP outcomes"),
             json!({"tcp": tcp, "udp": udp}),
             "{label}"
         );
@@ -308,7 +305,19 @@ fn allow_all() -> Value {
 #[test]
 #[ignore = "VM: requires Windows x64, WHP, a host IPv4 route and the exact signed official bundle"]
 fn signed_bundle_network_rules_enforce_allow_deny_and_port_selectors() {
-    let services = ControlledServices::new(true);
+    for executor in [false, true] {
+        exercise_network_rules(executor);
+    }
+    println!(
+        "VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement confirmed clones"
+    );
+    println!(
+        "VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges confirmed clones"
+    );
+}
+
+fn exercise_network_rules(executor: bool) {
+    let services = ControlledServices::new(true, executor);
     let reached = json!(["reached", "reached"]);
     let blocked = json!(["blocked", "blocked"]);
     services.probe_network(
@@ -460,8 +469,6 @@ fn signed_bundle_network_rules_enforce_allow_deny_and_port_selectors() {
         services.probe_network(policy, tcp, udp, label);
     }
     services.probe_network(allow_all(), reached.clone(), reached, "after control");
-    println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
-    println!("VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges");
 }
 
 const INGRESS_LISTENER: &str = r#"import json, os, pathlib, socket, threading, time
@@ -582,7 +589,7 @@ fn ingress_probe(port: u16, udp: bool, payload: &[u8]) -> io::Result<bool> {
     }
 }
 
-fn host_loopback_case(ports: [u16; 2], posture: &str, egress: &str) {
+fn host_loopback_case(ports: [u16; 2], posture: &str, egress: &str, executor: bool) {
     let directory = tempfile::tempdir().expect("owned ingress coordination directory");
     let canonical = directory.path().canonicalize().unwrap();
     let host_path = canonical.to_str().unwrap();
@@ -615,7 +622,7 @@ fn host_loopback_case(ports: [u16; 2], posture: &str, egress: &str) {
         }
     });
     let (observed, stopped, result) = thread::scope(|scope| {
-        let worker = scope.spawn(|| __ffi::run_json(&request.to_string(), true));
+        let worker = scope.spawn(|| clone_policy_output(&request, executor));
         let observed = (|| -> Result<[bool; 2], Box<dyn std::error::Error>> {
             let ready = directory.path().join("ready");
             let deadline = Instant::now() + Duration::from_secs(120);
@@ -649,19 +656,16 @@ fn host_loopback_case(ports: [u16; 2], posture: &str, egress: &str) {
         let stopped = std::fs::write(directory.path().join("stop"), b"stop");
         (observed, stopped, worker.join())
     });
-    let result = result
-        .expect("guest ingress execution thread")
-        .expect("guest ingress execution");
+    let stdout = result.expect("guest ingress execution thread");
     assert_no_run_state(std::process::id());
     stopped.expect("stop the guest listeners");
-    assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
     let observed = observed.expect("ready guest listeners and bounded host probes");
     let allowed = posture == "allow";
     assert_eq!(
         observed, [allowed; 2],
         "hostLoopback={posture}, egress={egress}"
     );
-    let guest: Value = serde_json::from_slice(&result.stdout).expect("guest ingress outcomes");
+    let guest: Value = serde_json::from_slice(&stdout).expect("guest ingress outcomes");
     assert_eq!(guest["local_before"], "reached");
     assert_eq!(guest["local_after"], "reached");
     for index in 0..2 {
@@ -684,19 +688,30 @@ fn signed_bundle_host_loopback_ingress() {
         udp.local_addr().unwrap().port(),
     ];
     drop((tcp, udp));
-    host_loopback_case(ports, "allow", "allow");
-    host_loopback_case(ports, "deny", "allow");
-    host_loopback_case(ports, "allow", "deny");
-    host_loopback_case(ports, "allow", "allow");
+    for executor in [false, true] {
+        host_loopback_case(ports, "allow", "allow", executor);
+        host_loopback_case(ports, "deny", "allow", executor);
+        host_loopback_case(ports, "allow", "deny", executor);
+        host_loopback_case(ports, "allow", "allow", executor);
+    }
     println!(
-        "VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls"
+        "VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls confirmed clones"
     );
 }
 
 #[test]
 #[ignore = "VM: requires Windows x64, WHP, a host IPv4 route and the exact signed official bundle"]
 fn signed_bundle_deny_default_proxy_policy() {
-    let services = ControlledServices::new(false);
+    for executor in [false, true] {
+        exercise_proxy_policy(executor);
+    }
+    println!(
+        "VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic confirmed clones"
+    );
+}
+
+fn exercise_proxy_policy(executor: bool) {
+    let services = ControlledServices::new(false, executor);
     assert_eq!(services.probe(allow_all()), json!(["reached", "reached"]));
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -746,22 +761,20 @@ print(json.dumps({"direct": direct, "proxy": data.decode()}))"#,
         json!({"egress": {}}),
         Some(json!({"networkProxy": format!("http://127.0.0.1:{port}")})),
     );
-    let result = __ffi::run_json(&request.to_string(), true);
+    let result = std::panic::catch_unwind(|| clone_policy_output(&request, executor));
     stop.store(true, Ordering::Release);
     let received = server.join().expect("host proxy thread");
-    let result = result.expect("proxy-only guest execution");
+    let stdout = result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let received = received.expect("request must reach the host proxy");
     assert!(
         received.starts_with(b"GET http://mxc-policy.invalid/probe HTTP/1.1\r\n"),
         "{}",
         String::from_utf8_lossy(&received)
     );
-    assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
     assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        serde_json::from_slice::<Value>(&stdout).unwrap(),
         json!({"direct": ["blocked", "blocked"], "proxy": "NVX_PROXY_OK"})
     );
     assert_no_run_state(std::process::id());
     assert_eq!(services.probe(allow_all()), json!(["reached", "reached"]));
-    println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic");
 }

@@ -533,11 +533,7 @@ fn run_state_aware_main(
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
 
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
@@ -707,6 +703,7 @@ fn run_state_aware_main(
             eprintln!("\n{}", json);
             process::exit(exit_code);
         }
+        StateAwareExit::UndeliverableExecError(exit_code) => process::exit(exit_code),
     }
 }
 
@@ -723,6 +720,8 @@ enum StateAwareExit {
     Error(String, i32),
     /// Print this JSON error envelope to stderr, then exit with the code's status.
     ExecError(String, i32),
+    /// Stderr could not drain; another diagnostic write would block exit again.
+    UndeliverableExecError(i32),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
@@ -744,7 +743,14 @@ fn finalize_state_aware_outcome(
             // so an envelope appended there would corrupt both. A dry run
             // streams nothing and keeps its envelope on stdout.
             if phase == "exec" && !dry_run {
-                StateAwareExit::ExecError(json, exit_code)
+                if e.details
+                    .as_ref()
+                    .is_some_and(|details| details["hostStderrUnavailable"] == true)
+                {
+                    StateAwareExit::UndeliverableExecError(exit_code)
+                } else {
+                    StateAwareExit::ExecError(json, exit_code)
+                }
             } else {
                 StateAwareExit::Error(json, exit_code)
             }
@@ -1297,10 +1303,7 @@ fn main() {
         learning_mode,
         &mut logger,
     );
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still

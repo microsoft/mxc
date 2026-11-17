@@ -576,8 +576,8 @@ function Initialize-MicroVmHost {
 # missing. Container images are pulled by the suite itself
 # (tests/scripts/run_wslc_all_tests.ps1).
 function Initialize-WslcHost {
-    # wslcsdk.dll ships beside wxc-exec.exe only in a --features wslc build.
-    Assert-RequiredFile @('wxc-exec.exe', 'wslcsdk.dll')
+    # These ship beside wxc-exec.exe only in a --features wslc build.
+    Assert-RequiredFile @('wxc-exec.exe', 'wslcsdk.dll', 'mxc-wslc-gateway.tar')
 
     Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
         -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'

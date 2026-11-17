@@ -34,13 +34,13 @@
     differs from the repo layout.
 
 .PARAMETER TelemetryResultsPath
-    Runs only two bounded, real container lifecycles with telemetry enabled and
+    Runs three bounded, real container lifecycles, one per supported contract, and
     records executor PIDs and phases for the isolated ETW capture harness.
     Use through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle.
 
 .PARAMETER TelemetryKeywords
-    Uses the development contract for the second telemetry lifecycle and
-    records each request's contract for descriptor-keyword assertions.
+    Explicitly disables request opt-in to prove Required collection ignores it.
+    Records each request's contract for descriptor-keyword assertions.
 
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
@@ -481,8 +481,8 @@ function Envelope-Arm {
 
 if ($TelemetryResultsPath) {
     $telemetryInvocations = [System.Collections.Generic.List[object]]::new()
-    foreach ($lifecycle in 1, 2) {
-        $contractVersion = if ($TelemetryKeywords -and $lifecycle -eq 2) { '1.1.0-alpha' } else { '1.0.0' }
+    foreach ($lifecycle in 1, 2, 3) {
+        $contractVersion = @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')[$lifecycle - 1]
         $telemetrySandboxId = $null
         $shouldStop = $false
         try {
@@ -490,7 +490,7 @@ if ($TelemetryResultsPath) {
                 $request = @{
                     version = $contractVersion
                     phase = $phase
-                    telemetry = @{ enabled = $true }
+                    telemetry = @{ enabled = -not $TelemetryKeywords }
                 }
                 if ($phase -eq 'provision') {
                     $request.containment = 'isolation_session'

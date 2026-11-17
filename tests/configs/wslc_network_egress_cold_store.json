@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-cold-store",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho ALLOWED=$(p 1.1.1.1:443)\necho DENIED=$(p 8.8.8.8:443)"
+  },
+  "network": {
+    "egress": {
+      "default": "allow",
+      "deny": [{ "to": [{ "cidr": "8.8.8.8/32" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "busybox:latest", "storagePath": "C:\\mxc_wslc_cold_cache_test" }
+}
