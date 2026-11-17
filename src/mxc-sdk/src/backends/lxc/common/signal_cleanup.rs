@@ -56,7 +56,7 @@ struct ActiveSandbox {
     startup_monitor: Option<Child>,
 
     #[cfg(target_os = "linux")]
-    startup_tool: Option<Child>,
+    startup_tool: Option<StartupTool>,
 
     #[cfg(target_os = "linux")]
     monitor_reaper: Option<mpsc::Sender<Child>>,
@@ -76,7 +76,17 @@ static DEADLINE_EPOCH: OnceLock<Instant> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static STARTUP_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "linux")]
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[cfg(target_os = "linux")]
+pub(super) const CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(target_os = "linux")]
+struct StartupTool {
+    child: Child,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+}
 
 #[cfg(target_os = "linux")]
 struct StartupDeadline;
@@ -211,11 +221,19 @@ fn read_startup_output(mut file: std::fs::File) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Result<Output, String> {
     use crate::lxc_common::lxc_bindings::unblock_fatal_signals;
+    use std::os::unix::process::CommandExt;
 
     let tool = command.get_program().to_string_lossy().into_owned();
+    if !watchdog_installed() {
+        return command
+            .output()
+            .map_err(|error| format!("Failed to run {tool}: {error}"));
+    }
+
     let stdout = tempfile::tempfile().map_err(|error| error.to_string())?;
     let stderr = tempfile::tempfile().map_err(|error| error.to_string())?;
     command
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(stdout.try_clone().map_err(|error| error.to_string())?)
         .stderr(stderr.try_clone().map_err(|error| error.to_string())?);
@@ -224,11 +242,14 @@ pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Resul
     {
         let mut slot = lock_slot();
         check_startup_cancellation()?;
-        slot.startup_tool = Some(
-            command
-                .spawn()
-                .map_err(|error| format!("Failed to run {tool}: {error}"))?,
-        );
+        let child = command
+            .spawn()
+            .map_err(|error| format!("Failed to run {tool}: {error}"))?;
+        slot.startup_tool = Some(StartupTool {
+            child,
+            stdout,
+            stderr,
+        });
     }
     loop {
         {
@@ -239,15 +260,19 @@ pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Resul
                 .as_mut()
                 .ok_or("LXC startup tool was cancelled")?;
             if let Some(status) = child
+                .child
                 .try_wait()
                 .map_err(|error| format!("Failed to wait for {tool}: {error}"))?
             {
-                slot.startup_tool = None;
+                let completed = slot
+                    .startup_tool
+                    .take()
+                    .ok_or("LXC startup tool was cancelled")?;
                 drop(slot);
                 return Ok(Output {
                     status,
-                    stdout: read_startup_output(stdout),
-                    stderr: read_startup_output(stderr),
+                    stdout: read_startup_output(completed.stdout),
+                    stderr: read_startup_output(completed.stderr),
                 });
             }
             if let Some(monitor) = &slot.startup_monitor {
@@ -424,15 +449,47 @@ fn reap_before(child: &mut Child, deadline: Instant) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn interrupt_startup_commands(
-    mut monitor: Option<Child>,
-    mut tool: Option<Child>,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    if let Some(tool) = &mut tool {
-        let _ = tool.kill();
+fn interrupt_startup_tool(mut tool: StartupTool) -> Result<(), String> {
+    use nix::errno::Errno;
+
+    let pid = Pid::from_raw(tool.child.id() as i32);
+    let deadline = Instant::now() + CLEANUP_COMMAND_TIMEOUT;
+
+    // WNOWAIT reserves the group leader's PID until the final signal.
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    let graceful = match killpg(pid, Signal::SIGTERM) {
+        Ok(()) | Err(Errno::ESRCH) => loop {
+            match waitid(Id::Pid(pid), flags) {
+                Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => break Ok(()),
+                Err(Errno::EINTR) => continue,
+                Err(error) => break Err(format!("Cannot observe startup command {pid}: {error}")),
+                _ if Instant::now() >= deadline => {
+                    break Err(format!(
+                        "Startup command {pid} did not finish cleanup within {}s",
+                        CLEANUP_COMMAND_TIMEOUT.as_secs()
+                    ));
+                }
+                _ => thread::sleep(Duration::from_millis(10)),
+            }
+        },
+        Err(error) => Err(format!("Cannot interrupt startup command {pid}: {error}")),
+    };
+    let killed = match killpg(pid, Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(format!("Cannot kill startup command group {pid}: {error}")),
+    };
+    let reaped = reap_before(&mut tool.child, Instant::now() + Duration::from_secs(5));
+    let stderr = read_startup_output(tool.stderr);
+    if !stderr.is_empty() {
+        write_fatal_diagnostic(String::from_utf8_lossy(&stderr).trim());
     }
-    if let Some(monitor) = &mut monitor {
+    graceful.and(killed).and(reaped)
+}
+
+#[cfg(target_os = "linux")]
+fn interrupt_startup_monitor(monitor: Option<Child>) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    if let Some(mut monitor) = monitor {
         let pid = Pid::from_raw(monitor.id() as i32);
         let flags = WaitPidFlag::WEXITED
             | WaitPidFlag::WSTOPPED
@@ -477,12 +534,23 @@ fn interrupt_startup_commands(
             }
         }
         let _ = killpg(pid, Signal::SIGKILL);
-        reap_before(monitor, deadline)?;
-    }
-    if let Some(tool) = &mut tool {
-        reap_before(tool, deadline)?;
+        reap_before(&mut monitor, deadline)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn interrupt_startup_commands(
+    monitor: Option<Child>,
+    tool: Option<StartupTool>,
+) -> Result<(), String> {
+    let tool = tool.map(interrupt_startup_tool).transpose();
+    let monitor = interrupt_startup_monitor(monitor);
+    match (tool, monitor) {
+        (Err(tool), Err(monitor)) => Err(format!("{tool}; {monitor}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(_), Ok(())) => Ok(()),
+    }
 }
 
 #[cfg(target_os = "linux")]

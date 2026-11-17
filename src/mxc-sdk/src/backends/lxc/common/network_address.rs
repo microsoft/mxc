@@ -29,9 +29,12 @@ pub(crate) fn reserve(container: &LxcContainer, directory: &Path) -> Result<Vec<
 
     let mut command = reservation_command(container, "reserve");
     command.arg(directory).arg(&bridge).arg(&mac);
-    let output = command
-        .output()
-        .map_err(|error| format!("Failed to reserve LXC address: {error}"))?;
+    #[cfg(target_os = "linux")]
+    let output =
+        super::signal_cleanup::run_startup_tool(command, super::signal_cleanup::STARTUP_TIMEOUT);
+    #[cfg(not(target_os = "linux"))]
+    let output = command.output().map_err(|error| error.to_string());
+    let output = output.map_err(|error| format!("Failed to reserve LXC address: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "Failed to reserve LXC address: {}",

@@ -62,11 +62,9 @@ impl LxcContainer {
         use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
-        // Generous enough to delete a large rootfs on slow storage.
-        const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
         let timeout = crate::lxc_common::signal_cleanup::startup_time_remaining()
             .map(|remaining| remaining.min(std::time::Duration::from_secs(5)))
-            .unwrap_or(RELEASE_TIMEOUT);
+            .unwrap_or(crate::lxc_common::signal_cleanup::CLEANUP_COMMAND_TIMEOUT);
 
         let tool = cmd.get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::null())

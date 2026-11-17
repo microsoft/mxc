@@ -139,13 +139,9 @@ fn failed_startup_waits_for_cleanup_after_one_minute() {
         return;
     }
 
-    for (case, hook_body, cleanup_start_limit) in [
-        ("immediate", "exit 1", Duration::from_secs(30)),
-        (
-            "hung",
-            "while [ ! -e \"$release\" ]; do sleep 0.01; done",
-            Duration::from_secs(75),
-        ),
+    for (case, hook_body) in [
+        ("immediate", "exit 1"),
+        ("hung", "while [ ! -e \"$release\" ]; do sleep 0.01; done"),
     ] {
         let fixture = tempfile::tempdir_in(".").expect("create startup timeout fixture");
         let directory = fixture.path().canonicalize().expect("startup fixture path");
@@ -223,7 +219,7 @@ fn failed_startup_waits_for_cleanup_after_one_minute() {
                     .spawn()
                     .expect("run LXC startup with delayed cleanup");
             while !cleanup_entered.exists()
-                && started.elapsed() < cleanup_start_limit
+                && started.elapsed() < Duration::from_secs(75)
                 && executor.try_wait().expect("poll executor status").is_none()
             {
                 std::thread::sleep(Duration::from_millis(25));

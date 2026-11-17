@@ -134,8 +134,10 @@ fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
     use nix::mount::{mount, MsFlags};
     use nix::sched::{unshare, CloneFlags};
     use nix::sys::signal::{kill, killpg, Signal};
-    use nix::unistd::Pid;
+    use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+    use nix::unistd::{getpgid, Pid};
     use serde_json::Value;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::{fs::PermissionsExt, process::CommandExt};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::process::{Child, Stdio};
@@ -193,6 +195,26 @@ fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
             _ => Err(format!("unreadable process identity for {pid}: {stat}")),
         }
     };
+    let signal_pidfd = |pidfd: &OwnedFd, signal: i32| -> Result<(), Errno> {
+        // SAFETY: The descriptor is borrowed, and null siginfo with zero flags uses kernel signal data.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0u32,
+            )
+        };
+        if result < 0 {
+            Err(Errno::last())
+        } else {
+            Ok(())
+        }
+    };
+
+    // Keep the executor PID reserved until fixture teardown has sent its signals.
+    let wait_options = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
     let before = read_links().expect("observe host links before address acquisition");
     let mut temporary_links = Vec::new();
     let mut owned_helpers = Vec::new();
@@ -304,9 +326,11 @@ exec /bin/sleep 300
             {
                 break Pid::from_raw(pid);
             }
-            if let Some(status) = child.try_wait().expect("observe executor before DHCP") {
+            let status = waitid(Id::Pid(group), wait_options)
+                .expect("observe executor before DHCP without reaping");
+            if status != WaitStatus::StillAlive {
                 panic!(
-                    "executor exited before reaching address acquisition: {status}\n{}",
+                    "executor exited before reaching address acquisition: {status:?}\n{}",
                     fs::read_to_string(&output_path).expect("read executor diagnostics")
                 );
             }
@@ -324,11 +348,31 @@ exec /bin/sleep 300
             if ancestor.as_raw() <= 1 {
                 panic!("gated DHCP client {client_pid} is not descended from executor {group}");
             }
+
+            // SAFETY: A successful pidfd_open returns a new descriptor owned by this fixture.
+            let pidfd = unsafe {
+                let fd = libc::syscall(libc::SYS_pidfd_open, ancestor.as_raw(), 0u32);
+                if fd < 0 {
+                    panic!("pin DHCP helper {ancestor}: {}", Errno::last());
+                }
+                OwnedFd::from_raw_fd(fd as i32)
+            };
             let (parent, started) = read_process(ancestor)
                 .expect("observe gated DHCP client ancestry")
                 .expect("gated DHCP client ancestry must still be alive");
-            helpers.push((ancestor, started));
+            helpers.push((ancestor, started, pidfd));
             ancestor = parent;
+        }
+        let mut parent = group;
+        for (pid, started, pidfd) in helpers.iter().rev() {
+            let (current_parent, current_start) = read_process(*pid)
+                .expect("verify pinned DHCP helper ancestry")
+                .expect("pinned DHCP helper must still be alive");
+            if current_parent != parent || current_start != *started {
+                panic!("DHCP helper {pid} changed identity or ancestry while pinning ownership");
+            }
+            signal_pidfd(pidfd, 0).expect("verify pidfd still refers to the observed DHCP helper");
+            parent = *pid;
         }
         owned_helpers = helpers;
         let client_links: Vec<Value> = serde_json::from_slice(
@@ -356,8 +400,12 @@ exec /bin/sleep 300
         }
         kill(group, Signal::SIGINT).expect("send Ctrl+C to executor during address acquisition");
         let status = loop {
-            if let Some(status) = child.try_wait().expect("observe cancellation exit") {
-                break Some(status);
+            match waitid(Id::Pid(group), wait_options)
+                .expect("observe cancellation exit without reaping")
+            {
+                status @ (WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => break Some(status),
+                WaitStatus::StillAlive => {}
+                status => panic!("unexpected executor state during cancellation: {status:?}"),
             }
 
             // Finish before the documented one-minute startup timeout can cancel the run.
@@ -366,12 +414,26 @@ exec /bin/sleep 300
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        let helpers_reaped = killpg(group, None) == Err(Errno::ESRCH)
-            && owned_helpers.iter().all(|(pid, started)| {
-                !read_process(*pid)
-                    .expect("observe owned DHCP helper after cancellation")
-                    .is_some_and(|(_, current)| current == *started)
-            });
+        let remaining_group_helpers: Vec<_> = fs::read_dir("/proc")
+            .expect("observe executor group at cancellation exit")
+            .map(|entry| entry.expect("read process directory entry").file_name())
+            .filter_map(|name| name.to_str()?.parse::<i32>().ok())
+            .map(Pid::from_raw)
+            .filter(|pid| *pid != group)
+            .filter(|pid| match getpgid(Some(*pid)) {
+                Ok(process_group) => process_group == group,
+                Err(Errno::ESRCH) => false,
+                Err(error) => panic!("observe executor group member {pid}: {error}"),
+            })
+            .collect();
+        let helpers_reaped = remaining_group_helpers.is_empty()
+            && owned_helpers
+                .iter()
+                .all(|(_, _, pidfd)| match signal_pidfd(pidfd, 0) {
+                    Err(Errno::ESRCH) => true,
+                    Ok(()) => false,
+                    Err(error) => panic!("observe pinned DHCP helper after cancellation: {error}"),
+                });
         let after = read_links().expect("observe host links at executor exit");
         let remaining: Vec<_> = after
             .iter()
@@ -384,23 +446,30 @@ exec /bin/sleep 300
             remaining,
             format!(
                 "{}\nhelpers at acquisition={owned_helpers:?}\n\
+                 remaining group helpers={remaining_group_helpers:?}\n\
                  links before={before:?}\nlinks during={during:?}\nlinks after={after:?}",
                 fs::read_to_string(output_path).expect("read executor output")
             ),
         )
     }));
+    if let Some(child) = executor.as_ref() {
+        let pid = Pid::from_raw(child.id() as i32);
+        let _ = kill(pid, Signal::SIGINT);
+        let cleanup_started = std::time::Instant::now();
+        while matches!(
+            waitid(Id::Pid(pid), wait_options),
+            Ok(WaitStatus::StillAlive) | Err(Errno::EINTR)
+        ) && cleanup_started.elapsed() < Duration::from_secs(180)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     let mut helper_cleanup_errors = Vec::new();
-    for (pid, started) in &owned_helpers {
-        match read_process(*pid) {
-            Ok(Some((_, current))) if current == *started => {
-                if let Err(error) = kill(*pid, Signal::SIGKILL) {
-                    if error != Errno::ESRCH {
-                        helper_cleanup_errors.push(format!("kill owned helper {pid}: {error}"));
-                    }
-                }
+    for (pid, _, pidfd) in &owned_helpers {
+        if let Err(error) = signal_pidfd(pidfd, libc::SIGKILL) {
+            if error != Errno::ESRCH {
+                helper_cleanup_errors.push(format!("kill pinned helper {pid}: {error}"));
             }
-            Ok(_) => {}
-            Err(error) => helper_cleanup_errors.push(error),
         }
     }
     if let Some(mut child) = executor {
@@ -446,9 +515,14 @@ exec /bin/sleep 300
     }
     let (status, helpers_reaped, remaining, output) =
         outcome.expect("address acquisition cancellation fixture failed");
+    let cancelled = match &status {
+        Some(WaitStatus::Exited(_, code)) => *code != 0,
+        Some(WaitStatus::Signaled(..)) => true,
+        _ => false,
+    };
 
     assert!(
-        status.is_some_and(|status| !status.success()) && helpers_reaped && remaining.is_empty(),
+        cancelled && helpers_reaped && remaining.is_empty(),
         "Ctrl+C during address acquisition must remove temporary host networking and reap \
          helper processes before the executor exits; exit={status:?}, \
          helpers_reaped={helpers_reaped}, remaining_links={remaining:?}\n{output}"

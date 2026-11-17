@@ -129,7 +129,7 @@ owner=$identity-$$
 marking=false
 backup=
 stage=
-record_stage=
+pending_file=
 defaults_backup=
 defaults_stage=
 created_config=
@@ -137,9 +137,8 @@ initialization_state=pre_restart
 
 cleanup()
 {
-    status=$?
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
     if [ -n "$veth_host" ] && [ -e "/sys/class/net/$veth_host" ]; then
         if [ "$(cat "/sys/class/net/$veth_host/ifalias")" = "$owner" ] ||
             { [ "$marking" = true ] &&
@@ -190,7 +189,7 @@ cleanup()
     elif [ "$status" -eq 0 ]; then
         status=1
     fi
-    for pending in "$stage" "$record_stage" "$defaults_stage"; do
+    for pending in "$stage" "$pending_file" "$defaults_stage"; do
         if [ -n "$pending" ]; then
             rm -f -- "$pending" || { [ "$status" -ne 0 ] || status=1; }
         fi
@@ -198,8 +197,8 @@ cleanup()
     exit "$status"
 }
 
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap 'status=$?; cleanup' EXIT
+trap 'status=1; cleanup' HUP INT TERM
 
 if [ "$server_config" != "$LXC_DHCP_CONFILE" ] ||
     ! grep -Fxq "$directive" "$LXC_DHCP_CONFILE"; then
@@ -241,16 +240,20 @@ if [ "$server_config" != "$LXC_DHCP_CONFILE" ] ||
         sh -n "$defaults_stage" || fail "The local lxc-net defaults did not pass validation"
     fi
     if [ -e "$LXC_DHCP_CONFILE" ]; then
-        cp -p -- "$LXC_DHCP_CONFILE" "$backup_path"
-        backup=$backup_path
+        pending_file=$backup_path
+        cp -p -- "$LXC_DHCP_CONFILE" "$pending_file"
+        backup=$pending_file
+        pending_file=
     else
         created_config=$LXC_DHCP_CONFILE
     fi
     mv -f -- "$stage" "$LXC_DHCP_CONFILE"
     stage=
     if [ -n "$defaults_stage" ]; then
-        cp -p -- "$defaults" "$defaults_backup_path"
-        defaults_backup=$defaults_backup_path
+        pending_file=$defaults_backup_path
+        cp -p -- "$defaults" "$pending_file"
+        defaults_backup=$pending_file
+        pending_file=
         mv -f -- "$defaults_stage" "$defaults"
         defaults_stage=
     fi
@@ -258,7 +261,7 @@ if [ "$server_config" != "$LXC_DHCP_CONFILE" ] ||
     initialization_state=restart_pending
 
     # Main dnsmasq configuration is not reloaded by SIGHUP.
-    timeout --signal=TERM --kill-after=2 30 systemctl restart lxc-net ||
+    timeout --foreground --signal=TERM --kill-after=2 30 systemctl restart lxc-net ||
         fail "Failed to enable the LXC reservation directory in local lxc-net"
     server=$(
         server_config=$LXC_DHCP_CONFILE
@@ -375,11 +378,11 @@ dnsmasq --test --conf-file=/dev/null --dhcp-host="$record" ||
 record_path=$state/.reservation-$$
 test ! -e "$record_path" && test ! -L "$record_path" ||
     fail "LXC reservation staging path already exists"
-record_stage=$record_path
-printf '# owner=%s\n%s\n' "$config" "$record" > "$record_stage"
-chmod 644 "$record_stage"
-mv -f -- "$record_stage" "$reservation"
-record_stage=
+pending_file=$record_path
+printf '# owner=%s\n%s\n' "$config" "$record" > "$pending_file"
+chmod 644 "$pending_file"
+mv -f -- "$pending_file" "$reservation"
+pending_file=
 server=$(server_pid)
 kill -HUP "$server" || fail "Failed to reload local lxc-net reservations"
 
