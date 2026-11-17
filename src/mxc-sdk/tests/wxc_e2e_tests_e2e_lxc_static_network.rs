@@ -126,3 +126,331 @@ fn existing_containers_keep_their_static_network_configuration() {
         );
     }
 }
+
+#[test]
+fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use nix::errno::Errno;
+    use nix::mount::{mount, MsFlags};
+    use nix::sched::{unshare, CloneFlags};
+    use nix::sys::signal::{kill, killpg, Signal};
+    use nix::unistd::Pid;
+    use serde_json::Value;
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    if !has_platform_exec() || !has_lxc_host() {
+        return;
+    }
+
+    let fixture = tempfile::Builder::new()
+        .prefix("lxc-cancel-address-")
+        .tempdir_in(".")
+        .expect("create address acquisition fixture");
+    let directory = fixture.path().canonicalize().expect("resolve fixture path");
+    let name = directory
+        .file_name()
+        .expect("fixture directory name")
+        .to_str()
+        .expect("fixture directory name is UTF-8");
+    let definition = format!("/var/lib/lxc/{name}/config");
+    if std::path::Path::new(&definition).exists() {
+        panic!("address acquisition fixture would overwrite an existing container: {name}");
+    }
+    let entered = directory.join("entered");
+    let read_links = || -> Result<Vec<Value>, String> {
+        let output = Command::new("ip")
+            .args(["-j", "-d", "link", "show"])
+            .output()
+            .map_err(|error| format!("read host links: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("host link observation failed: {output:?}"));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("decode host links: {error}; output={output:?}"))
+    };
+    let same_link = |left: &Value, right: &Value| left["ifindex"] == right["ifindex"];
+    let read_process = |pid: Pid| -> Result<Option<(Pid, u64)>, String> {
+        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("observe helper process {pid}: {error}")),
+        };
+
+        // After the command field, PPID and start time are fields 4 and 22.
+        let fields: Vec<_> = stat
+            .rsplit_once(") ")
+            .ok_or_else(|| format!("unreadable process stat for {pid}: {stat}"))?
+            .1
+            .split_whitespace()
+            .collect();
+        let parent = fields.get(1).and_then(|value| value.parse::<i32>().ok());
+        let started = fields.get(19).and_then(|value| value.parse::<u64>().ok());
+        match (parent, started) {
+            (Some(parent), Some(started)) => Ok(Some((Pid::from_raw(parent), started))),
+            _ => Err(format!("unreadable process identity for {pid}: {stat}")),
+        }
+    };
+    let before = read_links().expect("observe host links before address acquisition");
+    let mut temporary_links = Vec::new();
+    let mut owned_helpers = Vec::new();
+    let mut executor: Option<Child> = None;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let created = Command::new("/usr/bin/timeout")
+            .args(["--kill-after=1", "120", "lxc-create"])
+            .args([
+                "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", "amd64",
+            ])
+            .output()
+            .expect("create addressless container");
+        if !created.status.success() {
+            panic!("addressless container fixture creation failed: {created:?}");
+        }
+        let located = Command::new("sh")
+            .args(["-c", "command -v busybox"])
+            .output()
+            .expect("locate host BusyBox");
+        if !located.status.success() {
+            panic!("the DHCP fixture requires host BusyBox: {located:?}");
+        }
+        let busybox = fs::canonicalize(String::from_utf8_lossy(&located.stdout).trim())
+            .expect("resolve host BusyBox");
+        fs::create_dir(directory.join("original")).expect("create original BusyBox directory");
+        fs::copy(&busybox, directory.join("original/busybox"))
+            .expect("keep BusyBox available for non-DHCP applets");
+        let gate = directory.join("busybox-gate");
+
+        // Hold the DHCP client after its interface has been created.
+        fs::write(
+            &gate,
+            r#"#!/bin/sh
+if [ "$1" != udhcpc ]; then
+    exec "$MXC_E2E_FIXTURE/original/busybox" "$@"
+fi
+previous=
+interface=
+for argument do
+    if [ "$previous" = -i ] || [ "$previous" = --interface ]; then
+        interface=$argument
+        break
+    fi
+    previous=$argument
+done
+if [ -z "$interface" ]; then
+    echo "DHCP fixture did not receive an interface" >&2
+    exit 97
+fi
+ip -j -d link show dev "$interface" > "$MXC_E2E_FIXTURE/acquiring-link" || exit 98
+printf '%s\n' "$$" > "$MXC_E2E_FIXTURE/entered"
+exec /bin/sleep 300
+"#,
+        )
+        .expect("write blocking BusyBox fixture");
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o700))
+            .expect("make BusyBox fixture executable");
+        let config = json!({
+            "version": "0.9.0-alpha",
+            "containerId": name,
+            "containment": "lxc",
+            "process": { "commandLine": "true" },
+            "lifecycle": { "destroyOnExit": false },
+            "lxc": { "distribution": "alpine", "release": "3.23" },
+            "network": { "egress": { "default": "allow" } }
+        });
+        let output_path = directory.join("executor-output");
+        let output = fs::File::create(&output_path).expect("capture executor output");
+        let mut command = Command::new(wxc_e2e_tests::find_platform_exec().expect("find lxc-exec"));
+        command
+            .arg("--config-base64")
+            .arg(STANDARD.encode(config.to_string()))
+            .env("MXC_E2E_FIXTURE", &directory)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().expect("capture executor stdout"))
+            .stderr(output);
+
+        // SAFETY: Only namespace and mount syscalls run in the child before exec.
+        unsafe {
+            command.pre_exec(move || {
+                unshare(CloneFlags::CLONE_NEWNS).map_err(std::io::Error::from)?;
+                mount(
+                    None::<&str>,
+                    "/",
+                    None::<&str>,
+                    MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+                    None::<&str>,
+                )
+                .map_err(std::io::Error::from)?;
+                mount(
+                    Some(gate.as_path()),
+                    busybox.as_path(),
+                    None::<&str>,
+                    MsFlags::MS_BIND,
+                    None::<&str>,
+                )
+                .map_err(std::io::Error::from)
+            });
+        }
+        let started = Instant::now();
+        executor = Some(command.spawn().expect("start gated executor"));
+        let child = executor.as_mut().expect("executor was started");
+        let group = Pid::from_raw(child.id() as i32);
+        let client_pid = loop {
+            if let Some(pid) = fs::read_to_string(&entered)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+            {
+                break Pid::from_raw(pid);
+            }
+            if let Some(status) = child.try_wait().expect("observe executor before DHCP") {
+                panic!(
+                    "executor exited before reaching address acquisition: {status}\n{}",
+                    fs::read_to_string(&output_path).expect("read executor diagnostics")
+                );
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                panic!(
+                    "executor did not reach the DHCP gate within 30 seconds\n{}",
+                    fs::read_to_string(&output_path).expect("read executor diagnostics")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut ancestor = client_pid;
+        let mut helpers = Vec::new();
+        while ancestor != group {
+            if ancestor.as_raw() <= 1 {
+                panic!("gated DHCP client {client_pid} is not descended from executor {group}");
+            }
+            let (parent, started) = read_process(ancestor)
+                .expect("observe gated DHCP client ancestry")
+                .expect("gated DHCP client ancestry must still be alive");
+            helpers.push((ancestor, started));
+            ancestor = parent;
+        }
+        owned_helpers = helpers;
+        let client_links: Vec<Value> = serde_json::from_slice(
+            &fs::read(directory.join("acquiring-link")).expect("read DHCP interface observation"),
+        )
+        .expect("decode DHCP interface observation");
+        let client_link = client_links.first().expect("DHCP interface exists");
+        let during = read_links().expect("observe host links during address acquisition");
+        temporary_links = during
+            .iter()
+            .filter(|link| {
+                !before.iter().any(|original| same_link(original, link))
+                    && ((same_link(client_link, link) && client_link["address"] == link["address"])
+                        || (!client_link["link_index"].is_null()
+                            && link["ifindex"] == client_link["link_index"]
+                            && link["link_index"] == client_link["ifindex"]))
+            })
+            .cloned()
+            .collect();
+        if temporary_links.is_empty() {
+            panic!(
+                "DHCP gate was reached without newly created host networking; \
+                 client={client_link}, before={before:?}, during={during:?}"
+            );
+        }
+        kill(group, Signal::SIGINT).expect("send Ctrl+C to executor during address acquisition");
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("observe cancellation exit") {
+                break Some(status);
+            }
+
+            // Finish before the documented one-minute startup timeout can cancel the run.
+            if started.elapsed() >= Duration::from_secs(45) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let helpers_reaped = killpg(group, None) == Err(Errno::ESRCH)
+            && owned_helpers.iter().all(|(pid, started)| {
+                !read_process(*pid)
+                    .expect("observe owned DHCP helper after cancellation")
+                    .is_some_and(|(_, current)| current == *started)
+            });
+        let after = read_links().expect("observe host links at executor exit");
+        let remaining: Vec<_> = after
+            .iter()
+            .filter(|link| temporary_links.iter().any(|owned| same_link(owned, link)))
+            .cloned()
+            .collect();
+        (
+            status,
+            helpers_reaped,
+            remaining,
+            format!(
+                "{}\nhelpers at acquisition={owned_helpers:?}\n\
+                 links before={before:?}\nlinks during={during:?}\nlinks after={after:?}",
+                fs::read_to_string(output_path).expect("read executor output")
+            ),
+        )
+    }));
+    let mut helper_cleanup_errors = Vec::new();
+    for (pid, started) in &owned_helpers {
+        match read_process(*pid) {
+            Ok(Some((_, current))) if current == *started => {
+                if let Err(error) = kill(*pid, Signal::SIGKILL) {
+                    if error != Errno::ESRCH {
+                        helper_cleanup_errors.push(format!("kill owned helper {pid}: {error}"));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => helper_cleanup_errors.push(error),
+        }
+    }
+    if let Some(mut child) = executor {
+        let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Ok(current) = read_links() {
+        for link in current
+            .iter()
+            .filter(|link| temporary_links.iter().any(|owned| same_link(owned, link)))
+        {
+            let _ = Command::new("/usr/bin/timeout")
+                .args([
+                    "--kill-after=1",
+                    "5",
+                    "ip",
+                    "link",
+                    "delete",
+                    "dev",
+                    link["ifname"].as_str().expect("observed interface name"),
+                ])
+                .output();
+        }
+    }
+    let destroyed = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=1", "15", "lxc-destroy", "-n", name, "-f"])
+        .output();
+    let cleanup_links = read_links();
+    let fixture_network_removed = cleanup_links.as_ref().is_ok_and(|links| {
+        !temporary_links
+            .iter()
+            .any(|link| links.iter().any(|current| same_link(link, current)))
+    });
+    if !helper_cleanup_errors.is_empty()
+        || !fixture_network_removed
+        || std::path::Path::new(&definition).exists()
+    {
+        panic!(
+            "address acquisition fixture cleanup failed: helpers={helper_cleanup_errors:?}, \
+             links={cleanup_links:?}, container={destroyed:?}"
+        );
+    }
+    let (status, helpers_reaped, remaining, output) =
+        outcome.expect("address acquisition cancellation fixture failed");
+
+    assert!(
+        status.is_some_and(|status| !status.success()) && helpers_reaped && remaining.is_empty(),
+        "Ctrl+C during address acquisition must remove temporary host networking and reap \
+         helper processes before the executor exits; exit={status:?}, \
+         helpers_reaped={helpers_reaped}, remaining_links={remaining:?}\n{output}"
+    );
+}
