@@ -229,7 +229,7 @@ fn failed_startup_waits_for_cleanup_after_one_minute() {
                 std::thread::sleep(Duration::from_millis(25));
             }
             let cleanup_started = cleanup_entered.exists();
-            std::thread::sleep(Duration::from_secs(65).saturating_sub(started.elapsed()));
+            std::thread::sleep(Duration::from_secs(65));
             let running_during_cleanup = executor
                 .try_wait()
                 .expect("observe executor during cleanup")

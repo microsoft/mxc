@@ -20,10 +20,7 @@ use std::thread;
 #[cfg(target_os = "linux")]
 use std::{
     process::{Child, Command, Output, Stdio},
-    sync::{
-        atomic::{AtomicI32, AtomicU64},
-        mpsc, Arc,
-    },
+    sync::{atomic::AtomicU64, mpsc, Arc},
     time::{Duration, Instant},
 };
 
@@ -79,11 +76,7 @@ static DEADLINE_EPOCH: OnceLock<Instant> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static STARTUP_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "linux")]
-static CLEANUP_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_os = "linux")]
-static CLEANUP_EXIT_CODE: AtomicI32 = AtomicI32::new(124);
-#[cfg(target_os = "linux")]
-const EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(target_os = "linux")]
 struct StartupDeadline;
@@ -91,10 +84,6 @@ struct StartupDeadline;
 #[cfg(target_os = "linux")]
 impl Drop for StartupDeadline {
     fn drop(&mut self) {
-        let deadline = STARTUP_DEADLINE_MS.load(Ordering::Acquire);
-        if deadline != 0 {
-            arm_cleanup_deadline(deadline, 124);
-        }
         STARTUP_DEADLINE_MS.store(0, Ordering::Release);
     }
 }
@@ -187,35 +176,11 @@ pub(crate) fn record_startup_timeout() {
 }
 
 #[cfg(target_os = "linux")]
-fn arm_cleanup_deadline(deadline: u64, exit_code: i32) {
-    CLEANUP_EXIT_CODE.store(exit_code, Ordering::Release);
-    let _ = CLEANUP_DEADLINE_MS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        Some(if current == 0 {
-            deadline
-        } else {
-            current.min(deadline)
-        })
-    });
-}
-
-#[cfg(target_os = "linux")]
-fn run_deadline_guard(running: Arc<AtomicBool>) {
+fn cancel_timed_out_startup(running: Arc<AtomicBool>) {
     while running.load(Ordering::Acquire) {
         let now = elapsed_millis();
         let startup = STARTUP_DEADLINE_MS.load(Ordering::Acquire);
-        let cleanup = CLEANUP_DEADLINE_MS.load(Ordering::Acquire);
-        if (startup != 0 && now >= startup) || (cleanup != 0 && now >= cleanup) {
-            let code = if cleanup != 0 {
-                CLEANUP_EXIT_CODE.load(Ordering::Acquire)
-            } else {
-                124
-            };
-
-            // Locks, diagnostics, and buffered output must not delay the final exit.
-            unsafe { nix::libc::_exit(code) }
-        }
-
-        if startup != 0 && now >= startup.saturating_sub(10_000) {
+        if startup != 0 && now >= startup {
             if let Some(active) = ACTIVE_CONTAINER.get() {
                 if let Ok(_slot) = active.try_lock() {
                     if STARTUP_DEADLINE_MS.load(Ordering::Acquire) == startup
@@ -534,7 +499,7 @@ pub(crate) fn with_container_startup<T>(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let deadline = StartupDeadline;
     STARTUP_DEADLINE_MS.store(
-        elapsed_millis() + EXIT_TIMEOUT.as_millis() as u64,
+        elapsed_millis() + STARTUP_TIMEOUT.as_millis() as u64,
         Ordering::Release,
     );
 
@@ -570,7 +535,6 @@ pub(crate) fn with_container_startup<T>(
         }
         if result.is_ok() {
             slot.starting_container = None;
-            STARTUP_DEADLINE_MS.store(0, Ordering::Release);
             drop(deadline);
             return result;
         }
@@ -673,11 +637,11 @@ pub fn install() -> Result<(), String> {
     let guard_running = Arc::clone(&running);
     DEADLINE_EPOCH.get_or_init(Instant::now);
     if let Err(error) = thread::Builder::new()
-        .name("lxc-exit-deadline".into())
-        .spawn(move || run_deadline_guard(guard_running))
+        .name("lxc-startup-deadline".into())
+        .spawn(move || cancel_timed_out_startup(guard_running))
     {
         let _ = mask.thread_unblock();
-        return Err(format!("spawn lxc-exit-deadline thread: {error}"));
+        return Err(format!("spawn lxc-startup-deadline thread: {error}"));
     }
     match thread::Builder::new()
         .name("lxc-signal-cleanup".into())
@@ -710,10 +674,6 @@ fn run_watchdog(mask: SigSet) -> ! {
         } else {
             128 + sig as i32
         };
-        arm_cleanup_deadline(
-            elapsed_millis() + EXIT_TIMEOUT.as_millis() as u64,
-            exit_code,
-        );
         let (monitor, tool) = {
             let mut slot = lock_slot();
             STARTUP_CANCELLED.store(true, Ordering::Release);
@@ -727,9 +687,7 @@ fn run_watchdog(mask: SigSet) -> ! {
             lock_slot().starting_container = None;
         }
         if STARTUP_TIMED_OUT.load(Ordering::Acquire) {
-            write_fatal_diagnostic(
-                "LXC startup timed out.  MXC will exit at the one-minute deadline if cleanup remains blocked; unfinished containers may need manual cleanup.",
-            );
+            write_fatal_diagnostic("LXC startup timed out.  Cleaning up before exit.");
         }
         let _startup = STARTUP_LOCK
             .lock()
@@ -807,51 +765,6 @@ mod tests {
 
     fn set_watchdog_override(value: Option<bool>) {
         WATCHDOG_OVERRIDE.with(|slot| slot.set(value));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn earliest_fatal_deadline_exits_with_startup_and_active_locks_held() {
-        if std::env::var_os("MXC_TEST_FATAL_DEADLINE_CHILD").is_some() {
-            let _startup = STARTUP_LOCK.lock().unwrap();
-            let _active = lock_slot();
-            arm_cleanup_deadline(elapsed_millis() + EXIT_TIMEOUT.as_millis() as u64, 143);
-            arm_cleanup_deadline(
-                elapsed_millis() + Duration::from_secs(600).as_millis() as u64,
-                143,
-            );
-            run_deadline_guard(Arc::new(AtomicBool::new(true)));
-            unreachable!();
-        }
-
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "earliest_fatal_deadline_exits_with_startup_and_active_locks_held",
-                "--test-threads=1",
-            ])
-            .env("MXC_TEST_FATAL_DEADLINE_CHILD", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(75);
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break Some(status);
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(
-            status.and_then(|status| status.code()),
-            Some(143),
-            "MXC must keep its one-minute fatal deadline after a ten-minute rearm, even with cleanup locks held"
-        );
     }
 
     #[test]

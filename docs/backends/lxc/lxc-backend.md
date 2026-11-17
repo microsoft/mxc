@@ -26,6 +26,11 @@ ranges, or any mapping to outside ID 0.  Container root must map to a nonzero
 outside UID.  Validation failure prevents the workload from starting and
 triggers a container stop; a failed stop is reported.
 
+After one minute, `lxc-exec` requests startup cancellation and cleanup instead
+of forcing an exit.  Stop and destroy commands retain their 120-second limits;
+the startup timer does not interrupt cleanup.  A successfully started workload
+has no one-minute runtime limit.
+
 ## Prerequisites
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
