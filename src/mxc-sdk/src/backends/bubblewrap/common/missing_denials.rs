@@ -137,6 +137,13 @@ impl Drop for DenyPreparation {
 }
 
 /// Identity of a host object: its device and inode.
+///
+/// A caller that replaces this run's placeholder is normally caught here,
+/// because a different object carries a different inode. The exception is a
+/// filesystem that hands the freed inode straight back to the replacement. The
+/// change time cannot close that gap: a directory's change time moves whenever
+/// an entry is added to it, so this run's own multi-level placeholder would
+/// stop matching itself.
 type ObjectId = (u64, u64);
 
 /// Create the mount point for a missing denied entry and record what it made.
