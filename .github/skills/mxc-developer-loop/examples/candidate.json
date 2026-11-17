@@ -1,0 +1,18 @@
+{
+  "baseDigest": "<copy proposalContext.baseDigest>",
+  "evidenceDigest": "<copy proposalContext.evidenceDigest>",
+  "referenceDigest": "<copy proposalContext.referenceDigest>",
+  "changes": [
+    {
+      "field": "<exact changed leaf field; arrays count as one field>",
+      "reason": "<why this configuration change could address the observed failure; explain its full permission scope>",
+      "uncertainty": "<what is inferred rather than established and what the bounded retest will establish>",
+      "evidence": ["stderr"],
+      "reference": {
+        "file": "policy-1.0.0.md",
+        "section": "<relevant section, or cite a schema definition in the bundled schema instead>"
+      }
+    }
+  ],
+  "unresolved": []
+}
