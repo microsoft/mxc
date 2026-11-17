@@ -194,12 +194,13 @@ pub(crate) fn build_profile_with_terminals(
     );
     write_nested_pty_rules(&mut out, request);
     write_ui_rules(&mut out, request, capture.as_ref());
-    write_extra_seatbelt_rules(&mut out, request);
     write_custom_allows(&mut out, request, capture.as_ref());
 
-    // Setting denies follow every allow so no grant reopens them.
-    write_ui_policy_denies(&mut out, request, capture.as_ref());
+    // Setting denies follow every allow so no grant reopens them, except that
+    // V1 extraMachLookups entries still reach the Keychain servers.
     write_keychain_denies(&mut out, request, capture.as_ref());
+    write_extra_seatbelt_rules(&mut out, request);
+    write_ui_policy_denies(&mut out, request, capture.as_ref());
     write_nested_pty_denies(&mut out, request);
     write_custom_denies(&mut out, request);
 
@@ -804,8 +805,8 @@ fn write_keychain_rules(
     Ok(())
 }
 
-/// Without `keychainAccess`, deny the Keychain servers after every allow so
-/// that no broader Mach grant reaches them.
+/// Without `keychainAccess`, deny the Keychain servers after guiAccess and
+/// custom grants. `extraMachLookups` follows, so its entries keep their V1 effect.
 fn write_keychain_denies(
     out: &mut String,
     request: &ExecutionRequest,
@@ -2094,10 +2095,10 @@ mod tests {
         assert!(!p.contains("/private/var/db/mds"));
     }
 
-    /// The Keychain denies follow every broader Mach grant, so neither
-    /// guiAccess nor extraMachLookups reaches the Keychain servers.
+    /// guiAccess cannot reach the Keychain servers, but an extraMachLookups
+    /// entry still can, as in V1.
     #[test]
-    fn keychain_denies_follow_broader_mach_grants() {
+    fn keychain_denies_follow_gui_access_but_not_extra_lookups() {
         let mut r = req();
         r.policy.ui.disable = false;
         r.seatbelt = Some(SeatbeltConfig {
@@ -2108,7 +2109,9 @@ mod tests {
         let p = build_profile(&r).unwrap();
         let deny = p.find("keychainAccess=false: deny").expect("keychain deny");
         assert!(p.find("(allow mach-lookup)").unwrap() < deny);
-        assert!(p.find("extraMachLookups").unwrap() < deny);
+        let extra = p.find(";; --- extraMachLookups").unwrap();
+        assert!(deny < extra);
+        assert!(extra < p.find("ui.clipboard=none: deny").unwrap());
 
         r.seatbelt.as_mut().unwrap().keychain_access = true;
         let p = build_profile(&r).unwrap();

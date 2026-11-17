@@ -37,6 +37,16 @@ expect_absent "without extraMachLookups the uid does not resolve to a name" "$(i
 run_config "$(render seatbelt_opt_mach_lookup_present.json)"
 expect_ok "extraMachLookups reaches opendirectoryd" "$(id -un)"
 
+# V1 extraMachLookups entries reach the Keychain servers without
+# keychainAccess, while the default ui.clipboard deny still wins.
+run_config "$(render seatbelt_opt_mach_lookup_settings.json)"
+expect_ok "extraMachLookups reaches SecurityServer without keychainAccess" \
+    "com.apple.SecurityServer=ALLOWED"
+expect_ok "extraMachLookups reaches com.apple.securityd.* without keychainAccess" \
+    "com.apple.securityd.xpc=ALLOWED"
+expect_ok "ui.clipboard still blocks an extraMachLookups pasteboard entry" \
+    "com.apple.pasteboard.1=BLOCKED"
+
 # keychainAccess: HOME must be set either way, or Security.framework fails for
 # an unrelated reason and both halves look identical.
 run_config "$(render seatbelt_opt_keychain_off.json HOME "$HOME")"

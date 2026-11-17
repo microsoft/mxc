@@ -389,12 +389,6 @@ pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), 
                 .to_string(),
         );
     }
-    check_setting_conflicts(
-        request,
-        CustomNameKind::MachLookup,
-        ("seatbelt.extraMachLookups", &config.extra_mach_lookups),
-        ("", &[]),
-    )?;
     for (field, rules, kind) in sets {
         let allow_list = format!("seatbelt.{field}.allow");
         let deny_list = format!("seatbelt.{field}.deny");
@@ -921,6 +915,21 @@ mod tests {
         assert!(msg.contains("customMachLookups.allow"), "{msg}");
     }
 
+    /// V1 extraMachLookups entries are not checked against settings.
+    #[test]
+    fn accepts_extra_lookups_that_settings_deny() {
+        let mut request = seatbelt_request(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.apple.SecurityServer".into(),
+                "com.apple.pasteboard.1".into(),
+                "com.apple.windowserver.active".into(),
+            ],
+            ..Default::default()
+        });
+        request.policy.ui.disable = true;
+        validate_seatbelt_custom_rules(&request).unwrap();
+    }
+
     /// Explicit settings decide their own names; custom lists cannot
     /// contradict them.
     #[test]
@@ -934,14 +943,6 @@ mod tests {
             (
                 lookups(&["com.apple.securityd.xpc*"], &[]),
                 "customMachLookups.allow",
-                "keychainAccess",
-            ),
-            (
-                SeatbeltConfig {
-                    extra_mach_lookups: vec!["com.apple.securityd".into()],
-                    ..Default::default()
-                },
-                "extraMachLookups",
                 "keychainAccess",
             ),
             (
@@ -960,14 +961,6 @@ mod tests {
             (
                 lookups(&["com.apple.pasteboard.*"], &[]),
                 "customMachLookups.allow",
-                "ui.clipboard",
-            ),
-            (
-                SeatbeltConfig {
-                    extra_mach_lookups: vec!["com.apple.pasteboard.2".into()],
-                    ..Default::default()
-                },
-                "extraMachLookups",
                 "ui.clipboard",
             ),
             (

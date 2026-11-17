@@ -361,7 +361,7 @@ Set under a top-level `"seatbelt"` key.
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules, and rejects an override that contains their `com.microsoft.mxc.run.` names. Last resort. |
-| `extraMachLookups` | string[] | `[]` | **Deprecated in `1.1.0-alpha`: use `customMachLookups.allow`.** Additional Mach services the sandbox may look up, as exact `global-name` values. Names starting with `com.microsoft.mxc.run.` are rejected. |
+| `extraMachLookups` | string[] | `[]` | **Deprecated in `1.1.0-alpha`: use `customMachLookups.allow`.** Additional Mach services the sandbox may look up, as exact `global-name` values. Names starting with `com.microsoft.mxc.run.` are rejected. An entry for a Keychain server is granted even without `keychainAccess`; `ui.clipboard` and `ui.disable` still block their services. |
 | `customMachLookups` | object | unset | **Requires config version `1.1.0-alpha`.** Mach services the sandbox may look up. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
 | `customMachRegisters` | object | unset | **Requires config version `1.1.0-alpha`.** Mach services the sandbox may register, split into `global` and `local` names. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
 | `customIoKits` | object | unset | **Requires config version `1.1.0-alpha`.** IOKit user-client classes the sandbox may open. See [Custom Mach, IOKit, and shared memory lists](#custom-mach-iokit-and-shared-memory-lists). |
@@ -610,7 +610,6 @@ MXC rejects a config when:
   omitted (for
   example `com.apple.SecurityServer` without `keychainAccess`, or
   `IOHIDLibUserClient` with `ui.injection: false`). Change that setting instead.
-  This check also applies to `extraMachLookups`;
 - a `deny` entry would block something an explicit setting grants (for example
   the pasteboard with `ui.clipboard` enabled, `IOHIDLibUserClient` with
   `ui.injection: true`, or a Keychain helper such as `com.apple.trustd` with

@@ -375,11 +375,6 @@ change is intentional.
 In `captureDenials` `"allow"` mode, omitted settings allow and report access
 instead, so the report shows what they would block.
 
-The Seatbelt backend also rejects an `extraMachLookups` entry that names only
-a service a setting denies, written or by default, such as
-`com.apple.SecurityServer` without `keychainAccess: true`. Change that setting
-instead.
-
 This exception applies within V1 and does not require a new versioned API
 surface.
 
