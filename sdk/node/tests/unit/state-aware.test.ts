@@ -7,7 +7,6 @@ import { PassThrough } from 'node:stream';
 import {
   deprovisionContainer,
   spawnInContainer,
-  spawnInContainerWithStdin,
   runInContainer,
   spawnInContainerWithPty,
   provisionContainer,
@@ -136,18 +135,18 @@ function installStateAwareExecBinding(
   request: () => Record<string, unknown>;
   experimental: () => boolean;
   timeout: () => number | undefined;
-  stdin: () => boolean | undefined;
+  forRun: () => boolean | undefined;
 } {
   let binding: FakeStateAwareExecBinding | undefined;
   let requestJson: string | undefined;
   let experimental = false;
   let timeoutMs: number | undefined;
-  let withStdin: boolean | undefined;
-  _setStateAwareBindingSandboxProcessFactory((request, allowExperimental, timeout, stdin) => {
+  let forRunMode: boolean | undefined;
+  _setStateAwareBindingSandboxProcessFactory((request, allowExperimental, timeout, forRun) => {
     requestJson = request;
     experimental = allowExperimental;
     timeoutMs = timeout;
-    withStdin = stdin;
+    forRunMode = forRun;
     binding = createBinding();
     return new MxcProcess(binding, timeout);
   });
@@ -162,7 +161,7 @@ function installStateAwareExecBinding(
     },
     experimental: () => experimental,
     timeout: () => timeoutMs,
-    stdin: () => withStdin,
+    forRun: () => forRunMode,
   };
 }
 
@@ -811,6 +810,7 @@ timeoutMs: 250 },
     assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello', timeout: 250 });
     assert.strictEqual(exec.request().correlationVector, undefined);
     assert.strictEqual(exec.timeout(), 250);
+    assert.strictEqual(exec.forRun(), true, 'a captured run starts without writable stdin');
     assert.strictEqual(exec.binding().freed, true);
   });
 
@@ -933,22 +933,7 @@ timeoutMs: 123 },
       assert.deepStrictEqual(exec.request().process, { commandLine: 'echo live', timeout: 123 });
       assert.strictEqual(exec.experimental(), false);
       assert.strictEqual(exec.timeout(), 123);
-      assert.strictEqual(exec.stdin(), false);
-    } finally {
-      proc.dispose();
-    }
-  });
-
-  it('asks the native runtime for a writable stdin only through spawnInContainerWithStdin', async () => {
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(22, '', '', 0, { exitCode: 0, timedOut: false }),
-    );
-    const id = 'wslc:0123456789abcdef0123456789abcdef' as ContainerId<'wslc'>;
-    const proc = await spawnInContainerWithStdin(id, { command: 'cat' });
-
-    try {
-      assert.strictEqual(exec.stdin(), true);
-      assert.deepStrictEqual(exec.request().process, { commandLine: 'cat' });
+      assert.strictEqual(exec.forRun(), false);
     } finally {
       proc.dispose();
     }

@@ -12,6 +12,8 @@ pub enum Containment {
     MicroVm,
     /// WSL container backend.
     Wslc,
+    /// Development W365 Agents contract; runtime support is not yet available.
+    W365Agents,
 }
 
 impl Containment {
@@ -22,6 +24,7 @@ impl Containment {
             Containment::WindowsSandbox => "windows_sandbox",
             Containment::MicroVm => "microvm",
             Containment::Wslc => "wslc",
+            Containment::W365Agents => "w365_agents",
         }
     }
 
@@ -34,6 +37,7 @@ impl Containment {
             "windows_sandbox" => Some(Containment::WindowsSandbox),
             "microvm" => Some(Containment::MicroVm),
             "wslc" => Some(Containment::Wslc),
+            "w365_agents" => Some(Containment::W365Agents),
             _ => None,
         }
     }

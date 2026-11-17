@@ -108,6 +108,8 @@ match the pinned SDK.
    cargo test -p mxc-sdk --features wslc --lib wslc::common   # includes ABI size/enum asserts
    cargo fmt --all -- --check
    cargo clippy -p mxc-sdk --features wslc --all-targets -- -D warnings
+   cd ..
+   .\scripts\generate-wslc-bindings.ps1 -Check
    ```
 
 7. **Run the WSLC E2E suite on a live WSL host** (cannot run in GitHub Actions —

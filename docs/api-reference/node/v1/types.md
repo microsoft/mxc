@@ -828,6 +828,27 @@ export interface SpawnWithPtyOptions {
 ```
 
 
+## `@microsoft/mxc-sdk/v1::SpawnStdio`
+
+How `spawnWithExtendedOptions` connects the workload's standard streams.
+
+```typescript
+export type SpawnStdio = 'pipes' | 'inherit';
+```
+
+
+## `@microsoft/mxc-sdk/v1::SpawnExtendedOptions`
+
+Invocation controls for spawnWithExtendedOptions.
+
+```typescript
+export interface SpawnExtendedOptions {
+  telemetry?: TelemetryConfig;
+  stdio?: SpawnStdio; // defaults to 'pipes'
+}
+```
+
+
 
 ## `@microsoft/mxc-sdk/v1::StartOptions`
 
@@ -856,7 +877,7 @@ export interface StopOptions {
 
 ## `@microsoft/mxc-sdk/v1::TelemetryConfig`
 
-Telemetry configuration for TraceLogging ETW support.
+Compatibility preference; does not control Required telemetry.
 
 ```typescript
 export interface TelemetryConfig {

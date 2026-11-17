@@ -72,3 +72,5 @@ mod state_aware;
 mod state_aware_provision;
 #[path = "v1_1_0_alpha/wslc.rs"]
 mod wslc;
+#[path = "v1_1_0_alpha/w365_agents.rs"]
+mod w365_agents;

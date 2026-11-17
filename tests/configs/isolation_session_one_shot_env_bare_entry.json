@@ -1,0 +1,21 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "isolation-session-one-shot-env-bare-entry",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "if defined TEMP (echo TEMP_PRESENT & exit /b 0) else (echo TEMP_MISSING & exit /b 42)",
+    "env": ["TEMP"],
+    "inheritDefaultEnv": true,
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
+}

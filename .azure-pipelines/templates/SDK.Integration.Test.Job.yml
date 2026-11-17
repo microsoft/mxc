@@ -50,8 +50,6 @@ jobs:
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/node/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
-      # Cache npm package downloads across runs (see Package.NpmSdk.Job.yml).
-      npm_config_cache: $(Pipeline.Workspace)/.npm
 
     steps:
       - checkout: self
@@ -60,14 +58,6 @@ jobs:
         displayName: Use Node.js ${{ target.nodeVersion }}
         inputs:
           version: ${{ target.nodeVersion }}
-
-      - task: Cache@2
-        displayName: Cache npm
-        inputs:
-          key: 'npm | "$(Agent.OS)" | sdk/node/tests/integration/package-lock.json'
-          restoreKeys: |
-            npm | "$(Agent.OS)"
-          path: $(npm_config_cache)
 
       - task: DownloadPipelineArtifact@2
         displayName: Download SDK package
@@ -81,9 +71,6 @@ jobs:
           SourceFolder: '$(Build.SourcesDirectory)/.azure-pipelines/.npm'
           Contents: '.npmrc'
           TargetFolder: '$(integrationDirectory)'
-          # Overwrite the repo's committed .npmrc (install-links=true) with the
-          # Azure feed/auth .npmrc. The integration job installs the SDK from a
-          # packed tarball, so it does not need install-links.
           overWrite: true
 
       - task: NpmAuthenticate@0
@@ -93,8 +80,10 @@ jobs:
 
       - pwsh: |
           $sdkTgz = (Get-Item "$(sdkPkgDirectory)/*.tgz").FullName
-          npm ci
+          npm ci --install-links
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm install $sdkTgz
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         workingDirectory: $(integrationDirectory)
         displayName: Install dependencies and SDK from artifact
 
@@ -104,11 +93,37 @@ jobs:
 
       - ${{ if eq(target.os, 'linux') }}:
         - script: |
+            set -euo pipefail
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+          displayName: Install W365 native TLS build dependencies
+
+      - template: Rust.Toolchain.Public.yml@self
+        parameters:
+          ${{ if eq(target.os, 'windows') }}:
+            targetTriple: x86_64-pc-windows-msvc
+          ${{ if eq(target.os, 'linux') }}:
+            targetTriple: x86_64-unknown-linux-gnu
+          ${{ if eq(target.os, 'macos') }}:
+            targetTriple: aarch64-apple-darwin
+
+      - template: Cargo.Setup.Public.yml@self
+
+      - pwsh: ./scripts/ci/run-w365-node-fixture.ps1
+        workingDirectory: $(Build.SourcesDirectory)
+        displayName: Test W365 Dev JSON with an isolated native TLS fixture
+
+      - ${{ if eq(target.os, 'linux') }}:
+        - script: |
             sudo apt-get update -qq
-            sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns iproute2
+            sudo apt-get install -y -qq lxc dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
-        - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+        - script: |
+            set -euo pipefail
+            sudo env "PATH=$PATH" \
+              MXC_SKIP_LXC_NETWORK_TESTS=1 \
+              MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
 
@@ -119,6 +134,8 @@ jobs:
           env:
             MXC_DEBUG: ${{ parameters.debug }}
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+            MXC_SDK_PACKAGE_DIR: $(sdkPkgDirectory)
+            MXC_NVX_PACKAGE_DIR: $(sdkPkgDirectory)/nvx
 
       - ${{ if eq(target.os, 'macos') }}:
         # Restore execute bit on the mac binary; pipeline artifact

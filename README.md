@@ -137,16 +137,17 @@ deny-and-record diagnostics, audit outputs, and supported workflows.
 
 ## Telemetry
 
-Official Microsoft builds send Required diagnostic data to Microsoft for the
-development `1.1.0-alpha` request contract. MXC is moving to Required telemetry
-to keep MXC secure, reliable, and up to date: four events describe execution
+Eligible Windows builds send Required diagnostic data to Microsoft for all
+supported request contracts: `0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha`.
+MXC uses Required telemetry to keep MXC secure, reliable, and up to date:
+four events describe execution
 start and end, categorized failures, and process exits. They need no user
 consent or per-request opt-in, and administrative policy does not block them.
 
-Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
-unless the run opts in, the Windows user has consented, and administrative
-policy permits collection. An administrator can block that telemetry but cannot
-grant consent for the user.
+Only those four events are collected for supported contracts. Existing
+consent-management APIs and commands remain available, but their state does not
+enable or disable Required collection. Local diagnostic and denial reports
+remain separate.
 
 Local open-source debug builds are not configured to route telemetry to
 Microsoft. Windows release builds from source use the bundled signed telemetry

@@ -255,7 +255,8 @@ fn platform_support_linux_reports_the_backends_it_can_launch() {
 #[test]
 fn platform_support_windows_matches_processcontainer_availability() {
     let support = platform_support();
-    let process_container_available = mxc_sdk::v1::available_backends()
+    let backends = mxc_sdk::v1::available_backends();
+    let process_container_available = backends
         .iter()
         .any(|backend| backend.backend == "processcontainer");
     assert_eq!(
@@ -271,6 +272,20 @@ fn platform_support_windows_matches_processcontainer_availability() {
             Some("processcontainer")
         );
     }
+    let microvm_available = backends.iter().any(|backend| backend.backend == "microvm");
+    assert_eq!(
+        support
+            .available_methods
+            .iter()
+            .any(|method| method == "microvm"),
+        microvm_available,
+        "MicroVM discovery must agree across the public SDK APIs"
+    );
+    #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
+    assert!(
+        !microvm_available,
+        "MicroVM must not be reported when its backend is not compiled in"
+    );
     // Beyond processcontainer, only the opt-in backends may appear.
     // `windows_sandbox` is a host-capability backend reported by
     // `available_backends()`, not here — so assert it never leaks into this
@@ -279,10 +294,10 @@ fn platform_support_windows_matches_processcontainer_availability() {
         assert!(
             matches!(
                 method.as_str(),
-                "processcontainer" | "wslc" | "isolation_session"
+                "processcontainer" | "wslc" | "isolation_session" | "microvm"
             ),
             "unexpected Windows method (only processcontainer plus the opt-in \
-             wslc / isolation_session are SDK-launchable): {method}"
+             wslc / isolation_session / microvm are SDK-launchable): {method}"
         );
     }
 }

@@ -1,0 +1,20 @@
+name: WSLC Gateway Image Check
+
+on:
+  workflow_call:
+
+jobs:
+  check:
+    name: Reproduce committed images
+    # The script builds with the x64 Windows host toolchain, which the
+    # committed image IDs depend on.
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - name: Check committed gateway images
+        shell: pwsh
+        run: scripts/build-wslc-gateway-image.ps1 -Check

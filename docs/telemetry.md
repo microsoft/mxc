@@ -4,7 +4,7 @@
 
 MXC collects Required diagnostic data on supported Windows builds to help keep the component secure, reliable, up to date, and functioning as expected.
 
-Existing published contracts retain their current behavior, as described under [Availability and compatibility](#availability-and-compatibility).
+Required collection applies to all supported request contracts, as described under [Availability and compatibility](#availability-and-compatibility).
 
 ## Required diagnostic data
 
@@ -33,24 +33,18 @@ The Required diagnostic-data notification explains the collection; it does not a
 
 Automatic Required collection applies only to supported Windows builds configured and approved for Microsoft telemetry routing. Windows release builds from source use the signed telemetry component bundled in the repository and are routed; debug builds are not. To build a release without routing, set `MXC_TELEMETRY_COMPONENT_PATH` to an empty value. MXC telemetry remains unavailable on macOS and Linux.
 
-Required collection is introduced through a versioned contract. Existing published contracts retain their current explicit opt-in, consent, and administrative-policy behavior, which is unchanged.
+Requests using `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha` collect only the four Required events. This includes V1 SDK requests targeting `1.0.0`. Omitting `telemetry`, setting `telemetry.enabled` to `false`, withdrawing consent, or configuring administrative policy does not disable these events.
 
-## Administrative policy for published contracts
+This changes the earlier optional-collection behavior of `0.9.0-alpha` and `1.0.0`. Their JSON fields remain accepted, but no longer control Required collection. Local denial reports, audit artifacts, and diagnostic logs are unchanged; verbose denial data is not sent as telemetry for these contracts.
 
-For published contracts, an administrator can restrict collection with the `REG_DWORD` value `AllowTelemetry` under `HKLM\SOFTWARE\Policies\Mxc`. MXC does not read the Windows diagnostic-data setting.
+## Consent-management compatibility
 
-| Value | Effect |
-|---|---|
-| Not set | No restriction. Collection still needs request opt-in and MXC consent. |
-| `0` | Blocks collection. |
-| `1` | Blocks collection. |
-| `3` | Permits collection, subject to request opt-in and MXC consent. |
-| Any other value, wrong type, or read failure | Blocks collection. |
+The existing consent-management APIs and CLI remain available and continue to read and persist consent and report the MXC administrative policy. These results describe consent state, not whether Required events are collected. MXC does not change existing consent records or infer grants.
 
-The four Required events of the development contract are not affected by this policy.
+Internal requests without source-contract attribution retain their existing optional behavior: collection requires request opt-in, current MXC consent, provider availability, and a permitting `REG_DWORD` value `AllowTelemetry` under `HKLM\SOFTWARE\Policies\Mxc`. An absent value imposes no restriction; only value `3` explicitly permits collection. Other values, wrong types, and read failures block that optional path. None of these settings controls Required events. JSON version validation is unchanged.
 
 ## See also
 
 - [Telemetry architecture](development/architecture/telemetry.md)
 - [Lifecycle correlation](development/architecture/telemetry.md#correlating-a-lifecycle)
-- [Telemetry consent design for existing contracts](development/architecture/telemetry-consent-design.md)
+- [Telemetry consent-management design](development/architecture/telemetry-consent-design.md)

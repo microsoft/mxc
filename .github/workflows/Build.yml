@@ -50,6 +50,10 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
+  wslc-gateway-image-check:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/WSLC.Gateway.Image.Check.Job.yml
+
   sdk-unit-tests:
     needs: package-lock-check
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml

@@ -105,11 +105,16 @@ fn workload_can_still_ping() {
         return;
     }
 
+    // A packaged CAP_NET_RAW+ep ping cannot exec after the bounding-set drop.
+    // Use a copy without file capabilities to exercise unprivileged ICMP.
+    let command = "install -m 0755 \"$(command -v ping)\" /tmp/mxc-ping \
+                   && /tmp/mxc-ping -c 1 127.0.0.1";
+
     let config = json!({
         "version": "0.9.0-alpha",
         "containerId": "lxc-ping-allowed",
         "containment": "lxc",
-        "process": { "commandLine": "ping -c 1 127.0.0.1" },
+        "process": { "commandLine": command },
         "lifecycle": { "destroyOnExit": true },
         "lxc": { "distribution": "ubuntu", "release": "noble" },
         "network": {

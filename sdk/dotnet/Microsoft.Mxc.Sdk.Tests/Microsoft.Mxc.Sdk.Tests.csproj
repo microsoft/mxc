@@ -20,6 +20,7 @@
     <MxcTestCargoFeatures>dotnetsdk test-support</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
+    <MxcTestCargoFeatures Condition="'$(MxcWithMicrovm)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) mxc-sdk/microvm</MxcTestCargoFeatures>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="'$(MxcTestNativeFileName)' == ''">libmxc_ffi.so</MxcTestNativeFileName>

@@ -40,6 +40,7 @@ fn provision_dispatch(
     isolation_session: Value,
     microvm: Value,
     wslc: Value,
+    w365_agents: Value,
 ) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
@@ -53,7 +54,11 @@ fn provision_dispatch(
                 branch(
                     discriminator("containment", "wslc"),
                     wslc,
-                    Value::Bool(false),
+                    branch(
+                        discriminator("containment", "w365_agents"),
+                        w365_agents,
+                        Value::Bool(false),
+                    ),
                 ),
             ),
         ),
@@ -170,13 +175,20 @@ pub fn development_schema() -> Value {
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
     let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
+    let w365_agents = subschema::<super::W365AgentsProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
     let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, microvm, wslc);
+    let provision = provision_dispatch(
+        windows_sandbox,
+        isolation_session,
+        microvm,
+        wslc,
+        w365_agents,
+    );
     let state_aware = phase_dispatch(
         session_dispatch(wslc_session),
         provision,
@@ -216,6 +228,7 @@ mod tests {
         "IsolationSessionProvisionRequest",
         "MicroVmProvisionRequest",
         "WslcProvisionRequest",
+        "W365AgentsProvisionRequest",
         "StartRequest",
         "ExecRequest",
         "StopRequest",
@@ -236,6 +249,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "provision"),
                 ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
+                ("W365AgentsProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
@@ -248,6 +262,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
+                ("W365AgentsProvisionRequest", "w365_agents"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,

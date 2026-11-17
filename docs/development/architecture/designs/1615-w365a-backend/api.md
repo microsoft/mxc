@@ -12,10 +12,13 @@ SDK calls run in-process with experimental opt-in on each call.
 **The SDK is optional:** `wxc-exec` supports the same lifecycle with synchronous
 stdio relay; callers need not mix interfaces.
 
-Invocation signatures and result types are unchanged. The only public API
-additions are optional Rust/.NET error details; Node's existing member is
-preserved. These are proposed capabilities, not working W365 examples.
+Invocation signatures, result types and .NET error properties are unchanged.
+Existing native structured details are retained, and rejected checkout errors
+also include any valid cleanup ID in their message.
 Typed W365 configuration and contract publication remain out of scope.
+
+For currently supported operations and usage, see the
+[backend guide](../../../../backends/w365agents/w365agents-backend.md).
 
 ## Caller scenario
 
@@ -62,8 +65,10 @@ are application JSON builders, not new SDK APIs.
    Stop is an alternative terminal release, not suspension or stop/start reuse.
 
 Persistence is omitted from the snippets. They stop on nonzero exits/timeouts,
-which are command results; SDK failures raise errors. They also retain a rejected
-checkout's `details.sandboxId` for release without start/exec, and report primary
+which are command results; SDK failures raise errors. Existing structured details may retain a rejected
+checkout's `sandboxId`; the Provision error message also includes a valid
+returned cleanup ID for explicit release without start/exec. .NET callers use
+`MxcException.Message` rather than a new error property. Report primary
 and cleanup failures separately. Without a valid ID, do not invent one or retry
 checkout automatically. Retain IDs after failed/uncertain release; acceptance
 does not prove reset/sanitization. See [errors and recovery](#errors-and-recovery).
@@ -170,11 +175,8 @@ try
 catch (Exception error)
 {
     primary = error;
-    if (sandboxId is null && error is MxcException sdkError
-        && sdkError.Details is JsonElement details
-        && details.TryGetProperty("sandboxId", out var id)
-        && id.ValueKind == JsonValueKind.String)
-        sandboxId = id.GetString();
+    // A failed Provision may report a cleanup ID in Message for explicit release.
+    Console.Error.WriteLine(error.Message);
     throw;
 }
 finally
@@ -272,32 +274,25 @@ Neither path automatically releases the Cloud PC.
 
 ## Proposed signatures and types
 
-Lifecycle/execution signatures, options and results are unchanged; their
-declarations are in the versioned Dev references linked below. Only error
-metadata changes. Rust's error is non-exhaustive, .NET gains a read-only
-optional property, and Node retains its existing member; no new API major
-version is needed.
+Lifecycle/execution signatures, options, results and .NET error properties
+are unchanged; their declarations are in the versioned Dev references linked
+below. Native structured error details remain available where already exposed.
+Provision messages include a valid returned cleanup ID, without adding an
+SDK-specific recovery type or requiring a new API major version.
 
 ### Rust
 
 Use [`mxc_sdk::v1::dev`](../../../../api-reference/rust/v1/dev.md);
-results/errors belong to `mxc_sdk::v1`. Add to its non-exhaustive `Error`:
-
-```rust
-pub details: Option<serde_json::Value>
-```
+results/errors belong to `mxc_sdk::v1`. Its non-exhaustive `Error` retains
+native structured details alongside its message.
 
 ### .NET
 
 Use [`Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle`](../../../../api-reference/dotnet/v1/dev.md);
-results/errors belong to `Microsoft.Mxc.Sdk.V1`. Add to its `MxcException`,
-using `System.Text.Json.JsonElement`:
-
-```csharp
-public JsonElement? Details { get; }
-```
-
-The SDK owns a clone independent of parsing-document/native-buffer lifetime.
+results/errors belong to `Microsoft.Mxc.Sdk.V1`. `MxcException.Message`
+contains the backend message, including any valid cleanup ID returned with a
+failed Provision. No `Details` property is required for this stage. Retain the
+message for diagnosis and explicit cleanup; it is not a structured parsing API.
 
 ### Node
 
@@ -336,19 +331,21 @@ large/continuous output.
 
 ### Errors and recovery
 
-Existing error types/fields remain. Backend-defined `details` objects preserve
-unknown fields; absence is Rust `None`, .NET null or Node undefined, not proof
-that a remote operation had no effect. Preserve `details.code`,
-`possiblySucceeded`, HTTP/request context and rejected-checkout cleanup IDs
-(`poolId`, `sessionId`, `sandboxId`) as defined in the
+Existing error types/fields remain. Native backend-defined `details` objects
+retain `code`, `possiblySucceeded`, HTTP/request context and rejected-checkout
+cleanup IDs (`poolId`, `sessionId`, `sandboxId`) as defined in the
 [identity](README.md#container-identity) and [recovery](README.md#resource-ownership-and-failure-recovery)
-sections. Never fabricate a missing ID.
+sections. Provision messages also contain a valid returned cleanup ID so it
+is available through every SDK's existing message property. Missing details or
+an absent ID do not prove that the remote operation had no effect.
+Never fabricate a missing ID.
 
 Carry details through lifecycle, exec launch, I/O/wait and capture, retaining
 internal `MxcError` until the SDK boundary without an engine dependency in
 `mxc_common`. Rust `std::io::Error` retains the SDK `Error` as its typed inner
 error (`get_ref`/`downcast_ref`); Dev capture converts it back without loss.
-Native transport preserves details for .NET/Node.
+The existing .NET/Node native error transport preserves the message; this
+stage does not add structured-detail transport or enlarge the C ABI.
 
 Failed capture returns an error, not partial success; already-read spawned output
 remains the caller's. Kill reports unsupported remote termination. Local
@@ -380,10 +377,9 @@ deferral. Rust Dev/stream-adapter/FFI, Node unit/integration and .NET tests must
 invoke real in-process Dev paths against the service fixture, not merely check
 JSON construction. Run executor examples separately.
 
-Add cross-SDK error-conversion and native-buffer-lifetime checks; retain
-ABI/other-backend regressions. Any serialized .NET error DTOs must use
-`MxcJsonContext`/`MxcJson` and extend `Microsoft.Mxc.Sdk.AotSmokeTest`, without
-reflection-dependent serialization.
+Add cross-SDK checks for Provision error messages, valid and missing cleanup
+IDs, and native-buffer lifetime; retain ABI/other-backend regressions. No new
+.NET error DTO or serialized SDK type is required.
 
 Implementation documentation updates:
 
@@ -396,7 +392,7 @@ Implementation documentation updates:
 - Versioned V1 type/error references for
   [Rust](../../../../api-reference/rust/v1/types.md),
   [.NET](../../../../api-reference/dotnet/v1/types.md), and
-  [Node](../../../../api-reference/node/v1/types.md): additive error details
+  [Node](../../../../api-reference/node/v1/types.md): existing error fields
   and their ownership/mapping, without adding typed W365 configuration.
 
 ## Review checklist
