@@ -7,10 +7,6 @@ use std::time::{Duration, Instant};
 
 use crate::bwrap_common::proxy_network::{has_exited_unreaped, STARTUP_TIMEOUT};
 
-// CapBnd can stay non-empty: Bubblewrap clears it only up to the newest
-// capability it was built with, and no-new-privileges keeps exec from granting the rest.
-const EMPTY_SETS: [&str; 4] = ["CapInh", "CapPrm", "CapEff", "CapAmb"];
-
 pub(crate) fn wait_for_capability_drop(child_pid: u32, launcher: &Child) -> Result<(), String> {
     let path = format!("/proc/{child_pid}/status");
     let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -46,17 +42,34 @@ fn capabilities_dropped(status: &str) -> Result<bool, String> {
             .lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
             .map(str::trim)
-            .ok_or_else(|| format!("Bubblewrap: the sandbox's process status has no {name} field"))
     };
-    for name in EMPTY_SETS {
-        let value = field(name)?;
-        let mask = u64::from_str_radix(value, 16)
-            .map_err(|error| format!("Bubblewrap: unreadable {name} value '{value}': {error}"))?;
-        if mask != 0 {
+    let empty = |name: &str| -> Result<bool, String> {
+        let value = field(name).ok_or_else(|| {
+            format!("Bubblewrap: the sandbox's process status has no {name} field")
+        })?;
+        u64::from_str_radix(value, 16)
+            .map(|mask| mask == 0)
+            .map_err(|error| format!("Bubblewrap: unreadable {name} value '{value}': {error}"))
+    };
+
+    for name in ["CapInh", "CapPrm", "CapEff"] {
+        if !empty(name)? {
             return Ok(false);
         }
     }
-    Ok(field("NoNewPrivs")? == "1")
+
+    // Kernels before 4.3 have no ambient set.
+    if field("CapAmb").is_some() && !empty("CapAmb")? {
+        return Ok(false);
+    }
+
+    // Bubblewrap clears CapBnd only up to the newest capability it knows, and
+    // no-new-privileges keeps exec from granting the rest. Kernels before 4.10
+    // do not report NoNewPrivs.
+    match field("NoNewPrivs") {
+        Some(value) => Ok(value == "1"),
+        None => empty("CapBnd"),
+    }
 }
 
 fn capability_summary(status: &str) -> String {
@@ -82,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn a_held_capability_or_missing_no_new_privileges_is_not_dropped() {
+    fn a_held_capability_or_unset_no_new_privileges_is_not_dropped() {
         for (from, to) in [
             ("CapInh:\t0000000000000000", "CapInh:\t0000000000000400"),
             ("CapPrm:\t0000000000000000", "CapPrm:\t000001ffffffffff"),
@@ -98,9 +111,21 @@ mod tests {
     }
 
     #[test]
+    fn without_no_new_privileges_the_bounding_set_must_be_empty() {
+        let old_kernel = DROPPED
+            .replace("CapAmb:\t0000000000000000\n", "")
+            .replace("NoNewPrivs:\t1\n", "");
+        assert_eq!(capabilities_dropped(&old_kernel), Ok(false));
+        assert_eq!(
+            capabilities_dropped(&old_kernel.replace("0000010000000000", "0000000000000000")),
+            Ok(true)
+        );
+    }
+
+    #[test]
     fn a_status_without_a_checked_field_is_rejected() {
-        let error = capabilities_dropped(&DROPPED.replace("CapAmb:\t0000000000000000\n", ""))
-            .expect_err("a status without CapAmb must not pass");
-        assert!(error.contains("CapAmb"), "{error}");
+        let error = capabilities_dropped(&DROPPED.replace("CapPrm:\t0000000000000000\n", ""))
+            .expect_err("a status without CapPrm must not pass");
+        assert!(error.contains("CapPrm"), "{error}");
     }
 }

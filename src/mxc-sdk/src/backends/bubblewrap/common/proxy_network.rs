@@ -643,10 +643,8 @@ pub(crate) struct BwrapStartup {
 
 impl BwrapStartup {
     pub(crate) fn configure(args: &mut Vec<String>) -> Result<Self, String> {
-        let (info_reader, info_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        let (gate_reader, gate_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        let (info_reader, info_writer) = pipe_above_stdio()?;
+        let (gate_reader, gate_writer) = pipe_above_stdio()?;
         args.splice(
             0..0,
             [
@@ -918,7 +916,9 @@ impl ProxyNetworkNamespace {
         }
 
         let userns_path = format!("/proc/{}/ns/user", supervisor.id());
-        let userns = match File::open(&userns_path) {
+        let userns = match File::open(&userns_path)
+            .and_then(|file| above_stdio(file).map_err(std::io::Error::from))
+        {
             Ok(file) => file,
             Err(error) => {
                 let _ = supervisor.terminate();
@@ -2454,6 +2454,17 @@ pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
 
     // SAFETY: fcntl returned a new descriptor that nothing else owns.
     Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
+    let (reader, writer) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+    let lift = |end: OwnedFd| {
+        above_stdio(File::from(end))
+            .map(OwnedFd::from)
+            .map_err(|error| format!("Bubblewrap: failed to move a pipe above stdio: {error}"))
+    };
+    Ok((lift(reader)?, lift(writer)?))
 }
 
 /// Hand `mapping` to one specific child at fixed, known descriptor numbers.

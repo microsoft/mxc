@@ -198,9 +198,10 @@ Bubblewrap ignores a refused capability drop when the caller is root, for
 example when the host's seccomp or security policy blocks `capset`. MXC
 therefore holds every launch at Bubblewrap's startup barrier until the sandbox
 process has empty inheritable, permitted, effective, and ambient capability
-sets and has no-new-privileges set. If that does not happen within five
-seconds, MXC stops the sandbox and fails the launch without running the
-workload.
+sets and has no-new-privileges set. On kernels before Linux 4.10, which do not
+report no-new-privileges, MXC requires an empty bounding set instead. If that
+does not happen within five seconds, MXC stops the sandbox and fails the launch
+without running the workload.
 
 `bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
 when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
