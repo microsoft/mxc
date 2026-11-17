@@ -424,12 +424,37 @@ fn owner_only_directory_handle(
     handle: &OwnedHandle,
     path: &Path,
 ) -> Result<bool, FilesystemSecurityError> {
+    owner_only_handle(HANDLE(handle.as_raw_handle()), path, true)
+}
+
+pub(crate) fn file_is_owner_only(
+    file: &std::fs::File,
+    path: &Path,
+) -> Result<bool, FilesystemSecurityError> {
+    let handle = HANDLE(file.as_raw_handle());
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(handle, &mut information) }
+        .map_err(|error| message_error(path, format!("GetFileInformationByHandle: {error}")))?;
+    if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0)
+        != 0
+        || information.nNumberOfLinks != 1
+    {
+        return Ok(false);
+    }
+    owner_only_handle(handle, path, false)
+}
+
+fn owner_only_handle(
+    handle: HANDLE,
+    path: &Path,
+    inheritable: bool,
+) -> Result<bool, FilesystemSecurityError> {
     let mut owner = PSID(ptr::null_mut());
     let mut dacl: *mut ACL = ptr::null_mut();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     let result = unsafe {
         GetSecurityInfo(
-            HANDLE(handle.as_raw_handle()),
+            handle,
             SE_FILE_OBJECT,
             OBJECT_SECURITY_INFORMATION(OWNER_SECURITY_INFORMATION.0 | DACL_SECURITY_INFORMATION.0),
             Some(&mut owner),
@@ -442,7 +467,7 @@ fn owner_only_directory_handle(
     if result != ERROR_SUCCESS {
         return Err(win32_error(path, "GetSecurityInfo", result));
     }
-    let validation = validate_owner_only_acl(owner, dacl, descriptor, path);
+    let validation = validate_owner_only_acl(owner, dacl, descriptor, path, inheritable);
     unsafe {
         let _ = LocalFree(Some(HLOCAL(descriptor.0)));
     }
@@ -683,6 +708,7 @@ fn validate_owner_only_acl(
     dacl: *mut ACL,
     descriptor: PSECURITY_DESCRIPTOR,
     path: &Path,
+    inheritable: bool,
 ) -> Result<bool, FilesystemSecurityError> {
     let user = current_user_sid()?;
     let token_owner = current_token_owner_sid().ok();
@@ -693,6 +719,7 @@ fn validate_owner_only_acl(
         path,
         user.as_psid(),
         token_owner.as_ref().map(OwnedSid::as_psid),
+        inheritable,
     )
 }
 
@@ -703,6 +730,7 @@ fn validate_owner_only_acl_for_user(
     path: &Path,
     user: PSID,
     token_owner: Option<PSID>,
+    inheritable: bool,
 ) -> Result<bool, FilesystemSecurityError> {
     let system = OwnedSid::parse("S-1-5-18")?;
     let same_identity = unsafe { EqualSid(user, system.as_psid()).is_ok() };
@@ -742,7 +770,11 @@ fn validate_owner_only_acl_for_user(
             return Ok(false);
         }
 
-        let expected_flags = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE).0 as u8;
+        let expected_flags = if inheritable {
+            (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE).0 as u8
+        } else {
+            0
+        };
         let mut user_grant = false;
         let mut system_grant = false;
         for index in 0..information.AceCount {

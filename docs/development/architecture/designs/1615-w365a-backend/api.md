@@ -20,6 +20,28 @@ Typed W365 configuration and contract publication remain out of scope.
 For currently supported operations and usage, see the
 [backend guide](../../../../backends/w365agents/w365agents-backend.md).
 
+## Routing extension
+
+The [discovery and persistent-routing extension](w365a-backend-discovery.md)
+keeps these SDK signatures, request types and opaque IDs unchanged.
+Provision additionally uses caller-supplied `W365A_GRAPH_TOKEN` and the fixed
+public-default or explicit-Canary Graph selection. CP and DP credentials remain
+separate; the SDK does not acquire or persist any token.
+
+The mutable development JSON contract makes `w365Agents.provision.poolId`
+optional. A supplied ID selects that pool directly; omission tries assigned
+pools in order, stopping on success or an uncertain/allocated outcome.
+`userObjectId` remains required by the backend. SDK signatures and published
+contracts are unchanged; no typed W365 authoring API is introduced.
+
+With that extension, later lifecycle calls require a backend-owned local routing
+record, not endpoint environment variables. An ID alone is insufficient on a
+different machine or when its record is missing. Import/recovery is separate
+design work. Checkout without `computerUrl` fails with the known cleanup ID and
+CP routing retained; local record-publication failure can require service-operator
+cleanup rather than an ordinary SDK release retry. The examples below require
+the Graph credential and matching local routing state described above.
+
 ## Caller scenario
 
 All examples implement the same [internal Windows build scenario](README.md#usage-scenario).

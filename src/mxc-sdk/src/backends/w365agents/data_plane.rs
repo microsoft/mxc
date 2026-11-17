@@ -18,19 +18,7 @@ pub(crate) struct ReadyMetadata {
 }
 
 pub(super) fn client(identity: &Identity) -> Result<Client, MxcError> {
-    let mut client = Client::from_env_keys("W365A_DP_SUFFIX", "W365A_DP_TOKEN")?;
-    // Service routing is pool-scoped, not a URL returned by checkout.
-    #[cfg(feature = "test-support")]
-    if client.host == "localhost" && std::env::var_os("MXC_W365_TEST_PORT").is_some() {
-        return Ok(client);
-    }
-    client.host = format!("{}.{}", identity.pool_id, client.host);
-    if client.host.len() > 253 {
-        return Err(MxcError::policy_validation(
-            "W365 data-plane hostname is too long",
-        ));
-    }
-    Ok(client)
+    super::routing::client(identity, true)
 }
 
 pub(super) fn ready(identity: &Identity) -> Result<ReadyMetadata, MxcError> {

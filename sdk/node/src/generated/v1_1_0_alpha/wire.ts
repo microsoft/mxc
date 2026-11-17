@@ -918,9 +918,9 @@ export type W365AgentsGuid = string;
  */
 export interface W365AgentsProvision {
   /**
-   * Required pool identifier; no automatic pool selection.
+   * Optional pool identifier; omission lets the backend try assigned pools.
    */
-  poolId: W365AgentsGuid;
+  poolId?: W365AgentsGuid;
   /**
    * Optional user object identifier.
    */

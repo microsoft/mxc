@@ -25,7 +25,9 @@ public class MxcLifecycleW365Tests
     private const string Session = "22222222-2222-2222-2222-222222222222";
     private const string Id = $"w365:{Pool}:{Session}";
     private const string Provision =
-        $$$$"""{"version":"1.1.0-alpha","phase":"provision","containment":"w365_agents","w365Agents":{"provision":{"poolId":"{{{{Pool}}}}"}}}""";
+        $$$$"""{"version":"1.1.0-alpha","phase":"provision","containment":"w365_agents","w365Agents":{"provision":{"poolId":"{{{{Pool}}}}","userObjectId":"{{{{Session}}}}"}}}""";
+    private const string Checkout =
+        $$"""{"sessionId":"{{Session}}","status":"Succeeded","computerUrl":"https://localhost/computers/{{Session}}?api-version=1.0"}""";
 
     private static string Request(string phase) =>
         $$"""{"version":"1.1.0-alpha","phase":"{{phase}}","sandboxId":"{{Id}}"}""";
@@ -53,9 +55,10 @@ public class MxcLifecycleW365Tests
         Assert.Equal(ErrorCode.MalformedId, execution.Code);
         Assert.Empty(fixture.Requests);
 
-        fixture.Reply(200, $$"""{"sessionId":"{{Session}}","status":"Succeeded"}""");
+        fixture.Reply(200, Checkout);
         using var provision = JsonDocument.Parse(
-            await Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, options));
+            await Dev.MxcLifecycle.ProvisionContainerJsonAsync(
+                Provision.Replace($"\"poolId\":\"{Pool}\",", "", StringComparison.Ordinal), options));
         Assert.Equal(Id, provision.RootElement.GetProperty("result").GetProperty("sandboxId").GetString());
         foreach (var phase in new[] { "stop", "deprovision" })
         {
@@ -103,6 +106,9 @@ public class MxcLifecycleW365Tests
         await using var fixture = new Fixture(TimeSpan.FromSeconds(60));
         var options = new Dev.JsonOptions { Experimental = true };
         var ct = TestContext.Current.CancellationToken;
+        fixture.Reply(200, Checkout);
+        await Dev.MxcLifecycle.ProvisionContainerJsonAsync(Provision, options);
+        fixture.Requests.Clear();
         fixture.Reply(200, """{"status":"Live"}""");
         fixture.Reply(200, """{"status":"Ready"}""");
         using var ready = JsonDocument.Parse(
@@ -254,6 +260,8 @@ public class MxcLifecycleW365Tests
             cancellation = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(30));
             environment = new[] { "W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN",
                 "W365A_DP_SUFFIX", "W365A_DP_TOKEN",
+                "W365A_GRAPH_TOKEN", "W365A_GRAPH_ENVIRONMENT",
+                "MXC_W365_TEST_STATE_ROOT", "MXC_W365_TEST_GRAPH_LOCALHOST",
                 "MXC_W365_TEST_CA", "MXC_W365_TEST_PORT" }
                 .ToDictionary(key => key, key => (
                     Managed: Environment.GetEnvironmentVariable(key),
@@ -280,6 +288,12 @@ public class MxcLifecycleW365Tests
                 archive, "fixture-only", X509KeyStorageFlags.UserKeySet);
 #endif
             Directory.CreateDirectory(directory);
+            var state = Path.Combine(directory, "state");
+            Directory.CreateDirectory(state);
+            SetEnvironmentVariable("MXC_W365_TEST_STATE_ROOT", state);
+            SetEnvironmentVariable("W365A_GRAPH_TOKEN", "synthetic-graph-token");
+            SetEnvironmentVariable("W365A_GRAPH_ENVIRONMENT", "public");
+            SetEnvironmentVariable("MXC_W365_TEST_GRAPH_LOCALHOST", "1");
             var ca = Path.Combine(directory, "certificate.pem");
             File.WriteAllText(ca, certificate.ExportCertificatePem());
             listener.Start();
@@ -348,7 +362,27 @@ public class MxcLifecycleW365Tests
                 var headers = new StringBuilder();
                 while (await reader.ReadLineAsync(cancellation.Token) is { Length: > 0 } line)
                     headers.AppendLine(line);
-                Requests.Enqueue(headers.ToString());
+                var listPools = headers.ToString().StartsWith("GET /beta/me/cloudPcPools ", StringComparison.Ordinal);
+                if (listPools || headers.ToString().StartsWith(
+                    $"GET /beta/deviceManagement/virtualEndpoint/cloudPcPools/{Pool} ", StringComparison.Ordinal))
+                {
+                    Assert.Contains("Bearer synthetic-graph-token", headers.ToString());
+                    var body = listPools
+                        ? $$"""{"value":[{"id":"{{Pool}}"}]}"""
+                        : $$"""{"id":"{{Pool}}"}""";
+                    await stream.WriteAsync(Encoding.UTF8.GetBytes(
+                        $"HTTP/1.1 200 Fixture\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"), cancellation.Token);
+                    await stream.FlushAsync(cancellation.Token);
+                    continue;
+                }
+                var contentLength = headers.ToString().Split('\n')
+                    .Where(line => line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    .Select(line => int.Parse(line.Split(':', 2)[1])).SingleOrDefault();
+                var content = new char[contentLength];
+                if (contentLength != 0)
+                    Assert.Equal(contentLength,
+                        await reader.ReadBlockAsync(content.AsMemory(), cancellation.Token));
+                Requests.Enqueue(headers.ToString() + new string(content));
                 if (headers.ToString().Contains("/microsoft.exec?api-version=1.0", StringComparison.Ordinal))
                 {
                     Assert.Contains("Upgrade: exec", headers.ToString(), StringComparison.OrdinalIgnoreCase);

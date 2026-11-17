@@ -10,7 +10,10 @@ use crate::mxc_common::models::W365AgentsProvisionConfig as Provision;
 impl From<contract::W365AgentsProvision> for Provision {
     fn from(value: contract::W365AgentsProvision) -> Self {
         Self {
-            pool_id: value.pool_id.into_inner(),
+            pool_id: value
+                .pool_id
+                .into_option()
+                .map(contract::W365AgentsGuid::into_inner),
             user_type: value.user_type.into_option().map(|value| match value {
                 contract::W365AgentsUserType::Local => "Local".to_owned(),
                 contract::W365AgentsUserType::HumanUser => "HumanUser".to_owned(),
@@ -62,7 +65,10 @@ mod tests {
         let StateAwareProvision::W365Agents(Some(Some(config))) = provision else {
             panic!("expected W365 provision")
         };
-        assert_eq!(config.pool_id, "AAAAAAAA-bbbb-CCCC-dddd-EEEEEEEEEEEE");
+        assert_eq!(
+            config.pool_id.as_deref(),
+            Some("AAAAAAAA-bbbb-CCCC-dddd-EEEEEEEEEEEE")
+        );
         assert_eq!(config.user_type.as_deref(), Some("HumanUser"));
         assert_eq!(
             config.user_object_id.as_deref(),
@@ -104,7 +110,7 @@ mod tests {
 
     #[test]
     fn w365_agents_provision_omission_and_empty_wrapper_stay_distinct() {
-        for presence in 0..3 {
+        for presence in 0..4 {
             let mut value = json!({
                 "version":"1.1.0-alpha",
                 "phase":"provision",
@@ -117,6 +123,9 @@ mod tests {
                 value["w365Agents"]["provision"] =
                     json!({"poolId":"11111111-1111-1111-1111-111111111111"});
             }
+            if presence == 3 {
+                value["w365Agents"]["provision"] = json!({});
+            }
             let (common, input) = adapt(&value.to_string());
             assert!(common.containment.is_none());
             assert!(common.sandbox_id.is_none());
@@ -127,6 +136,7 @@ mod tests {
             if let Some(Some(ref config)) = settings {
                 assert!(config.user_type.is_none());
                 assert!(config.user_object_id.is_none());
+                assert_eq!(config.pool_id.is_none(), presence == 3);
             }
             assert_eq!(
                 settings.map(|inner| inner.is_some()),

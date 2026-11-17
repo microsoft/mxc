@@ -80,8 +80,9 @@ impl schemars::JsonSchema for W365AgentsGuid {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct W365AgentsProvision {
-    /// Required pool identifier; no automatic pool selection.
-    pub pool_id: W365AgentsGuid,
+    /// Optional pool identifier; omission lets the backend try assigned pools.
+    #[serde(default)]
+    pub pool_id: OptionalField<W365AgentsGuid>,
     /// Optional user type.
     #[serde(default)]
     pub user_type: OptionalField<W365AgentsUserType>,

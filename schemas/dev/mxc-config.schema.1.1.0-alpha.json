@@ -1753,7 +1753,7 @@
       "properties": {
         "poolId": {
           "$ref": "#/definitions/W365AgentsGuid",
-          "description": "Required pool identifier; no automatic pool selection."
+          "description": "Optional pool identifier; omission lets the backend try assigned pools."
         },
         "userObjectId": {
           "$ref": "#/definitions/W365AgentsGuid",
@@ -1764,9 +1764,6 @@
           "description": "Optional user type."
         }
       },
-      "required": [
-        "poolId"
-      ],
       "type": "object"
     },
     "W365AgentsProvisionRequest": {

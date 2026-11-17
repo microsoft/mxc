@@ -17,7 +17,7 @@ const session = '22222222-2222-2222-2222-222222222222';
 const id = `w365:${pool}:${session}`;
 const provision = JSON.stringify({
   version: '1.1.0-alpha', phase: 'provision', containment: 'w365_agents',
-  w365Agents: { provision: { poolId: pool } },
+  w365Agents: { provision: { poolId: pool, userObjectId: session } },
 });
 const request = (phase: string, sandboxId = id) => JSON.stringify({
   version: '1.1.0-alpha', phase, sandboxId,
@@ -34,6 +34,8 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
     const config = join(directory, 'openssl.cnf');
     const keys = ['W365A_CONTROLPLANE_URL', 'W365A_CP_TOKEN',
       'W365A_DP_SUFFIX', 'W365A_DP_TOKEN',
+      'W365A_GRAPH_TOKEN', 'W365A_GRAPH_ENVIRONMENT',
+      'MXC_W365_TEST_STATE_ROOT', 'MXC_W365_TEST_GRAPH_LOCALHOST',
       'MXC_W365_TEST_CA', 'MXC_W365_TEST_PORT'] as const;
     const environment = keys.map(name => [name, process.env[name]] as const);
     const stackSize = koffi.config().async_stack_size;
@@ -95,6 +97,14 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       ], { stdio: 'pipe' });
       server = createServer({ cert: readFileSync(certificate), key: readFileSync(key) },
         (incoming, response) => {
+          if (incoming.url === '/beta/me/cloudPcPools'
+            || incoming.url === `/beta/deviceManagement/virtualEndpoint/cloudPcPools/${pool}`) {
+            assert.equal(incoming.headers.authorization, 'Bearer synthetic-graph-token');
+            response.writeHead(200, { Connection: 'close' });
+            response.end(incoming.url === '/beta/me/cloudPcPools'
+              ? JSON.stringify({ value: [{ id: pool }] }) : JSON.stringify({ id: pool }));
+            return;
+          }
           requests.push({
             method: incoming.method, url: incoming.url,
             authorization: incoming.headers.authorization,
@@ -167,6 +177,10 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       process.env.W365A_CP_TOKEN = 'fixture-token';
       process.env.W365A_DP_SUFFIX = 'localhost';
       process.env.W365A_DP_TOKEN = 'synthetic-data-plane-token';
+      process.env.W365A_GRAPH_TOKEN = 'synthetic-graph-token';
+      process.env.W365A_GRAPH_ENVIRONMENT = 'public';
+      process.env.MXC_W365_TEST_GRAPH_LOCALHOST = '1';
+      process.env.MXC_W365_TEST_STATE_ROOT = directory;
       process.env.MXC_W365_TEST_CA = certificate;
       process.env.MXC_W365_TEST_PORT = String(address.port);
       await assert.rejects(provisionContainerJson(provision),
@@ -193,8 +207,10 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       }
       assert.equal(requests.length, 0, 'validation must not call the service');
 
-      reply(200, { sessionId: session, status: 'Succeeded' });
-      const value = JSON.parse(await provisionContainerJson(provision, options));
+      reply(200, { sessionId: session, status: 'Succeeded',
+        computerUrl: `https://localhost/computers/${session}?api-version=1.0` });
+      const value = JSON.parse(await provisionContainerJson(
+        provision.replace(`"poolId":"${pool}",`, ''), options));
       assert.equal(value.result.sandboxId, id);
       for (const phase of ['stop', 'deprovision']) {
         reply(204);

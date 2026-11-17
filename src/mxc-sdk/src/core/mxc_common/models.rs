@@ -277,7 +277,7 @@ impl MicroVmProvisionConfig {
 /// Passive W365 provision inputs; defaults and enforcement belong to the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct W365AgentsProvisionConfig {
-    pub pool_id: String,
+    pub pool_id: Option<String>,
     pub user_type: Option<String>,
     pub user_object_id: Option<String>,
 }

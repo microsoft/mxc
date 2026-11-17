@@ -4,7 +4,9 @@
 //! Native W365 checkout, readiness, execution and terminal release.
 
 mod data_plane;
+mod discovery;
 mod exec;
+mod routing;
 mod service;
 
 use crate::mxc_common::logger::Logger;
@@ -17,6 +19,7 @@ use crate::mxc_common::state_aware_backend::{
 };
 use crate::mxc_common::validator::validate_network_policy_support;
 use serde::Serialize;
+use serde_json::{json, Value};
 
 pub(crate) struct Runner;
 
@@ -75,6 +78,16 @@ fn policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     Ok(())
 }
 
+fn with_pool_attempts(mut error: MxcError, attempts: Vec<Value>) -> MxcError {
+    if !attempts.is_empty() {
+        error
+            .message
+            .push_str(&format!("; pool checkout attempts={}", attempts.len()));
+        error.details.get_or_insert_with(|| json!({}))["poolAttempts"] = json!(attempts);
+    }
+    error
+}
+
 impl StatefulSandboxBackend for Runner {
     const ID_PREFIX: &'static str = "w365";
     const BACKEND_KEY: &'static str = "w365_agents";
@@ -95,7 +108,7 @@ impl StatefulSandboxBackend for Runner {
     ) -> Result<(), MxcError> {
         policy(request)?;
         service::validate_provision(config)?;
-        service::Client::from_env().map(|_| ())
+        discovery::validate()
     }
 
     fn provision(
@@ -105,7 +118,32 @@ impl StatefulSandboxBackend for Runner {
     ) -> Result<ProvisionResult<Self::ProvisionMetadata>, MxcError> {
         self.validate_provision(request, config.as_ref())?;
         let config = service::validate_provision(config.as_ref())?;
-        service::Client::from_env()?.checkout(config)
+        routing::preflight()?;
+        let automatic = config.pool_id.is_none();
+        let pools = match config.pool_id.as_ref() {
+            Some(pool) => vec![pool.clone()],
+            None => discovery::assigned_pools()?,
+        };
+        let mut attempts = Vec::new();
+        let mut last_error =
+            routing::error("no_assigned_pools", "Graph returned no assigned pools");
+        for pool in pools {
+            let (client, source) = discovery::control_plane(&pool)
+                .map_err(|error| with_pool_attempts(error, attempts.clone()))?;
+            match client.checkout(&pool, config, source) {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    if !automatic || !service::can_try_next_pool(&error) {
+                        return Err(with_pool_attempts(error, attempts));
+                    }
+                    if let Some(details) = error.details.as_ref() {
+                        attempts.push(details.clone());
+                    }
+                    last_error = error;
+                }
+            }
+        }
+        Err(with_pool_attempts(last_error, attempts))
     }
 
     fn validate_start(
@@ -158,8 +196,7 @@ impl StatefulSandboxBackend for Runner {
         _: Option<&()>,
     ) -> Result<(), MxcError> {
         policy(request)?;
-        service::Identity::parse(id)?;
-        service::Client::from_env().map(|_| ())
+        routing::client(&service::Identity::parse(id)?, false).map(|_| ())
     }
 
     fn validate_deprovision(
@@ -178,7 +215,8 @@ impl StatefulSandboxBackend for Runner {
         config: Option<()>,
     ) -> Result<StopResult<Self::StopMetadata>, MxcError> {
         self.validate_stop(id, request, config.as_ref())?;
-        service::Client::from_env()?.release(&service::Identity::parse(id)?)?;
+        let identity = service::Identity::parse(id)?;
+        routing::client(&identity, false)?.release(&identity)?;
         Ok(StopResult {
             metadata: Some(ReleaseMetadata {
                 release_requested: true,

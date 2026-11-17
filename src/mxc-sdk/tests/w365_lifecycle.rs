@@ -305,15 +305,24 @@ fn fixture_tls(cert: &FixtureCertificate) -> native_tls::TlsAcceptor {
     native_tls::TlsAcceptor::new(identity).unwrap()
 }
 
-struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+struct Environment(
+    Vec<(&'static str, Option<std::ffi::OsString>)>,
+    tempfile::TempDir,
+);
 impl Environment {
     fn new() -> Self {
+        let state = tempfile::tempdir().unwrap();
         let environment = Self(
             [
                 "W365A_CONTROLPLANE_URL",
                 "W365A_CP_TOKEN",
                 "W365A_DP_SUFFIX",
                 "W365A_DP_TOKEN",
+                "W365A_GRAPH_TOKEN",
+                "W365A_GRAPH_ENVIRONMENT",
+                "MXC_W365_TEST_GRAPH_LOCALHOST",
+                "MXC_W365_TEST_STATE_ROOT",
+                "MXC_W365_TEST_STATE_WRITE_FAIL",
                 "MXC_W365_TEST_CA",
                 "MXC_W365_TEST_PORT",
                 "MXC_W365_TEST_TIMEOUT_MS",
@@ -324,15 +333,96 @@ impl Environment {
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
             .collect(),
+            state,
         );
+        environment.set("W365A_GRAPH_TOKEN", "synthetic-graph-token");
+        environment.set("W365A_GRAPH_ENVIRONMENT", "public");
+        environment.set("MXC_W365_TEST_GRAPH_LOCALHOST", "1");
+        environment.set(
+            "MXC_W365_TEST_STATE_ROOT",
+            environment
+                .1
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        environment.seed(A);
+        environment.seed(B);
         std::env::remove_var("MXC_W365_TEST_TIMEOUT_MS");
         std::env::remove_var("MXC_W365_TEST_READY_BUDGET_MS");
         std::env::remove_var("MXC_W365_TEST_DNS_DELAY_MS");
         std::env::remove_var("MXC_W365_TEST_EXEC_ELAPSED_MS");
+        std::env::remove_var("MXC_W365_TEST_STATE_WRITE_FAIL");
         environment
     }
     fn set(&self, key: &str, value: &str) {
         std::env::set_var(key, value);
+    }
+    fn record(&self, session: &str) -> std::path::PathBuf {
+        self.record_for_pool(POOL, session)
+    }
+    fn record_for_pool(&self, pool: &str, session: &str) -> std::path::PathBuf {
+        self.1
+            .path()
+            .join("Microsoft")
+            .join("MXC")
+            .join("w365")
+            .join(pool)
+            .join(session)
+            .join("connection.json")
+    }
+    fn seed(&self, session: &str) {
+        let path = self.record(session);
+        let directory = path.parent().unwrap();
+        #[cfg(windows)]
+        {
+            use mxc_sdk::mxc_common::filesystem_security::*;
+            let _guard = lock_owner_only_directory_path(
+                self.1.path(),
+                &[
+                    "Microsoft".as_ref(),
+                    "MXC".as_ref(),
+                    "w365".as_ref(),
+                    POOL.as_ref(),
+                    session.as_ref(),
+                ],
+                2,
+            )
+            .unwrap();
+            for path in [
+                directory,
+                directory.parent().unwrap(),
+                directory.parent().unwrap().parent().unwrap(),
+            ] {
+                set_current_user_owner(path).unwrap();
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(directory)
+                .unwrap();
+        }
+        std::fs::write(&path, json!({
+            "version":1,"poolId":POOL,"sessionId":session,
+            "controlPlaneHost":"localhost","controlPlaneSource":"environment","computerHost":"localhost",
+        }).to_string()).unwrap();
+        #[cfg(windows)]
+        {
+            use mxc_sdk::mxc_common::filesystem_security::*;
+            set_owner_only_dacl(&path, false).unwrap();
+            set_current_user_owner(&path).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 }
 impl Drop for Environment {
@@ -366,6 +456,8 @@ struct Fixture {
     ca: tempfile::NamedTempFile,
     requests: Arc<Mutex<Vec<String>>>,
     replies: Arc<Mutex<std::collections::VecDeque<FixtureReply>>>,
+    graph_requests: Arc<Mutex<Vec<String>>>,
+    graph_replies: Arc<Mutex<std::collections::VecDeque<FixtureReply>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
@@ -388,8 +480,11 @@ impl Fixture {
         listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replies = Arc::new(Mutex::new(std::collections::VecDeque::<FixtureReply>::new()));
+        let graph_requests = Arc::new(Mutex::new(Vec::new()));
+        let graph_replies = Arc::new(Mutex::new(std::collections::VecDeque::<FixtureReply>::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (seen, responses, stopping) = (requests.clone(), replies.clone(), stop.clone());
+        let (graph_seen, graph_responses) = (graph_requests.clone(), graph_replies.clone());
         let worker = std::thread::spawn(move || {
             while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                 let socket = match listener.accept() {
@@ -432,8 +527,44 @@ impl Fixture {
                 if data.is_empty() {
                     continue;
                 } // Rejected TLS never carries an HTTP request.
-                seen.lock().unwrap().push(String::from_utf8(data).unwrap());
-                let reply = responses.lock().unwrap().pop_front();
+                let header_end = data.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 4;
+                let header = String::from_utf8_lossy(&data[..header_end]);
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while data.len() < header_end + length {
+                    let n = stream.read(&mut buf).unwrap();
+                    assert_ne!(n, 0);
+                    data.extend_from_slice(&buf[..n]);
+                }
+                let data = String::from_utf8(data).unwrap();
+                let graph = data.starts_with("GET /beta/me/cloudPcPools")
+                    || data.starts_with("GET /testprodbeta_cpc_sh/me/cloudPcPools")
+                    || data.starts_with("GET /beta/deviceManagement/virtualEndpoint/cloudPcPools/")
+                    || data.starts_with(
+                        "GET /testprodbeta_cpc_sh/deviceManagement/virtualEndpoint/cloudPcPools/",
+                    );
+                let reply = if graph {
+                    let body = if data.contains("/deviceManagement/virtualEndpoint/cloudPcPools/") {
+                        let path = data.split_whitespace().nth(1).unwrap();
+                        json!({"id":path.rsplit('/').next().unwrap()}).to_string()
+                    } else {
+                        json!({"value":[]}).to_string()
+                    };
+                    graph_seen.lock().unwrap().push(data);
+                    graph_responses.lock().unwrap().pop_front().or_else(|| {
+                        Some(FixtureReply::Complete(format!(
+                            "HTTP/1.1 200 Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())))
+                    })
+                } else {
+                    seen.lock().unwrap().push(data);
+                    responses.lock().unwrap().pop_front()
+                };
                 match reply {
                     Some(FixtureReply::Complete(reply)) => {
                         stream.write_all(reply.as_bytes()).unwrap();
@@ -459,6 +590,8 @@ impl Fixture {
             ca,
             requests,
             replies,
+            graph_requests,
+            graph_replies,
             stop,
             worker: Some(worker),
             #[cfg(target_os = "windows")]
@@ -470,6 +603,16 @@ impl Fixture {
         env.set("W365A_CP_TOKEN", "fixture-token-never-log");
         env.set("MXC_W365_TEST_CA", self.ca.path().to_str().unwrap());
         env.set("MXC_W365_TEST_PORT", &self.port.to_string());
+    }
+    fn graph_reply(&self, status: u16, body: Value) {
+        let body = body.to_string();
+        self.graph_replies
+            .lock()
+            .unwrap()
+            .push_back(FixtureReply::Complete(format!(
+            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
     }
     fn reply(&self, status: u16, body: &str) {
         self.reply_with_length(status, body, body.len());
@@ -516,7 +659,10 @@ impl Drop for Fixture {
 
 fn provision() -> Value {
     json!({"version":"1.1.0-alpha", "phase":"provision", "containment":"w365_agents",
-        "w365Agents":{"provision":{"poolId":POOL}}})
+        "w365Agents":{"provision":{"poolId":POOL,"userObjectId":B}}})
+}
+fn computer_url(session: &str) -> String {
+    format!("https://localhost/computers/{session}?api-version=1.0")
 }
 fn request(phase: &str, session: &str) -> Value {
     let mut value = json!({"version":"1.1.0-alpha","phase":phase,
@@ -717,10 +863,8 @@ fn lifecycle_contract_and_recovery_fixture() {
         std::env::remove_var(key);
     }
     for phase in ["start", "exec"] {
-        assert_eq!(
-            invoke(&request(phase, A), true).unwrap_err().code,
-            MxcErrorCode::PolicyValidation
-        );
+        let error = invoke(&request(phase, A), true).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation, "{error:?}");
     }
     for phase in ["stop", "deprovision"] {
         for bad in [
@@ -880,7 +1024,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         );
         fixture.reply(
             200,
-            &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+            &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
         );
         let value: Value =
             serde_json::from_str(&sdk::provision_container_json(&source, options).unwrap())
@@ -935,8 +1079,8 @@ fn lifecycle_contract_and_recovery_fixture() {
 
     let first_checkout = fixture.count();
     for body in [
-        json!({"sessionId":A,"computerId":A,"status":"Succeeded"}),
-        json!({"sessionId":A,"status":"Succeeded"}),
+        json!({"sessionId":A,"computerId":A,"status":"Succeeded","computerUrl":computer_url(A)}),
+        json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}),
     ] {
         fixture.reply(200, &body.to_string());
         assert_eq!(
@@ -954,16 +1098,15 @@ fn lifecycle_contract_and_recovery_fixture() {
     human["w365Agents"]["provision"]["userObjectId"] = json!(B);
     fixture.reply(
         200,
-        &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+        &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
     );
     invoke(&human, true).unwrap();
     let sent = fixture.request(first_checkout + 2);
-    assert!(sent.to_ascii_lowercase().contains("user-type: humanuser"));
+    assert!(!sent.to_ascii_lowercase().contains("user-type:"));
     assert!(sent.contains(B));
     assert_eq!(
-        sent.split_once("\r\n\r\n").unwrap().1,
-        "",
-        "API 3.0 checkout is bodyless"
+        serde_json::from_str::<Value>(sent.split_once("\r\n\r\n").unwrap().1).unwrap(),
+        json!({"userObjectId":B,"sessionKind":"human"}),
     );
 
     for (kind, oid) in [(true, false), (false, true)] {
@@ -976,13 +1119,16 @@ fn lifecycle_contract_and_recovery_fixture() {
         }
         fixture.reply(
             200,
-            &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+            &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
         );
         let n = fixture.count();
         invoke(&value, true).unwrap();
-        let sent = fixture.request(n).to_ascii_lowercase();
-        assert_eq!(sent.contains("user-type:"), kind);
-        assert_eq!(sent.contains("user-object-id:"), oid);
+        let sent = fixture.request(n);
+        assert!(!sent.to_ascii_lowercase().contains("user-type:"));
+        assert!(!sent.to_ascii_lowercase().contains("user-object-id:"));
+        let body: Value = serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["userObjectId"], B);
+        assert_eq!(body.get("sessionKind").is_some(), kind);
     }
     for user_type in ["Local", "HumanUser", "Agentic"] {
         for oid in [false, true] {
@@ -990,22 +1136,37 @@ fn lifecycle_contract_and_recovery_fixture() {
             value["w365Agents"]["provision"]["userType"] = json!(user_type);
             if oid {
                 value["w365Agents"]["provision"]["userObjectId"] = json!(B);
+            } else {
+                value["w365Agents"]["provision"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("userObjectId");
             }
             let n = fixture.count();
             assert!(invoke(&value, false).is_err());
             assert_eq!(fixture.count(), n, "all user types require authorization");
+            if !oid || user_type == "Agentic" {
+                assert_eq!(
+                    invoke(&value, true).unwrap_err().code,
+                    MxcErrorCode::PolicyValidation
+                );
+                assert_eq!(fixture.count(), n);
+                continue;
+            }
             fixture.reply(
                 200,
-                &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+                &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)})
+                    .to_string(),
             );
             invoke(&value, true).unwrap();
             let sent = fixture.request(n);
-            assert!(sent.contains(&format!("user-type: {user_type}\r\n")));
-            assert_eq!(sent.contains("user-object-id:"), oid);
-            if oid {
-                assert!(sent.contains(&format!("user-object-id: {B}\r\n")));
-            }
-            assert_eq!(sent.split_once("\r\n\r\n").unwrap().1, "");
+            assert!(!sent.contains("user-type:"));
+            assert!(!sent.contains("user-object-id:"));
+            let body: Value = serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(
+                body,
+                json!({"userObjectId":B,"sessionKind":if user_type=="Local" {"local"} else {"human"}})
+            );
         }
     }
     let upper = "AAAAAAAA-bbbb-CCCC-dddd-EEEEEEEEEEEE";
@@ -1015,6 +1176,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         200,
         &json!({
             "sessionId":upper,"computerId":upper.to_ascii_lowercase(),"status":"Succeeded",
+            "computerUrl":computer_url(&upper.to_ascii_lowercase()),
             "connectivityUrl":"https://example.invalid/?ticket=must-not-persist",
         })
         .to_string(),
@@ -1026,8 +1188,8 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     assert!(!value.to_string().contains("must-not-persist"));
     fixture.reply(
-        201,
-        &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+        203,
+        &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
     );
     assert_eq!(
         invoke(&provision(), true).unwrap_err().details.unwrap()["sandboxId"],
@@ -1186,7 +1348,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     fixture.reply(
         200,
-        &json!({"sessionId":B,"status":"Succeeded"}).to_string(),
+        &json!({"sessionId":B,"status":"Succeeded","computerUrl":computer_url(B)}).to_string(),
     );
     invoke(&provision(), true).unwrap();
     fixture.reply(204, "");
@@ -1194,6 +1356,469 @@ fn lifecycle_contract_and_recovery_fixture() {
     assert!(fixture
         .request(fixture.count() - 1)
         .starts_with(&format!("DELETE /api/sessions/{A}?")));
+
+    // Completion must address the allocated ID, never allocate a replacement.
+    let before = fixture.count();
+    fixture.reply(201, &json!({"sessionId":A,"status":"Created"}).to_string());
+    fixture.reply(
+        200,
+        &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
+    );
+    invoke(&provision(), true).unwrap();
+    let first = fixture.request(before);
+    let completed = fixture.request(before + 1);
+    assert!(completed
+        .to_ascii_lowercase()
+        .contains(&format!("x-ms-sessionid: {A}")));
+    assert_eq!(completed.split_once("\r\n\r\n").unwrap().1, "{}");
+    let client_request_id = |request: &str| {
+        request
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("x-ms-client-request-id:")
+            })
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(client_request_id(&first), client_request_id(&completed));
+
+    let graph_before = fixture.graph_requests.lock().unwrap().len();
+    let before = fixture.count();
+    let root = std::env::var("MXC_W365_TEST_STATE_ROOT").unwrap();
+    env.set("MXC_W365_TEST_STATE_ROOT", "relative-state-is-not-allowed");
+    assert_eq!(
+        invoke(&provision(), true).unwrap_err().details.unwrap()["code"],
+        "routing_state_root"
+    );
+    assert_eq!(fixture.graph_requests.lock().unwrap().len(), graph_before);
+    assert_eq!(
+        fixture.count(),
+        before,
+        "storage preflight must precede discovery and allocation"
+    );
+    env.set("MXC_W365_TEST_STATE_ROOT", &root);
+    let mut automatic = provision();
+    automatic["w365Agents"]["provision"]
+        .as_object_mut()
+        .unwrap()
+        .remove("poolId");
+    for (status, body) in [
+        (401, json!({})),
+        (404, json!({})),
+        (429, json!({})),
+        (200, json!({"value":[{"id":POOL},{"id":POOL}]})),
+        (
+            200,
+            json!({"value":[], "@odata.nextLink":"https://graph.microsoft.com/beta/deviceManagement/virtualEndpoint/cloudPcPools"}),
+        ),
+    ] {
+        fixture.graph_reply(status, body);
+        assert!(invoke(&automatic, true).is_err());
+        assert_eq!(
+            fixture.count(),
+            before,
+            "discovery errors cannot fall back or allocate"
+        );
+    }
+    for (status, body) in [
+        (401, json!({})),
+        (403, json!({})),
+        (404, json!({})),
+        (429, json!({})),
+        (500, json!({})),
+        (302, json!({})),
+        (200, json!(null)),
+        (200, json!({"value":[{"id":POOL}]})),
+        (200, json!({"id":A,"poolUrl":"https://localhost/sessions"})),
+        (200, json!({"id":POOL,"poolUrl":123})),
+        (
+            200,
+            json!({"id":POOL,"poolUrl":"https://untrusted.invalid/sessions"}),
+        ),
+    ] {
+        let graphs = fixture.graph_requests.lock().unwrap().len();
+        fixture.graph_reply(status, body);
+        assert!(invoke(&provision(), true).is_err());
+        assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs + 1);
+        assert_eq!(
+            fixture.count(),
+            before,
+            "pool resource errors cannot fall back or allocate"
+        );
+    }
+    for pool in [
+        json!({"id":POOL}),
+        json!({"id":POOL,"poolUrl":null}),
+        json!({"id":POOL,"poolUrl":""}),
+    ] {
+        let calls = fixture.count();
+        fixture.graph_reply(200, pool);
+        fixture.reply(401, "{}");
+        let error = invoke(&provision(), true).unwrap_err();
+        assert_eq!(error.details.unwrap()["httpStatus"], 401);
+        assert_eq!(
+            fixture.count(),
+            calls + 1,
+            "missing resource poolUrl uses the configured CP"
+        );
+    }
+    let c = "44444444-4444-4444-4444-444444444444";
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    fixture.graph_reply(200, json!({"value":[], "@odata.nextLink":"https://graph.microsoft.com/beta/me/cloudPcPools?$skiptoken=fixture"}));
+    fixture.graph_reply(200, json!({"value":[{"id":POOL}]}));
+    fixture.graph_reply(
+        200,
+        json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
+    );
+    std::env::remove_var("W365A_CONTROLPLANE_URL");
+    fixture.reply(
+        200,
+        &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c),
+        "mcpUrl":"https://invalid/?ticket=must-not-persist"})
+        .to_string(),
+    );
+    invoke(&automatic, true).unwrap();
+    let stored = std::fs::read_to_string(env.record(c)).unwrap();
+    assert!(!stored.contains("token") && !stored.contains("ticket"));
+    let record: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(record["controlPlaneSource"], "graph");
+    assert_eq!(record["computerHost"], "localhost");
+    {
+        let requests = fixture.graph_requests.lock().unwrap();
+        assert_eq!(requests.len(), graphs + 3);
+        assert!(requests[graphs].starts_with("GET /beta/me/cloudPcPools "));
+        assert!(requests[graphs + 1].starts_with("GET /beta/me/cloudPcPools?$skiptoken=fixture "));
+        assert!(requests[graphs + 2].starts_with(&format!(
+            "GET /beta/deviceManagement/virtualEndpoint/cloudPcPools/{POOL} "
+        )));
+    }
+    env.set("W365A_GRAPH_ENVIRONMENT", "canary");
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    fixture.graph_reply(
+        200,
+        json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
+    );
+    fixture.reply(
+        200,
+        &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)}).to_string(),
+    );
+    invoke(&provision(), true).unwrap();
+    {
+        let requests = fixture.graph_requests.lock().unwrap();
+        assert_eq!(requests.len(), graphs + 1);
+        assert!(requests[graphs].starts_with(&format!(
+            "GET /testprodbeta_cpc_sh/deviceManagement/virtualEndpoint/cloudPcPools/{POOL} "
+        )));
+    }
+    env.set("W365A_GRAPH_ENVIRONMENT", "public");
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    let calls = fixture.count();
+    fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+    for pool in [POOL, B] {
+        fixture.graph_reply(
+            200,
+            json!({"id":pool,"poolUrl":"https://localhost/sessions"}),
+        );
+    }
+    fixture.reply(403, "{}");
+    fixture.reply(
+        200,
+        &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)}).to_string(),
+    );
+    let selected = invoke(&automatic, true).unwrap();
+    assert_eq!(selected["result"]["sandboxId"], format!("w365:{B}:{c}"));
+    let selected_record = env.record_for_pool(B, c);
+    let selected_record: Value =
+        serde_json::from_slice(&std::fs::read(selected_record).unwrap()).unwrap();
+    assert_eq!(selected_record["poolId"], B);
+    assert_eq!(selected_record["controlPlaneSource"], "graph");
+    assert_eq!(fixture.count(), calls + 2);
+    for (offset, pool) in [POOL, B].into_iter().enumerate() {
+        assert!(fixture
+            .request(calls + offset)
+            .starts_with(&format!("POST /api/pools/{pool}/sessions?api-version=3.0 ")));
+    }
+    assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs + 3);
+
+    fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+    for pool in [POOL, B] {
+        fixture.graph_reply(
+            200,
+            json!({"id":pool,"poolUrl":"https://localhost/sessions"}),
+        );
+        fixture.reply(429, "{}");
+    }
+    let error = invoke(&automatic, true).unwrap_err();
+    assert_eq!(
+        error.details.as_ref().unwrap()["poolAttempts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(error.details.as_ref().unwrap()["httpStatus"], 429);
+    assert!(error.details.as_ref().unwrap().get("sandboxId").is_none());
+    assert!(error.message.contains("pool checkout attempts=2"));
+
+    for (status, response, write_failure) in [
+        (403, json!({"sessionId":A}), false),
+        (408, json!({}), false),
+        (500, json!({}), false),
+        (302, json!({}), false),
+        (200, json!({"sessionId":A,"status":"Succeeded"}), false),
+        (
+            200,
+            json!({"sessionId":"88888888-8888-8888-8888-888888888888",
+            "status":"Succeeded",
+            "computerUrl":computer_url("88888888-8888-8888-8888-888888888888")}),
+            true,
+        ),
+    ] {
+        let graphs = fixture.graph_requests.lock().unwrap().len();
+        let calls = fixture.count();
+        fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+        fixture.graph_reply(
+            200,
+            json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
+        );
+        fixture.reply(status, &response.to_string());
+        if write_failure {
+            env.set("MXC_W365_TEST_STATE_WRITE_FAIL", "1");
+        }
+        let result = invoke(&automatic, true);
+        std::env::remove_var("MXC_W365_TEST_STATE_WRITE_FAIL");
+        let error = result.unwrap_err();
+        if write_failure {
+            assert_eq!(
+                error.details.as_ref().unwrap()["code"],
+                "routing_state_write"
+            );
+        }
+        assert_eq!(
+            fixture.count(),
+            calls + 1,
+            "uncertain/allocated checkout cannot try another pool"
+        );
+        assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs + 2);
+        assert_eq!(
+            error.details.as_ref().unwrap().get("sessionId").is_some(),
+            response.get("sessionId").is_some()
+        );
+    }
+    let calls = fixture.count();
+    fixture.graph_reply(200, json!({"value":[]}));
+    assert_eq!(
+        invoke(&automatic, true).unwrap_err().details.unwrap()["code"],
+        "no_assigned_pools"
+    );
+    assert_eq!(fixture.count(), calls);
+    for sent in &fixture.graph_requests.lock().unwrap()[graph_before..] {
+        assert!(sent.contains("Bearer synthetic-graph-token"));
+        assert!(!sent.contains("renewed-fixture-token"));
+    }
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    std::env::remove_var("W365A_GRAPH_TOKEN");
+    env.set("W365A_CONTROLPLANE_URL", "must-not-use.invalid");
+    env.set("W365A_DP_SUFFIX", "must-not-use.invalid");
+    env.set("W365A_DP_TOKEN", "separate-routing-fixture-token");
+    fixture.reply(200, r#"{"status":"Ready"}"#);
+    invoke(&request("start", c), true).unwrap();
+    assert!(fixture
+        .request(fixture.count() - 1)
+        .contains("Bearer separate-routing-fixture-token"));
+    fixture.reply(202, "");
+    invoke(&request("stop", c), true).unwrap();
+    assert!(
+        env.record(c).exists(),
+        "accepted release retains recovery routing"
+    );
+    assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs);
+    fixture.configure(&env);
+    env.set("W365A_GRAPH_TOKEN", "synthetic-graph-token");
+    let before = fixture.count();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(env.record(c).with_file_name("connection.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    std::thread::scope(|scope| {
+        let calls: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| invoke(&request("deprovision", c), true).unwrap_err()))
+            .collect();
+        for call in calls {
+            assert_eq!(
+                call.join().unwrap().details.unwrap()["code"],
+                "routing_state_lock"
+            );
+        }
+    });
+    drop(lock);
+    assert_eq!(
+        fixture.count(),
+        before,
+        "contended records cannot route a request"
+    );
+    #[cfg(windows)]
+    {
+        use mxc_sdk::mxc_common::filesystem_security::set_owner_only_dacl;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+        use windows::Win32::Security::Authorization::{
+            GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{
+            ACL, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        let path: Vec<_> = env
+            .record(c)
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        assert_eq!(
+            unsafe {
+                GetNamedSecurityInfoW(
+                    PCWSTR(path.as_ptr()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    Some(&mut dacl),
+                    None,
+                    &mut descriptor,
+                )
+            },
+            ERROR_SUCCESS
+        );
+        let changed = unsafe {
+            SetNamedSecurityInfoW(
+                PCWSTR(path.as_ptr()),
+                SE_FILE_OBJECT,
+                OBJECT_SECURITY_INFORMATION(
+                    DACL_SECURITY_INFORMATION.0 | UNPROTECTED_DACL_SECURITY_INFORMATION.0,
+                ),
+                None,
+                None,
+                Some(dacl.cast_const()),
+                None,
+            )
+        };
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(changed, ERROR_SUCCESS);
+        assert_eq!(
+            invoke(&request("start", c), true)
+                .unwrap_err()
+                .details
+                .unwrap()["code"],
+            "routing_state_permissions"
+        );
+        set_owner_only_dacl(&env.record(c), false).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(env.record(c), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(invoke(&request("start", c), true).is_err());
+        std::fs::set_permissions(env.record(c), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for malformed in [
+        "{}".to_owned(),
+        stored.replace("\"version\":1", "\"version\":2"),
+        stored.replace(c, B),
+        stored.replace(
+            "\"computerHost\":\"localhost\"",
+            "\"computerHost\":\"untrusted.invalid\"",
+        ),
+    ] {
+        std::fs::write(env.record(c), malformed).unwrap();
+        assert!(invoke(&request("start", c), true).is_err());
+        assert!(invoke(&request("deprovision", c), true).is_err());
+        assert_eq!(fixture.count(), before);
+    }
+    std::fs::remove_file(env.record(c)).unwrap();
+    assert!(invoke(&request("deprovision", c), true).is_err());
+    assert_eq!(
+        fixture.count(),
+        before,
+        "missing record cannot use ambient endpoints"
+    );
+    std::fs::hard_link(env.record(A), env.record(c)).unwrap();
+    assert!(invoke(&request("deprovision", c), true).is_err());
+    std::fs::remove_file(env.record(c)).unwrap();
+    assert_eq!(
+        fixture.count(),
+        before,
+        "linked records cannot route a request"
+    );
+
+    // An allocated ID survives a failed atomic publication, without a false success.
+    env.set("MXC_W365_TEST_STATE_WRITE_FAIL", "1");
+    fixture.reply(
+        200,
+        &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)}).to_string(),
+    );
+    let failure = invoke(&provision(), true).unwrap_err();
+    assert!(failure.message.contains("service-operator cleanup"));
+    assert!(failure.message.contains("controlPlaneHost=localhost"));
+    assert_eq!(
+        failure.details.as_ref().unwrap()["sandboxId"],
+        format!("w365:{POOL}:{c}")
+    );
+    assert_eq!(
+        failure.details.as_ref().unwrap()["controlPlaneHost"],
+        "localhost"
+    );
+    assert!(!env.record(c).exists());
+    assert!(std::fs::read_dir(env.record(c).parent().unwrap())
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+    std::env::remove_var("MXC_W365_TEST_STATE_WRITE_FAIL");
+    for url in [
+        format!("https://localhost/computers/{B}?api-version=1.0"),
+        format!("https://localhost/computers/{c}?api-version=1.0&ticket=must-not-persist"),
+        format!("https://untrusted.invalid/computers/{c}?api-version=1.0"),
+    ] {
+        fixture.reply(
+            200,
+            &json!({"sessionId":c,"status":"Succeeded","computerUrl":url}).to_string(),
+        );
+        let failure = invoke(&provision(), true).unwrap_err();
+        assert_eq!(
+            failure.details.as_ref().unwrap()["code"],
+            "invalid_computer_url"
+        );
+        assert!(!format!("{failure:?}").contains("must-not-persist"));
+    }
+    fixture.reply(
+        200,
+        &json!({"sessionId":c,"status":"Succeeded",
+        "mcpUrl":"https://localhost/computers/not-a-computer-resource"})
+        .to_string(),
+    );
+    let failure = invoke(&provision(), true).unwrap_err();
+    assert_eq!(
+        failure.details.as_ref().unwrap()["code"],
+        "missing_computer_url"
+    );
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(env.record(c)).unwrap()).unwrap();
+    assert!(record["computerHost"].is_null());
+    assert!(invoke(&request("start", c), true).is_err());
+    fixture.reply(204, "");
+    invoke(&request("deprovision", c), true).unwrap();
+
     for request in fixture.requests.lock().unwrap().iter() {
         let user_agent = request.lines().find_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -1255,7 +1880,7 @@ fn lifecycle_fresh_executor_fixture() {
     assert_eq!(fixture.count(), 0);
     fixture.reply(
         200,
-        &json!({"sessionId":A,"status":"Succeeded"}).to_string(),
+        &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
     );
     let output = run(provision(), true);
     assert!(

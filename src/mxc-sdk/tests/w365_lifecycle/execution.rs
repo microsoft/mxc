@@ -87,6 +87,8 @@ impl ExecFixture {
             }
         });
         let fixture = Fixture {
+            graph_requests: Default::default(),
+            graph_replies: Default::default(),
             port,
             ca,
             requests,
@@ -1233,15 +1235,12 @@ fn execution_upgrade_validation_fixture() {
     for n in 0..9 {
         assert_eq!(fixture.request(n).split_once("\r\n\r\n").unwrap().1, "");
     }
-    for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN"] {
-        env.set(key, "");
-        assert_eq!(
-            spawn(&exec_request()).err().unwrap().code,
-            ErrorCode::PolicyValidation
-        );
-        env.set("W365A_DP_SUFFIX", "localhost");
-        env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
-    }
+    env.set("W365A_DP_TOKEN", "");
+    assert_eq!(
+        spawn(&exec_request()).err().unwrap().code,
+        ErrorCode::PolicyValidation
+    );
+    env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
     let mut value = exec_request();
     value["process"]["mode"] = json!("pty");
     assert!(
@@ -1333,7 +1332,60 @@ fn selected_exec_upgrade(env: &Environment) {
 fn execution_fresh_executor_fixture() {
     let _lock = ENV.lock().unwrap();
     let env = Environment::new();
+    let exe = std::env::var("MXC_W365_TEST_EXECUTOR").expect("fixture executor required");
+    let mut lifecycle_file = tempfile::NamedTempFile::new().unwrap();
+    lifecycle_file
+        .write_all(br#"{"version":"1.1.0-alpha"}"#)
+        .unwrap();
+    let mut provision_file = tempfile::NamedTempFile::new().unwrap();
+    let mut config = provision();
+    config.as_object_mut().unwrap().remove("phase");
+    provision_file
+        .write_all(config.to_string().as_bytes())
+        .unwrap();
+    let lifecycle = |operation: &str| {
+        let mut command = std::process::Command::new(&exe);
+        command
+            .args(["--operation", operation, "--experimental", "--config"])
+            .arg(lifecycle_file.path());
+        if operation != "provision" {
+            command.args(["--container-id", &format!("w365:{POOL}:{A}")]);
+        }
+        command.output().unwrap()
+    };
+    std::fs::remove_file(env.record(A)).unwrap();
+    {
+        let control = Fixture::new();
+        control.configure(&env);
+        control.reply(
+            200,
+            &json!({"sessionId":A,"status":"Succeeded","computerUrl":computer_url(A)}).to_string(),
+        );
+        let result = std::process::Command::new(&exe)
+            .args(["--operation", "provision", "--experimental", "--config"])
+            .arg(provision_file.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        std::env::remove_var("W365A_CONTROLPLANE_URL");
+        std::env::remove_var("W365A_DP_SUFFIX");
+        std::env::remove_var("W365A_GRAPH_TOKEN");
+        env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
+        control.reply(200, r#"{"status":"Ready"}"#);
+        let result = lifecycle("start");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
     let fixture = ExecFixture::new(&env);
+    std::env::remove_var("W365A_CONTROLPLANE_URL");
+    std::env::remove_var("W365A_DP_SUFFIX");
     fixture.script(|stream| {
         started(stream);
         assert_eq!(eof(stream), b"executor-stdin\0\xff");
@@ -1346,7 +1398,6 @@ fn execution_fresh_executor_fixture() {
     value.as_object_mut().unwrap().remove("phase");
     value.as_object_mut().unwrap().remove("sandboxId");
     file.write_all(value.to_string().as_bytes()).unwrap();
-    let exe = std::env::var("MXC_W365_TEST_EXECUTOR").expect("fixture executor required");
     let example = std::path::Path::new(&exe)
         .parent()
         .unwrap()
@@ -1616,6 +1667,17 @@ fn execution_fresh_executor_fixture() {
             " (w365_agents)\r\n"
         )));
     }
+    let control = Fixture::new();
+    control.configure(&env);
+    std::env::remove_var("W365A_CONTROLPLANE_URL");
+    control.reply(204, "");
+    let result = lifecycle("deprovision");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(env.record(A).exists());
 }
 
 #[test]

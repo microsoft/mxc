@@ -31,12 +31,11 @@ settings under `w365Agents.provision`:
 
 | Field | Meaning |
 | --- | --- |
-| `poolId` | Required hyphenated ASCII GUID of the authorized pool. |
-| `userType` | Optional: `Local`, `HumanUser`, or `Agentic`. |
-| `userObjectId` | Optional hyphenated ASCII GUID. |
+| `poolId` | Optional hyphenated ASCII GUID. When supplied, use only that pool; otherwise try the signed-in user's assigned pools in list order. Explicit null and empty values are invalid. |
+| `userType` | Optional: `Local` or `HumanUser`. `Agentic` is parsed but rejected because its auxiliary authentication is unsupported. |
+| `userObjectId` | Required non-nil hyphenated ASCII GUID for API 3.0 checkout. |
 
-Omitted identity fields are left to the service; MXC does not infer a user or
-select `Local`. Supply `w365Agents.provision` only for provision operations.
+MXC does not infer a user or select `Local`. Supply `w365Agents.provision` only for provision operations.
 Per-call endpoint, token and lifecycle timeout overrides are not supported.
 Local filesystem, network, UI, clipboard and proxy policies are rejected before
 service work because MXC cannot enforce them on the Cloud PC.
@@ -45,9 +44,10 @@ Supply configuration in the **caller environment**:
 
 | Variable | Requirement |
 | --- | --- |
-| `W365A_CONTROLPLANE_URL` | Control-plane ASCII DNS hostname only, without scheme, port or path. HTTPS uses port 443. |
-| `W365A_CP_TOKEN` | Nonempty resource-specific bearer token, without whitespace or control characters. |
-| `W365A_DP_SUFFIX` | Bare ASCII data-plane DNS suffix, for example `northeurope.remotinginterface.regional.cloudinferenceplatform-int.azure.com`. MXC prefixes the reservation's pool GUID. Required for start/exec only. |
+| `W365A_GRAPH_TOKEN` | Separate caller-supplied Graph bearer token, required only for provision. Use a token for the selected Graph environment. |
+| `W365A_GRAPH_ENVIRONMENT` | `public` (default) or `canary`. Selects a fixed Graph deployment, not an arbitrary URL. |
+| `W365A_CONTROLPLANE_URL` | Fallback control-plane ASCII DNS hostname only, without scheme, port or path. Used only when a successfully fetched pool resource lacks `poolUrl`. |
+| `W365A_CP_TOKEN` | Nonempty resource-specific control-plane bearer token, without whitespace or control characters. Required for provision and release. |
 | `W365A_DP_TOKEN` | Nonempty resource-specific data-plane bearer token with the same character constraints. Required for start/exec only; no control-plane token fallback. |
 
 For example, with an approved token already in `$controlPlaneToken`:
@@ -55,6 +55,7 @@ For example, with an approved token already in `$controlPlaneToken`:
 ```powershell
 $env:W365A_CONTROLPLANE_URL = 'northeurope.sessionmanagement.regional.cloudinferenceplatform.azure.com'
 $env:W365A_CP_TOKEN = $controlPlaneToken
+$env:W365A_GRAPH_TOKEN = $graphToken
 ```
 
 Set the variables before launching the caller. Use the endpoints authorized for
@@ -62,8 +63,87 @@ your pool; the hostname above is only an example. Never put tokens in request
 JSON, command-line arguments, shell history or logs.
 
 The caller must acquire and renew tokens, including before cleanup. Each call
-rereads the environment. Checkout has a 45-second client budget; release has
-30 seconds.
+rereads only the credentials it needs. Listing assigned pools has a 30-second
+budget across pages; each pool-resource fetch has a separate 30-second budget.
+Each pool checkout has a 45-second budget, and release has 30 seconds. Checkout
+sends API 3.0 JSON `userObjectId` and optional `sessionKind` (`local` or `human`).
+`Created` completes using the same session ID and client request ID inside that
+checkout budget; it never triggers a replacement allocation.
+
+### Endpoint discovery and local routing
+
+When `poolId` is supplied, provision fetches its resource directly without
+listing assigned pools. When it is omitted, MXC first lists
+`/beta/me/cloudPcPools` on `graph.microsoft.com`, or
+`/testprodbeta_cpc_sh/me/cloudPcPools` on `canary.graph.microsoft.com`, following
+pagination only within that collection. Malformed or duplicate pool IDs fail
+before checkout. An empty list returns `no_assigned_pools`, not a CP fallback.
+
+For each candidate, MXC fetches `/beta/deviceManagement/virtualEndpoint/cloudPcPools/{poolId}`
+on public Graph, or
+`/testprodbeta_cpc_sh/deviceManagement/virtualEndpoint/cloudPcPools/{poolId}`
+on Canary, and reads `poolUrl` from that resource, not the list entry. The
+resource's `id` must match the candidate pool. Listing and resource fetches use
+the same Graph token; the caller must authorize the endpoints used.
+Authentication, transport, HTTP (including resource GET 404), malformed-response
+and pagination failures are errors, not fallback conditions. No administrative
+pool-list fallback is used.
+
+A supplied `poolUrl` must be HTTPS port 443 with path `/sessions`, no credentials,
+query or fragment, and a regional `sessionmanagement` host under
+`cloudinferenceplatform.azure.com` or `cloudinferenceplatform-int.azure.com`.
+MXC extracts that hostname and builds
+`/api/pools/{poolId}/sessions?api-version=3.0`; it does not infer regions or rewrite
+hosts. A missing, null or empty resource `poolUrl` permits the explicit
+environment fallback above. A failed checkout is never retried against another
+host for that pool.
+
+Without a supplied `poolId`, MXC fetches each candidate's details and attempts
+checkout in list order, stopping at the first successful checkout whose routing
+was saved. It advances only after a definitive HTTP 4xx checkout rejection
+(excluding 408) with `possiblySucceeded=false` and no allocated session ID.
+If every pool is rejected, the error retains the last failure and `poolAttempts`
+details. With an explicit ID, any checkout failure is returned immediately.
+
+Transport errors, timeouts, redirects, server errors, any returned session ID,
+invalid successful responses and routing-publication failures stop provisioning;
+they never trigger another pool allocation. Retain the reported cleanup ID and
+CP destination. Graph resource/authentication/validation errors also stop the
+operation rather than skipping a pool. No automatic release is performed.
+
+Successful checkout must supply a `computerUrl` for
+`https://{poolId}.{region}.remotinginterface.regional.cloudinferenceplatform[-int].azure.com/computers/{sessionId}?api-version=1.0`.
+This is a computer-resource URL, not a bare origin or MCP endpoint. MXC validates
+the identity, host, path and sole query before using that host for readiness
+`/computers/{sessionId}/status?api-version=1.0` and Desktop Exec
+`/computers/{sessionId}/microsoft.exec?api-version=1.0`. Other prefixes, versions,
+query parameters or host families are unsupported.
+
+These are deliberately narrow supported mappings. The Graph documentation's
+`poolUrl` example and an observed API 2.0 session-list `computerUrl` do not prove
+API 3.0 checkout compatibility or permissions for both Graph endpoints in a
+deployed tenant. Controlled fixtures verify MXC's behavior, not service
+availability.
+
+MXC stores versioned, nonsecret `connection.json` records under
+`%LOCALAPPDATA%\Microsoft\MXC\w365\{poolId}\{sessionId}` on Windows,
+`${XDG_DATA_HOME:-$HOME/.local/share}/Microsoft/MXC/w365/{poolId}/{sessionId}`
+on Linux, and `$HOME/Library/Application Support/Microsoft/MXC/w365/{poolId}/{sessionId}`
+on macOS. Records contain only identity, validated destination hostnames and CP
+source; never tokens, tickets or other checkout URLs. Private ownership and
+permissions, per-record locks and atomic publication protect the records.
+Local lock contention fails explicitly with `routing_state_lock`; retry an
+existing-ID operation only after contention clears. A provisioning error is
+never permission to repeat allocation.
+
+Later operations require the matching local record and ignore ambient endpoint
+variables, including `W365A_DP_SUFFIX`. They do not call Graph. Credentials
+remain separate, caller-owned and resource-specific; no token cache or renewal
+provider is added. Do not copy records between users or machines. Missing,
+corrupt, unsupported-version, foreign-owned or conflicting records fail
+explicitly; automatic import, endpoint refresh and legacy-ID fallback are not
+implemented. Backend storage errors require correction or service-operator
+reconciliation, not another allocation.
 
 HTTP proxy configuration is not supported.
 
@@ -124,19 +204,27 @@ automatically replay commands after a disconnect or timeout.
 ## Reservation ownership and error recovery
 
 Retain the returned `result.sandboxId` (`w365:{poolId}:{sessionId}`) and pass it
-unchanged to later operations. MXC does not keep a local reservation registry.
+unchanged to later operations. MXC retains a local routing cache, not a registry
+of authoritative remote reservation status.
 
 Checkout can fail after allocating a session. Retain any cleanup ID from
 `error.details.sandboxId` or the SDK error message and explicitly release it.
 If no ID was returned, give the service operator the `clientRequestId`, any
 service `requestId` and `possiblySucceeded` value for reconciliation. Do not
 repeat checkout automatically. SDK messages are diagnostic text, not a parsing API.
+If checkout yields an ID but lacks a supported `computerUrl`, provisioning fails
+and MXC retains CP-only routing for explicit release. If writing the routing
+record itself fails after allocation, retain the reported ID and CP host for
+service-operator cleanup: ordinary lifecycle calls cannot recover without a
+valid local record. MXC does not auto-release, replay checkout or discard the ID.
 
 Stop and deprovision are terminal release alternatives, not suspension.
 `result.metadata.releaseRequested: true` means release was accepted or the
 session was already absent; it does not confirm reset, sanitization or reusable
 capacity. If release fails or is uncertain, retain the same ID for an explicit
 retry with renewed credentials. A new checkout does not clean up an earlier one.
+Routing records remain after accepted release to support explicit retries;
+their presence never means the reservation is still usable.
 
 ## Dev SDK lifecycle and execution
 
@@ -211,7 +299,8 @@ Save this as `provision.json`, replacing the synthetic pool GUID:
   "w365Agents": {
     "provision": {
       "poolId": "11111111-1111-1111-1111-111111111111",
-      "userType": "Local"
+      "userType": "Local",
+      "userObjectId": "22222222-2222-2222-2222-222222222222"
     }
   }
 }
@@ -232,7 +321,7 @@ commands.
 ### Run commands on the same reservation
 
 After the single Local provision above, retain its ID as `$id`. Supply both
-data-plane environment variables through the caller's approved credential
+data-plane token through the caller's approved credential
 mechanism and run readiness explicitly:
 
 ```powershell
@@ -283,7 +372,17 @@ is accepted.
 
 The `w365_lifecycle` integration target tests lifecycle recovery, readiness,
 binary I/O, backpressure, timeouts and cleanup against loopback TLS services.
-It needs no live tenant. Separate .NET and Node fixtures cover Dev JSON APIs.
+It also tests separate Graph/CP/DP credentials, public/Canary list pagination
+followed by pool-resource retrieval, resource identity validation and Graph
+fallback boundaries, optional pool selection, ordered checkout failover and
+exhaustion, refusal to fail over after uncertain allocation or publication
+failure, API 3.0 same-ID completion, checkout-derived routing,
+private routing records, contention, missing/corrupt/mismatched/linked records,
+atomic-write failure after allocation and fresh-process
+provision/start/exec/release without endpoint variables. Each fixture uses an
+isolated private state root and synthetic credentials; it must never read a
+user's real routing store. It needs no live tenant. Separate .NET and Node
+fixtures cover Dev JSON APIs.
 For CI hosts and job wiring, see the
 [validation runbook](../../development/build-and-test/ci-validation-infrastructure.md#offline-tls-fixtures).
 
@@ -301,5 +400,5 @@ Keep fixture artifacts separate from shipping builds. Fresh-executor tests are
 ignored unless explicitly included as above. Linux/macOS jobs build the execution
 example but do not require a fixture executor. All fixture hosts require
 the OpenSSL CLI on `PATH` or selected by `MXC_W365_TEST_OPENSSL`.
-Test certificate and deadline overrides work only in `test-support` builds;
+Test certificate, endpoint, state-root, write-failure and deadline overrides work only in `test-support` builds;
 shipping builds ignore them.
