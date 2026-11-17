@@ -666,6 +666,25 @@ impl ProcessSettings {
 // ContainerSettings builder
 // ---------------------------------------------------------------------------
 
+/// The SDK form of `mappings`, bound to the SDK's default Windows address.
+/// The parser rejects UDP today; the branch keeps this correct if an SDK
+/// update enables it.
+pub(crate) fn sdk_port_mappings(mappings: &[PortMapping]) -> Vec<WslcContainerPortMapping> {
+    mappings
+        .iter()
+        .map(|pm| WslcContainerPortMapping {
+            windowsPort: pm.windows_port,
+            containerPort: pm.container_port,
+            protocol: if pm.protocol == "udp" {
+                WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
+            } else {
+                WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
+            },
+            windowsAddress: ptr::null_mut(),
+        })
+        .collect()
+}
+
 /// A fully-populated `WslcContainerSettings` together with every heap buffer its
 /// pointers reference (image name, volume paths, port mappings). The init
 /// process is intentionally NOT set here — that is caller-specific (the one-shot
@@ -703,24 +722,10 @@ impl ContainerSettings {
             return Err(sdk_step_error("WslcInitContainerSettings", hr, ""));
         }
 
-        // Port mappings (host<->container). Empty list = no forwarding. The
-        // parser rejects UDP up front today; the explicit branch is retained so
-        // this keeps compiling if UDP is enabled after an SDK update.
+        // Port mappings (host<->container). Empty list = no forwarding.
         let mut port_vec: Vec<WslcContainerPortMapping> = Vec::new();
         if !port_mappings.is_empty() {
-            port_vec = port_mappings
-                .iter()
-                .map(|pm| WslcContainerPortMapping {
-                    windowsPort: pm.windows_port,
-                    containerPort: pm.container_port,
-                    protocol: if pm.protocol == "udp" {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                    } else {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                    },
-                    windowsAddress: ptr::null_mut(),
-                })
-                .collect();
+            port_vec = sdk_port_mappings(port_mappings);
 
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut raw,

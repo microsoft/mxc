@@ -481,11 +481,7 @@ impl WSLContainerRunner {
     }
 
     fn network_mode(&self, request: &ExecutionRequest) -> Result<policy::NetworkMode, MxcError> {
-        policy::create_and_run_network_mode(
-            request,
-            "wslc.portMappings",
-            !self.config.port_mappings.is_empty(),
-        )
+        policy::create_and_run_network_mode(request, !self.config.port_mappings.is_empty())
     }
 
     fn validate_target_os(&self) -> Result<(), ScriptResponse> {
@@ -1038,6 +1034,7 @@ impl WSLContainerRunner {
                     &storage_path,
                     &session_name,
                     egress,
+                    &self.config.port_mappings,
                     logger,
                 )?)
             }
@@ -1177,32 +1174,13 @@ impl WSLContainerRunner {
         // -- Port mappings (host<->container) --
         // Apply before networking mode so the SDK has the complete picture
         // when the container is created. Empty list = no forwarding (default).
-        // The parser rejects `"udp"` up front: the C header declares
-        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime returns
-        // `E_NOTIMPL` when UDP is actually requested. The protocol match below
-        // therefore only ever sees `"tcp"` today, but the explicit branch is
-        // retained so this code keeps compiling cleanly if/when the parser
-        // starts accepting UDP after an SDK update.
-        // Built at function scope: these arrays must outlive
-        // `WslcCreateContainer` below, which is the call that actually consumes
-        // the pointers handed to `WslcSetContainerSettingsPortMappings`.
-        let mappings: Vec<WslcContainerPortMapping> = self
-            .config
-            .port_mappings
-            .iter()
-            .map(|pm| WslcContainerPortMapping {
-                windowsPort: pm.windows_port,
-                containerPort: pm.container_port,
-                protocol: if pm.protocol == "udp" {
-                    WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                } else {
-                    WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                },
-                // Default bind address (typically loopback/0.0.0.0 per
-                // SDK config). Not exposed in the MXC config today.
-                windowsAddress: ptr::null_mut(),
-            })
-            .collect();
+        // Read by WslcCreateContainer below. Behind the built-in proxy, the
+        // gateway owns the mappings.
+        let mappings = if gateway.is_some() {
+            Vec::new()
+        } else {
+            container_steps::sdk_port_mappings(&self.config.port_mappings)
+        };
         if !mappings.is_empty() {
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut container_settings,
@@ -2805,7 +2783,7 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_rejects_port_mappings_under_isolated_networking() {
+    fn one_shot_proxies_port_mappings_under_isolated_networking() {
         let config = WslcConfig {
             port_mappings: vec![crate::mxc_common::models::PortMapping {
                 windows_port: 8080,
@@ -2819,18 +2797,12 @@ mod tests {
             ..Default::default()
         };
 
-        let err = WSLContainerRunner::new(&config)
-            .validate_runner(&request)
-            .unwrap_err();
-        assert_eq!(
-            err.failure_phase,
-            crate::mxc_common::models::FailurePhase::Rejected
-        );
-        assert!(
-            err.error_message.contains("wslc.portMappings"),
-            "the message must name the one-shot list; got: {}",
-            err.error_message
-        );
+        let runner = WSLContainerRunner::new(&config);
+        runner.validate_runner(&request).unwrap();
+        assert!(matches!(
+            runner.network_mode(&request).unwrap(),
+            policy::NetworkMode::Proxied(_)
+        ));
     }
 
     #[test]

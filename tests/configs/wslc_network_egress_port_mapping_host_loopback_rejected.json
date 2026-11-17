@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-port-mapping-host-loopback-rejected",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN"
+  },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "allow" }
+  },
+  "wslc": {
+    "image": "alpine:latest",
+    "portMappings": [{ "windowsPort": 18088, "containerPort": 80, "protocol": "tcp" }]
+  }
+}

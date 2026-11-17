@@ -591,7 +591,6 @@ public class MxcContainerWslcE2ETests
 
     public static TheoryData<string, string> UnenforceableEgressCases() => new()
     {
-        { "port mappings", "wslc.portMappings cannot be combined with egress filtering" },
         { "external proxy", "runtimeConfig.networkProxy cannot be combined with egress filtering" },
         { "host loopback", "hostLoopback 'allow' cannot be combined with egress filtering" },
         { "UDP allow", "network.egress.allow supports only protocol 'tcp' (got 'udp')" },
@@ -605,12 +604,8 @@ public class MxcContainerWslcE2ETests
     {
         RequireWslc();
         var network = AllowCloudflare443();
-        var containment = new Containment.Wslc();
         switch (name)
         {
-            case "port mappings":
-                containment.PortMappings.Add(new WslcPortMapping(39001, 80));
-                break;
             case "external proxy":
                 network.RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8888" };
                 break;
@@ -630,7 +625,7 @@ public class MxcContainerWslcE2ETests
         var request = new ContainerRequest("echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN")
         {
             Network = network,
-            Containment = containment,
+            Containment = new Containment.Wslc(),
         };
 
         var run = await Assert.ThrowsAsync<MxcException>(
