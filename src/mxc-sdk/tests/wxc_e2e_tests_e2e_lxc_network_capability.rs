@@ -128,28 +128,31 @@ fn cancelling_startup_preserves_a_stopped_container() {
 }
 
 #[test]
-fn failed_startup_exits_when_cleanup_hangs() {
+fn failed_startup_waits_for_cleanup_after_one_minute() {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     if !ready() {
         return;
     }
 
-    for (case, hook_body) in [
-        ("startup hook fails immediately", "exit 1"),
+    for (case, hook_body, cleanup_start_limit) in [
+        ("immediate", "exit 1", Duration::from_secs(30)),
         (
-            "startup hook hangs",
+            "hung",
             "while [ ! -e \"$release\" ]; do sleep 0.01; done",
+            Duration::from_secs(75),
         ),
     ] {
         let fixture = tempfile::tempdir_in(".").expect("create startup timeout fixture");
         let directory = fixture.path().canonicalize().expect("startup fixture path");
-        let name = format!("lxc-timeout-startup-{}", std::process::id());
+        let name = format!("lxc-timeout-startup-{case}-{}", std::process::id());
         let entered = directory.join("entered");
         let cleanup_entered = directory.join("cleanup-entered");
+        let cleanup_finished = directory.join("cleanup-finished");
         let release = directory.join("release");
         let outcome = std::panic::catch_unwind(|| {
             let created = Command::new("lxc-create")
@@ -179,54 +182,83 @@ fn failed_startup_exits_when_cleanup_hangs() {
             contents.push_str(&format!("\nlxc.hook.start-host = {}\n", hook.display()));
             fs::write(&definition, contents).expect("install startup gate");
             let destroy = directory.join("lxc-destroy");
+            let original_path = std::env::var("PATH").expect("host command path");
 
-            // Block destruction until fixture cleanup releases it.
+            // Hold destruction past the startup deadline, then remove the container.
             fs::write(
                 &destroy,
                 format!(
-                    "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 1\n",
+                    "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n\
+                     PATH='{}' lxc-destroy \"$@\" && touch '{}'\n",
                     cleanup_entered.display(),
-                    release.display()
+                    release.display(),
+                    original_path,
+                    cleanup_finished.display()
                 ),
             )
-            .expect("write blocked destruction tool");
+            .expect("write delayed destruction tool");
             fs::set_permissions(&destroy, fs::Permissions::from_mode(0o700))
                 .expect("make destruction tool executable");
-            let path = format!(
-                "{}:{}",
-                directory.display(),
-                std::env::var("PATH").expect("host command path")
-            );
+            let path = format!("{}:{original_path}", directory.display());
             let config = json!({
                 "version": "0.9.0-alpha",
                 "containerId": name,
                 "containment": "lxc",
-                "process": { "commandLine": "true" },
+                "process": { "commandLine": "echo WORKLOAD_RAN" },
                 "lifecycle": { "destroyOnExit": true },
                 "lxc": { "distribution": "alpine", "release": "3.23" },
                 "network": { "egress": { "default": "allow" } }
             });
-
-            // Preserve MXC's exit status and kill it if it exceeds the test deadline.
-            let executor_status = Command::new("/usr/bin/timeout")
-                .args(["--preserve-status", "--signal=KILL", "75"])
-                .arg(wxc_e2e_tests::find_platform_exec().expect("find lxc-exec"))
-                .arg("--config-base64")
-                .arg(STANDARD.encode(config.to_string()))
-                .env("PATH", &path)
-                .stdin(Stdio::null())
-                .status()
-                .expect("run LXC startup and cleanup timeout");
-            let hook_entered = entered.exists();
-            let state = Command::new("/usr/bin/timeout")
-                .args(["--kill-after=1", "5", "lxc-info", "-n", &name, "-sH"])
-                .output()
-                .expect("read container state after startup timeout");
+            let output_path = directory.join("executor-output");
+            let output = fs::File::create(&output_path).expect("create executor output");
+            let started = Instant::now();
+            let mut executor =
+                Command::new(wxc_e2e_tests::find_platform_exec().expect("find lxc-exec"))
+                    .arg("--config-base64")
+                    .arg(STANDARD.encode(config.to_string()))
+                    .env("PATH", &path)
+                    .stdin(Stdio::null())
+                    .stdout(output.try_clone().expect("capture executor stdout"))
+                    .stderr(output)
+                    .spawn()
+                    .expect("run LXC startup with delayed cleanup");
+            while !cleanup_entered.exists()
+                && started.elapsed() < cleanup_start_limit
+                && executor.try_wait().expect("poll executor status").is_none()
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let cleanup_started = cleanup_entered.exists();
+            std::thread::sleep(Duration::from_secs(65).saturating_sub(started.elapsed()));
+            let running_during_cleanup = executor
+                .try_wait()
+                .expect("observe executor during cleanup")
+                .is_none();
+            fs::write(&release, "").expect("release delayed cleanup");
+            let mut exited_before_cleanup = false;
+            let executor_status = loop {
+                if let Some(status) = executor.try_wait().expect("poll executor status") {
+                    if cleanup_finished.exists() {
+                        break Some(status);
+                    }
+                    exited_before_cleanup = true;
+                }
+                if started.elapsed() >= Duration::from_secs(200) {
+                    let _ = executor.kill();
+                    let _ = executor.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            let output = fs::read_to_string(output_path).expect("read executor output");
             (
                 executor_status,
-                state,
-                hook_entered,
-                cleanup_entered.exists(),
+                entered.exists(),
+                cleanup_started,
+                running_during_cleanup,
+                exited_before_cleanup,
+                !std::path::Path::new(&definition).exists(),
+                output,
             )
         });
         let _ = fs::write(release, "");
@@ -234,18 +266,29 @@ fn failed_startup_exits_when_cleanup_hangs() {
         let _ = Command::new("lxc-destroy")
             .args(["-n", &name, "-f"])
             .output();
-        let (executor_status, state, hook_entered, cleanup_started) =
-            outcome.expect("startup timeout fixture failed");
+        let (
+            executor_status,
+            hook_entered,
+            cleanup_started,
+            running_during_cleanup,
+            exited_before_cleanup,
+            container_destroyed,
+            output,
+        ) = outcome.expect("startup cleanup fixture failed");
 
         assert!(
             hook_entered
                 && cleanup_started
-                && executor_status.code() == Some(124)
-                && state.status.success()
-                && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED",
-            "failed startup must exit within one minute even when destruction hangs; \
+                && running_during_cleanup
+                && !exited_before_cleanup
+                && executor_status.is_some_and(|status| !status.success())
+                && container_destroyed
+                && !output.contains("WORKLOAD_RAN"),
+            "failed startup must wait for cleanup past one minute without running the workload; \
              case={case}, hook_entered={hook_entered}, cleanup_started={cleanup_started}, \
-             state={state:?}, executor={executor_status:?}"
+             running_during_cleanup={running_during_cleanup}, \
+             exited_before_cleanup={exited_before_cleanup}, \
+             container_destroyed={container_destroyed}, executor={executor_status:?}\n{output}"
         );
     }
 }

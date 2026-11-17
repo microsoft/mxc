@@ -762,6 +762,10 @@ fn run_watchdog(mask: SigSet) -> ! {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "signal_cleanup_timeout_spec.rs"]
+mod timeout_spec;
+
 #[cfg(test)]
 mod tests {
     use super::*;
