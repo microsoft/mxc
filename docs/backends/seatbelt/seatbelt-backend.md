@@ -377,8 +377,9 @@ and POSIX shared memory. A `customMachLookups`, `customMachRegisters`,
 `customIoKits`, or `customPosixShm` block replaces the matching grant.
 
 It also grants read **and** write across all of `/private/tmp` and
-`/private/var/folders`. Your `filesystem` policy is applied after this grant, so
-`readonlyPaths` and `deniedPaths` entries inside those directories still apply.
+`/private/var/folders`. `readonlyPaths` entries at or inside those folders
+still apply, and a read-only parent such as `/private` doesn't block them.
+`deniedPaths` entries always apply.
 
 Settings always win over `guiAccess`, whether written or left at their default:
 `nestedPty` alone controls PTY creation, `keychainAccess` controls the
@@ -396,8 +397,9 @@ Mach lookup for `com.apple.SecurityServer`, `com.apple.securityd`,
 the `com.apple.lsd.*` family (matched by anchored regex — Seatbelt has no glob
 in `global-name`). Read access to `/private/var/db/mds` and
 `/private/var/protected/trustd`. Read+write on `~/Library/Keychains` and
-`/private/var/folders`. System keychain stores are already covered by the
-baseline `/Library` and `/System` allows.
+`/private/var/folders`; the same `readonlyPaths` and `deniedPaths` rules as
+`guiAccess` apply to these folders. System keychain stores are already covered
+by the baseline `/Library` and `/System` allows.
 </details>
 
 ## Learning mode (`captureDenials`)

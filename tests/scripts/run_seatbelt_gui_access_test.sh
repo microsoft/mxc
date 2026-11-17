@@ -99,6 +99,15 @@ grep -qx "GUI_TMP_ORIGINAL" "$TESTDIR/ro/file.txt" ||
     fail "the read-only file was modified" "$(cat "$TESTDIR/ro/file.txt")"
 pass "the read-only file is unchanged"
 
+# A read-only parent folder doesn't block guiAccess's temp folder grant.
+CFG="$(render seatbelt_gui_access_readonly_tmp.json TESTDIR "$TESTDIR")"
+edit_config "$CFG" 'config["filesystem"]["readonlyPaths"] = ["/private"]'
+run_config "$CFG"
+expect_ok "a read-only parent keeps /private/tmp writable under guiAccess" "TMP_WRITE_OK"
+echo "GUI_TMP_ORIGINAL" >"$TESTDIR/ro/file.txt"
+edit_config "$CFG" 'config["filesystem"]["readonlyPaths"] = ["/private/tmp"]'
+run_config "$CFG"
+expect_ok "a read-only /private/tmp stays read-only under guiAccess" "TMP_WRITE_BLOCKED"
 # --- customPosixShm replaces the shared memory grant ---------------------------
 
 cat >"$TESTDIR/shm_probe.py" <<'PROBE'

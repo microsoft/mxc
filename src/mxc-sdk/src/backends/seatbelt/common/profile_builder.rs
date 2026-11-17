@@ -31,7 +31,7 @@
 //! reports instead of enforcing the denies of settings the request omitted,
 //! and makes the broad guiAccess grants report under `<tag>:grant`.
 
-use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
+use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent, ResolvedMount};
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     CaptureDenialsMode, ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress,
@@ -39,7 +39,7 @@ use crate::mxc_common::models::{
 };
 use crate::seatbelt_common::seatbelt_policy::{self, NamePattern};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Prepared filesystem grants for profile generation.
 #[derive(Debug, Default)]
@@ -178,14 +178,24 @@ pub(crate) fn build_profile_with_terminals(
         );
     }
 
-    // Option filesystem grants come before the filesystem policy so that
-    // readonlyPaths and deniedPaths entries inside them still apply.
+    // Policy-derived allow rules. Setting folder grants follow them, so a
+    // read-only parent folder doesn't block them; policy entries at or inside
+    // a granted folder are then repeated so they still apply there.
+    let resolved = ResolvedPaths::from_inputs(inputs);
+    let plan = resolve_path_plan(&resolved.readwrite, &resolved.readonly, &[]);
+    write_filesystem_allow(&mut out, FS_ALLOW_SECTION, &plan);
     write_keychain_rules(&mut out, request, inputs.user_keychains.as_deref())?;
     write_gui_filesystem_rules(&mut out, request);
-
-    // Policy-derived allow rules.
-    let resolved = ResolvedPaths::from_inputs(inputs);
-    write_filesystem_allow(&mut out, &resolved);
+    let granted = setting_write_folders(request, inputs.user_keychains.as_deref());
+    let within_grants: Vec<_> = plan
+        .into_iter()
+        .filter(|mount| {
+            granted
+                .iter()
+                .any(|folder| Path::new(&mount.path).starts_with(folder))
+        })
+        .collect();
+    write_filesystem_allow(&mut out, FS_WITHIN_GRANTS_SECTION, &within_grants);
     write_network_rules(
         &mut out,
         request,
@@ -332,8 +342,12 @@ impl ResolvedPaths {
     }
 }
 
-fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
-    if paths.readonly.is_empty() && paths.readwrite.is_empty() {
+const FS_ALLOW_SECTION: &str = "policy.readonlyPaths / policy.readwritePaths (shallow-to-deep)";
+const FS_WITHIN_GRANTS_SECTION: &str =
+    "policy paths at or inside keychainAccess/guiAccess folders (shallow-to-deep)";
+
+fn write_filesystem_allow(out: &mut String, section: &str, plan: &[ResolvedMount]) {
+    if plan.is_empty() {
         return;
     }
 
@@ -345,8 +359,8 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
     // than inheriting the parent's write grant. `deniedPaths` is deliberately
     // not part of this plan: it is emitted last so it outranks these filtered
     // allows regardless of depth.
-    out.push_str(";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---\n");
-    for mount in resolve_path_plan(&paths.readwrite, &paths.readonly, &[]) {
+    let _ = writeln!(out, ";; --- {section} ---");
+    for mount in plan {
         let subpath = [mount.path.clone()];
         match mount.intent {
             FsIntent::ReadWrite => {
@@ -615,8 +629,27 @@ fn write_gui_filesystem_rules(out: &mut String, request: &ExecutionRequest) {
     }
     out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
     out.push_str("(allow file-read* file-write*\n");
-    out.push_str("    (subpath \"/private/tmp\")\n");
-    out.push_str("    (subpath \"/private/var/folders\"))\n");
+    let _ = writeln!(out, "    (subpath {})", quote_scheme(SHARED_TEMP_DIR));
+    let _ = writeln!(out, "    (subpath {}))", quote_scheme(PER_USER_TEMP_DIR));
+}
+
+const SHARED_TEMP_DIR: &str = "/private/tmp";
+const PER_USER_TEMP_DIR: &str = "/private/var/folders";
+
+/// Folders that `keychainAccess` and `guiAccess` grant read+write.
+fn setting_write_folders<'a>(
+    request: &ExecutionRequest,
+    user_keychains: Option<&'a str>,
+) -> Vec<&'a str> {
+    let mut folders = Vec::new();
+    if request.seatbelt.as_ref().is_some_and(|c| c.keychain_access) {
+        folders.extend(user_keychains);
+        folders.push(PER_USER_TEMP_DIR);
+    }
+    if seatbelt_policy::gui_access_effective(request) {
+        folders.extend([SHARED_TEMP_DIR, PER_USER_TEMP_DIR]);
+    }
+    folders
 }
 
 /// Emit one `(<action> mach-lookup (global-name …)…)` rule.
@@ -801,7 +834,7 @@ fn write_keychain_rules(
     out.push_str(";; --- keychainAccess: user keychain DB + XPC/folder caches (read+write) ---\n");
     out.push_str("(allow file-read* file-write*\n");
     let _ = writeln!(out, "    (subpath {})", quote_scheme(user_keychains));
-    out.push_str("    (subpath \"/private/var/folders\"))\n");
+    let _ = writeln!(out, "    (subpath {}))", quote_scheme(PER_USER_TEMP_DIR));
     Ok(())
 }
 
@@ -2118,13 +2151,20 @@ mod tests {
         assert!(!p.contains("keychainAccess=false"));
     }
 
-    /// guiAccess's temp/cache grant precedes the filesystem policy, so a
-    /// readonlyPaths or deniedPaths entry inside it still applies.
+    /// Setting folder grants follow the filesystem policy, so a read-only
+    /// parent doesn't block them. Policy entries at or inside a granted
+    /// folder are repeated after the grants, and deniedPaths stays last.
     #[test]
-    fn filesystem_policy_follows_option_filesystem_grants() {
+    fn filesystem_policy_at_or_inside_setting_grants_still_applies() {
         let mut r = req();
         r.policy.ui.disable = false;
-        r.policy.readonly_paths = vec!["/private/tmp/ro".into()];
+        r.policy.readonly_paths = vec![
+            "/private".into(),
+            "/Users/profile-test".into(),
+            "/Users/profile-test/Library/Keychains".into(),
+            "/private/tmp/ro".into(),
+        ];
+        r.policy.readwrite_paths = vec!["/private/tmp/ro/rw".into()];
         r.policy.denied_paths = vec!["/private/var/folders/xy".into()];
         r.seatbelt = Some(SeatbeltConfig {
             gui_access: true,
@@ -2134,14 +2174,24 @@ mod tests {
         let p = build_profile(&r).unwrap();
         let gui = p.find("guiAccess: allow writing").unwrap();
         let keychain = p.find("keychainAccess: user keychain").unwrap();
-        let readonly = p
-            .find("(deny file-write* network-bind network-outbound\n    (subpath \"/private/tmp/ro\")")
-            .unwrap();
+        let fs = p.find(FS_SECTION).unwrap();
+        let within = p.find(FS_WITHIN_GRANTS_SECTION).unwrap();
         let denied = p.find("policy.deniedPaths").unwrap();
+        assert!(fs < keychain && keychain < gui && gui < within && within < denied);
+
+        let repeated = &p[within..denied];
+        let strip = |path: &str| format!("{RO_STRIP}    (subpath \"{path}\")");
+        assert!(!repeated.contains(&strip("/private")), "{repeated}");
         assert!(
-            gui < readonly && keychain < readonly && readonly < denied,
-            "{p}"
+            !repeated.contains(&strip("/Users/profile-test")),
+            "{repeated}"
         );
+        assert!(repeated.contains(&strip("/Users/profile-test/Library/Keychains")));
+        let tmp_ro = repeated.find(&strip("/private/tmp/ro")).unwrap();
+        let tmp_rw = repeated
+            .find(&format!("{RW_RULE}    (subpath \"/private/tmp/ro/rw\")"))
+            .unwrap();
+        assert!(tmp_ro < tmp_rw, "{repeated}");
     }
 
     #[test]

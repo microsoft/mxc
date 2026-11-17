@@ -383,8 +383,10 @@ change is intentional.
   servers.
 - `ui.clipboard: "none"` or an omitted `ui.clipboard` blocks every
   `com.apple.pasteboard.` server.
-- `readonlyPaths` and `deniedPaths` entries inside `/private/tmp` and
-  `/private/var/folders` apply.
+- `readonlyPaths` and `deniedPaths` entries at or inside `/private/tmp` and
+  `/private/var/folders` apply. The same holds for `keychainAccess: true` and
+  its `~/Library/Keychains` and `/private/var/folders` grants. A read-only
+  parent folder doesn't block these grants.
 
 In `captureDenials` `"allow"` mode, omitted settings allow and report access
 instead, so the report shows what they would block.

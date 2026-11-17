@@ -1,0 +1,20 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "(echo changed > {{TARGET}}) 2>/dev/null && echo KC_FOLDER_WRITE_OK || echo KC_FOLDER_WRITE_BLOCKED",
+        "timeout": 20000,
+        "env": [
+            "HOME={{HOME}}"
+        ]
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{READONLY}}"
+        ]
+    },
+    "seatbelt": {
+        "keychainAccess": true
+    }
+}

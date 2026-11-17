@@ -14,7 +14,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 require_python3_probe
 
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-opt.XXXXXX)"
-trap 'rm -rf "$TESTDIR" "$SEATBELT_TMP"' EXIT
+# keychainAccess grants writes to the per-user temp folder under /private/var/folders.
+KC_DIR="$(mktemp -d "$(cd "$(getconf DARWIN_USER_TEMP_DIR)" && pwd -P)/mxc-seatbelt-kc.XXXXXX")"
+mkdir -p "$HOME/Library/Keychains"
+KC_FILE="$HOME/Library/Keychains/mxc-seatbelt-test.$$"
+trap 'rm -rf "$TESTDIR" "$KC_DIR" "$KC_FILE" "$SEATBELT_TMP"' EXIT
 mkdir -p "$TESTDIR/denied"
 echo "OPT_SECRET_CONTENT" >"$TESTDIR/denied/secret.txt"
 chmod -R a+rX "$TESTDIR"
@@ -54,6 +58,18 @@ expect_ok "keychainAccess defaults to denying the Keychain" "KEYCHAIN_BLOCKED"
 
 run_config "$(render seatbelt_opt_keychain_on.json HOME "$HOME")"
 expect_ok "keychainAccess=true reaches the Keychain" "KEYCHAIN_OK"
+
+# A read-only parent folder doesn't block keychainAccess's folder grants, but
+# a readonlyPaths entry at a granted folder still applies.
+run_config "$(render seatbelt_opt_keychain_readonly_overlap.json HOME "$HOME" \
+    TARGET "$KC_FILE" READONLY "$HOME")"
+expect_ok "a read-only home folder keeps ~/Library/Keychains writable" "KC_FOLDER_WRITE_OK"
+run_config "$(render seatbelt_opt_keychain_readonly_overlap.json HOME "$HOME" \
+    TARGET "$KC_DIR/file.txt" READONLY /private/var)"
+expect_ok "a read-only parent keeps keychainAccess folders writable" "KC_FOLDER_WRITE_OK"
+run_config "$(render seatbelt_opt_keychain_readonly_overlap.json HOME "$HOME" \
+    TARGET "$KC_DIR/file.txt" READONLY /private/var/folders)"
+expect_ok "a read-only entry at a keychainAccess folder stays read-only" "KC_FOLDER_WRITE_BLOCKED"
 
 # profileOverride replaces generation outright, so filesystem policy in the
 # same config is ignored -- including a deniedPaths entry, which is the
