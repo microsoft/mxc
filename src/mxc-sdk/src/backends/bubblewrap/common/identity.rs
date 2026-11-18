@@ -191,7 +191,7 @@ impl RootIdentity {
             .iter()
             .map(|(path, _, mask)| (CString::new(path.as_str()).ok(), *mask))
             .collect();
-        let (uid, gid) = (self.uid_base + WORKLOAD_ID, self.gid_base + WORKLOAD_ID);
+        let (uid, gid) = self.workload_ids();
         let results = FilesystemProbe::default()
             .run_batch(
                 &paths,
@@ -229,7 +229,7 @@ impl RootIdentity {
         let shown = path.display().to_string();
         let path = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
-        let (uid, gid) = (self.uid_base + WORKLOAD_ID, self.gid_base + WORKLOAD_ID);
+        let (uid, gid) = self.workload_ids();
         let opened = FilesystemProbe::default()
             .run(&shown, move |_| {
                 let mut child = IdentityChild::start(ChildOperation::Open {
@@ -253,6 +253,41 @@ impl RootIdentity {
                 ),
             ),
         })
+    }
+
+    pub(crate) fn watch_sandbox(
+        self,
+        sandbox: u32,
+        launcher: u32,
+    ) -> Result<SandboxWatchdog, String> {
+        let (uid, gid) = self.workload_ids();
+        let pid = |pid: u32| {
+            libc::pid_t::try_from(pid)
+                .map_err(|_| format!("Bubblewrap: process ID {pid} is out of range"))
+        };
+        let operation = ChildOperation::Watch {
+            uid,
+            gid,
+            sandbox: pid(sandbox)?,
+            launcher: pid(launcher)?,
+        };
+        let mut helper = IdentityChild::start(operation).map_err(|error| {
+            format!("Bubblewrap: could not start the sandbox watchdog: {error}")
+        })?;
+        match helper.result() {
+            Ok(_) => Ok(SandboxWatchdog { helper }),
+            Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => Err(
+                "Bubblewrap: root launches require Linux 5.3 or later; MXC needs pidfd_open to \
+                 stop the sandbox when the run ends or MXC exits. On this kernel, run MXC as a \
+                 non-root user"
+                    .into(),
+            ),
+            Err(error) => Err(format!("Bubblewrap: could not watch the sandbox: {error}")),
+        }
+    }
+
+    fn workload_ids(self) -> (u32, u32) {
+        (self.uid_base + WORKLOAD_ID, self.gid_base + WORKLOAD_ID)
     }
 
     pub(crate) fn configure_command(self, command: &mut Command) {
@@ -454,6 +489,12 @@ enum ChildOperation {
         path: CString,
         flags: libc::c_int,
     },
+    Watch {
+        uid: u32,
+        gid: u32,
+        sandbox: libc::pid_t,
+        launcher: libc::pid_t,
+    },
 }
 
 struct IdentityChild {
@@ -603,6 +644,18 @@ impl Drop for IdentityChild {
     }
 }
 
+pub(crate) struct SandboxWatchdog {
+    helper: IdentityChild,
+}
+
+impl Drop for SandboxWatchdog {
+    fn drop(&mut self) {
+        // Closing the socket, not killing the helper, is what makes it stop the sandbox.
+        let _ = self.helper.channel.shutdown(Shutdown::Both);
+        let _ = self.helper.reap();
+    }
+}
+
 unsafe fn close_child_descriptors(keep: i32) -> Result<(), i32> {
     let mut supported = true;
     for (first, last) in [(0, keep as u32), (keep as u32 + 1, u32::MAX)] {
@@ -715,14 +768,18 @@ unsafe fn enter_identity(operation: &ChildOperation, parent: libc::pid_t) -> Res
             }
             return Ok(());
         }
-        ChildOperation::Access { uid, gid, .. } | ChildOperation::Open { uid, gid, .. } => {
-            (*uid, *gid)
-        }
+        ChildOperation::Access { uid, gid, .. }
+        | ChildOperation::Open { uid, gid, .. }
+        | ChildOperation::Watch { uid, gid, .. } => (*uid, *gid),
     };
     if libc::setresgid(gid, gid, gid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
         return Err(*libc::__errno_location());
     }
-    arm_parent_death(parent)?;
+
+    // The watchdog outlives MXC so that it can stop the sandbox after MXC exits.
+    if !matches!(operation, ChildOperation::Watch { .. }) {
+        arm_parent_death(parent)?;
+    }
     let header = [LINUX_CAPABILITY_VERSION_3, 0];
     let capabilities = [0_u32; 6];
     if libc::syscall(libc::SYS_capset, header.as_ptr(), capabilities.as_ptr()) != 0 {
@@ -763,7 +820,48 @@ unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
                 send_reply(socket, [0, 0], Some(file));
             }
         }
+        ChildOperation::Watch {
+            sandbox, launcher, ..
+        } => {
+            let opened = open_process(*sandbox)
+                .and_then(|sandbox| open_process(*launcher).map(|launcher| (sandbox, launcher)));
+            match opened {
+                Ok((sandbox, launcher)) => {
+                    if send_reply(socket, [0, 0], None) {
+                        wait_for_exit_or_disconnect(launcher, socket);
+                    }
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        sandbox,
+                        libc::SIGKILL,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0_u32,
+                    );
+                }
+                Err(error) => {
+                    send_reply(socket, [0, error], None);
+                }
+            }
+        }
     }
+}
+
+unsafe fn open_process(pid: libc::pid_t) -> Result<libc::c_int, i32> {
+    let pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0_u32);
+    if pidfd < 0 {
+        Err(*libc::__errno_location())
+    } else {
+        Ok(pidfd as libc::c_int)
+    }
+}
+
+unsafe fn wait_for_exit_or_disconnect(launcher: libc::c_int, socket: libc::c_int) {
+    let mut watched = [launcher, socket].map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    while libc::poll(watched.as_mut_ptr(), 2, -1) < 0 && *libc::__errno_location() == libc::EINTR {}
 }
 
 unsafe fn check_access(path: &CString, mask: i32) -> i32 {
@@ -893,6 +991,59 @@ mod tests {
         unsafe { libc::waitpid(pid, &mut status, 0) };
         read.unwrap();
         assert_eq!(answer, [1]);
+    }
+
+    fn fork_watchdog(
+        sandbox: &std::process::Child,
+        launcher: &std::process::Child,
+    ) -> SandboxWatchdog {
+        let (parent, child) = UnixStream::pair().unwrap();
+        parent.set_read_timeout(Some(PROBE_TIMEOUT)).unwrap();
+        let operation = ChildOperation::Watch {
+            uid: getuid().as_raw(),
+            gid: nix::unistd::getgid().as_raw(),
+            sandbox: libc::pid_t::try_from(sandbox.id()).unwrap(),
+            launcher: libc::pid_t::try_from(launcher.id()).unwrap(),
+        };
+
+        // Switching identity needs root, so this child runs only the watch loop.
+        // SAFETY: the child calls only syscalls before _exit.
+        let helper = unsafe { libc::fork() };
+        if helper == 0 {
+            unsafe {
+                if close_child_descriptors(child.as_raw_fd()).is_ok() {
+                    run_child_operation(&operation, child.as_raw_fd());
+                }
+                libc::_exit(0);
+            }
+        }
+        assert!(helper > 0, "{}", io::Error::last_os_error());
+        let mut helper = IdentityChild {
+            pid: helper,
+            channel: parent,
+            reaped: false,
+        };
+        helper.result().unwrap();
+        SandboxWatchdog { helper }
+    }
+
+    #[test]
+    fn a_watchdog_kills_its_sandbox_when_the_launcher_exits_or_its_socket_closes() {
+        use std::os::unix::process::ExitStatusExt;
+
+        for launcher_exits in [true, false] {
+            let mut sandbox = Command::new("sleep").arg("60").spawn().unwrap();
+            let mut launcher = Command::new("sleep").arg("60").spawn().unwrap();
+            let watchdog = fork_watchdog(&sandbox, &launcher);
+            if launcher_exits {
+                launcher.kill().unwrap();
+            } else {
+                drop(watchdog);
+            }
+            assert_eq!(sandbox.wait().unwrap().signal(), Some(libc::SIGKILL));
+            let _ = launcher.kill();
+            launcher.wait().unwrap();
+        }
     }
 
     #[test]

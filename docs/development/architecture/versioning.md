@@ -383,6 +383,7 @@ For existing V1 root callers, workloads now run as sandbox UID/GID 1000
 without supplementary groups or capabilities, so commands that need root
 inside the sandbox fail. Root-only grants are rejected before launch, and
 files created through writable grants belong to the mapped host identity.
+Root launches also require Linux 5.3 or later.
 Before upgrading, reserve the ranges and give the mapped identity access to
 each granted path.
 

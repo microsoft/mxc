@@ -261,11 +261,16 @@ Only the firewall case needs a non-loopback host IPv4 address
 outside slirp's subnet; if unavailable, isolated and proxy cases still run,
 then the script reports exit 77. A failed workload takes precedence over skips.
 
-The root lanes also run `run_bwrap_dns_test.sh` and
-`run_bwrap_resolver_isolation_test.sh` as root; any nonzero exit, including a
-prerequisite skip, fails the job. The resolver fixture copies root's allocation
-files into its private `/etc`, launches once to learn the mapped workload
-owner, and gives that owner the fixtures its cases write.
+The root lanes also run `run_bwrap_dns_test.sh`,
+`run_bwrap_resolver_isolation_test.sh`, and `run_bwrap_root_lifetime_test.sh`
+as root; any nonzero exit, including a prerequisite skip, fails the job. The
+resolver fixture copies root's allocation files into its private `/etc`,
+launches once to learn the mapped workload owner, and gives that owner the
+fixtures its cases write. The lifetime test ends root workloads in isolated
+and firewall modes four ways: a normal exit that leaves a process running in
+the background, the process timeout, and `SIGTERM` and `SIGKILL` of
+`lxc-exec`. Afterwards no process may still run as the workload's mapped host
+UID. Each case is repeated without `CAP_KILL` in the caller's capability sets.
 
 The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts.
 It reuses valid root allocations or selects free 65,536-ID blocks from the

@@ -40,7 +40,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
     bwrap_version, capability_check,
-    identity::RootIdentity,
+    identity::{RootIdentity, SandboxWatchdog},
     lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
@@ -830,6 +830,7 @@ impl BubblewrapScriptRunner {
         if let Some(network) = proxy_network.as_mut() {
             network.userns_handed_off();
         }
+        let mut watchdog = None;
         let startup_result = startup
             .child_pid(&child)
             .map_err(|error| {
@@ -840,6 +841,11 @@ impl BubblewrapScriptRunner {
             })
             .and_then(|child_pid| {
                 capability_check::wait_for_capability_drop(child_pid, &child)?;
+                if let Some(identity) = root_identity {
+                    // Bubblewrap's parent-death signal cannot reach a sandbox running as
+                    // another host UID.
+                    watchdog = Some(identity.watch_sandbox(child_pid, child.id())?);
+                }
                 match proxy_network.as_mut() {
                     Some(network) => {
                         network.attach(child_pid, logger)?;
@@ -862,6 +868,7 @@ impl BubblewrapScriptRunner {
                     "; failed to reap Bubblewrap startup: {cleanup_error}"
                 ));
             }
+            drop(watchdog);
             drop(startup);
             let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
                 Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
@@ -892,6 +899,7 @@ impl BubblewrapScriptRunner {
                 (out_result, err_result) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    drop(watchdog);
                     stop_proxy_network(&mut proxy_network, logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::failed(
@@ -929,6 +937,7 @@ impl BubblewrapScriptRunner {
             group,
             proxy_network,
             monitor,
+            watchdog,
             timeout,
             started,
             timed_out: false,
@@ -958,6 +967,7 @@ struct BwrapChild {
     group: bool,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     monitor: Option<ProviderMonitor>,
+    watchdog: Option<SandboxWatchdog>,
     timeout: Option<Duration>,
     started: Instant,
     timed_out: bool,
@@ -974,6 +984,9 @@ impl BwrapChild {
         // disarming first is what keeps a normal teardown from reading as a
         // provider that died.
         self.monitor.take();
+
+        // Dropping the watchdog stops the sandbox before its network is torn down.
+        self.watchdog.take();
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
@@ -1297,8 +1310,6 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 BwrapOutcome::Timeout => {
                     // Tree-kill so descendants die too and release any stdout/stderr
                     // pipe write-ends (else the drain threads below could block).
-                    // `kill()` group-kills in Pipes mode; in Inherit mode it kills
-                    // bwrap, which `--die-with-parent` turns into a full teardown.
                     if let Err(error) = self.kill_for_timeout() {
                         let error =
                             format!("Bubblewrap: script timed out, and teardown failed: {error}");
@@ -1344,8 +1355,7 @@ impl Drop for BubblewrapSandboxProcess {
         // Kill and reap the child *before* removing network enforcement —
         // otherwise an abandoned-but-running sandbox would keep egressing after
         // its iptables/proxy rules were torn down, and the child would leak as
-        // a zombie. `kill()` group-kills in `Pipes` mode and relies on
-        // `--die-with-parent` otherwise, then we reap.
+        // a zombie.
         let _ = self.kill();
         let _ = self.inner.lock_child().wait();
         self.run_teardown();

@@ -80,7 +80,8 @@ case "$backend" in
             exit 1
         fi
         rm -f "$capability_log"
-        for script in run_bwrap_dns_test.sh run_bwrap_resolver_isolation_test.sh; do
+        for script in run_bwrap_dns_test.sh run_bwrap_resolver_isolation_test.sh \
+            run_bwrap_root_lifetime_test.sh; do
             if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
                 bash "$test_script_root/$script"; then
                 echo "The Bubblewrap root test $script failed or skipped." >&2

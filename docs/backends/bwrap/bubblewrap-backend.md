@@ -23,7 +23,8 @@ requiring root privileges or a container runtime.
 
 ## Prerequisites
 
-- **Linux** host with kernel 3.8+ (user namespace support)
+- **Linux** host with kernel 3.8+ (user namespace support); root callers need
+  5.3+ (see [Root callers](#root-callers))
 - **x86-64 or AArch64** host. The filter also preserves x32 and i386
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
@@ -124,9 +125,9 @@ requiring root privileges or a container runtime.
 Root callers require administrator-reserved subordinate UID and GID allocations
 in `/etc/subuid` and `/etc/subgid`, and `getent` for checking host accounts.
 Each file must be a regular, root-owned file, not a symlink or writable by
-group or others. Root launches also require `/proc/<pid>/setgroups` (Linux
-3.19+) and an unshifted host user namespace. Mixed real/effective root
-credentials and root callers in limited user namespaces are rejected.
+group or others. Root launches also require Linux 5.3 or later and an
+unshifted host user namespace. Mixed real/effective root credentials and root
+callers in limited user namespaces are rejected.
 
 MXC selects the first allocation for root with at least 65,536 IDs in each
 file. Numeric owner `0` and account names whose UID is 0 are supported. UID
@@ -159,6 +160,15 @@ files are passed by descriptor and copied read-only into the sandbox. MXC
 reads their host inputs as the mapped identity. If that identity cannot read
 the resolver file, MXC supplies no resolver copy and logs a warning. If it
 cannot read `/etc/hosts` while pinning a proxy hostname, startup fails.
+
+Linux does not deliver Bubblewrap's parent-death signal to a sandbox running
+as another host UID. MXC therefore starts a helper process for each root
+launch, running as the mapped host UID/GID with no capabilities. The helper
+stops the sandbox when Bubblewrap exits, when MXC tears the run down, or when
+the MXC process exits. As with unprivileged callers, processes the workload
+leaves running in the background stop when the workload exits. On kernels
+before 5.3, which lack `pidfd_open`, root launches fail before the workload
+starts.
 
 Unprivileged callers keep their existing UID/GID behavior and do not require
 subordinate allocations.
