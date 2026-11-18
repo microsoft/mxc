@@ -22,7 +22,6 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::lxc_common::signal_cleanup;
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::filesystem_symlink::{is_policy_path_error, resolve_through_symlinks};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
@@ -33,6 +32,7 @@ use crate::mxc_common::sandbox_process::{
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
+use crate::mxc_common::termination_signals;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
@@ -702,7 +702,7 @@ impl BubblewrapScriptRunner {
         // bwrap passes its signal mask on to the workload, so left as
         // `lxc-exec`'s watchdog set it, the workload would ignore SIGTERM,
         // SIGINT and SIGHUP in every stdio mode.
-        signal_cleanup::unblock_in_child(&mut command);
+        termination_signals::unblock_in_child(&mut command);
         let pty = match stdio {
             StdioMode::Pipes => {
                 command

@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 #[cfg(target_os = "linux")]
-use nix::sys::signal::{SigSet, Signal};
+use nix::sys::signal::SigSet;
 
 #[cfg(target_os = "linux")]
 use crate::lxc_common::lxc_bindings::LxcContainer;
@@ -29,6 +29,8 @@ use crate::lxc_common::network_iptables::CreatedResources;
 use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 #[cfg(target_os = "linux")]
 use crate::mxc_common::logger::{Logger, Mode};
+#[cfg(target_os = "linux")]
+use crate::mxc_common::termination_signals;
 
 #[derive(Default)]
 struct ActiveSandbox {
@@ -104,61 +106,20 @@ fn clear_active() {
     *lock_slot() = ActiveSandbox::default();
 }
 
-/// The signals [`install`] blocks so that only the watchdog receives them.
-#[cfg(target_os = "linux")]
-pub const WATCHDOG_SIGNALS: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
-
-#[cfg(target_os = "linux")]
-fn watchdog_mask() -> SigSet {
-    let mut mask = SigSet::empty();
-    for signal in WATCHDOG_SIGNALS {
-        mask.add(*signal);
-    }
-    mask
-}
-
-/// Unblock [`WATCHDOG_SIGNALS`] in `command`'s child before it execs.
-///
-/// A blocked signal stays blocked across `fork` and `execve`, so a process
-/// spawned while the watchdog is installed -- and everything it spawns in
-/// turn -- would leave SIGHUP, SIGTERM and SIGINT pending forever: Ctrl-C,
-/// `kill` and `timeout(1)` would not stop it, and its `trap`s for them would
-/// never run. Every spawn of a workload, or of a helper that relies on those
-/// signals, needs this.
-///
-/// It applies whether or not the watchdog is installed: a library host that
-/// blocks these signals for its own reasons would leak them the same way.
-#[cfg(target_os = "linux")]
-pub fn unblock_in_child(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe work is permitted. Building the set is plain
-    // `sigemptyset`/`sigaddset` on a stack value, `pthread_sigmask` (which
-    // nix's `thread_unblock` wraps) is async-signal-safe, and this closure
-    // allocates nothing and captures nothing.
-    unsafe {
-        command.pre_exec(|| {
-            watchdog_mask()
-                .thread_unblock()
-                .map_err(std::io::Error::from)
-        });
-    }
-}
-
 /// Blocks fatal signals in this thread and spawns the cleanup watchdog.
 ///
 /// `pthread_sigmask` changes only the calling thread's mask, and new threads
 /// inherit their creator's mask.  Call this before spawning any thread that
 /// should leave signal delivery to the watchdog.
 ///
-/// Child processes inherit the mask as well; see [`unblock_in_child`].
+/// Child processes inherit the mask as well; spawns undo it with
+/// [`termination_signals::unblock_in_child`].
 #[cfg(target_os = "linux")]
 pub fn install() -> Result<(), String> {
     if watchdog_installed() {
         return Ok(());
     }
-    let mask = watchdog_mask();
+    let mask = termination_signals::mask();
     mask.thread_block()
         .map_err(|e| format!("pthread_sigmask: {}", e))?;
 

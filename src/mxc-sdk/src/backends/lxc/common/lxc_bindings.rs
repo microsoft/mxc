@@ -527,7 +527,7 @@ impl LxcContainer {
         timeout: Option<std::time::Duration>,
         firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
-        use crate::lxc_common::signal_cleanup::WATCHDOG_SIGNALS;
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
         use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 
         let mut cmd = self.lxc_command("lxc-attach");
@@ -544,7 +544,7 @@ impl LxcContainer {
 
         let options = PtyOptions {
             // Left blocked, the inner shell would ignore Ctrl-C.
-            unblock_signals: WATCHDOG_SIGNALS,
+            unblock_signals: TERMINATION_SIGNALS,
             timeout,
             ..PtyOptions::default()
         };
@@ -602,7 +602,7 @@ impl LxcContainer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        crate::lxc_common::signal_cleanup::unblock_in_child(&mut cmd);
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
@@ -674,9 +674,6 @@ impl LxcContainer {
 
     /// Launch a command in the container on pipes the caller owns, and hand
     /// back the handle without waiting for it.
-    ///
-    /// The child's signal mask is left alone: in a host application it belongs
-    /// to the application, not to `lxc-exec`'s watchdog.
     #[cfg(target_os = "linux")]
     pub fn attach_spawn(
         &self,
@@ -693,6 +690,7 @@ impl LxcContainer {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         cmd.spawn()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))
@@ -709,11 +707,11 @@ impl LxcContainer {
         firewall: ContainerFirewall,
         size: crate::mxc_pty::PtySize,
     ) -> Result<(std::process::Child, crate::mxc_pty::LivePty), String> {
-        use crate::lxc_common::signal_cleanup::WATCHDOG_SIGNALS;
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
 
         let mut cmd =
             self.attach_command(command, working_directory, env, force_clear_env, firewall);
-        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, WATCHDOG_SIGNALS)
+        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, TERMINATION_SIGNALS)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
             .spawn()
