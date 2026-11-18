@@ -173,13 +173,16 @@ fn streaming_lxc_delivers_termination_signals_despite_host_mask() {
     }
     let _guard = exclusive();
     let name = container_name("termination-signals");
-    termination_signals_contract::assert_delivered_despite_host_mask(|| {
-        lxc_request(
-            termination_signals_contract::COMMAND,
-            &name,
-            LIVE_TIMEOUT_MS,
-        )
-    });
+    termination_signals_contract::assert_delivered_despite_host_mask(
+        "streaming_lxc_delivers_termination_signals_despite_host_mask",
+        || {
+            lxc_request(
+                termination_signals_contract::COMMAND,
+                &name,
+                LIVE_TIMEOUT_MS,
+            )
+        },
+    );
     assert_container_released(&name);
 }
 

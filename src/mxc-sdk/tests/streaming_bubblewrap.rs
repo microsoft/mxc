@@ -677,9 +677,10 @@ fn streaming_bubblewrap_delivers_termination_signals_despite_host_mask() {
     if !bwrap_available() {
         return;
     }
-    termination_signals_contract::assert_delivered_despite_host_mask(|| {
-        bwrap_request(termination_signals_contract::COMMAND, 30_000)
-    });
+    termination_signals_contract::assert_delivered_despite_host_mask(
+        "streaming_bubblewrap_delivers_termination_signals_despite_host_mask",
+        || bwrap_request(termination_signals_contract::COMMAND, 30_000),
+    );
 }
 
 #[test]
