@@ -579,6 +579,13 @@ impl BubblewrapScriptRunner {
         let deny_mountpoints =
             missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
                 .map_err(|error| error.into_response())?;
+
+        // Bubblewrap mounts the overlay layers as the mapped identity.
+        if let (Some(identity), Some(storage)) = (root_identity, &deny_mountpoints) {
+            identity
+                .share_with_workload(storage.path())
+                .map_err(|error| FilesystemPolicyError::Host(error).into_response())?;
+        }
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(

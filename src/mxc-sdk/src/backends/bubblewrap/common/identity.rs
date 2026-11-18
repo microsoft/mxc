@@ -8,7 +8,7 @@ use std::mem::offset_of;
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -255,6 +255,39 @@ impl RootIdentity {
         })
     }
 
+    pub(crate) fn share_with_workload(self, directory: &Path) -> Result<(), String> {
+        let (uid, gid) = self.workload_ids();
+        let shown = directory.display().to_string();
+        let directory = std::fs::canonicalize(directory)
+            .and_then(|directory| share_tree(&directory, gid).map(|()| directory))
+            .map_err(|error| {
+                format!(
+                    "Bubblewrap: could not give mapped Bubblewrap GID {gid} access to {shown}: \
+                     {error}"
+                )
+            })?;
+        let path = CString::new(directory.as_os_str().as_bytes())
+            .map_err(|_| format!("Bubblewrap: {shown} contains a NUL byte"))?;
+        FilesystemProbe::default()
+            .run(&shown, move |_| {
+                let mut child = IdentityChild::start(ChildOperation::Access {
+                    uid,
+                    gid,
+                    paths: vec![(Some(path), libc::R_OK)],
+                })?;
+                let result = child.result();
+                child.finish()?;
+                result.map(drop)
+            })?
+            .map_err(|error| {
+                format!(
+                    "Bubblewrap: mapped Bubblewrap UID {uid} / GID {gid} cannot reach private \
+                     storage {shown} ({error}); set TMPDIR to a directory that identity can \
+                     traverse"
+                )
+            })
+    }
+
     pub(crate) fn watch_sandbox(
         self,
         sandbox: u32,
@@ -358,6 +391,18 @@ fn check_access_as(
 
 fn is_missing(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
+}
+
+fn share_tree(directory: &Path, gid: u32) -> io::Result<()> {
+    std::os::unix::fs::lchown(directory, None, Some(gid))?;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o750))?;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            share_tree(&entry.path(), gid)?;
+        }
+    }
+    Ok(())
 }
 
 fn map_entries(contents: &str) -> Option<Vec<u32>> {
@@ -1281,7 +1326,6 @@ mod tests {
     #[test]
     #[ignore = "requires root with subordinate ranges and Bubblewrap network prerequisites"]
     fn root_resolver_inputs_use_mapped_identity() {
-        use crate::bwrap_common::bwrap_command::BASELINE_RO_BIND_PATHS;
         use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
 
         assert!(getuid().is_root());
@@ -1289,15 +1333,8 @@ mod tests {
         if reran_in_private_mount_namespace("root_resolver_inputs_use_mapped_identity") {
             return;
         }
-        let resolver = std::fs::canonicalize("/etc/resolv.conf").unwrap();
-        assert!(
-            !BASELINE_RO_BIND_PATHS
-                .iter()
-                .any(|root| resolver.starts_with(root)),
-            "/etc/resolv.conf must link to a runtime resolver file that MXC copies, not {}",
-            resolver.display()
-        );
         let directory = tempfile::tempdir().unwrap();
+        let resolver = link_resolver_outside_etc(directory.path());
         let marker = format!("mxc-{}.invalid", uuid::Uuid::new_v4().simple());
         let mut request = ExecutionRequest {
             script_code: "set -e; test \"$(id -u)\" = 1000; cat /etc/resolv.conf || true".into(),
@@ -1309,16 +1346,14 @@ mod tests {
             ..Default::default()
         });
         for (mode, readable) in [(0o644, true), (0o600, false)] {
-            bind_fixture(
-                directory.path(),
+            std::fs::write(
                 &resolver,
-                mode,
-                &format!("nameserver 127.0.0.53\nsearch {marker}\n"),
-            );
+                format!("nameserver 127.0.0.53\nsearch {marker}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(mode)).unwrap();
             let mut logger = Logger::new(Mode::Buffer);
-            let result = run_backend(&request, &mut logger);
-            nix::mount::umount(resolver.as_path()).unwrap();
-            let (status, output) = result.unwrap();
+            let (status, output) = run_backend(&request, &mut logger).unwrap();
             assert_eq!(status, 0, "{output}\n{}", logger.get_buffer());
             assert_eq!(
                 output.contains(&marker),
@@ -1335,6 +1370,92 @@ mod tests {
                 logger.warnings()
             );
         }
+    }
+
+    fn link_resolver_outside_etc(directory: &Path) -> std::path::PathBuf {
+        use crate::bwrap_common::bwrap_command::WSL_RESOLV_CONF;
+        use nix::mount::{mount, MsFlags};
+
+        let scratch = directory.join("etc");
+        std::fs::create_dir(&scratch).unwrap();
+        mount(
+            Some("tmpfs"),
+            &scratch,
+            Some("tmpfs"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .unwrap();
+        for layer in ["upper", "work"] {
+            std::fs::create_dir(scratch.join(layer)).unwrap();
+        }
+        let options = format!(
+            "lowerdir=/etc,upperdir={0}/upper,workdir={0}/work",
+            scratch.display()
+        );
+        mount(
+            Some("overlay"),
+            "/etc",
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(options.as_str()),
+        )
+        .unwrap();
+        mount(
+            Some("tmpfs"),
+            "/mnt",
+            Some("tmpfs"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .unwrap();
+        let resolver = Path::new(WSL_RESOLV_CONF);
+        std::fs::create_dir_all(resolver.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file("/etc/resolv.conf");
+        std::os::unix::fs::symlink(resolver, "/etc/resolv.conf").unwrap();
+        resolver.to_path_buf()
+    }
+
+    #[test]
+    #[ignore = "requires root with subordinate ranges"]
+    fn root_missing_denied_path_overlay_uses_mapped_identity() {
+        use crate::bwrap_common::bwrap_version::{probe_bwrap_uncached, BwrapVersion};
+
+        assert!(getuid().is_root());
+        RootIdentity::for_caller().unwrap().expect("root identity");
+        if reran_in_private_mount_namespace("root_missing_denied_path_overlay_uses_mapped_identity")
+        {
+            return;
+        }
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let grant = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(grant.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let denied = grant.path().join("missing");
+        let mut request = ExecutionRequest {
+            script_code: format!(
+                "set -e; test -d '{0}'; test -z \"$(ls -A '{0}')\"; \
+                 if touch '{0}/written' 2>/dev/null; then exit 1; fi; echo MISSING_PATH_MASKED",
+                denied.display()
+            ),
+            script_timeout: 15_000,
+            ..Default::default()
+        };
+        request.policy.readonly_paths = vec![grant.path().display().to_string()];
+        request.policy.denied_paths = vec![denied.display().to_string()];
+        let result = run_backend(&request, &mut Logger::new(Mode::Buffer));
+        assert!(
+            !denied.exists(),
+            "the private overlay created {} on the host",
+            denied.display()
+        );
+        if probe_bwrap_uncached().unwrap().version < BwrapVersion::new(0, 11, 0) {
+            let error = result.expect_err("bwrap before 0.11 cannot mask a missing path");
+            assert!(error.contains("requires bwrap 0.11.0"), "{error}");
+            return;
+        }
+        let (status, output) = result.expect("mapped launch with a missing denied path");
+        assert_eq!(status, 0, "{output}");
+        assert!(output.contains("MISSING_PATH_MASKED"), "{output}");
     }
 
     #[test]

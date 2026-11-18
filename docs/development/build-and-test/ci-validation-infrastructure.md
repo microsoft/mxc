@@ -310,10 +310,15 @@ The same payload runs `root_backend_hostname_pin_uses_mapped_identity` against
 private mount fixtures. It checks hostname pins from private supervisor storage
 through the backend's programmatic request path; request JSON still restricts
 proxy hosts to loopback names and addresses. A `0600` hosts file must then
-reject the launch. `root_resolver_inputs_use_mapped_identity` binds readable
-and `0600` fixtures over the host's resolver file in firewall mode; only the
-readable contents may reach the workload. It requires `/etc/resolv.conf` to
-link outside `/etc`, as it does with systemd-resolved or WSL.
+reject the launch. `root_resolver_inputs_use_mapped_identity` overlays `/etc`
+in a private mount namespace so `/etc/resolv.conf` links to a fixture outside
+`/etc`, whatever the host's resolver layout, then makes that fixture readable
+and `0600` in firewall mode; only the readable contents may reach the workload.
+`root_missing_denied_path_overlay_uses_mapped_identity` denies a missing path
+beneath a read-only grant under umask `077`, which makes MXC's private overlay
+storage owner-only. With bwrap 0.11 or newer the workload must see an
+empty, read-only mask and the host must stay unchanged; older bwrap must
+reject the launch.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

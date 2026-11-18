@@ -91,6 +91,7 @@ case "$backend" in
         for case in root_sdk_streaming_and_pty_use_mapped_identity \
             root_backend_hostname_pin_uses_mapped_identity \
             root_resolver_inputs_use_mapped_identity \
+            root_missing_denied_path_overlay_uses_mapped_identity \
             root_account_lookups_stop_at_the_validation_deadline; do
             identity_test="backend_modules::bubblewrap::common::identity::tests::$case"
             "$binary_directory/mxc-filesystem-probe-tests" --list --ignored --exact "$identity_test" \

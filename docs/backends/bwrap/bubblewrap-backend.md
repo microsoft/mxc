@@ -153,6 +153,11 @@ grants before launch; it does not change their ownership or permissions.
 Provision the intended access explicitly. Files created in writable grants
 belong to the mapped host identity.
 
+When a missing `deniedPaths` entry needs a private overlay, MXC gives the
+mapped workload group read and search access to that overlay's private storage
+under `TMPDIR`. The mapped identity must be able to traverse `TMPDIR`, or the
+launch is rejected.
+
 The trusted root network supervisor stays in the host user namespace and
 enters only the workload's network namespace to install policy. Its private
 state directory is not granted to the workload. Generated hosts and resolver
