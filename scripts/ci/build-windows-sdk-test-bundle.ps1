@@ -76,6 +76,23 @@ function Invoke-CargoBuild {
     } | Where-Object { $_.reason -eq 'compiler-artifact' }
 }
 
+function Invoke-CargoDebugBuild {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    Push-Location $srcRoot
+    try {
+        $messages = Invoke-Checked "cargo $($Arguments -join ' ')" {
+            cargo @Arguments --locked --target $triple --message-format=json
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    $messages | ForEach-Object {
+        try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { }
+    } | Where-Object { $_.reason -eq 'compiler-artifact' }
+}
+
 function Get-CargoExecutable {
     param([object[]]$Artifacts, [string]$TargetName)
 
@@ -117,7 +134,18 @@ $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', $na
 if (-not $nativeLibrary) {
     throw 'cargo reported no mxc_ffi.dll.'
 }
+$testNativeLibrary = Invoke-CargoDebugBuild @(
+    'build', '-p', 'mxc_ffi', '--features', "$nativeFeatures,test-support") |
+    Where-Object { $_.target.name -eq 'mxc_ffi' } |
+    ForEach-Object { $_.filenames } |
+    Where-Object { [IO.Path]::GetExtension($_) -eq '.dll' } |
+    Select-Object -Last 1
+if (-not $testNativeLibrary) {
+    throw 'cargo reported no test-support mxc_ffi.dll.'
+}
 $wslcDaemon = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'mxc-sdk', '--features', 'wslc', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
+$testWslcDaemon = Get-CargoExecutable (Invoke-CargoDebugBuild @(
+    'build', '-p', 'mxc-sdk', '--features', 'wslc,test-support', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
 $wslcTestArtifacts = Invoke-CargoBuild @('test', '-p', 'mxc-sdk', '--features', 'wslc', '--test', 'streaming_wslc', '--no-run')
 
 # The wslc build feature stages the WSLC SDK library and gateway image beside mxc_ffi.
@@ -150,10 +178,12 @@ if ($NuGetSource) {
     $publish += @('--source', $NuGetSource)
 }
 Invoke-Checked 'dotnet publish' { dotnet @publish }
-if ($Architecture -eq 'x64') {
-    $testNative = Join-Path $srcRoot "target\dotnet-test-support\$triple\debug\mxc_ffi.dll"
-    if (-not (Test-Path -LiteralPath $testNative -PathType Leaf)) { throw 'MicroVM test-support DLL is missing.' }
-    Copy-Item -LiteralPath $testNative -Destination (Join-Path $dotnetOut 'mxc_ffi.dll') -Force
+foreach ($source in $testNativeLibrary, $testWslcDaemon) {
+    $destination = Join-Path $dotnetOut (Split-Path -Leaf $source)
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+        throw "The published .NET test bundle did not stage $(Split-Path -Leaf $source)."
+    }
 }
 
 Copy-Item -LiteralPath $WxcExecPath -Destination (New-Directory (Join-Path $OutputDirectory "bin\$Architecture"))
@@ -202,6 +232,14 @@ foreach ($name in 'bin', 'dist', 'node_modules', 'package.json', 'LICENSE.md') {
     $source = Join-Path $nodeSdkRoot $name
     if (Test-Path -LiteralPath $source) {
         Copy-Item -LiteralPath $source -Destination $sdkOut -Recurse -Force
+    }
+}
+$nodeSdkBin = Join-Path $sdkOut "bin\$Architecture"
+foreach ($source in $testNativeLibrary, $testWslcDaemon) {
+    $destination = Join-Path $nodeSdkBin (Split-Path -Leaf $source)
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+        throw "The Node integration bundle did not stage $(Split-Path -Leaf $source)."
     }
 }
 
@@ -263,6 +301,7 @@ $required = @(
     'sdk-integration\dist\wslc-e2e.test.js',
     'sdk-integration\dist\nvx-json.test.js',
     'sdk-integration\dist\packaged-runtime-test.js',
+    "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc_ffi.dll",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wslcsdk.dll",
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc-wslc-gateway.tar",
@@ -358,10 +397,14 @@ foreach ($test in @(
         'MxcLifecycleWslcE2ETests.SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook',
         'MxcLifecycleWslcE2ETests.SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook',
         'MxcLifecycleWslcE2ETests.RunInContainer_GivesACommandThatReadsStdinEndOfFile',
+        'MxcLifecycleWslcE2ETests.RunInContainer_PreservesStructuredPostAdmissionWaitFailure',
+        'MxcLifecycleWslcE2ETests.SpawnInContainer_WaitPreservesStructuredPostAdmissionWaitFailure',
         'MxcContainerWslcE2ETests.Spawn_ForwardsEveryByteAndClosingStdinEndsInput',
         'MxcContainerWslcE2ETests.Spawn_WaitClosesAnUntakenStdin',
         'MxcContainerWslcE2ETests.Spawn_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
-        'MxcContainerWslcE2ETests.Run_GivesACommandThatReadsStdinEndOfFile')) {
+        'MxcContainerWslcE2ETests.Run_GivesACommandThatReadsStdinEndOfFile',
+        'MxcContainerWslcE2ETests.Run_PreservesStructuredPostAdmissionWaitFailure',
+        'MxcContainerWslcE2ETests.Spawn_WaitPreservesStructuredPostAdmissionWaitFailure')) {
     $class = $test.Split('.')[0]
     Assert-Discovery ".NET $test" ([regex]::Escape($test)) {
         & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class "*.$class"
@@ -392,17 +435,22 @@ try {
     }
 
     # A skipped Node suite lists no test names, so check that the bundled files
-    # still define the stdin tests.
-    $wslcNodeStdinTests = [ordered]@{
-        'wslc-state-aware.test.js' = @('preserves lifecycle, streaming, stdin, timeout, and stale-id behavior')
+    # still define these tests.
+    $wslcNodeTests = [ordered]@{
+        'wslc-state-aware.test.js' = @(
+            'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior',
+            'captured exec preserves structured post-admission wait failures',
+            'process wait preserves structured post-admission wait failures')
         'wslc-e2e.test.js'         = @(
             'should forward every stdin byte to a spawned command',
             'should give a spawned command end-of-file when wait ends an untaken stdin',
             'should let output be read to the end before waiting once stdin is ended',
-            'should give a command run to completion end-of-file on stdin')
+            'should give a command run to completion end-of-file on stdin',
+            'captured run preserves structured post-admission wait failures',
+            'spawned process wait preserves structured post-admission wait failures')
     }
-    foreach ($file in $wslcNodeStdinTests.Keys) {
-        foreach ($name in $wslcNodeStdinTests[$file]) {
+    foreach ($file in $wslcNodeTests.Keys) {
+        foreach ($name in $wslcNodeTests[$file]) {
             if (-not (Select-String -LiteralPath (Join-Path 'dist' $file) -SimpleMatch -Pattern $name -Quiet)) {
                 throw "The Node WSLC suite $file no longer defines '$name'."
             }

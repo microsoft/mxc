@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use mxc_sdk::mxc_common::models::SandboxOutputMetadata;
 use mxc_sdk::mxc_common::sandbox_process::NativeStdio;
-use mxc_sdk::v1::{StreamCloser, WaitResult};
+use mxc_sdk::v1::{Error, ErrorCode, StreamCloser, WaitResult};
 
 use crate::streaming::{LiveSandbox, MxcSandbox};
 use crate::{MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS};
@@ -57,6 +57,24 @@ struct FakeSandbox {
     control: Arc<MxcTestFakeControl>,
     stdout: Option<HeldOutput>,
     exit_code: i32,
+    wait_failure: WaitFailure,
+    poll_count: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+enum WaitFailure {
+    #[default]
+    None,
+    TryWait,
+    WaitAfterRunningPoll,
+}
+
+fn test_wait_error() -> Error {
+    let mut error = Error::new(ErrorCode::BackendUnavailable, "test process wait failed");
+    error.operation = Some("TestSandbox.Wait".to_string());
+    error.native_code = Some("0x80004005".to_string());
+    error.remediation = Some("Retry the test process wait.".to_string());
+    error
 }
 
 /// Reports end-of-file only once the test releases it, like a pipe a
@@ -106,13 +124,36 @@ impl LiveSandbox for FakeSandbox {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        match self.try_wait_detailed() {
+            Ok(Some(WaitResult::Exited(code))) => Ok(Some(code)),
+            Ok(Some(WaitResult::TimedOut)) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the fake process timed out",
+            )),
+            Ok(None) => Ok(None),
+            Err(error) => Err(std::io::Error::other(error.message)),
+        }
+    }
+
+    fn try_wait_detailed(&mut self) -> super::streaming::DetailedWaitResult<Option<WaitResult>> {
+        match self.wait_failure {
+            WaitFailure::TryWait => return Err(test_wait_error()),
+            WaitFailure::WaitAfterRunningPoll if self.poll_count == 0 => {
+                self.poll_count += 1;
+                return Ok(None);
+            }
+            WaitFailure::WaitAfterRunningPoll => {
+                return Ok(Some(WaitResult::Exited(self.exit_code)));
+            }
+            WaitFailure::None => {}
+        }
         let exited = self
             .control
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .exited;
-        Ok(exited.then_some(self.exit_code))
+        Ok(exited.then_some(WaitResult::Exited(self.exit_code)))
     }
 
     fn id(&self) -> u32 {
@@ -129,6 +170,14 @@ impl LiveSandbox for FakeSandbox {
     }
 
     fn wait(&mut self) -> std::io::Result<WaitResult> {
+        self.wait_detailed()
+            .map_err(|error| std::io::Error::other(error.message))
+    }
+
+    fn wait_detailed(&mut self) -> super::streaming::DetailedWaitResult<WaitResult> {
+        if matches!(self.wait_failure, WaitFailure::WaitAfterRunningPoll) {
+            return Err(test_wait_error());
+        }
         self.control.update(|s| s.wait_entered = true);
         self.control.wait_until(|s| s.wait_released, None);
         Ok(WaitResult::Exited(self.exit_code))
@@ -162,6 +211,8 @@ pub unsafe extern "C" fn mxc_test_fake_sandbox_new(
             control: Arc::clone(&control),
             stdout: (held_stdout != 0).then(|| HeldOutput(Arc::clone(&control))),
             exit_code,
+            wait_failure: WaitFailure::None,
+            poll_count: 0,
         };
         // SAFETY: both out pointers are non-null and writable per the caller contract.
         unsafe {
@@ -171,6 +222,51 @@ pub unsafe extern "C" fn mxc_test_fake_sandbox_new(
         MXC_STATUS_SUCCESS
     }))
     .unwrap_or(MXC_STATUS_PANIC)
+}
+
+unsafe fn new_wait_failure_sandbox(failure: WaitFailure, out_sandbox: *mut *mut MxcSandbox) -> i32 {
+    if !out_sandbox.is_null() {
+        unsafe { *out_sandbox = std::ptr::null_mut() };
+    }
+    if out_sandbox.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let sandbox = FakeSandbox {
+            control: Arc::new(MxcTestFakeControl::default()),
+            stdout: None,
+            exit_code: 23,
+            wait_failure: failure,
+            poll_count: 0,
+        };
+        unsafe {
+            *out_sandbox = Box::into_raw(Box::new(MxcSandbox::from_live(Box::new(sandbox))));
+        }
+        MXC_STATUS_SUCCESS
+    }))
+    .unwrap_or(MXC_STATUS_PANIC)
+}
+
+/// Create a fake sandbox whose first status poll returns a structured failure.
+///
+/// # Safety
+/// `out_sandbox` must be null or writable pointer storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_test_fake_sandbox_new_try_wait_failure(
+    out_sandbox: *mut *mut MxcSandbox,
+) -> i32 {
+    unsafe { new_wait_failure_sandbox(WaitFailure::TryWait, out_sandbox) }
+}
+
+/// Create a fake sandbox whose blocking wait fails after one running poll.
+///
+/// # Safety
+/// `out_sandbox` must be null or writable pointer storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_test_fake_sandbox_new_wait_failure(
+    out_sandbox: *mut *mut MxcSandbox,
+) -> i32 {
+    unsafe { new_wait_failure_sandbox(WaitFailure::WaitAfterRunningPoll, out_sandbox) }
 }
 
 /// Return 1 once the fake sandbox's native wait has started, or 0 if it has
