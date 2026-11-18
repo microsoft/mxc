@@ -8,6 +8,8 @@
 //! its `trap`s for them never run.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 use mxc_sdk::v1::{spawn, spawn_with_pty, ContainerRequest, WaitResult};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
@@ -20,11 +22,57 @@ pub const COMMAND: &str = "for sig in HUP INT TERM; do \
                                kill -s \"$sig\" $$; \
                            done";
 
-/// Runs [`COMMAND`] through `spawn` and `spawn_with_pty` while the calling
-/// thread blocks the three signals, and asserts each trap ran in both modes.
-pub fn assert_delivered_despite_host_mask(request: impl Fn() -> ContainerRequest) {
-    let _blocked = BlockedSignals::new();
+const FIXTURE_ENV: &str = "MXC_TERMINATION_SIGNALS_FIXTURE";
+const FIXTURE_DONE: &str = "TERMINATION_SIGNALS_FIXTURE_DONE";
 
+/// Runs [`COMMAND`] through `spawn` and `spawn_with_pty` in a process whose
+/// every thread blocks the three signals, and asserts each trap ran.
+///
+/// Backends may spawn from a long-lived thread rather than the caller's, so
+/// blocking only the test thread would not reliably reach the spawn. Instead
+/// `test_name` re-runs as a child process started with the signals blocked,
+/// which every thread it creates inherits, as with `lxc-exec`'s watchdog.
+pub fn assert_delivered_despite_host_mask(test_name: &str, request: impl Fn() -> ContainerRequest) {
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        let current = SigSet::thread_get_mask().expect("read signal mask");
+        for signal in [Signal::SIGHUP, Signal::SIGINT, Signal::SIGTERM] {
+            assert!(
+                current.contains(signal),
+                "fixture must start with {signal} blocked"
+            );
+        }
+        assert_delivered(request);
+        println!("{FIXTURE_DONE}");
+        return;
+    }
+
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test_name, "--nocapture"])
+        .env(FIXTURE_ENV, "1");
+    // SAFETY: `pthread_sigmask` is async-signal-safe, and the closure builds
+    // its set on the stack and allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            let mut mask = SigSet::empty();
+            mask.add(Signal::SIGHUP);
+            mask.add(Signal::SIGINT);
+            mask.add(Signal::SIGTERM);
+            nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mask), None)
+                .map_err(std::io::Error::from)
+        });
+    }
+    let output = command.output().expect("run signal fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(FIXTURE_DONE),
+        "signal fixture failed ({}):\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_delivered(request: impl Fn() -> ContainerRequest) {
     let output = spawn(request(), Default::default())
         .expect("spawn")
         .wait_with_output()
@@ -59,27 +107,5 @@ fn assert_caught(mode: &str, output: &str) {
                 .any(|line| line.trim_end() == format!("CAUGHT_{sig}")),
             "{mode}: SIG{sig} sent to the workload never reached its trap. Output:\n{output}"
         );
-    }
-}
-
-/// Blocks the three signals on the calling thread until dropped.
-struct BlockedSignals(SigSet);
-
-impl BlockedSignals {
-    fn new() -> Self {
-        let mut mask = SigSet::empty();
-        mask.add(Signal::SIGHUP);
-        mask.add(Signal::SIGINT);
-        mask.add(Signal::SIGTERM);
-        let mut previous = SigSet::empty();
-        nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mask), Some(&mut previous))
-            .expect("block termination signals");
-        Self(previous)
-    }
-}
-
-impl Drop for BlockedSignals {
-    fn drop(&mut self) {
-        let _ = nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&self.0), None);
     }
 }
