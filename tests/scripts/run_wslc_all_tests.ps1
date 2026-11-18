@@ -562,9 +562,11 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_real_client.json" -Force
 $null = $results.Add((Run-WslcTest "wslc_network_egress_raw_frame.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
     -Probes ([ordered]@{ RAW_SOCKET = "DENIED"; RAW_REPLY = "NONE" })))
 
-# Send FROM_<port> to a mapped Windows port and return the reply. The proxy
-# closes connections until the workload listens, so retry until it replies.
-function Send-WslcMappedPort([int]$Port, $Run) {
+# Read the workload's reply on a mapped Windows port, run $WhileOpen, then send
+# FROM_<port>. The workload exits once it receives that, so $WhileOpen runs
+# while the mapping is live. The proxy closes connections until the workload
+# listens, so retry until it replies.
+function Send-WslcMappedPort([int]$Port, $Run, [scriptblock]$WhileOpen = {}) {
     $deadline = (Get-Date).AddSeconds(120)
     while (-not $Run.Process.HasExited -and (Get-Date) -lt $deadline) {
         $client = [Net.Sockets.TcpClient]::new()
@@ -572,18 +574,23 @@ function Send-WslcMappedPort([int]$Port, $Run) {
             $client.Connect("127.0.0.1", $Port)
             $stream = $client.GetStream()
             $stream.ReadTimeout = 30000
-            $hello = [Text.Encoding]::ASCII.GetBytes("FROM_$Port`n")
-            $stream.Write($hello, 0, $hello.Length)
-            $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
-            $reply = [IO.StreamReader]::new($stream).ReadToEnd().Trim()
-            if ($reply) { return $reply }
+            $reader = [IO.StreamReader]::new($stream)
+            $reply = $reader.ReadLine()
+            if ($reply) {
+                $check = & $WhileOpen $Port
+                $hello = [Text.Encoding]::ASCII.GetBytes("FROM_$Port`n")
+                $stream.Write($hello, 0, $hello.Length)
+                $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+                $null = $reader.ReadToEnd()
+                return @{ Reply = $reply.Trim(); Check = $check }
+            }
         } catch {
         } finally {
             $client.Dispose()
         }
         Start-Sleep 1
     }
-    return ""
+    return @{ Reply = ""; Check = $null }
 }
 
 # Mappings bind Windows 127.0.0.1 only.
@@ -611,16 +618,15 @@ function Invoke-WslcMappedRun {
     foreach ($mapping in $Mappings.GetEnumerator()) {
         $n++
         $port = $mapping.Key
-        $reply = Send-WslcMappedPort $port $run
-        if ($reply -ne "MAPPED_$($mapping.Value)") {
-            $reason = "127.0.0.1:$port replied '$reply', expected 'MAPPED_$($mapping.Value)'"
+        $lanCheck = if ($n -eq 1) { { param($p) $LanAddresses | Where-Object { Test-WslcTcpConnect $_ $p } } } else { {} }
+        $sent = Send-WslcMappedPort $port $run $lanCheck
+        if ($sent.Reply -ne "MAPPED_$($mapping.Value)") {
+            $reason = "127.0.0.1:$port replied '$($sent.Reply)', expected 'MAPPED_$($mapping.Value)'"
             break
         }
+        # RECEIVED_n shows the mapping still worked after the LAN check.
         $Probes["RECEIVED_$n"] = "FROM_$port"
-        if ($n -eq 1) {
-            $exposed = $LanAddresses | Where-Object { Test-WslcTcpConnect $_ $port }
-            if ($exposed) { $reason = "Port $port is reachable on $($exposed -join ', ')"; break }
-        }
+        if ($sent.Check) { $reason = "Port $port is reachable on $($sent.Check -join ', ')"; break }
     }
     $bg = Complete-WslcBackgroundRun $run
     if (-not $reason) {
