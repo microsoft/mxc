@@ -216,21 +216,24 @@ function Invoke-ProcessContainerStreamingTests {
         $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'process-container-dotnet-streaming.log' `
             -ArgumentList @('-class', '*.MxcProcessTests', '-class', '*.DevEntryPointTests', '-result-xml', $resultXml)
         if ($run.ExitCode -ne 0) { throw ".NET ProcessContainer streaming exited $($run.ExitCode)." }
-        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests', 'DevEntryPointTests' -RejectSkipped `
+        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests' -RejectSkipped `
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
-                'DevJson_CapturesOutputAndStreamsInput', 'PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching',
-                'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
-                'PolicyPreparationStoragePreservesDuplicateCommentMembers',
+                'DevJson_CapturesOutputAndStreamsInput',
                 'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio') `
-            -RequiredTestNames @(
-                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(nativePreparation: True)',
-                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)') `
             -RequiredOutputText @('MXC_PREPARED_FILESYSTEM_BASELINE_RW_OK',
                 'MXC_PREPARED_FILESYSTEM_ACCEPTED:',
-                    'MXC_PREPARED_FILESYSTEM_STRICT_RUN_SPAWN_OK:1.1.0-alpha:seed=unchanged:permitted=written')
+                'MXC_PREPARED_FILESYSTEM_STRICT_RUN_SPAWN_OK:1.1.0-alpha:seed=unchanged:permitted=written')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
+        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'DevEntryPointTests' `
+            -RequiredMethods @('PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching',
+                'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
+                'PolicyPreparationStoragePreservesDuplicateCommentMembers') `
+            -RequiredTestNames @(
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(nativePreparation: True)',
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)')
+        if ($failure) { throw ".NET ProcessContainer policy preparation: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
         if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }

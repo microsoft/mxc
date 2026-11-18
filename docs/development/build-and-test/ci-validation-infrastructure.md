@@ -446,11 +446,11 @@ The managed preparation tests verify owned candidate requests without
 launching and lossless storage of native results. They launch no workload, so
 they do not depend on this host opt-in and also run on every OS in the .NET SDK
 job. Bundle discovery requires the native preparation fact and both native
-storage theory rows, and scheduled validation rejects skipped tests in either
-class.
-Scheduled validation also requires the passing `nativePreparation: True`
-result row for each storage theory; its pure-storage `False` row cannot satisfy
-the native execution gate.
+storage theory rows. Scheduled validation rejects skipped `MxcProcessTests`
+and requires the preparation fact and each storage theory's
+`nativePreparation: True` row to pass; a pure-storage `False` row cannot satisfy
+the native execution gate. Unrelated architecture-dependent skips in
+`DevEntryPointTests` do not fail this gate.
 The tool-discovery case uses a private fixture alongside the packaged Node
 tests rather than under the host temporary directory. It uses a fake
 `pwsh.exe`, applies the discovered policy through public `run`, and checks that

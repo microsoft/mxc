@@ -54,8 +54,13 @@ try {
         'Ns.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)'
     )
     foreach ($case in 'complete', 'missing-class', 'missing-method', 'skipped-native',
-        'missing-native-large', 'missing-native-duplicate') {
-        $rows = @("<test type='Ns.MxcProcessTests' method='DevJson_CapturesOutputAndStreamsInput' result='Pass'/>")
+        'missing-native-large', 'missing-native-duplicate', 'unrelated-skipped', 'skipped-streaming',
+        'unrelated-streaming-skipped') {
+        $streamingResult = if ($case -eq 'skipped-streaming') { 'Skip' } else { 'Pass' }
+        $rows = @("<test type='Ns.MxcProcessTests' method='DevJson_CapturesOutputAndStreamsInput' result='$streamingResult'/>")
+        if ($case -eq 'unrelated-streaming-skipped') {
+            $rows += "<test type='Ns.MxcProcessTests' method='AnotherStreamingTest' result='Skip'/>"
+        }
         if ($case -ne 'missing-class') {
             if ($case -ne 'missing-method') {
                 $rows += "<test type='Ns.DevEntryPointTests' method='$($methods[0])' result='Pass'/>"
@@ -72,17 +77,23 @@ try {
                 $pureStorageName = $rowName -replace 'nativePreparation: True', 'nativePreparation: False'
                 $rows += "<test type='Ns.DevEntryPointTests' method='$method' name='$pureStorageName' result='Pass'/>"
             }
+            if ($case -eq 'unrelated-skipped') {
+                $rows += "<test type='Ns.DevEntryPointTests' method='RealNativeLifecycleAndCapturedExecRejectUnsupportedBackend' result='Skip'/>"
+            }
         }
         Set-Content -LiteralPath $xunit -Value (
             '<assemblies><assembly><collection>' + ($rows -join '') + '</collection></assembly></assemblies>')
-        $failure = Get-XunitSuiteFailure -ResultXml $xunit -Classes 'MxcProcessTests', 'DevEntryPointTests' `
-            -RejectSkipped -RequiredMethods (@('DevJson_CapturesOutputAndStreamsInput') + $methods) `
-            -RequiredTestNames $requiredNativeRows
-        if (($case -eq 'complete') -ne [string]::IsNullOrEmpty($failure)) {
+        $failure = Get-XunitSuiteFailure -ResultXml $xunit -Classes 'MxcProcessTests' -RejectSkipped `
+            -RequiredMethods 'DevJson_CapturesOutputAndStreamsInput'
+        if (-not $failure) {
+            $failure = Get-XunitSuiteFailure -ResultXml $xunit -Classes 'DevEntryPointTests' `
+                -RequiredMethods $methods -RequiredTestNames $requiredNativeRows
+        }
+        if (($case -in 'complete', 'unrelated-skipped') -ne [string]::IsNullOrEmpty($failure)) {
             throw "Unexpected .NET native preparation gate for ${case}: $failure"
         }
     }
-    Write-Host 'Policy preparation result gates passed (16 cases).'
+    Write-Host 'Policy preparation result gates passed (19 cases).'
 }
 finally {
     Remove-Item -LiteralPath $directory -Recurse -Force
