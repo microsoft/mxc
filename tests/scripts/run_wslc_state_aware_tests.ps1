@@ -1204,6 +1204,38 @@ try {
             Assert-True ($r.Stdout -match 'https_proxy=\[http://127\.0\.0\.1:8888\]') `
                 "https_proxy injected into the container"
         } | Out-Null
+
+        # A replaced environment reaches the container as `env -i` arguments.
+        Run-StateAwareTest "C: exec with a replaced environment gets the proxy" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:netSandboxId
+                runtimeConfig = @{ networkProxy = 'http://127.0.0.1:8888' }
+                process = @{
+                    commandLine = "sh -c 'echo FOO=[`$FOO] HTTP_PROXY=[`$HTTP_PROXY] NO_PROXY=[`$NO_PROXY]'"
+                    env = @('FOO=bar', 'HTTP_PROXY=http://caller.invalid:1', 'NO_PROXY=*')
+                    timeout = 30000
+                }
+            }
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout.Contains('FOO=[bar] HTTP_PROXY=[http://127.0.0.1:8888] NO_PROXY=[]')) `
+                "proxy replaced the caller's proxy variables ($($r.Stdout.Trim()))"
+        } | Out-Null
+
+        Run-StateAwareTest "C: credential-bearing proxy with a replaced environment is rejected" {
+            $r = Invoke-StateAware -Request @{
+                phase = 'exec'
+                sandboxId = $script:netSandboxId
+                runtimeConfig = @{ networkProxy = 'http://user:hunter2@127.0.0.1:8888' }
+                process = @{ commandLine = 'true'; env = @('FOO=bar'); timeout = 30000 }
+            }
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            if (-not $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True (-not ($r.Stdout + $r.Stderr).Contains('hunter2')) "the password is not echoed"
+        } | Out-Null
     }
 
     if ($netProvisionedOk) {
@@ -1458,6 +1490,26 @@ Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
     $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
     Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
         "error.message identifies the closed runtimeConfig path (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "D: provision (bridged runtime proxy rejected; set per exec)" {
+    $r = Invoke-StateAware -Request @{
+        version = '1.1.0-alpha'
+        phase = 'provision'
+        containment = 'wslc'
+        network = @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+        runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' }
+        wslc = @{ provision = @{ image = 'alpine:latest' } }
+    } -DryRun
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'set it on the exec phase') "error.message points to exec (got '$msg')"
 } | Out-Null
 
 # No legacy member remains legal on either exact v0.9 network-bearing

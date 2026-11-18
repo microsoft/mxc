@@ -16,6 +16,7 @@ and its async form take observations separately and use
 `PolicyPreparationOptions`, which defines only `Experimental`. Preparation
 does not create a container; callers decide whether to accept its proposed
 changes.
+`SpawnExtendedJsonOptions` defines `Experimental` and `SpawnStdio Stdio`.
 Execution returns V1 result and process types. Lifecycle and validation
 return complete response JSON strings, including backend metadata. When
 importing both namespaces, qualify the Dev facade, for example with
@@ -34,6 +35,7 @@ MxcProcess SpawnJson(string json, JsonOptions? options = null);
 Task<MxcProcess> SpawnJsonAsync(string json, JsonOptions? options = null,
     CancellationToken cancellationToken = default);
 MxcPtyProcess SpawnWithPtyJson(string json, PtyJsonOptions? options = null);
+MxcProcess SpawnWithExtendedOptionsJson(string json, SpawnExtendedJsonOptions? options = null);
 
 // Microsoft.Mxc.Sdk.V1.Dev.MxcLifecycle
 ExecutionResult RunInContainerJson(string json, JsonOptions? options = null);
@@ -65,19 +67,21 @@ string ValidateProcessJson(string json, JsonOptions? options = null);
 Task<string> ValidateProcessJsonAsync(string json, JsonOptions? options = null);
 ```
 
-PTY methods are synchronous. Async preparation, run, and spawn methods accept
-cancellation tokens. Canceling `RunJsonAsync` stops awaiting, not native
-execution; canceling `PreparePolicyJsonAsync` similarly stops awaiting, not
-preparation.
-Canceling `RunInContainerJsonAsync` disposes its owned process. Async
+PTY methods and `SpawnWithExtendedOptionsJson` are synchronous. With
+`SpawnStdio.Inherit`, `SpawnWithExtendedOptionsJson` attaches the workload to
+the calling process's standard streams and supports ProcessContainer,
+Bubblewrap, and Seatbelt. Async run/spawn methods accept cancellation
+tokens. Canceling `RunJsonAsync` stops awaiting, not native execution;
+canceling `RunInContainerJsonAsync` disposes its owned process. Async
 lifecycle management and validation calls run off the caller's thread
 without cancellation tokens.
 
 Captured output is lossy UTF-8 text. Callers own and dispose live handles;
 existing-container execution leaves the container caller-owned.
+Captured existing-container execution closes unused stdin automatically.
+With live execution, close any stdin stream you take when the workload needs EOF.
 A descendant holding an output pipe open can delay captured execution
 completion after a workload timeout.
-
 ## Policy preparation and caller-owned observations
 
 `PreparePolicyJson(json, failures, options)` validates untrusted creation-policy
@@ -337,3 +341,14 @@ Native validation owns the stricter input limits and all remediation decisions.
 Successful creation returns the usual `ExecutionResult` or `MxcProcess`, with
 the same warnings, stdin, cancellation, and ownership semantics. Observations
 remain structured on errors.
+
+On WSLC, `SpawnJson`, `SpawnWithExtendedOptionsJson` with `SpawnStdio.Pipes`,
+and `SpawnInContainerJson` return a process whose `StandardInput` is writable.
+Disposing it, or waiting before taking it, gives the command end-of-file;
+`RunJson` and `RunInContainerJson` give the command end-of-file. Killing a
+`SpawnInContainerJson` command that is still running, or reaching its timeout,
+deletes its container about a minute later, because MXC does not signal a WSLC
+process that has stdin.
+
+For MicroVM output and recovery limitations, see the
+[NVX backend guide](../../../backends/nvx/nvx.md#output-timeout-and-cleanup).

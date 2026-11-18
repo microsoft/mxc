@@ -197,8 +197,8 @@ public class MxcProcess : IMxcProcess
     /// The child's stdin as a writable <see cref="Stream"/>. Returns the same
     /// stream on repeated access; <see cref="Stream.Dispose()"/> (or disposing
     /// this process) closes stdin, sending EOF to the child. Returns
-    /// <see langword="null"/> if stdin was not piped, or was closed by a wait
-    /// that started before it was taken.
+    /// <see langword="null"/> if the backend did not expose stdin, or a wait
+    /// closed it before it was taken.
     /// </summary>
     public Stream? StandardInput
     {

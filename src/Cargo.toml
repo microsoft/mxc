@@ -10,6 +10,7 @@ members = [
     "tools/mxc_darwin",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "tools/wslc_gateway",
     "tools/wxc",
 ]
 exclude = ["testing/fuzz"]
@@ -25,8 +26,19 @@ debug = "full"
 split-debuginfo = "packed"
 strip = "debuginfo"
 
+# The gateway binary ships inside a committed image, so keep it small.
+[profile.wslc-gateway]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+split-debuginfo = "off"
+strip = true
+
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 

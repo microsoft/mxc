@@ -45,6 +45,8 @@ export type {
   RunOptions,
   SpawnOptions,
   SpawnWithPtyOptions,
+  SpawnStdio,
+  SpawnExtendedOptions,
   ProvisionOptions,
   StartOptions,
   StopOptions,
@@ -56,8 +58,8 @@ export type {
 
 export {
   spawn,
-  spawnWithStdin,
   spawnWithPty,
+  spawnWithExtendedOptions,
   run,
 } from './container.js';
 export { MxcProcess } from './container-process.js';
@@ -85,7 +87,6 @@ export type { ProcessNetworkConfig } from './lifecycle-types.js';
 
 export {
   spawnInContainer,
-  spawnInContainerWithStdin,
   provisionContainer,
   startContainer,
   spawnInContainerWithPty,

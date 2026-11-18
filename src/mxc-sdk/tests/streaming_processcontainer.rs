@@ -9,9 +9,29 @@
 
 #![cfg(target_os = "windows")]
 
+mod inherited_stdio_contract;
+
 use mxc_sdk::v1::configs::ProcessContainerConfig;
 use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
+
+#[test]
+#[ignore = "requires a PSEC-capable Windows host"]
+fn inherited_stdio_processcontainer_uses_caller_stdio() {
+    inherited_stdio_contract::assert_uses_caller_stdio(
+        "inherited_stdio_processcontainer_uses_caller_stdio",
+        |command| ContainerRequest {
+            containment: Containment::ProcessContainer(ProcessContainerConfig::default()),
+            timeout_ms: Some(30_000),
+            ..ContainerRequest::new(command)
+        },
+        |marker, exit_code| {
+            format!(
+                "cmd.exe /v:on /c \"set /p L= & echo {marker}_OUT:!L! & echo {marker}_ERR 1>&2 & exit /b {exit_code}\""
+            )
+        },
+    );
+}
 
 #[test]
 #[ignore = "requires a PSEC-capable Windows host"]

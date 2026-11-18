@@ -827,7 +827,7 @@ fn no_egress_refusal(image: &str, store: &StoreHint) -> WslcStepError {
         .into_step_error();
     }
     WslcError::Rejected(format!(
-        "WSLC image '{}' is not cached, and this sandbox declares no egress. \
+        "WSLC image '{}' is not cached, and this sandbox's egress default is deny. \
          Pulling it would reach the registry on the host's network, before the \
          container exists and outside the policy the request declares. Warm the \
          cache first with wxc-exec.exe --setup-wslc --image {}{}, set \

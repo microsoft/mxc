@@ -150,13 +150,7 @@ pub fn run_state_aware(
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         crate::mxc_common::models::ContainmentBackend::MicroVm => {
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new();
-            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
-                &mut runner,
-                bound,
-                dry_run,
-            );
-            runner.finish(outcome)
+            crate::backend_modules::nvx::state_aware::dispatch(bound, dry_run)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -357,16 +351,16 @@ fn run_state_aware_typed(
 /// caller's stdio. The streaming counterpart of the exec arm of
 /// [`run_state_aware`].
 ///
-/// `stdin` gives a WSLc process a writable stdin rather than end-of-file;
-/// IsolationSession always provides one, and MicroVM rejects it before setup.
+/// `wslc_stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// other backends ignore it.
 ///
 /// Backends without a state-aware impl return an [`MxcError`] with
 /// `unsupported_phase`.
 pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    exec_state_aware_with_capture_mode(parsed, stdin, false)
+    exec_state_aware_with_capture_mode(parsed, wslc_stdin, false)
 }
 
 fn exec_state_aware_capture(
@@ -377,7 +371,7 @@ fn exec_state_aware_capture(
 
 fn exec_state_aware_with_capture_mode(
     parsed: ParsedStateAwareRequest,
-    _stdin: bool,
+    _wslc_stdin: bool,
     _capture_output: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
@@ -388,11 +382,13 @@ fn exec_state_aware_with_capture_mode(
     match backend {
         crate::mxc_common::models::ContainmentBackend::W365Agents => {
             let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
-            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut crate::backend_modules::W365AgentsRunner,
                 bound,
             )?;
-            Err(crate::backend_modules::w365_deferred())
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
         }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -422,7 +418,7 @@ fn exec_state_aware_with_capture_mode(
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
-            let mut runner = if _stdin {
+            let mut runner = if _wslc_stdin {
                 crate::wslc_common::WslcStateAwareRunner::with_piped_stdin()
             } else {
                 crate::wslc_common::WslcStateAwareRunner::new()
@@ -437,25 +433,8 @@ fn exec_state_aware_with_capture_mode(
         }
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         crate::mxc_common::models::ContainmentBackend::MicroVm => {
-            if _stdin {
-                return Err(MxcError::unsupported_containment(
-                    "MicroVM lifecycle exec does not support writable stdin",
-                ));
-            }
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
-            let mut runner = if _capture_output {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::for_capture()
-            } else {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new()
-            };
-            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
-                &mut runner,
-                bound,
-            );
-            let handle = runner.finish(handle)?;
-            Ok(Box::new(
-                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
-            ))
+            crate::backend_modules::nvx::state_aware::dispatch_exec(bound, _capture_output)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -674,11 +653,7 @@ fn exec_state_aware_attached_parsed(
     exec_attached_gate(host_is_interactive)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -762,11 +737,7 @@ fn run_state_aware_envelope(
     let phase = parsed.phase();
     let phase_name = phase.as_str();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -852,9 +823,11 @@ fn run_state_aware_envelope(
 fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware(parsed, stdin))
+    exec_state_aware_process_parsed(parsed, logger, |parsed| {
+        exec_state_aware(parsed, wslc_stdin)
+    })
 }
 
 fn exec_state_aware_capture_parsed(
@@ -885,11 +858,7 @@ fn exec_state_aware_process_parsed(
     }
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -968,11 +937,7 @@ pub fn run_typed_state_aware_request(
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
-    let requested_sandbox_kind = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = parsed.request().requested_sandbox_kind;
     let telemetry_active = telemetry::init_for_request(
         parsed.request().telemetry.as_ref(),
         parsed.request().source_contract,
@@ -1060,15 +1025,15 @@ pub fn run_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
-/// model as a live streaming process, with a writable WSLc stdin if `stdin`.
+/// model as a live streaming process, with a writable WSLc stdin if `wslc_stdin`.
 pub fn exec_typed_state_aware_request(
     input: SdkStateAwareInput,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
@@ -1130,15 +1095,15 @@ pub fn run_state_aware_json(
 /// streaming process, returning a [`SandboxProcess`] handle.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]; `stdin` is as for [`exec_state_aware`].
+/// [`run_state_aware_json`]; `wslc_stdin` is as for [`exec_state_aware`].
 pub fn exec_state_aware_json(
     request_json: &str,
     experimental: bool,
-    stdin: bool,
+    wslc_stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger, stdin)
+    exec_state_aware_parsed(parsed, &mut logger, wslc_stdin)
 }
 
 pub fn exec_state_aware_capture_json(
@@ -1280,8 +1245,8 @@ mod tests {
         );
         assert_eq!(
             typed.request().source_contract,
-            None,
-            "typed SDK input has no external exact-contract source"
+            exact.request().source_contract,
+            "typed SDK input must retain its selected contract"
         );
         assert_eq!(request_intent(&typed), request_intent(&exact));
     }
@@ -2132,8 +2097,8 @@ mod tests {
 
         let store = tempfile::tempdir().unwrap();
         let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
-        telemetry::consent::set_consent(true, "test").unwrap();
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();
@@ -2148,7 +2113,6 @@ mod tests {
                 Phase::Deprovision,
                 Phase::DeprovisionSession,
             ] {
-                let mut development = false;
                 let succeeded = if typed {
                     let mut input = match phase {
                         Phase::ProvisionSession => SdkStateAwareInput::new(
@@ -2175,7 +2139,7 @@ mod tests {
                         )
                         .unwrap(),
                     };
-                    input.telemetry_opt_in = Some(true);
+                    input.telemetry_opt_in = Some(false);
                     run_typed_state_aware_request(input, true, true).is_ok()
                 } else {
                     let mut request: serde_json::Value = match phase {
@@ -2192,14 +2156,12 @@ mod tests {
                         }),
                         _ => serde_json::from_str(&lifecycle_fixture("wslc", id, phase)).unwrap(),
                     };
-                    request["telemetry"] = serde_json::json!({ "enabled": true });
-                    development = request["version"] == "1.1.0-alpha";
+                    request["telemetry"] = serde_json::json!({ "enabled": false });
                     run_state_aware_json(&request.to_string(), true, true).is_ok()
                 };
                 let starts = test_sink::take_starts();
                 let ends = test_sink::take_executions();
-                let expected =
-                    usize::from(!development || crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
                 assert_eq!(starts.len(), expected, "typed={typed}, phase={phase:?}");
                 assert_eq!(ends.len(), expected, "typed={typed}, phase={phase:?}");
                 if expected == 0 {
@@ -2233,8 +2195,8 @@ mod tests {
 
         let store = tempfile::tempdir().unwrap();
         let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
-        telemetry::consent::set_consent(true, "test").unwrap();
+        env.set_policy_value(0);
+        telemetry::consent::set_consent(false, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();
@@ -2243,31 +2205,33 @@ mod tests {
             exec_input(
                 "wslc:00000000000000000000000000000000",
                 "echo synthetic",
-                Some(true),
+                Some(false),
             ),
             true,
             &mut logger,
         )
         .unwrap();
         let mut start = None;
+        let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
         let result = exec_state_aware_process_parsed(parsed, &mut logger, |_| {
             let starts = test_sink::take_starts();
-            assert_eq!(starts.len(), 1);
+            assert_eq!(starts.len(), expected);
             assert!(test_sink::take_executions().is_empty());
             start = starts.first().cloned();
             Err(MxcError::backend_unavailable("synthetic"))
         });
         assert!(result.is_err());
         let ends = test_sink::take_executions();
-        assert_eq!(ends.len(), 1);
-        let start = start.unwrap();
-        assert_eq!(start.session_id, ends[0].session_id);
-        assert_eq!(start.phase, ends[0].phase);
-        assert_eq!(start.correlation_vector, ends[0].correlation_vector);
-        assert_eq!(
-            ends[0].failure_reason,
-            Some(telemetry::FailureReason::InitError)
-        );
+        assert_eq!(ends.len(), expected);
+        if let Some(start) = start {
+            assert_eq!(start.session_id, ends[0].session_id);
+            assert_eq!(start.phase, ends[0].phase);
+            assert_eq!(start.correlation_vector, ends[0].correlation_vector);
+            assert_eq!(
+                ends[0].failure_reason,
+                Some(telemetry::FailureReason::InitError)
+            );
+        }
         test_sink::clear();
     }
 

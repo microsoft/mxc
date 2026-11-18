@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <_MxcNvxRuntimeRoot>$(MSBuildThisFileDirectory)..\runtimes\win-x64\aci-edge-sandboxes\</_MxcNvxRuntimeRoot>
+    <_MxcNvxSupportedRid Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win10-x64'">true</_MxcNvxSupportedRid>
+    <_MxcNvxHostSupported Condition="'$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Windows')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">true</_MxcNvxHostSupported>
+  </PropertyGroup>
+  <Target Name="_MxcNvxValidatePlatform" BeforeTargets="PrepareForBuild;Publish">
+    <Error Condition="'$(RuntimeIdentifier)' != '' And '$(_MxcNvxSupportedRid)' != 'true'" Text="Microsoft.Mxc.Sdk.Nvx.Runtime supports only the win-x64 or win10-x64 RuntimeIdentifier; got '$(RuntimeIdentifier)'." />
+    <Error Condition="'$(RuntimeIdentifier)' == '' And '$(_MxcNvxHostSupported)' != 'true'" Text="Microsoft.Mxc.Sdk.Nvx.Runtime requires an explicit Windows x64 runtime identifier when building outside Windows x64. Build or publish with -r win-x64." />
+    <Error Condition="'$(PlatformTarget)' != '' And '$(PlatformTarget)' != 'AnyCPU' And '$(PlatformTarget)' != 'x64'" Text="Microsoft.Mxc.Sdk.Nvx.Runtime requires an x64 or AnyCPU PlatformTarget; got '$(PlatformTarget)'." />
+  </Target>
+  <ItemGroup Condition="'$(_MxcNvxSupportedRid)' == 'true' Or '$(_MxcNvxHostSupported)' == 'true'">
+    <Content Include="$(_MxcNvxRuntimeRoot)**\*">
+      <TargetPath>aci-edge-sandboxes\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+</Project>

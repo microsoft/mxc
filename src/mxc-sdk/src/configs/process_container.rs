@@ -189,7 +189,10 @@ mod tests {
         .expect("ProcessContainer request should build");
 
         let inner = &request.inner;
-        assert_eq!(inner.source_contract, None);
+        assert_eq!(
+            inner.source_contract,
+            Some(crate::mxc_contract::ContractVersion::V1_0_0)
+        );
         assert_eq!(inner.containment, ContainmentBackend::ProcessContainer);
         assert!(!inner.policy.least_privilege_mode);
         assert!(inner

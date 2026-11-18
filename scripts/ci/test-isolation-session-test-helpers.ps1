@@ -90,7 +90,12 @@ Write-Output 'LoopbackAnchor.ps1'
     $updates = @($builder.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text -eq '$required' -and $node.Operator -eq 'PlusEquals'
+            $node.Left.Extent.Text -eq '$required' -and $node.Operator -eq 'PlusEquals' -and
+            $null -ne $node.Right.Find({
+                param($dependency)
+                $dependency -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $dependency.VariablePath.UserPath -eq 'helperPaths'
+            }, $true)
     }, $true))
     if ($errors.Count -or $updates.Count -ne 1) {
         throw 'Cannot locate the standalone builder helper layout check.'

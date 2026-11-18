@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-reserved",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho DEFAULT=$(p 1.1.1.1:443)\necho LOOPBACK=$(p 127.0.0.1:22)\necho LOCALHOST=$(p localhost:80)\necho PROXY_SELF=$(p 10.231.1.254:3128)\necho GATEWAY_NET=$(p 10.231.0.1:443)\necho LINK_LOCAL=$(p 169.254.169.254:80)\necho MULTICAST=$(p 224.0.0.1:80)\necho UNSPECIFIED=$(p 0.0.0.0:80)\necho HOST_LOOPBACK=$(p host.wslc.internal:80)\nnslookup host.wslc.internal >/dev/null 2>&1 && echo HOST_DNS=RESOLVED || echo HOST_DNS=REFUSED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nexit 7"
+  },
+  "network": { "egress": { "default": "allow" }, "ingress": { "default": "allow", "hostLoopback": "deny" } },
+  "wslc": { "image": "alpine:latest" }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-allow-ipv6-rejected",
+  "containment": "wslc",
+  "process": { "commandLine": "echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN" },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "2606:4700::/32" }], "ports": [{ "port": 443, "protocol": "tcp" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}

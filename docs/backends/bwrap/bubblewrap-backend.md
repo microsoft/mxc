@@ -40,11 +40,16 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add bubblewrap
   ```
-  The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
-  environment is built with `--clearenv` (bwrap 0.5.0+). The address-family
-  filter uses `--seccomp FD`, which predates that release, so **bwrap 0.5.0 or
-  newer** remains the requirement. Platform detection probes `bwrap --version`
+  The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
+  additionally require **bwrap 0.11.0+** and unprivileged OverlayFS support.
+  When an overlay is needed, execution rejects a setuid `bwrap` before launch.
+  If the host kernel or source filesystem does not support unprivileged
+  OverlayFS, Bubblewrap can fail with an overlay-mount error such as
+  `Invalid argument`; use a kernel and filesystem that support unprivileged
+  OverlayFS. A missing denied target beneath a read-only source with nested
+  host mounts is rejected before launch because the overlay cannot preserve
+  those mounts. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -177,10 +182,26 @@ Bubblewrap creates a namespace-isolated process by:
    for Unix-domain, IPv4, IPv6, and netlink address families, and disables
    io_uring
 6. Clearing the environment and applying only requested variables
-7. Executing the command via `sh -c`
+7. Dropping all workload capabilities with `--cap-drop ALL`, including for root callers
+8. Executing the command via `sh -c`
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+Capability removal does not change the workload's UID or GID. Run MXC as an
+unprivileged user: a root caller still gives the workload root-owner access
+to visible host files, including secrets in `/etc` and writable policy grants.
+The separate network supervisor retains the namespace capabilities it needs
+to install firewall rules.
+
+Bubblewrap ignores a refused capability drop when the caller is root, for
+example when the host's seccomp or security policy blocks `capset`. MXC
+therefore holds every launch at Bubblewrap's startup barrier until the sandbox
+process has empty inheritable, permitted, effective, and ambient capability
+sets and has no-new-privileges set. On kernels before Linux 4.10, which do not
+report no-new-privileges, MXC requires an empty bounding set instead. If that
+does not happen within five seconds, MXC stops the sandbox and fails the launch
+without running the workload.
 
 `bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
 when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
@@ -224,7 +245,8 @@ enables its parent-death cleanup. CLI execution uses `--new-session` instead.
 
 CLI execution still inherits its standard input, output, and error
 descriptors, but the workload cannot reopen the host terminal through
-`/dev/tty` or use it for terminal job control. For programs that need a
+`/dev/tty` or use it for terminal job control. SDK inherited-stdio execution
+(`spawn_with_extended_options` with `SpawnStdio::Inherit`) behaves the same way. For programs that need a
 controlling terminal, use the SDK's PTY execution API, which allocates a
 separate terminal and supports resizing and merged output.
 ### Deny-by-default filesystem
@@ -356,7 +378,7 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
-| `readonlyPaths` | `--ro-bind <real path> <real path>` | Explicit read-only bind mount |
+| `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
 | `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
@@ -367,6 +389,14 @@ tmpfs would replace it with an empty *directory*, changing its type). Paths that
 cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
 The masks are remounted after policy mounts are created, so a more specific
 allowed child remains accessible with its own permissions.
+
+When a missing denied path needs a private overlay, the executor masks the
+overlay backing directory at its normal path and at any writable bind-mount
+alias found in `/proc/self/mountinfo`. The mount list is read with the
+filesystem-probe deadline and bounded to 1 MiB and 4096 entries; startup fails
+closed if it cannot be read or parsed. If the read-only source contains a
+nested host mount, startup also fails before the workload starts rather than
+exposing the directory underneath that mount.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
@@ -873,14 +903,18 @@ shared-host-network behavior.
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
-   rule aborts the supervisor rather than starting an unenforced sandbox.
+   rule aborts startup. The runner terminates Bubblewrap and its blocked
+   sandbox child while the startup barrier is still held, then reaps the
+   launcher, cleans up the network helpers, and returns the setup error.
+   This also applies to create-and-run execution, streaming, and PTY execution
+   in both proxy-only and firewall-enforced modes.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the
-   rule-bearing network namespace. This relies on Bubblewrap dropping
-   capabilities in the sandboxed process — the runner passes no `--cap-add` —
-   which is what prevents the workload from holding the `CAP_NET_ADMIN` needed
-   to flush the chain.
+   rule-bearing network namespace. MXC passes `--cap-drop ALL` so the workload
+   has no capabilities, regardless of the caller's UID. The supervisor keeps
+   its namespace capabilities; the workload cannot use `CAP_NET_ADMIN` to
+   flush the chain or `CAP_NET_RAW` to create packet sockets.
 4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
    `bwrap --setenv` (caller-supplied values for these keys, including
@@ -1021,11 +1055,10 @@ so a Node caller keeps the first answer it received.
   than creating its own, and the namespace descriptor stays open in the
   workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
   to close it. Re-entering the namespace with `setns` requires
-  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
-  capability bounding set before `exec`, so the workload runs with
-  `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
-  those are zero, because that assumption is what makes the exposed
-  descriptor inert.
+  `CAP_SYS_ADMIN`, which MXC removes with `--cap-drop ALL` before workload
+  execution. The permitted, effective, inheritable, bounding, and ambient
+  capability sets are empty. Functional tests cover root and non-root callers
+  in isolated, firewall, and proxy modes.
 - **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
   and additionally programs a default-DROP egress chain inside the sandbox's

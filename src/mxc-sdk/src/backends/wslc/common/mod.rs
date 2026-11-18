@@ -17,6 +17,7 @@ pub mod container_steps;
 pub mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_record;
+pub mod egress_gateway;
 pub mod error;
 pub mod image;
 pub mod policy;

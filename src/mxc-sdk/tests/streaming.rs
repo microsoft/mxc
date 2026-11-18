@@ -9,11 +9,25 @@
 
 #![cfg(target_os = "macos")]
 
+mod inherited_stdio_contract;
 mod unix_pty_contract;
 
 use mxc_sdk::v1::{
     spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
 };
+
+#[test]
+fn seatbelt_inherited_stdio_uses_caller_stdio() {
+    inherited_stdio_contract::assert_uses_caller_stdio(
+        "seatbelt_inherited_stdio_uses_caller_stdio",
+        |command| seatbelt_request(&command, 30_000),
+        |marker, exit_code| {
+            format!(
+                "IFS= read -r line; printf '{marker}_OUT:%s\\n' \"$line\"; printf '{marker}_ERR\\n' >&2; exit {exit_code}"
+            )
+        },
+    );
+}
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).

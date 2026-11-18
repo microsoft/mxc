@@ -157,10 +157,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
         .as_ref()
         .map(|c| telemetry::init(c, logger))
         .unwrap_or(false);
-    let requested_sandbox_kind = request
-        .telemetry
-        .as_ref()
-        .and_then(|config| config.requested_sandbox_kind);
+    let requested_sandbox_kind = request.requested_sandbox_kind;
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still

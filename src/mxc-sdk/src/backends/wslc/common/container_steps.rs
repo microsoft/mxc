@@ -386,7 +386,25 @@ pub(crate) unsafe fn set_command_line_and_env(
     env: &[String],
     script_code: &str,
 ) -> Result<CommandLineBuffers, WslcStepError> {
-    let argv_cstrings = process_env::argv_words(scope, env, script_code)
+    set_argv_and_env(
+        sdk,
+        settings,
+        &process_env::argv_words(scope, env, script_code),
+        &process_env::sdk_entries(scope, env),
+    )
+}
+
+/// Set `settings`' argv and the environment the SDK layers over the image's.
+///
+/// # Safety
+/// Same contract as [`set_command_line_and_env`].
+unsafe fn set_argv_and_env(
+    sdk: &WslcSdk,
+    settings: *mut WslcProcessSettings,
+    argv: &[String],
+    env: &[String],
+) -> Result<CommandLineBuffers, WslcStepError> {
+    let argv_cstrings = argv
         .iter()
         .map(|word| cstr_bytes("command", word))
         .collect::<Result<Vec<_>, _>>()?;
@@ -396,7 +414,7 @@ pub(crate) unsafe fn set_command_line_and_env(
         return Err(sdk_step_error("WslcSetProcessSettingsCmdLine", hr, ""));
     }
 
-    let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
+    let env_cstrings: Vec<Vec<u8>> = env
         .iter()
         .map(|e| cstr_bytes("environment variable", e))
         .collect::<Result<Vec<_>, _>>()?;
@@ -492,7 +510,14 @@ impl ProcessSettings {
         working_directory: &str,
         sink: Option<OutputSink>,
     ) -> Result<Self, WslcStepError> {
-        Self::build_inner(sdk, script_code, env, scope, working_directory, true, sink)
+        Self::build_inner(
+            sdk,
+            &process_env::argv_words(scope, env, script_code),
+            &process_env::sdk_entries(scope, env),
+            working_directory,
+            true,
+            sink,
+        )
     }
 
     /// Like [`build`](Self::build) but registers no stdio callbacks and shares no
@@ -508,14 +533,33 @@ impl ProcessSettings {
         scope: EnvScope,
         working_directory: &str,
     ) -> Result<Self, WslcStepError> {
-        Self::build_inner(sdk, script_code, env, scope, working_directory, false, None)
+        Self::build_inner(
+            sdk,
+            &process_env::argv_words(scope, env, script_code),
+            &process_env::sdk_entries(scope, env),
+            working_directory,
+            false,
+            None,
+        )
+    }
+
+    /// Run `argv` directly, without a shell, with `env` layered over the
+    /// image's environment. Output is captured into [`io_ctx`](Self::io_ctx).
+    ///
+    /// # Safety
+    /// Same contract as [`build`](Self::build).
+    pub(crate) unsafe fn build_argv(
+        sdk: &WslcSdk,
+        argv: &[String],
+        env: &[String],
+    ) -> Result<Self, WslcStepError> {
+        Self::build_inner(sdk, argv, env, "", true, None)
     }
 
     unsafe fn build_inner(
         sdk: &WslcSdk,
-        script_code: &str,
+        argv: &[String],
         env: &[String],
-        scope: EnvScope,
         working_directory: &str,
         register_callbacks: bool,
         sink: Option<OutputSink>,
@@ -557,7 +601,7 @@ impl ProcessSettings {
             sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
 
-        let command = set_command_line_and_env(sdk, &mut raw, scope, env, script_code)?;
+        let command = set_argv_and_env(sdk, &mut raw, argv, env)?;
 
         // Working directory (an absolute in-container path, e.g. `/work`; empty =
         // container default). It is passed straight to the SDK; a non-absolute

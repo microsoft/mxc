@@ -58,7 +58,7 @@ Linux / macOS (`.sh`):
 | `run_wslc_all_tests.ps1` | All WSLC create-and-run and container-lifecycle E2E tests; delegates the lifecycle half to `run_wslc_state_aware_tests.ps1` | WSL2, WSLC SDK, staged daemon, and registry access for the image preflight, which warms the create-and-run store and daemon store slots 0 through 2 (`-SkipSetup` needs all stores already warm, because the lifecycle fixtures deny egress) |
 | `run_wslc_state_aware_tests.ps1` | WSLC container and session lifecycle E2E suite, including shared sandboxes, identical-session independence, guest CPU/memory sizing, cold-store refusal, warm reuse, exec concurrency and idle teardown; GPU enforcement is not verified | WSL2, WSLC SDK, `wxc-wslc-daemon.exe` staged beside `wxc-exec.exe`, and `alpine:latest` / `python:3.12-alpine` cached in daemon store slots 0 through 2 (warm them with `scripts\setup-wslc.ps1 -DaemonSlots 3`); the fresh cold-store regression requires registry access even with `-SkipSetup` |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
-| `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture; `-IsolationSessionLifecycle` checks two real cross-process lifecycles and fresh session attribution after cleanup | Local-only debug `wxc-exec.exe` built with `test-support` (also `isolation_session` for lifecycle mode); ETW tooling; Administrator. Missing privileges skip the basic smoke test but fail lifecycle mode |
+| `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture; `-IsolationSessionLifecycle` checks three real cross-process lifecycles, one per supported contract, and fresh session attribution after cleanup | Local-only debug `wxc-exec.exe` built with `test-support` (also `isolation_session` for lifecycle mode); ETW tooling; Administrator. Missing privileges skip the basic smoke test but fail lifecycle and keyword modes |
 | `test_telemetry_etw_assertions.ps1` | Offline ETW trace rejection controls, release consent fixture defaults, and real CLI dry-run validation of the lifecycle scenario's requests; no container, consent or registry mutations | PowerShell 7; `-WxcExePath` pointing to a debug executor with `isolation_session` |
 | `run_telemetry_consent_release_test.ps1` | Consent path in a **release** executor, where the debug store/policy overrides are compiled out. Mutates the real consent store and HKLM policy, so it requires `-AcceptRealMachineMutation` and an ephemeral machine | Release `wxc-exec.exe`; Administrator for the HKLM policy section, otherwise that section skips unless `-RequirePolicyCeiling` is passed |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
@@ -137,11 +137,19 @@ overrides are assigned only to child processes, never to the invoking shell.
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
 | `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap`, Python 3 for terminal isolation |
+| `run_bwrap_capabilities_test.sh` | Workload capability removal, refusal when the capability drop is blocked, read-only mount protection, firewall tamper resistance, and supervisor networking in all three modes; CI runs as both root and non-root | `lxc-exec`, Python 3, Bubblewrap network prerequisites, x86_64 or aarch64 |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
 run focused backend suites; the aggregate scripts above are what CI dispatches to.
+
+The Bubblewrap capability test still runs its isolated and proxy cases when
+no suitable host IPv4 address is available for the firewall fixture. It reports
+the firewall case as skipped and returns 77 after the remaining cases, or 1
+if any case fails. A complete run ends with
+`Bubblewrap capability test complete: isolated, firewall, proxy.`, and CI
+requires that exact line.
 
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does

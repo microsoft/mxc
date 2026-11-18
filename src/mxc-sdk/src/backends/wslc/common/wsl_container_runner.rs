@@ -16,7 +16,7 @@
 //! [`crate::wslc_common::sandbox`]. They differ only in where the SDK's I/O callbacks send
 //! their bytes — see `IoSink`.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr, CString};
 use std::fmt::Write;
 use std::io::Read;
 use std::ptr;
@@ -33,6 +33,7 @@ use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 use crate::mxc_common::validator::validate_network_policy_support;
 
 use crate::wslc_common::container_steps::{self, sdk_error, SESSION_BOOT_TIMEOUT_MS};
+use crate::wslc_common::egress_gateway;
 use crate::wslc_common::error::WslcError;
 use crate::wslc_common::image;
 use crate::wslc_common::policy;
@@ -479,6 +480,14 @@ impl WSLContainerRunner {
         }
     }
 
+    fn network_mode(&self, request: &ExecutionRequest) -> Result<policy::NetworkMode, MxcError> {
+        policy::create_and_run_network_mode(
+            request,
+            "wslc.portMappings",
+            !self.config.port_mappings.is_empty(),
+        )
+    }
+
     fn validate_target_os(&self) -> Result<(), ScriptResponse> {
         if self.config.target_os == "linux" {
             return Ok(());
@@ -511,17 +520,11 @@ impl ScriptRunner for WSLContainerRunner {
         policy_mapping::container_working_directory(&request.working_directory)
             .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
-        policy::reject_port_mappings_without_bridged_network(
-            request,
-            "wslc.portMappings",
-            !self.config.port_mappings.is_empty(),
-        )
-        .map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
-        validate_network_policy_support(request, policy::network_policy_support())
+        validate_network_policy_support(request, policy::create_and_run_network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
-        policy::validate_directional_network(request).map_err(as_wslc_rejection)?;
+        self.network_mode(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
         Ok(())
     }
@@ -605,6 +608,15 @@ fn resolve_session_name(container_id: &str) -> String {
 }
 
 impl WSLContainerRunner {
+    fn storage_path(&self) -> String {
+        self.config.storage_path.clone().unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("mxc-wslc-sessions")
+                .to_string_lossy()
+                .to_string()
+        })
+    }
+
     /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
     /// Keeps owned string data alive through session creation.
@@ -616,19 +628,13 @@ impl WSLContainerRunner {
         &self,
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
+        session_name_str: &str,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
         reject_embedded_nul_container_id(&request.container_id)?;
-        let session_name_str = resolve_session_name(&request.container_id);
-        let session_name: Vec<u16> = to_wide(&session_name_str);
-        let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("mxc-wslc-sessions")
-                .to_string_lossy()
-                .to_string()
-        });
-        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
+        let session_name: Vec<u16> = to_wide(session_name_str);
+        let storage_path_wide: Vec<u16> = to_wide(&self.storage_path());
 
         let mut settings = std::mem::zeroed::<WslcSessionSettings>();
         let hr = sdk.WslcInitSessionSettings(
@@ -980,10 +986,12 @@ impl WSLContainerRunner {
         };
 
         // -- Init: COM + SDK + preflight --
+        let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
         let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
-        let session_guard = self.create_session(sdk, request, logger)?;
+        let session_name = resolve_session_name(&request.container_id);
+        let session_guard = self.create_session(sdk, request, &session_name, logger)?;
 
         // -- Image resolution --
         // An isolated sandbox gets no registry fetch on its behalf; the pull
@@ -1011,6 +1019,30 @@ impl WSLContainerRunner {
             }
             return Err(e.into_response());
         }
+
+        let gateway = match &network_mode {
+            policy::NetworkMode::Proxied(egress) => {
+                for warning in &egress.warnings {
+                    logger.warning_line(&format!("WARNING: WSLc: {warning}"));
+                }
+                let storage_path = self.storage_path();
+                egress_gateway::sweep_leftovers(
+                    sdk,
+                    session_guard.as_raw(),
+                    &storage_path,
+                    logger,
+                )?;
+                Some(egress_gateway::Gateway::start(
+                    sdk,
+                    session_guard.as_raw(),
+                    &storage_path,
+                    &session_name,
+                    egress,
+                    logger,
+                )?)
+            }
+            policy::NetworkMode::None | policy::NetworkMode::Bridged => None,
+        };
 
         // -- Process settings --
         // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive
@@ -1059,7 +1091,9 @@ impl WSLContainerRunner {
         // belongs to the proxy. Inject HTTP(S)_PROXY after scrubbing caller
         // proxy variables.
         // See crate::mxc_common::proxy_env.
-        let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
+        let effective_env: Vec<String> = if gateway.is_some() {
+            egress_gateway::workload_env(request.env_entries(), process_env::EnvScope::of(request))
+        } else if request.policy.network_proxy.is_enabled() {
             // A directly constructed request must retain its proxy URL so the
             // guest receives a routable endpoint instead of an empty setting.
             let proxy_url = match request
@@ -1188,7 +1222,7 @@ impl WSLContainerRunner {
                 mappings.len()
             );
         }
-        let mounts = match policy_mapping::build_volume_mounts(
+        let mut mounts = match policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
         ) {
@@ -1198,6 +1232,9 @@ impl WSLContainerRunner {
                 return Err(WslcError::Rejected(e).into_response());
             }
         };
+        if let Some(gateway) = &gateway {
+            mounts.push(gateway.resolv_conf_mount());
+        }
 
         // Keep owned data alive for volume pointers
         let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts
@@ -1236,17 +1273,52 @@ impl WSLContainerRunner {
             );
         }
 
-        let is_default_block = policy::network_is_isolated(request);
-        let net_mode = policy_mapping::map_network_policy(is_default_block);
-        let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
-        if hr != S_OK {
-            return Err(sdk_error(
-                "WslcSetContainerSettingsNetworkingMode failed",
-                hr,
-                "",
-            ));
+        // Read by WslcCreateContainer below.
+        let workload_networks = gateway.as_ref().map(|g| g.workload_networks());
+        // Raw sockets could hand frames to the gateway outside the proxy.
+        let workload_capability_drops: [PCSTR; 1] = [c"NET_RAW".as_ptr()];
+        if let (Some(gateway), Some(workload_networks)) = (&gateway, &workload_networks) {
+            let hr = sdk.WslcSetContainerSettingsName(
+                &mut container_settings,
+                gateway.workload_name().as_ptr(),
+            );
+            if hr != S_OK {
+                return Err(sdk_error("WslcSetContainerSettingsName failed", hr, ""));
+            }
+            let hr = sdk.WslcSetContainerSettingsNetworks(
+                &mut container_settings,
+                workload_networks.as_ptr(),
+                workload_networks.len() as u32,
+            );
+            if hr != S_OK {
+                return Err(sdk_error("WslcSetContainerSettingsNetworks failed", hr, ""));
+            }
+            let hr = sdk.WslcSetContainerSettingsCapabilityDrops(
+                &mut container_settings,
+                workload_capability_drops.as_ptr(),
+                workload_capability_drops.len() as u32,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsCapabilityDrops failed",
+                    hr,
+                    "",
+                ));
+            }
+            let _ = writeln!(logger, "[WSLC] Networking: built-in proxy");
+        } else {
+            let is_default_block = network_mode == policy::NetworkMode::None;
+            let net_mode = policy_mapping::map_network_policy(is_default_block);
+            let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsNetworkingMode failed",
+                    hr,
+                    "",
+                ));
+            }
+            let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
         }
-        let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
         let mut flags = WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE;
         if request.lifecycle.destroy_on_exit {
@@ -1304,9 +1376,10 @@ impl WSLContainerRunner {
         // `io_ctx_guard`) *before* the session is terminated and the DLL
         // unloaded — so a late callback could dereference freed memory. Every
         // failure past this point therefore quiesces the container first.
-        let post_start = Self::attach_init_process(sdk, &container_guard);
-        let process_guard = match post_start {
-            Ok(guard) => guard,
+        let post_start = Self::container_id(sdk, &container_guard)
+            .and_then(|id| Ok((id, Self::attach_init_process(sdk, &container_guard)?)));
+        let (container_id, process_guard) = match post_start {
+            Ok(started) => started,
             Err(e) => {
                 Self::quiesce_started_container(
                     sdk,
@@ -1341,6 +1414,8 @@ impl WSLContainerRunner {
         Ok(StartedContainer {
             process_guard,
             container_guard,
+            container_id,
+            gateway,
             session_guard,
             io_ctx_guard,
             io_ctx,
@@ -1381,6 +1456,22 @@ impl WSLContainerRunner {
         }
         // SAFETY: the SDK transfers ownership of the returned handle to the caller.
         Ok(std::fs::File::from_raw_handle(handle))
+    }
+
+    /// # Safety
+    /// `sdk` must hold valid function pointers and `container` a live handle.
+    unsafe fn container_id(
+        sdk: &'static WslcSdk,
+        container: &WslcContainerGuard,
+    ) -> Result<CString, ScriptResponse> {
+        let mut id = [0u8; WSLC_CONTAINER_ID_BUFFER_SIZE as usize];
+        let hr = sdk.WslcGetContainerID(container.as_raw(), id.as_mut_ptr().cast());
+        if hr != S_OK {
+            return Err(sdk_error("WslcGetContainerID failed", hr, ""));
+        }
+        CStr::from_bytes_until_nul(&id)
+            .map(CStr::to_owned)
+            .map_err(|_| sdk_error("WslcGetContainerID returned no terminator", hr, ""))
     }
 
     /// Take the container's init process handle. Split out so every failure
@@ -1872,8 +1963,11 @@ impl StreamCloser for SharedStdinClosers {
 pub(crate) struct StartedContainer {
     process_guard: WslcProcessGuard,
     container_guard: WslcContainerGuard,
-    /// Held for its `Drop`, which terminates and releases the WSLC session.
-    #[allow(dead_code, reason = "RAII guard: terminates the session on drop")]
+    /// Looks the container up in the session after its handle disconnects.
+    container_id: CString,
+    /// The built-in proxy, removed before the session ends.
+    gateway: Option<egress_gateway::Gateway>,
+    /// Terminates and releases the WSLC session on drop.
     session_guard: WslcSessionGuard,
     /// Held for its `Drop`, which reclaims the `Arc<IoContext>` reference handed
     /// to the SDK by raw pointer.
@@ -1932,6 +2026,41 @@ impl Drop for StartedContainer {
 }
 
 impl StartedContainer {
+    /// Check a stop or delete result; `Ok(true)` means the service already
+    /// removed the auto-remove container. The service disconnects the handle
+    /// when it does, but so does a crashed service, so the session must
+    /// confirm the container is gone.
+    ///
+    /// # Safety
+    /// The caller must be in a COM apartment.
+    unsafe fn teardown_step(
+        &self,
+        call: &str,
+        hr: HRESULT,
+        err_msg: &CoTaskMemPWSTR,
+    ) -> Result<bool, String> {
+        if hr == S_OK {
+            return Ok(false);
+        }
+        let failed = format!(
+            "{call} failed: {} (HRESULT 0x{:08X})",
+            err_msg.to_string_lossy(),
+            hr as u32
+        );
+        if hr != RPC_E_DISCONNECTED && hr != WSLC_E_CONTAINER_NOT_FOUND {
+            return Err(failed);
+        }
+        match egress_gateway::open_container(
+            self.sdk,
+            self.session_guard.as_raw(),
+            &self.container_id,
+        ) {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) => Err(format!("{failed}; the container still exists")),
+            Err(e) => Err(format!("{failed}; {e}")),
+        }
+    }
+
     /// Wait for the init process to exit, enforcing the request's timeout
     /// (stopping the container when it fires). Returns `(exit_code, timed_out)`.
     pub(crate) fn wait_for_exit(
@@ -2140,31 +2269,38 @@ impl StartedContainer {
                     10,
                     err_msg.as_mut_ptr(),
                 );
-                if hr != S_OK {
-                    let msg = err_msg.to_string_lossy();
-                    failure = Some(format!(
-                        "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
-                        hr as u32
-                    ));
-                }
+                let stopped = self.teardown_step("WslcStopContainer", hr, &err_msg);
                 drop(err_msg);
+                let removed = matches!(stopped, Ok(true));
+                if removed {
+                    let _ = writeln!(logger, "[WSLC] Container already removed by the service");
+                }
+                if let Err(e) = stopped {
+                    failure = Some(e);
+                }
 
                 // Attempted even after a failed stop: the delete is forced, so
                 // it is the better chance of not leaking the container.
-                let mut err_msg = CoTaskMemPWSTR::null();
-                let hr = self.sdk.WslcDeleteContainer(
-                    self.container_guard.as_raw(),
-                    WslcDeleteContainerFlags::WSLC_DELETE_CONTAINER_FLAG_FORCE,
-                    err_msg.as_mut_ptr(),
-                );
-                if hr != S_OK && failure.is_none() {
-                    let msg = err_msg.to_string_lossy();
-                    failure = Some(format!(
-                        "WslcDeleteContainer failed: {msg} (HRESULT 0x{:08X})",
-                        hr as u32
-                    ));
+                if !removed {
+                    let mut err_msg = CoTaskMemPWSTR::null();
+                    let hr = self.sdk.WslcDeleteContainer(
+                        self.container_guard.as_raw(),
+                        WslcDeleteContainerFlags::WSLC_DELETE_CONTAINER_FLAG_FORCE,
+                        err_msg.as_mut_ptr(),
+                    );
+                    if let Err(e) = self.teardown_step("WslcDeleteContainer", hr, &err_msg) {
+                        failure.get_or_insert(e);
+                    }
+                    drop(err_msg);
                 }
-                drop(err_msg);
+            }
+        }
+        if let Some(gateway) = &self.gateway {
+            if let Err(e) = gateway.teardown(logger) {
+                failure = Some(match failure {
+                    Some(first) => format!("{first}; {e}"),
+                    None => e,
+                });
             }
         }
 
@@ -2458,12 +2594,20 @@ mod tests {
     }
 
     #[test]
-    fn both_surfaces_reject_directional_host_filtering() {
+    fn only_create_and_run_accepts_egress_rules() {
+        use crate::mxc_common::models::{NetworkPort, NetworkProtocol, NetworkRule};
         let request = ExecutionRequest {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             policy: crate::mxc_common::models::ContainerPolicy {
                 network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
-                    allow: vec![Default::default()],
+                    allow: vec![NetworkRule {
+                        to: Vec::new(),
+                        ports: vec![NetworkPort {
+                            protocol: NetworkProtocol::Tcp,
+                            port: None,
+                            end_port: None,
+                        }],
+                    }],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2471,14 +2615,12 @@ mod tests {
             ..Default::default()
         };
 
-        let one_shot = WSLContainerRunner::new(&WslcConfig::default())
-            .validate_runner(&request)
-            .unwrap_err();
-        assert_eq!(
-            one_shot.failure_phase,
-            crate::mxc_common::models::FailurePhase::Rejected
-        );
-        assert!(one_shot.error_message.contains("network.egress"));
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        runner.validate_runner(&request).unwrap();
+        assert!(matches!(
+            runner.network_mode(&request).unwrap(),
+            policy::NetworkMode::Proxied(_)
+        ));
 
         let state_aware =
             crate::wslc_common::policy::validate_provision_policy(&request).unwrap_err();
@@ -2501,13 +2643,10 @@ mod tests {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             ..Default::default()
         };
-        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
-            default: crate::mxc_common::models::NetworkAction::Allow,
-            ..Default::default()
-        });
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         let err = runner.validate_runner(&request).unwrap_err();
-        assert!(err.error_message.contains("network.egress.default"));
+        assert!(err.error_message.contains("allowedProxyPeer"));
         assert_eq!(
             err.failure_phase,
             crate::mxc_common::models::FailurePhase::Rejected

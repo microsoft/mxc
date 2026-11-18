@@ -21,6 +21,8 @@ mod module_lifetime;
 #[allow(dead_code)]
 #[path = "../../src/core/mxc_common/process_util.rs"]
 mod process_util;
+#[path = "../../src/core/mxc_common/worker_gate.rs"]
+mod worker_gate;
 
 #[no_mangle]
 unsafe extern "C" fn timed_out_worker(state: *const AtomicU8) -> bool {
