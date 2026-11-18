@@ -264,10 +264,13 @@ fn setting_names(
             });
         }
         CustomNameKind::IoKit => {
-            let target = if ui.injection {
+            // ui.injection only removes the HID deny; guiAccess is what grants HID.
+            let target = if !ui.injection {
+                &mut denied
+            } else if gui_access_effective(request) {
                 &mut granted
             } else {
-                &mut denied
+                return (denied, granted);
             };
             target.push(SettingNames {
                 patterns: vec![NamePattern::Exact(HID_USER_CLIENT_CLASS)],
@@ -1014,12 +1017,14 @@ mod tests {
         }
 
         let mut request = seatbelt_request(SeatbeltConfig {
+            gui_access: true,
             custom_io_kits: Some(SeatbeltCustomRules {
                 deny: vec!["IOHID*".into()],
                 ..Default::default()
             }),
             ..Default::default()
         });
+        request.policy.ui.disable = false;
         request.policy.ui.injection = true;
         let msg = validate_seatbelt_custom_rules(&request).unwrap_err();
         assert!(msg.contains("customIoKits.deny"), "{msg}");
@@ -1045,6 +1050,17 @@ mod tests {
             ..lookups(&["com.apple.SecurityServer"], &[])
         }))
         .unwrap();
+
+        // Without guiAccess, ui.injection doesn't grant HID, so denying it is allowed.
+        let mut request = seatbelt_request(SeatbeltConfig {
+            custom_io_kits: Some(SeatbeltCustomRules {
+                deny: vec!["IOHIDLibUserClient".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        request.policy.ui.injection = true;
+        validate_seatbelt_custom_rules(&request).unwrap();
     }
 
     #[test]

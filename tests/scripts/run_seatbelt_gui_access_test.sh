@@ -74,12 +74,20 @@ require_python3_probe
 run_config "$(render seatbelt_gui_access_nested_pty_off.json)"
 expect_ok "nestedPty=false blocks pty allocation under guiAccess" "PTY_BLOCKED"
 
+# Without guiAccess, ui.injection grants no HID access, so denying it is accepted.
+CFG="$(render seatbelt_gui_access_off.json)"
+edit_config "$CFG" 'config["version"] = "1.1.0-alpha"; config["ui"]["injection"] = True
+config["seatbelt"] = {"customIoKits": {"deny": ["IOHIDLibUserClient"]}}'
+run_config "$CFG"
+expect_ok "a HID deny entry is accepted with ui.injection but no guiAccess" "$(id -u)"
+
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-gui.XXXXXX)"
 # POSIX shared memory names are limited to 31 bytes.
 SHM="/mxc$$"
 SHM_LEVEL_NAMES=(.x .b .a.r .a.w .a.c.x .a.c.o .a.c.no)
 # The level probe creates these itself, so the host must not.
 SHM_NEW_NAMES=(.x.new .a.r.new .a.c.new)
+SHM_TESTED_LEVELS=()
 shm_cleanup() {
     /usr/bin/python3 -c '
 import _posixshmem as s, sys
@@ -214,7 +222,20 @@ for level in deny:----:- read:R---:- readWrite:RW--:- create:RWC-:C own:RWCD:C; 
     expect_ok "customPosixShm default $name gives unlisted names exactly that access" "LEVEL.x=$access"
     if [ "$new" = C ]; then verb=allows; else verb=blocks; fi
     expect_ok "customPosixShm default $name $verb creating a new region" "NEW.x.new=$new"
+    SHM_TESTED_LEVELS+=("$name")
 done
+# Every access level the schema accepts must have run above.
+/usr/bin/python3 - "$CONFIG_DIR/seatbelt_gui_access_custom_posix_shm.json" "${SHM_TESTED_LEVELS[@]}" <<'EOF' ||
+import json, os, sys
+config_path, tested = sys.argv[1], set(sys.argv[2:])
+with open(config_path) as f:
+    schema_path = os.path.join(os.path.dirname(config_path), json.load(f)["$schema"])
+with open(schema_path) as f:
+    levels = {v for o in json.load(f)["definitions"]["SeatbeltPosixShmAccess"]["oneOf"] for v in o["enum"]}
+sys.exit(f"untested customPosixShm levels: {sorted(levels - tested)}" if levels - tested else 0)
+EOF
+    fail "not every customPosixShm access level was tested"
+pass "every customPosixShm access level was tested"
 
 # Each name gets exactly the access of the longest entry that matches it.
 shm_levels 'config["seatbelt"]["customPosixShm"] = {"default": "own",

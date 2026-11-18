@@ -346,11 +346,11 @@ combined with `runtimeConfig.networkProxy`.
 
 ## UI policy
 
-| Policy | Generated rule |
-|---|---|
-| `ui.disable: true` (default) | Denies mach-lookup of `com.apple.windowserver.active`, `com.apple.windowserver.session`, and `com.apple.coreservices.launchservicesd` |
-| `ui.clipboard: "none"` (default) | Denies mach-lookup of every name starting with `com.apple.pasteboard.` |
-| `ui.injection: false` (default) | Denies `iokit-open` of `IOHIDLibUserClient` |
+| Setting | Default value | Other values |
+|---|---|---|
+| `ui.disable` | `true`: denies mach-lookup of `com.apple.windowserver.active`, `com.apple.windowserver.session`, and `com.apple.coreservices.launchservicesd` | `false`: allows mach-lookup of those services |
+| `ui.clipboard` | `"none"`: denies mach-lookup of every name starting with `com.apple.pasteboard.` | `"all"`: allows mach-lookup of `com.apple.pasteboard.1` |
+| `ui.injection` | `false`: denies `iokit-open` of `IOHIDLibUserClient` | `true`: adds no rule. HID access comes from `guiAccess` or a `customIoKits.allow` entry |
 
 ## Seatbelt-specific options
 
@@ -615,8 +615,8 @@ MXC rejects a config when:
   `IOHIDLibUserClient` with `ui.injection: false`). Change that setting instead.
 - a `deny` entry would block something an explicit setting grants (for example
   the pasteboard with `ui.clipboard` enabled, `IOHIDLibUserClient` with
-  `ui.injection: true`, or a Keychain helper such as `com.apple.trustd` with
-  `keychainAccess: true`).
+  `guiAccess` and `ui.injection: true`, or a Keychain helper such as
+  `com.apple.trustd` with `keychainAccess: true`).
 
 To find the names an app needs, run it once with
 [`captureDenials`](#learning-mode-capturedenials) in `"allow"` mode. In that
