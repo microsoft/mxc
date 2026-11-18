@@ -23,10 +23,7 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console launch API. Typed V1 does
-not accept ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
-[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
-accepts caller-authored requests separately.
+ownership; there is no separate attached-console launch API.
 `spawnWithExtendedOptions` takes extensible options; its default
 `stdio: 'pipes'` behaves like `spawn`. `stdio: 'inherit'` instead attaches the
 workload to whatever this Node.js process's standard streams already are, such

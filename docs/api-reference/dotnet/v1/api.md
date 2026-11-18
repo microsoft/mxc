@@ -22,10 +22,7 @@ and operation options. Create-and-run PTY support covers IsolationSession, Bubbl
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
 IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
 give the caller explicit input, output, resize, and process ownership; there
-is no separate public attached-console launch API. Typed V1 does not accept
-["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
-[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
-accepts caller-authored requests separately.
+is no separate public attached-console launch API.
 `SpawnWithExtendedOptions` takes extensible options; its default
 `SpawnStdio.Pipes` behaves like `Spawn`. `SpawnStdio.Inherit` instead attaches
 the workload to whatever the calling process's standard streams already are,
