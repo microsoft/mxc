@@ -114,21 +114,22 @@ expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
 
 # `--clearenv` only changes the workload's environment. bwrap itself is the
 # sandbox's PID 1 and keeps the environment it was started with, which the
-# workload can read from /proc. Each pid must be readable, otherwise a zero
-# count would pass without checking anything.
+# workload can read from /proc. The config sweeps every pid in the sandbox and
+# counts only after a successful read, so a pid that cannot be read is reported
+# as unreadable instead of passing with a zero count.
 run_config bwrap_env_host_environ.json
 expect_ok "the probe ran" "ENV_PROBE_DONE"
 expect_ok "a supplied env reaches the command" "FOO=[bar]"
-expect_ok "the command's own environ holds the supplied env" "CONTROL_SELF=[1]"
-expect_ok "the command's own environ is readable" "READABLE_self=[yes]"
+expect_ok "a successful read of the command's own environ holds the supplied env" "CONTROL_SELF=[1]"
 expect_ok "the sandbox's pid 1 environ is readable" "READABLE_1=[yes]"
-expect_ok "no host variable in the command's own environ" "LEAK_self=[0]"
 expect_ok "no host variable in the sandbox's pid 1 environ" "LEAK_1=[0]"
 expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
-# Also covers $PPID, whose pid differs by launch mode.
-if grep -q 'LEAK_[0-9a-z]*=\[[1-9]' <<<"$OUT"; then
+if grep -q 'READABLE_[0-9]*=\[no\]' <<<"$OUT"; then
+    fail "a sandbox pid's environ could not be read" "$OUT"
+fi
+if grep -q 'LEAK_[0-9]*=\[[1-9]' <<<"$OUT"; then
     fail "a host variable is readable from /proc" "$OUT"
 fi
-pass "no checked pid exposes a host variable"
+pass "no sandbox pid exposes a host variable"
 
 echo "All $PASS_COUNT Bubblewrap environment assertions passed."

@@ -4,7 +4,7 @@
   "containerId": "CLI-bubblewrap-Env-host_environ",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "for p in self 1 $PPID; do if [ -r /proc/$p/environ ]; then echo \"READABLE_$p=[yes]\"; echo \"LEAK_$p=[$(tr '\\0' '\\n' < /proc/$p/environ | grep -c '^MXC_LEAK_PROBE=')]\"; else echo \"READABLE_$p=[no]\"; fi; done; echo \"CONTROL_SELF=[$(tr '\\0' '\\n' < /proc/self/environ | grep -c '^FOO=bar$')]\"; echo \"FOO=[$FOO]\"; echo ENV_PROBE_DONE",
+    "commandLine": "for f in /proc/[0-9]*/environ; do p=${f#/proc/}; p=${p%/environ}; if d=$(tr '\\0' '\\n' < \"$f\"); then echo \"READABLE_$p=[yes]\"; echo \"LEAK_$p=[$(printf '%s\\n' \"$d\" | grep -c '^MXC_LEAK_PROBE=')]\"; else echo \"READABLE_$p=[no]\"; fi; done; echo \"CONTROL_SELF=[$(cat /proc/self/environ | tr '\\0' '\\n' | grep -c '^FOO=bar$')]\"; echo \"FOO=[$FOO]\"; echo ENV_PROBE_DONE",
     "cwd": "/tmp",
     "env": ["FOO=bar"],
     "timeout": 20000
