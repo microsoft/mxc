@@ -593,17 +593,22 @@ fn streaming_bubblewrap_cancels_without_parent_death_signal() {
     let wrapper = directory.path().join("bwrap");
 
     // Omit parent-death cleanup to hold the startup condition without a timing race.
+    // MXC starts bwrap with an empty environment, so the real path is written into
+    // the wrapper instead of being passed through a variable.
+    let real_bwrap = format!("'{}'", real_bwrap.to_string_lossy().replace('\'', r"'\''"));
     std::fs::write(
         &wrapper,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 for arg in "$@"; do
     shift
     if [ "$arg" != "--die-with-parent" ]; then
         set -- "$@" "$arg"
     fi
 done
-exec "$MXC_TEST_REAL_BWRAP" "$@"
-"#,
+exec {real_bwrap} "$@"
+"#
+        ),
     )
     .expect("write bwrap wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -622,7 +627,6 @@ exec "$MXC_TEST_REAL_BWRAP" "$@"
             "--test-threads=1",
         ])
         .env(FIXTURE_ENV, "1")
-        .env("MXC_TEST_REAL_BWRAP", real_bwrap)
         .env("PATH", path);
     run_terminal_fixture(command);
 }
