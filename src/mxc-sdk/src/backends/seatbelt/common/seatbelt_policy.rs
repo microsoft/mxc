@@ -10,11 +10,11 @@
 //! Each check returns the caller-facing message; the backend wraps it as a
 //! `ScriptResponse`.
 
-use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkAction, SeatbeltConfig,
     SeatbeltCustomDefault, SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
+use crate::mxc_common::{escape_diagnostic_text, host_is_canonical_loopback};
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
 /// policy leaves UI enabled, since every GUI grant is emitted alongside the
@@ -299,9 +299,12 @@ fn check_setting_conflicts(
             .find(|names| names.patterns.iter().any(|d| pattern.within(*d)))
         {
             return Err(format!(
-                "Seatbelt: {allow_list} entry '{entry}' names {}, which the current {} \
+                "Seatbelt: {allow_list} entry '{}' names {}, which the current {} \
                  setting denies. Change {} instead.",
-                names.description, names.setting, names.setting
+                escape_diagnostic_text(entry),
+                names.description,
+                names.setting,
+                names.setting
             ));
         }
     }
@@ -312,9 +315,12 @@ fn check_setting_conflicts(
             .find(|names| names.patterns.iter().any(|g| pattern.overlaps(*g)))
         {
             return Err(format!(
-                "Seatbelt: {deny_list} entry '{entry}' would deny {}, which the current {} \
+                "Seatbelt: {deny_list} entry '{}' would deny {}, which the current {} \
                  setting allows. Change {} instead.",
-                names.description, names.setting, names.setting
+                escape_diagnostic_text(entry),
+                names.description,
+                names.setting,
+                names.setting
             ));
         }
     }
@@ -329,6 +335,8 @@ fn validate_custom_entry(
     kind: CustomNameKind,
     all_names: &str,
 ) -> Result<(), String> {
+    reject_nul(list, entry)?;
+    let shown = escape_diagnostic_text(entry);
     let name = match NamePattern::parse(entry) {
         NamePattern::Exact(name) | NamePattern::Prefix(name) => name,
     };
@@ -340,7 +348,7 @@ fn validate_custom_entry(
     }
     if name.contains('*') {
         return Err(format!(
-            "Seatbelt: {list} entry '{entry}' has a '*' that is not at the end. \
+            "Seatbelt: {list} entry '{shown}' has a '*' that is not at the end. \
              Only a single trailing '*' (prefix match) is supported."
         ));
     }
@@ -352,14 +360,26 @@ fn validate_custom_entry(
     };
     if kind == CustomNameKind::IoKit && !is_class_name(name) {
         return Err(format!(
-            "Seatbelt: {list} entry '{entry}' is not an IOKit user-client class name \
+            "Seatbelt: {list} entry '{shown}' is not an IOKit user-client class name \
              (letters, digits, and '_', optionally ending in '*')."
         ));
     }
     if kind == CustomNameKind::PosixShm && name.len() > POSIX_SHM_NAME_MAX {
         return Err(format!(
-            "Seatbelt: {list} entry '{entry}' is longer than {POSIX_SHM_NAME_MAX} bytes, \
+            "Seatbelt: {list} entry '{shown}' is longer than {POSIX_SHM_NAME_MAX} bytes, \
              the longest POSIX shared memory name macOS accepts."
+        ));
+    }
+    Ok(())
+}
+
+/// The profile is handed to macOS as a C string, so a NUL would cut it short.
+fn reject_nul(list: &str, entry: &str) -> Result<(), String> {
+    if entry.contains('\0') {
+        return Err(format!(
+            "Seatbelt: {list} entry '{}' contains a NUL character, which a Seatbelt \
+             profile cannot hold. Remove it.",
+            escape_diagnostic_text(entry)
         ));
     }
     Ok(())
@@ -391,6 +411,9 @@ pub fn validate_seatbelt_custom_rules(request: &ExecutionRequest) -> Result<(), 
                     customMachLookups.allow."
                 .to_string(),
         );
+    }
+    for entry in &config.extra_mach_lookups {
+        reject_nul("seatbelt.extraMachLookups", entry)?;
     }
     for (field, rules, kind) in sets {
         let allow_list = format!("seatbelt.{field}.allow");
@@ -446,8 +469,9 @@ fn validate_posix_shm_rules(shm: &SeatbeltCustomPosixShm) -> Result<(), String> 
         for (other, _, other_entries) in &lists[i + 1..] {
             if let Some(entry) = entries.iter().find(|e| other_entries.contains(e)) {
                 return Err(format!(
-                    "Seatbelt: seatbelt.customPosixShm entry '{entry}' is in both '{list}' \
-                     and '{other}'. List each name once, with the access it needs."
+                    "Seatbelt: seatbelt.customPosixShm entry '{}' is in both '{list}' \
+                     and '{other}'. List each name once, with the access it needs.",
+                    escape_diagnostic_text(entry)
                 ));
             }
         }
@@ -494,8 +518,9 @@ pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<()
             .find(|name| name.starts_with(RUN_MARKER_NAME_PREFIX))
         {
             return Err(format!(
-                "Seatbelt: {list} entry '{name}' uses the prefix \
-                 '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules."
+                "Seatbelt: {list} entry '{}' uses the prefix \
+                 '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules.",
+                escape_diagnostic_text(name)
             ));
         }
     }
@@ -870,6 +895,27 @@ mod tests {
             );
             assert!(msg.contains(expected), "{entry}: {msg}");
         }
+
+        let msg = custom_error(lookups(&["com.apple.a\0b"], &[]));
+        assert!(msg.contains("customMachLookups.allow"), "{msg}");
+        assert!(msg.contains("NUL character"), "{msg}");
+        let msg = validate_seatbelt_custom_rules(&shm("read", "apple.x\0y")).unwrap_err();
+        assert!(msg.contains("customPosixShm.read"), "{msg}");
+        assert!(msg.contains("NUL character"), "{msg}");
+        let msg = custom_error(SeatbeltConfig {
+            extra_mach_lookups: vec!["com.apple.a\0b".into()],
+            ..Default::default()
+        });
+        assert!(msg.contains("extraMachLookups"), "{msg}");
+        assert!(msg.contains("NUL character"), "{msg}");
+    }
+
+    #[test]
+    fn escapes_control_characters_in_rejected_entries() {
+        let msg = custom_error(lookups(&["a*\u{1b}[2J\nSeatbelt: forged"], &[]));
+        assert!(msg.contains("not at the end"), "{msg}");
+        assert!(!msg.chars().any(char::is_control), "{msg:?}");
+        assert!(msg.contains("a*\\u{1b}[2J\\nSeatbelt: forged"), "{msg}");
     }
 
     #[test]

@@ -98,4 +98,14 @@ expect_rejected "a shared memory name over 31 bytes is refused" \
     "seatbelt_reject_shm_name_too_long.json" \
     "longer than 31 bytes" "$S"
 
+expect_rejected "a custom name with a NUL character is refused" \
+    "seatbelt_reject_custom_nul_name.json" \
+    "contains a NUL character" "$S"
+
+# --dry-run prints the message as plain text, where raw control characters
+# would reach the terminal.
+expect_rejected "a rejected entry's control characters are escaped" \
+    "seatbelt_reject_custom_control_characters.json" \
+    'a*\u{1b}[2J\nSeatbelt: forged' "$S" --dry-run
+
 summary "Seatbelt rejections"
