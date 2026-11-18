@@ -100,6 +100,11 @@ optional initial terminal `size`, and returns `Promise<MxcPtyProcess>`.
 `StopOptions` and `DeprovisionOptions` carry optional experimental authorization
 and telemetry. Neither phase returns metadata.
 
+Success, including `warnings: []`, reports the Windows lifecycle API result;
+it does not verify companion-profile removal. No additional SDK profile-cleanup
+call is available. See the [cleanup contract and profile limitations](state-aware-rust.md#cleanup-contract-and-profile-limitations)
+for caller responsibilities and investigation guidance.
+
 ## End-to-end example
 
 ```typescript
