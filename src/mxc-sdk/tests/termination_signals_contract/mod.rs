@@ -32,7 +32,14 @@ const FIXTURE_DONE: &str = "TERMINATION_SIGNALS_FIXTURE_DONE";
 /// blocking only the test thread would not reliably reach the spawn. Instead
 /// `test_name` re-runs as a child process started with the signals blocked,
 /// which every thread it creates inherits, as with `lxc-exec`'s watchdog.
-pub fn assert_delivered_despite_host_mask(test_name: &str, request: impl Fn() -> ContainerRequest) {
+///
+/// Returns `true` in the child, which ran the workloads, so the caller can
+/// check their cleanup there; a failure in the child fails the parent too. The
+/// parent gets `false`.
+pub fn assert_delivered_despite_host_mask(
+    test_name: &str,
+    request: impl Fn() -> ContainerRequest,
+) -> bool {
     if std::env::var_os(FIXTURE_ENV).is_some() {
         let current = SigSet::thread_get_mask().expect("read signal mask");
         for signal in [Signal::SIGHUP, Signal::SIGINT, Signal::SIGTERM] {
@@ -43,7 +50,7 @@ pub fn assert_delivered_despite_host_mask(test_name: &str, request: impl Fn() ->
         }
         assert_delivered(request);
         println!("{FIXTURE_DONE}");
-        return;
+        return true;
     }
 
     let mut command = Command::new(std::env::current_exe().expect("test executable"));
@@ -70,6 +77,7 @@ pub fn assert_delivered_despite_host_mask(test_name: &str, request: impl Fn() ->
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+    false
 }
 
 fn assert_delivered(request: impl Fn() -> ContainerRequest) {
