@@ -176,13 +176,15 @@ public sealed class PolicyFailureDetail
 
 The result JSON is
 `{ "requestJson": "...", "changes": [{ "operation": "replace", "path": "/example", "before": null, "after": true }] }`.
-`requestJson` contains complete MXC request JSON. `path` is an RFC 6901 JSON
-Pointer; `~0` escapes `~` and `~1` escapes `/`. Changes retain their order.
+`requestJson` contains complete MXC request JSON. `path` identifies the changed
+location in that request using an RFC 6901 JSON Pointer; `~0` escapes `~` and
+`~1` escapes `/`. Changes retain their order.
 The enum uses the named lowercase JSON strings `add`, `remove`, and `replace`,
 not numeric enum values.
 
 Both `before` and `after` are required JSON values, represented by non-nullable
-`JsonElement` properties. Add uses JSON null for the absent original value;
+`JsonElement` properties because a changed location can hold any JSON value;
+the complete request remains the `RequestJson` string. Add uses JSON null for the absent original value;
 Remove uses JSON null for the absent prepared value. Replace can have an actual
 JSON null on either side. The operation distinguishes absence from replacing
 an actual JSON null value. The SDK owns the JSON elements independently of

@@ -419,9 +419,8 @@ export interface LxcConfig {
 
 Typed error thrown by the MXC SDK in response to a native JSON error object.
 Native status decoding preserves backend-specific `details` together with
-`details.ffiStatus`. For typed creation-policy observations, use the helpers
-in the [V1.Dev reference](dev.md#models-and-storage-helpers).
-`details` can contain policy resource paths. `console.log` and `util.inspect`
+`details.ffiStatus`. `details` can contain policy resource paths.
+`console.log` and `util.inspect`
 use the SDK's custom inspector and omit `details`, even with `getters` enabled.
 `JSON.stringify(error)`, object copies, `util.inspect` with both
 `customInspect: false` and `getters: true`, and Node's uncaught-error printer

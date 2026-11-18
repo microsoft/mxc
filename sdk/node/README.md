@@ -248,50 +248,6 @@ backend guides under [`docs/`](https://github.com/microsoft/mxc/tree/main/docs).
 See the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
 
-## Separate policy preparation (V1.Dev)
-
-On a supported native creation-policy refusal, `policyFailuresFromError(error)`
-from `@microsoft/mxc-sdk/v1/dev` extracts owned observations from
-`MxcError.details.policyFailures`. `parsePolicyFailures` and
-`serializePolicyFailures` support application-owned storage;
-`mergePolicyFailures(older, newer)` combines complete batches in first-seen
-order, leaves both inputs unchanged, and never truncates over-limit
-observations.
-
-`preparePolicyJson(requestJson, failures, options?)` returns a candidate
-`PreparedPolicyRequest` with `requestJson` and ordered `changes`. Preparation
-runs native filesystem work asynchronously, creates no container, and leaves
-both inputs unchanged. The application inspects and accepts the candidate
-before submitting it to strict `runJson` or `spawnJson`, whose `JsonOptions`
-contain only independent `experimental` authorization. Preparation has its
-own `PolicyPreparationOptions`. `preparePolicyJson` is the only operation that
-takes observations, and the SDK keeps none between calls.
-
-```typescript
-import { preparePolicyJson, runJson } from '@microsoft/mxc-sdk/v1/dev';
-
-const prepared = await preparePolicyJson(requestJson, failures);
-// acceptPolicyChange is the application's inspection and approval callback.
-if (await acceptPolicyChange(prepared)) {
-  const result = await runJson(prepared.requestJson);
-}
-```
-
-Named groups such as `PolicyFailureOutcomes.Blocked` and
-`PolicyFailureReasons.CapabilityNotAllowed` are exported from the Dev subpath
-for readable comparisons. Native codes remain numeric; unsigned 64-bit values
-remain decimal strings. A resource is a string in `resource`; a native resource
-that is not valid UTF-16 is omitted and marked unavailable, and that detail is
-never actionable. Resource text alone does not establish a safe policy change. The native
-backend validates preparation and Windows reevaluates policy during strict
-creation. Both `before` and `after` are required JSON values in every change,
-including null placeholders
-for added or removed fields. `parsePreparedPolicyRequest` and
-`serializePreparedPolicyRequest` store checked candidates. See the
-[V1.Dev reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md#separate-policy-preparation)
-for models and limits. Preparation is bounded to 8 MiB of input request UTF-8,
-32 MiB of result JSON, and 4096 changes.
-
 ## Errors, warnings, and telemetry
 
 Native errors are surfaced as `MxcError` with a typed error code and optional

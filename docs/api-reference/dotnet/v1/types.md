@@ -597,11 +597,8 @@ public sealed class MxcException : Exception
 ```
 
 `Details` preserves optional backend data independently of native memory and
-the original JSON document. The
-[V1.Dev observation helpers](dev.md#observations-and-storage)
-provide typed extraction and Native AOT-compatible storage of
-`Details.policyFailures`. Other backend details remain available through
-the `JsonElement`; the exception message does not include them.
+the original JSON document. Backend details remain available through the
+`JsonElement`; the exception message does not include them.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle`
