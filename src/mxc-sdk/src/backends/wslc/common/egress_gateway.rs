@@ -17,7 +17,7 @@
 
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Write as _;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +35,7 @@ use crate::mxc_common::string_util::CoTaskMemPWSTR;
 use crate::wslc_common::container_steps::{self, cstr_bytes, sdk_error, ProcessSettings};
 use crate::wslc_common::error::WslcError;
 use crate::wslc_common::image;
-use crate::wslc_common::policy::ProxiedEgress;
+use crate::wslc_common::policy::{self, CustomProxy, CustomProxyHost, ProxiedEgress};
 use crate::wslc_common::policy_mapping::VolumeMount;
 use crate::wslc_common::process_env::EnvScope;
 use crate::wslc_common::wslc_bindings::*;
@@ -140,6 +140,7 @@ pub(crate) struct Gateway {
     resolv_conf: tempfile::TempPath,
     records: StoreRecords,
     names: ProxyNames,
+    proxy_url: String,
     torn_down: AtomicBool,
 }
 
@@ -159,21 +160,38 @@ impl Gateway {
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<Self, ScriptResponse> {
+        let custom_proxy = egress
+            .custom_proxy
+            .as_ref()
+            .map(|proxy| relayed_custom_proxy(proxy, |host, port| (host, port).to_socket_addrs()))
+            .transpose()
+            .map_err(|e| WslcError::Rejected(e).into_response())?;
+        let proxy_url = workload_proxy_url(egress.custom_proxy.as_ref()).map_err(host_error)?;
+        let policy = render_policy(egress, custom_proxy, port_mappings);
+
         let records = StoreRecords::open(store_path).map_err(host_error)?;
         let names = ProxyNames::for_session(session_name);
         refuse_unrecorded(sdk, session, &records, &names)?;
         records.write(&names, &names.all()).map_err(host_error)?;
-        match Self::start_inner(sdk, session, &names, egress, port_mappings, logger) {
-            Ok((container, process, resolv_conf)) => Ok(Self {
-                sdk,
-                session,
-                _container: container,
-                process,
-                resolv_conf,
-                records,
-                names,
-                torn_down: AtomicBool::new(false),
-            }),
+        match Self::start_inner(sdk, session, &names, &policy, port_mappings, logger) {
+            Ok((container, process, resolv_conf)) => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Built-in proxy ready at {}",
+                    proxy_env::redact_proxy_url(&proxy_url)
+                );
+                Ok(Self {
+                    sdk,
+                    session,
+                    _container: container,
+                    process,
+                    resolv_conf,
+                    records,
+                    names,
+                    proxy_url,
+                    torn_down: AtomicBool::new(false),
+                })
+            }
             Err(mut e) => {
                 if let Err(cleanup) = remove_recorded(sdk, session, &records, &names) {
                     e.error_message =
@@ -188,7 +206,7 @@ impl Gateway {
         sdk: &'static WslcSdk,
         session: WslcSession,
         names: &ProxyNames,
-        egress: &ProxiedEgress,
+        policy: &gateway::Policy,
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<(WslcContainerGuard, ProcessSettings, tempfile::TempPath), ScriptResponse> {
@@ -238,7 +256,7 @@ impl Gateway {
             }
         }
 
-        let policy = serde_json::to_string(&render_policy(egress, port_mappings)).map_err(|e| {
+        let policy = serde_json::to_string(policy).map_err(|e| {
             WslcError::Host(format!("could not render the built-in proxy policy: {e}"))
                 .into_response()
         })?;
@@ -296,7 +314,6 @@ impl Gateway {
             ))
             .into_response()
         })?;
-        let _ = writeln!(logger, "[WSLC] Built-in proxy ready at {}", proxy_url());
         Ok((container, process, resolv_conf))
     }
 
@@ -346,22 +363,15 @@ impl Gateway {
             Err(e) => Err(format!("could not remove the built-in proxy: {e}")),
         }
     }
-}
 
-impl Drop for Gateway {
-    fn drop(&mut self) {
-        let _ = self.teardown(&mut Logger::new(Mode::Buffer));
+    /// The workload's environment: the caller's, pointed at the proxy.
+    pub(crate) fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
+        workload_env(caller_env, scope, &self.proxy_url)
     }
 }
 
-/// The proxy URL the workload is pointed at.
-pub(crate) fn proxy_url() -> String {
-    format!("http://{GATEWAY_WORKLOAD_ADDRESS}:{PROXY_PORT}")
-}
-
-/// The workload's environment: the caller's, pointed at the proxy.
-pub(crate) fn workload_env(caller_env: &[String], scope: EnvScope) -> Vec<String> {
-    let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, &proxy_url());
+fn workload_env(caller_env: &[String], scope: EnvScope, proxy_url: &str) -> Vec<String> {
+    let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, proxy_url);
     // Node.js ignores HTTP(S)_PROXY unless this is set. It joins the default
     // environment, so a replacing request doesn't get it.
     if scope == EnvScope::Merge
@@ -374,7 +384,65 @@ pub(crate) fn workload_env(caller_env: &[String], scope: EnvScope) -> Vec<String
     env
 }
 
-fn render_policy(egress: &ProxiedEgress, port_mappings: &[PortMapping]) -> gateway::Policy {
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        let _ = self.teardown(&mut Logger::new(Mode::Buffer));
+    }
+}
+
+/// The proxy URL the workload is pointed at. A custom proxy's IP or loopback
+/// host is unreachable from the workload, so it becomes the gateway's address.
+fn workload_proxy_url(custom: Option<&CustomProxy>) -> Result<String, String> {
+    let Some(custom) = custom else {
+        return Ok(format!("http://{GATEWAY_WORKLOAD_ADDRESS}:{PROXY_PORT}"));
+    };
+    if let CustomProxyHost::Name(_) = custom.host {
+        return Ok(custom.url.clone());
+    }
+    let mut url = url::Url::parse(&custom.url)
+        .map_err(|_| "runtimeConfig.networkProxy is not a valid URL".to_string())?;
+    url.set_host(Some(&GATEWAY_WORKLOAD_ADDRESS.to_string()))
+        .map_err(|e| {
+            format!("could not point runtimeConfig.networkProxy at the built-in proxy: {e}")
+        })?;
+    Ok(url.into())
+}
+
+/// The custom proxy as the gateway relays it. A hostname is resolved here,
+/// on Windows, so the gateway never resolves it.
+fn relayed_custom_proxy(
+    custom: &CustomProxy,
+    lookup: impl FnOnce(&str, u16) -> std::io::Result<std::vec::IntoIter<SocketAddr>>,
+) -> Result<gateway::CustomProxy, String> {
+    let (name, address) = match &custom.host {
+        CustomProxyHost::Name(name) => {
+            let ip = lookup(name, custom.port)
+                .into_iter()
+                .flatten()
+                .find_map(|a| match a.ip() {
+                    IpAddr::V4(ip) => Some(ip),
+                    IpAddr::V6(_) => None,
+                })
+                .ok_or_else(|| {
+                    format!("WSLc: runtimeConfig.networkProxy host '{name}' has no IPv4 address on Windows")
+                })?;
+            let address = policy::relayed_proxy_address(ip).map_err(|e| e.message)?;
+            (Some(name.clone()), address)
+        }
+        CustomProxyHost::Address(address) => (None, *address),
+    };
+    Ok(gateway::CustomProxy {
+        name,
+        address,
+        port: custom.port,
+    })
+}
+
+fn render_policy(
+    egress: &ProxiedEgress,
+    custom_proxy: Option<gateway::CustomProxy>,
+    port_mappings: &[PortMapping],
+) -> gateway::Policy {
     let egress = egress.egress.clone();
     let mut relayed: Vec<gateway::PortMapping> = Vec::new();
     for mapping in port_mappings {
@@ -392,11 +460,14 @@ fn render_policy(egress: &ProxiedEgress, port_mappings: &[PortMapping]) -> gatew
     gateway::Policy {
         workload_address: GATEWAY_WORKLOAD_ADDRESS,
         egress_address: GATEWAY_EGRESS_ADDRESS,
-        proxy_port: PROXY_PORT,
-        forward_dns: egress.default == gateway::Action::Allow || !egress.allow.is_empty(),
+        // The workload keeps the custom proxy's port.
+        proxy_port: custom_proxy.as_ref().map_or(PROXY_PORT, |proxy| proxy.port),
+        forward_dns: egress.default == gateway::Action::Allow
+            || !egress.allow.is_empty()
+            || custom_proxy.is_some(),
         egress,
         host_loopback: None,
-        custom_proxy: None,
+        custom_proxy,
         port_mappings: relayed,
     }
 }
@@ -952,6 +1023,7 @@ mod tests {
                 allow,
                 deny: Vec::new(),
             },
+            custom_proxy: None,
             warnings: Vec::new(),
         };
         let rule = gateway::Rule {
@@ -962,12 +1034,106 @@ mod tests {
             ports: None,
         };
 
-        let policy = render_policy(&egress(gateway::Action::Deny, vec![rule]), &[]);
+        let policy = render_policy(&egress(gateway::Action::Deny, vec![rule]), None, &[]);
         assert!(policy.forward_dns);
         assert_eq!(policy.workload_address, GATEWAY_WORKLOAD_ADDRESS);
-        assert_eq!(proxy_url(), "http://10.231.1.254:3128");
-        assert!(render_policy(&egress(gateway::Action::Allow, Vec::new()), &[]).forward_dns);
-        assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new()), &[]).forward_dns);
+        assert_eq!(policy.proxy_port, PROXY_PORT);
+        assert_eq!(
+            workload_proxy_url(None).unwrap(),
+            "http://10.231.1.254:3128"
+        );
+        assert!(render_policy(&egress(gateway::Action::Allow, Vec::new()), None, &[]).forward_dns);
+        assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new()), None, &[]).forward_dns);
+    }
+
+    fn custom(url: &str, host: CustomProxyHost, port: u16) -> CustomProxy {
+        CustomProxy {
+            url: url.to_string(),
+            host,
+            port,
+        }
+    }
+
+    fn resolves_to(
+        addrs: &[&str],
+    ) -> impl FnOnce(&str, u16) -> std::io::Result<std::vec::IntoIter<SocketAddr>> {
+        let addrs: Vec<SocketAddr> = addrs.iter().map(|a| a.parse().unwrap()).collect();
+        move |_, _| Ok(addrs.into_iter())
+    }
+
+    #[test]
+    fn a_custom_proxy_is_relayed_on_its_own_port_with_dns_forwarded() {
+        let egress = ProxiedEgress {
+            egress: gateway::Egress {
+                default: gateway::Action::Deny,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+            custom_proxy: None,
+            warnings: Vec::new(),
+        };
+        let relayed = gateway::CustomProxy {
+            name: None,
+            address: Some(Ipv4Addr::new(1, 1, 1, 1)),
+            port: 8080,
+        };
+        let policy = render_policy(&egress, Some(relayed.clone()), &[]);
+        assert_eq!(policy.proxy_port, 8080);
+        assert!(policy.forward_dns);
+        assert_eq!(policy.custom_proxy, Some(relayed));
+    }
+
+    #[test]
+    fn a_custom_proxy_hostname_is_resolved_to_its_first_ipv4_address() {
+        let proxy = custom(
+            "http://proxy.example:8080",
+            CustomProxyHost::Name("proxy.example".to_string()),
+            8080,
+        );
+        let relayed =
+            relayed_custom_proxy(&proxy, resolves_to(&["[2001:db8::1]:8080", "1.2.3.4:8080"]))
+                .unwrap();
+        assert_eq!(relayed.name.as_deref(), Some("proxy.example"));
+        assert_eq!(relayed.address, Some(Ipv4Addr::new(1, 2, 3, 4)));
+        assert_eq!(relayed.port, 8080);
+
+        for addrs in [
+            ["[2001:db8::1]:8080"],
+            ["127.0.0.1:8080"],
+            ["10.231.1.9:8080"],
+        ] {
+            assert!(relayed_custom_proxy(&proxy, resolves_to(&addrs)).is_err());
+        }
+        let failed = relayed_custom_proxy(&proxy, |_, _| Err(std::io::ErrorKind::NotFound.into()));
+        assert!(failed.unwrap_err().contains("has no IPv4 address"));
+    }
+
+    #[test]
+    fn the_workload_reaches_a_custom_proxy_ip_through_the_gateway() {
+        let ip = |url: &str, port| {
+            custom(
+                url,
+                CustomProxyHost::Address(Some(Ipv4Addr::new(1, 1, 1, 1))),
+                port,
+            )
+        };
+        assert_eq!(
+            workload_proxy_url(Some(&ip("http://user:pw@1.1.1.1:8080", 8080))).unwrap(),
+            "http://user:pw@10.231.1.254:8080/"
+        );
+        assert_eq!(
+            workload_proxy_url(Some(&ip("socks5://1.1.1.1:1080", 1080))).unwrap(),
+            "socks5://10.231.1.254:1080"
+        );
+        let named = custom(
+            "https://proxy.example:443",
+            CustomProxyHost::Name("proxy.example".to_string()),
+            443,
+        );
+        assert_eq!(
+            workload_proxy_url(Some(&named)).unwrap(),
+            "https://proxy.example:443"
+        );
     }
 
     #[test]
@@ -983,10 +1149,12 @@ mod tests {
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
+            custom_proxy: None,
             warnings: Vec::new(),
         };
         let policy = render_policy(
             &egress,
+            None,
             &[
                 mapping(18080, 8080),
                 mapping(18081, 8080),
@@ -1006,15 +1174,20 @@ mod tests {
 
     #[test]
     fn workload_env_adds_node_proxy_to_the_default_environment() {
-        let env = workload_env(&["HTTPS_PROXY=http://other:1".to_string()], EnvScope::Merge);
+        let url = "http://10.231.1.254:3128";
+        let env = workload_env(
+            &["HTTPS_PROXY=http://other:1".to_string()],
+            EnvScope::Merge,
+            url,
+        );
         assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
         assert!(env.contains(&"NODE_USE_ENV_PROXY=1".to_string()));
 
-        let env = workload_env(&[], EnvScope::Replace);
+        let env = workload_env(&[], EnvScope::Replace, url);
         assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
         assert!(!env.iter().any(|e| e.starts_with("NODE_USE_ENV_PROXY=")));
 
-        let env = workload_env(&["NODE_USE_ENV_PROXY=0".to_string()], EnvScope::Merge);
+        let env = workload_env(&["NODE_USE_ENV_PROXY=0".to_string()], EnvScope::Merge, url);
         assert_eq!(
             env.iter()
                 .filter(|e| e.starts_with("NODE_USE_ENV_PROXY="))

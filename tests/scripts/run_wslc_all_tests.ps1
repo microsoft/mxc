@@ -655,6 +655,29 @@ Invoke-WslcMappedRun "wslc_network_egress_port_mapping_ingress_allow.json" ([ord
 Invoke-WslcMappedRun "wslc_port_mapping_bridged_reached.json" ([ordered]@{ 18086 = 8086 }) `
     -OutputNotContains "Built-in proxy ready"
 
+# A custom proxy is the only destination, relayed by the built-in proxy. Probes
+# send an absolute-form HTTP request through it to Cloudflare's port 8080, which
+# answers it like a proxy would. A hostname keeps its URL and resolves to the
+# built-in proxy; an IP is rewritten to the built-in proxy's address.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_ip.json" -ForceDebug -OutputNotContains $NotClean `
+    -OutputContains "Built-in proxy ready at http://10.231.1.254:8080/", "custom proxy: 10.231.1.254:8080 relays to 1.1.1.1:8080", $Clean `
+    -Probes ([ordered]@{
+        PROXY_ENV = "http://10\.231\.1\.254:8080/ http://10\.231\.1\.254:8080/"; NO_PROXY = ""; VIA_PROXY = "[1-5]\d\d"
+        BUILT_IN = "ERROR .*"; DIRECT = "ERROR .*"; RESOLVED = "\d+\.\d+\.\d+\.\d+"
+    })))
+# TLS to the proxy verifies against its hostname through the relay.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_https_name.json" -ForceDebug -OutputNotContains $NotClean `
+    -OutputContains "Built-in proxy ready at https://one.one.one.one:8443", "accepts connections only through port mappings", $Clean `
+    -Probes ([ordered]@{
+        PROXY_ENV = "https://one\.one\.one\.one:8443"; RESOLVED = "10\.231\.1\.254"; TLS_PROXY = "VERIFIED"
+        TLS_OTHER_NAME = "ERROR .*"; DIRECT = "BLOCKED"
+    })))
+Invoke-WslcMappedRun "wslc_network_egress_port_mapping_network_proxy.json" ([ordered]@{ 18089 = 8089 }) `
+    -OutputContains "Built-in proxy ready at http://one.one.one.one:8080" `
+    -Probes ([ordered]@{
+        PROXY_ENV = "http://one\.one\.one\.one:8080"; RESOLVED = "10\.231\.1\.254"; VIA_PROXY = "[1-5]\d\d"; DIRECT = "BLOCKED"
+    })
+
 # Rejected before any container is created.
 $egressRejections = [ordered]@{
     "allow_udp"           = "network.egress.allow supports only protocol 'tcp' (got 'udp')"
@@ -665,11 +688,14 @@ $egressRejections = [ordered]@{
     "deny_ipv6"           = "network.egress CIDR 2001:db8::/32 is IPv6"
     "reserved_subnet"     = "which the built-in proxy reserves for its own networks"
     "network_proxy"       = "runtimeConfig.networkProxy cannot be combined with egress filtering"
+    "network_proxy_egress_allow"  = "runtimeConfig.networkProxy with network.egress.default 'allow' requires bridged networking"
+    "network_proxy_https_ip"      = "with an IP address or loopback host must use http://"
+    "network_proxy_loopback"      = "runtimeConfig.networkProxy on Windows loopback is not supported yet"
+    "network_proxy_unresolvable"  = "runtimeConfig.networkProxy host 'mxc-proxy.invalid' has no IPv4 address on Windows"
     "rules_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
     "port_mapping_udp"           = "unknown variant ``udp``"
     "port_mapping_duplicate"     = "duplicate windowsPort 18087 for protocol 'tcp'"
     "port_mapping_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
-    "port_mapping_network_proxy" = "runtimeConfig.networkProxy requires bridged networking"
 }
 foreach ($name in $egressRejections.Keys) {
     $null = $results.Add((Run-WslcTest "wslc_network_egress_$($name)_rejected.json" -ExpectedExit 1 `

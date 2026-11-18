@@ -1098,8 +1098,8 @@ impl WSLContainerRunner {
         // belongs to the proxy. Inject HTTP(S)_PROXY after scrubbing caller
         // proxy variables.
         // See crate::mxc_common::proxy_env.
-        let effective_env: Vec<String> = if gateway.is_some() {
-            egress_gateway::workload_env(request.env_entries(), process_env::EnvScope::of(request))
+        let effective_env: Vec<String> = if let Some(gateway) = &gateway {
+            gateway.workload_env(request.env_entries(), process_env::EnvScope::of(request))
         } else if request.policy.network_proxy.is_enabled() {
             // A directly constructed request must retain its proxy URL so the
             // guest receives a routable endpoint instead of an empty setting.

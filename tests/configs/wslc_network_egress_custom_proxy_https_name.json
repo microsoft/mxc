@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-custom-proxy-https-name",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport os, socket, ssl\nprint('PROXY_ENV=' + os.environ.get('HTTPS_PROXY', 'unset'))\ntry:\n    print('RESOLVED=' + socket.gethostbyname('one.one.one.one'))\nexcept OSError as e:\n    print('RESOLVED=ERROR', e)\ndef tls(name):\n    try:\n        with socket.create_connection(('one.one.one.one', 8443), timeout=10) as s:\n            with ssl.create_default_context().wrap_socket(s, server_hostname=name):\n                return 'VERIFIED'\n    except OSError as e:\n        return 'ERROR ' + str(e)\nprint('TLS_PROXY=' + tls('one.one.one.one'))\nprint('TLS_OTHER_NAME=' + tls('dns.google'))\ntry:\n    socket.create_connection(('1.1.1.1', 443), timeout=5).close()\n    print('DIRECT=REACHED')\nexcept OSError:\n    print('DIRECT=BLOCKED')\nEOF"
+  },
+  "network": { "ingress": { "default": "allow" } },
+  "runtimeConfig": { "networkProxy": "https://one.one.one.one:8443" },
+  "wslc": { "image": "python:3.12-alpine" }
+}
