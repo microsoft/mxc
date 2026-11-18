@@ -419,7 +419,8 @@ With the [built-in proxy](#built-in-proxy), including a policy that denies
 everything else, the mapping is set on the proxy container, which relays it to
 the workload's `containerPort`. Each mapping is reachable only on Windows
 `127.0.0.1`, regardless of `network.ingress`, and the workload sees the proxy
-container's address as the source.
+container's address as the source. Each mapping accepts at most 512 open
+connections; more wait until one closes.
 
 The separate `provision` operation takes the same list under
 `wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
