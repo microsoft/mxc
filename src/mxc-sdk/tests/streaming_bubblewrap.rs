@@ -13,6 +13,7 @@
 #![cfg(target_os = "linux")]
 
 mod inherited_stdio_contract;
+mod termination_signals_contract;
 mod unix_pty_contract;
 
 use mxc_sdk::v1::WaitResult;
@@ -669,6 +670,16 @@ fn bubblewrap_pty_transfers_native_stdio() {
         unix_pty_contract::NATIVE_STDIO_COMMAND,
         30_000,
     ));
+}
+
+#[test]
+fn streaming_bubblewrap_delivers_termination_signals_despite_host_mask() {
+    if !bwrap_available() {
+        return;
+    }
+    termination_signals_contract::assert_delivered_despite_host_mask(|| {
+        bwrap_request(termination_signals_contract::COMMAND, 30_000)
+    });
 }
 
 #[test]

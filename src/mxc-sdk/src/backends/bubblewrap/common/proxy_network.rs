@@ -15,12 +15,12 @@ use std::sync::{mpsc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::lxc_common::signal_cleanup;
 use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
 use crate::mxc_common::sandbox_process::group_kill;
+use crate::mxc_common::termination_signals;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
@@ -869,7 +869,7 @@ impl ProxyNetworkNamespace {
         let mut command = Command::new(&tools.unshare);
         // The supervisor's TERM/INT trap, which stops slirp4netns, can only
         // run if those signals are not left blocked by the watchdog.
-        signal_cleanup::unblock_in_child(&mut command);
+        termination_signals::unblock_in_child(&mut command);
         command
             .args(["--user", "--map-current-user", "--keep-caps", "--"])
             .arg(&tools.sh)
