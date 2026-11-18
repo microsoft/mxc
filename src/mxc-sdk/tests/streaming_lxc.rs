@@ -172,8 +172,9 @@ fn streaming_lxc_delivers_termination_signals_despite_host_mask() {
         return;
     }
     let _guard = exclusive();
+    // Named in the child process, which is the one that creates the container.
     let name = container_name("termination-signals");
-    termination_signals_contract::assert_delivered_despite_host_mask(
+    let ran_here = termination_signals_contract::assert_delivered_despite_host_mask(
         "streaming_lxc_delivers_termination_signals_despite_host_mask",
         || {
             lxc_request(
@@ -183,7 +184,9 @@ fn streaming_lxc_delivers_termination_signals_despite_host_mask() {
             )
         },
     );
-    assert_container_released(&name);
+    if ran_here {
+        assert_container_released(&name);
+    }
 }
 
 #[test]
