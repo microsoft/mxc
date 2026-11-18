@@ -17,7 +17,7 @@
 use std::fmt;
 
 use crate::mxc_common::models::{FailurePhase, ScriptResponse};
-use crate::mxc_common::mxc_error::ApiFailure;
+use crate::mxc_common::mxc_error::{ApiFailure, MxcError};
 
 use crate::wslc_common::wslc_bindings::HRESULT;
 
@@ -36,6 +36,18 @@ impl WslcStepError {
 
     pub fn into_response(self) -> ScriptResponse {
         ScriptResponse::failed(self.failure_phase, &self.error_message)
+    }
+
+    pub(crate) fn into_mxc_error(self) -> MxcError {
+        let error = match self.failure_phase {
+            FailurePhase::BackendUnavailable => MxcError::backend_unavailable(self.error_message),
+            FailurePhase::Rejected => MxcError::policy_validation(self.error_message),
+            _ => MxcError::backend_error(self.error_message),
+        };
+        match self.api_failure {
+            Some(failure) => error.with_api_failure(*failure),
+            None => error,
+        }
     }
 }
 
@@ -224,6 +236,22 @@ mod tests {
             serde_json::to_value(step.into_response()).unwrap(),
             serde_json::to_value(create_and_run).unwrap()
         );
+    }
+
+    #[test]
+    fn a_step_error_preserves_api_failure_in_mxc_error() {
+        let hr = 0x8000_4005_u32 as HRESULT;
+        let error = WslcError::sdk("WslcGetProcessExitCode failed", hr, "")
+            .into_step_error()
+            .with_api_failure(sdk_api_failure("WslcGetProcessExitCode", hr))
+            .into_mxc_error();
+
+        assert_eq!(
+            error.message,
+            "WslcGetProcessExitCode failed: HRESULT 0x80004005"
+        );
+        assert_eq!(error.operation(), Some("WslcGetProcessExitCode"));
+        assert_eq!(error.native_code(), Some("0x80004005"));
     }
 
     /// A WSLc rejection has to cost the caller the same exit code a rejection

@@ -286,8 +286,14 @@ Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
 `NativeCode`, `Remediation`, and optional `Details` when available. `Details`
 is a `JsonElement` that remains valid after native cleanup. Security and
 operational warnings are available on `ExecutionResult.Warnings` and
-`MxcProcess.Warnings`. Provision returns identity, optional typed metadata,
-and `ProvisionResult.Warnings`.
+`MxcProcess.Warnings`.
+Failures that occur after a process starts but before MXC can confirm its
+terminal result retain those fields from `MxcContainer.Run`,
+`MxcLifecycle.RunInContainer`, `MxcProcess.TryGetExitCode`, `Wait`, and
+`WaitAsync`; they are not converted into an exit code. Repeated waits report
+the same failure, while disposal still performs process cleanup.
+`MxcPtyProcess` does not preserve these fields.
+Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
 warnings become an empty array; malformed warnings fail explicitly. When
 IsolationSession provision metadata is present, `AgentUserName`, `AgentUserSid`,
