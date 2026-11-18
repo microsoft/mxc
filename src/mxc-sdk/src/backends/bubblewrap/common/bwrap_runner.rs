@@ -697,7 +697,10 @@ impl BubblewrapScriptRunner {
 
         // 3. Spawn `bwrap`.
         let mut command = Command::new(&bwrap);
-        command.args(&args);
+        // The confined command can read bwrap's exec-time environment through
+        // /proc, so bwrap must not inherit the host's. The command's own
+        // environment is passed as --clearenv/--setenv arguments.
+        command.env_clear().args(&args);
         let pty = match stdio {
             StdioMode::Pipes => {
                 command

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "CLI-bubblewrap-Env-host_environ",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "for p in self 1 $PPID; do if [ -r /proc/$p/environ ]; then echo \"READABLE_$p=[yes]\"; echo \"LEAK_$p=[$(tr '\\0' '\\n' < /proc/$p/environ | grep -c '^MXC_LEAK_PROBE=')]\"; else echo \"READABLE_$p=[no]\"; fi; done; echo \"CONTROL_SELF=[$(tr '\\0' '\\n' < /proc/self/environ | grep -c '^FOO=bar$')]\"; echo \"FOO=[$FOO]\"; echo ENV_PROBE_DONE",
+    "cwd": "/tmp",
+    "env": ["FOO=bar"],
+    "timeout": 20000
+  }
+}
