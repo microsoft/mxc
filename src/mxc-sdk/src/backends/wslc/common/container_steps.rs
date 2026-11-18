@@ -666,6 +666,35 @@ impl ProcessSettings {
 // ContainerSettings builder
 // ---------------------------------------------------------------------------
 
+/// IPv4 `127.0.0.1` as a `sockaddr_in` (port, then address, in network order).
+/// `'static` because the SDK reads `windowsAddress` at `WslcCreateContainer`.
+static WINDOWS_LOOPBACK: sockaddr_storage = sockaddr_storage {
+    ss_family: 2, // AF_INET
+    __ss_pad1: [0, 0, 127, 0, 0, 1],
+    __ss_align: 0,
+    __ss_pad2: [0; 112],
+};
+
+/// The SDK form of `mappings`, bound to Windows `127.0.0.1` only.
+/// The parser rejects UDP today; the branch keeps this correct if an SDK
+/// update enables it.
+pub(crate) fn sdk_port_mappings(mappings: &[PortMapping]) -> Vec<WslcContainerPortMapping> {
+    mappings
+        .iter()
+        .map(|pm| WslcContainerPortMapping {
+            windowsPort: pm.windows_port,
+            containerPort: pm.container_port,
+            protocol: if pm.protocol == "udp" {
+                WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
+            } else {
+                WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
+            },
+            // The SDK only reads the address.
+            windowsAddress: ptr::from_ref(&WINDOWS_LOOPBACK).cast_mut(),
+        })
+        .collect()
+}
+
 /// A fully-populated `WslcContainerSettings` together with every heap buffer its
 /// pointers reference (image name, volume paths, port mappings). The init
 /// process is intentionally NOT set here — that is caller-specific (the one-shot
@@ -703,24 +732,10 @@ impl ContainerSettings {
             return Err(sdk_step_error("WslcInitContainerSettings", hr, ""));
         }
 
-        // Port mappings (host<->container). Empty list = no forwarding. The
-        // parser rejects UDP up front today; the explicit branch is retained so
-        // this keeps compiling if UDP is enabled after an SDK update.
+        // Port mappings (host<->container). Empty list = no forwarding.
         let mut port_vec: Vec<WslcContainerPortMapping> = Vec::new();
         if !port_mappings.is_empty() {
-            port_vec = port_mappings
-                .iter()
-                .map(|pm| WslcContainerPortMapping {
-                    windowsPort: pm.windows_port,
-                    containerPort: pm.container_port,
-                    protocol: if pm.protocol == "udp" {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                    } else {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                    },
-                    windowsAddress: ptr::null_mut(),
-                })
-                .collect();
+            port_vec = sdk_port_mappings(port_mappings);
 
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut raw,
@@ -1863,6 +1878,20 @@ mod tests {
         total_memory_mb: 16 * 1024,
         logical_cpus: 8,
     };
+
+    #[test]
+    fn port_mappings_bind_windows_ipv4_loopback() {
+        let mapping = PortMapping {
+            windows_port: 8080,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        };
+        let sdk = sdk_port_mappings(&[mapping]);
+        // SAFETY: points at the 'static WINDOWS_LOOPBACK.
+        let address = unsafe { &*sdk[0].windowsAddress };
+        assert_eq!(address.ss_family, 2);
+        assert_eq!(address.__ss_pad1, [0, 0, 127, 0, 0, 1]);
+    }
 
     #[test]
     fn a_processor_count_the_host_cannot_supply_is_refused() {

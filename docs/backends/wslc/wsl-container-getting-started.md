@@ -415,6 +415,13 @@ TCP only — the WSLC SDK runtime returns `E_NOTIMPL` for UDP, so a `"udp"`
 protocol is rejected. Two entries claiming the same `windowsPort` are also
 rejected.
 
+With the [built-in proxy](#built-in-proxy), including a policy that denies
+everything else, the mapping is set on the proxy container, which relays it to
+the workload's `containerPort`. Each mapping is reachable only on Windows
+`127.0.0.1`, regardless of `network.ingress`, and the workload sees the proxy
+container's address as the source. Each mapping accepts at most 512 open
+connections; more wait until one closes.
+
 The separate `provision` operation takes the same list under
 `wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
 
@@ -517,7 +524,7 @@ no separate `--setup-wslc` step is required.
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
 | Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. |
-| Isolated | All three defaults omitted or `deny`, without egress allow rules | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
+| Isolated | All three defaults omitted or `deny`, without egress allow rules or port mappings | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
 | Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
 | Built-in proxy | Any other combination, container lifecycle operations | Rejected |
 
@@ -576,13 +583,14 @@ as follows:
 - Rejected with the proxy: `allow` entries for any protocol except `tcp`
   (including entries without `ports`, which cover every protocol; use
   `"ports": [{ "protocol": "tcp" }]` for every TCP port), IPv6
-  CIDRs, targets inside `10.231.0.0/16`, `wslc.portMappings`,
-  `hostLoopback: "allow"`, and `runtimeConfig.networkProxy`. `deny` entries
+  CIDRs, targets inside `10.231.0.0/16`, `hostLoopback: "allow"`, and
+  `runtimeConfig.networkProxy`. `deny` entries
   for `udp` or `icmp` have no effect, because only TCP leaves through the
   proxy, and log a warning.
 
-- Nothing can connect in to the workload, so `network.ingress.default:
-  "allow"` has no effect and logs a warning.
+- The workload accepts connections only through [port mappings](#port-mappings),
+  which listen on Windows `127.0.0.1`, not a LAN address. So
+  `network.ingress.default: "allow"` has no effect and logs a warning.
 
 - The proxy image ships as `mxc-wslc-gateway.tar` beside the MXC binaries and
   is imported into the image store on first use. If the tar is missing or

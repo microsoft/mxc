@@ -563,6 +563,98 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_real_client.json" -Force
 $null = $results.Add((Run-WslcTest "wslc_network_egress_raw_frame.json" -ForceDebug -OutputNotContains $NotClean -OutputContains $Clean `
     -Probes ([ordered]@{ RAW_SOCKET = "DENIED"; RAW_REPLY = "NONE" })))
 
+# Read the workload's reply on a mapped Windows port, run $WhileOpen, then send
+# FROM_<port>. The workload exits once it receives that, so $WhileOpen runs
+# while the mapping is live. The proxy closes connections until the workload
+# listens, so retry until it replies.
+function Send-WslcMappedPort([int]$Port, $Run, [scriptblock]$WhileOpen = {}) {
+    $deadline = (Get-Date).AddSeconds(120)
+    while (-not $Run.Process.HasExited -and (Get-Date) -lt $deadline) {
+        $client = [Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect("127.0.0.1", $Port)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 30000
+            $reader = [IO.StreamReader]::new($stream)
+            $reply = $reader.ReadLine()
+            if ($reply) {
+                $check = & $WhileOpen $Port
+                $hello = [Text.Encoding]::ASCII.GetBytes("FROM_$Port`n")
+                $stream.Write($hello, 0, $hello.Length)
+                $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+                $null = $reader.ReadToEnd()
+                return @{ Reply = $reply.Trim(); Check = $check }
+            }
+        } catch {
+        } finally {
+            $client.Dispose()
+        }
+        Start-Sleep 1
+    }
+    return @{ Reply = ""; Check = $null }
+}
+
+# Mappings bind Windows 127.0.0.1 only.
+$LanAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } | ForEach-Object IPAddress)
+function Test-WslcTcpConnect([string]$Address, [int]$Port) {
+    $client = [Net.Sockets.TcpClient]::new()
+    try { return $client.ConnectAsync($Address, $Port).Wait(3000) } catch { return $false } finally { $client.Dispose() }
+}
+
+# Run a config whose workload serves its mappings in order, each with
+# `serve <containerPort> <n>`. Mappings maps each Windows port to the
+# container port expected to answer.
+function Invoke-WslcMappedRun {
+    param(
+        [string]$ConfigFile,
+        [System.Collections.IDictionary]$Mappings,
+        [System.Collections.IDictionary]$Probes = [ordered]@{},
+        [string[]]$OutputContains = @(),
+        [string[]]$OutputNotContains = @()
+    )
+    $run = Start-WslcBackgroundRun $ConfigFile
+    $reason = ""
+    $n = 0
+    foreach ($mapping in $Mappings.GetEnumerator()) {
+        $n++
+        $port = $mapping.Key
+        $lanCheck = if ($n -eq 1) { { param($p) $LanAddresses | Where-Object { Test-WslcTcpConnect $_ $p } } } else { {} }
+        $sent = Send-WslcMappedPort $port $run $lanCheck
+        if ($sent.Reply -ne "MAPPED_$($mapping.Value)") {
+            $reason = "127.0.0.1:$port replied '$($sent.Reply)', expected 'MAPPED_$($mapping.Value)'"
+            break
+        }
+        # RECEIVED_n shows the mapping still worked after the LAN check.
+        $Probes["RECEIVED_$n"] = "FROM_$port"
+        if ($sent.Check) { $reason = "Port $port is reachable on $($sent.Check -join ', ')"; break }
+    }
+    $bg = Complete-WslcBackgroundRun $run
+    if (-not $reason) {
+        $reason = if ($bg.Exit -ne 0) { "Expected exit 0, got $($bg.Exit)" }
+            elseif ($missing = @($OutputContains + $Clean) | Where-Object { -not $bg.Output.Contains($_) } | Select-Object -First 1) { "Output missing '$missing'" }
+            elseif ($found = @($OutputNotContains + $NotClean) | Where-Object { $bg.Output.Contains($_) } | Select-Object -First 1) { "Output contains '$found'" }
+            else { Test-WslcProbes $bg.Output $Probes }
+    }
+    Add-WslcResult $ConfigFile (-not $reason) $reason $bg.Output
+}
+
+# Port mappings are relayed by the proxy under every proxied posture, and stay
+# on the workload under bridged networking.
+Invoke-WslcMappedRun "wslc_network_egress_port_mapping.json" ([ordered]@{ 18080 = 8080 }) `
+    -Probes ([ordered]@{ PROXY = "403"; DNS = "REFUSED"; DIRECT = "BLOCKED" })
+Invoke-WslcMappedRun "wslc_network_egress_port_mapping_allow_rules.json" ([ordered]@{ 18081 = 8081 }) `
+    -Probes ([ordered]@{ ALLOWED = "200"; OTHER = "403"; DNS = "RESOLVED"; DIRECT = "BLOCKED" })
+# The workload can't reach the proxy's relay listeners.
+Invoke-WslcMappedRun "wslc_network_egress_port_mapping_allow_default.json" ([ordered]@{ 18082 = 8082; 18083 = 8083 }) `
+    -Probes ([ordered]@{ ALLOWED = "200"; RELAY_PROXY = "403"; RELAY_DIRECT = "BLOCKED"; DIRECT = "BLOCKED" })
+# Two Windows ports mapped to one container port.
+Invoke-WslcMappedRun "wslc_network_egress_port_mapping_ingress_allow.json" ([ordered]@{ 18084 = 8084; 18085 = 8084 }) `
+    -OutputContains "accepts connections only through port mappings on Windows 127.0.0.1" `
+    -Probes ([ordered]@{ PROXY = "403"; DNS = "REFUSED" })
+Invoke-WslcMappedRun "wslc_port_mapping_bridged_reached.json" ([ordered]@{ 18086 = 8086 }) `
+    -OutputNotContains "Built-in proxy ready"
+
 # Rejected before any container is created.
 $egressRejections = [ordered]@{
     "allow_udp"           = "network.egress.allow supports only protocol 'tcp' (got 'udp')"
@@ -573,8 +665,11 @@ $egressRejections = [ordered]@{
     "deny_ipv6"           = "network.egress CIDR 2001:db8::/32 is IPv6"
     "reserved_subnet"     = "which the built-in proxy reserves for its own networks"
     "network_proxy"       = "runtimeConfig.networkProxy cannot be combined with egress filtering"
-    "port_mappings"       = "wslc.portMappings cannot be combined with egress filtering"
     "rules_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
+    "port_mapping_udp"           = "unknown variant ``udp``"
+    "port_mapping_duplicate"     = "duplicate windowsPort 18087 for protocol 'tcp'"
+    "port_mapping_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
+    "port_mapping_network_proxy" = "runtimeConfig.networkProxy requires bridged networking"
 }
 foreach ($name in $egressRejections.Keys) {
     $null = $results.Add((Run-WslcTest "wslc_network_egress_$($name)_rejected.json" -ExpectedExit 1 `

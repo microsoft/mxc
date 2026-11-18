@@ -29,7 +29,7 @@ use crate::mxc_common::filesystem_security::{
     lock_owner_only_directory_path, set_current_user_owner, LockedDirectoryPath,
 };
 use crate::mxc_common::logger::{Logger, Mode};
-use crate::mxc_common::models::ScriptResponse;
+use crate::mxc_common::models::{PortMapping, ScriptResponse};
 use crate::mxc_common::proxy_env;
 use crate::mxc_common::string_util::CoTaskMemPWSTR;
 use crate::wslc_common::container_steps::{self, cstr_bytes, sdk_error, ProcessSettings};
@@ -113,12 +113,15 @@ const INTERNAL_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 0);
 const SUBNET_PREFIX_LENGTH: u8 = 24;
 const GATEWAY_EGRESS_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 2);
 const GATEWAY_WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 254);
+/// Pinned so the gateway knows where to relay port mappings.
+const WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 2);
 const PROXY_PORT: u16 = 3128;
 const NODE_USE_ENV_PROXY: &str = "NODE_USE_ENV_PROXY";
 
 // The SDK reads these through pointers when the container is created.
 static GATEWAY_EGRESS_IN_ADDR: IN_ADDR = in_addr_of(GATEWAY_EGRESS_ADDRESS);
 static GATEWAY_WORKLOAD_IN_ADDR: IN_ADDR = in_addr_of(GATEWAY_WORKLOAD_ADDRESS);
+static WORKLOAD_IN_ADDR: IN_ADDR = in_addr_of(WORKLOAD_ADDRESS);
 
 const IMAGE_ID: &str = env!("MXC_WSLC_GATEWAY_IMAGE_ID");
 const IMAGE_TAR: &str = "mxc-wslc-gateway.tar";
@@ -153,13 +156,14 @@ impl Gateway {
         store_path: &str,
         session_name: &str,
         egress: &ProxiedEgress,
+        port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<Self, ScriptResponse> {
         let records = StoreRecords::open(store_path).map_err(host_error)?;
         let names = ProxyNames::for_session(session_name);
         refuse_unrecorded(sdk, session, &records, &names)?;
         records.write(&names, &names.all()).map_err(host_error)?;
-        match Self::start_inner(sdk, session, &names, egress, logger) {
+        match Self::start_inner(sdk, session, &names, egress, port_mappings, logger) {
             Ok((container, process, resolv_conf)) => Ok(Self {
                 sdk,
                 session,
@@ -185,6 +189,7 @@ impl Gateway {
         session: WslcSession,
         names: &ProxyNames,
         egress: &ProxiedEgress,
+        port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<(WslcContainerGuard, ProcessSettings, tempfile::TempPath), ScriptResponse> {
         create_network(sdk, session, &names.egress, EGRESS_SUBNET, false)?;
@@ -215,8 +220,25 @@ impl Gateway {
         if hr != S_OK {
             return Err(sdk_error("WslcSetContainerSettingsNetworks failed", hr, ""));
         }
+        // Published ports reach only a container with a non-internal network,
+        // so the gateway takes the workload's mappings and relays them.
+        let mappings = container_steps::sdk_port_mappings(port_mappings);
+        if !mappings.is_empty() {
+            let hr = sdk.WslcSetContainerSettingsPortMappings(
+                &mut settings,
+                mappings.as_ptr(),
+                mappings.len() as u32,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsPortMappings failed",
+                    hr,
+                    "",
+                ));
+            }
+        }
 
-        let policy = serde_json::to_string(&render_policy(egress)).map_err(|e| {
+        let policy = serde_json::to_string(&render_policy(egress, port_mappings)).map_err(|e| {
             WslcError::Host(format!("could not render the built-in proxy policy: {e}"))
                 .into_response()
         })?;
@@ -294,7 +316,7 @@ impl Gateway {
     /// The workload's only network. The SDK reads it when the container is
     /// created.
     pub(crate) fn workload_networks(&self) -> [WslcContainerNetwork; 1] {
-        [network(&self.names.internal, ptr::null())]
+        [network(&self.names.internal, &WORKLOAD_IN_ADDR)]
     }
 
     /// Delete the gateway, the workload, and their networks, then log the
@@ -352,8 +374,21 @@ pub(crate) fn workload_env(caller_env: &[String], scope: EnvScope) -> Vec<String
     env
 }
 
-fn render_policy(egress: &ProxiedEgress) -> gateway::Policy {
+fn render_policy(egress: &ProxiedEgress, port_mappings: &[PortMapping]) -> gateway::Policy {
     let egress = egress.egress.clone();
+    let mut relayed: Vec<gateway::PortMapping> = Vec::new();
+    for mapping in port_mappings {
+        if relayed
+            .iter()
+            .all(|r| r.listen_port != mapping.container_port)
+        {
+            relayed.push(gateway::PortMapping {
+                listen_port: mapping.container_port,
+                workload_address: WORKLOAD_ADDRESS,
+                workload_port: mapping.container_port,
+            });
+        }
+    }
     gateway::Policy {
         workload_address: GATEWAY_WORKLOAD_ADDRESS,
         egress_address: GATEWAY_EGRESS_ADDRESS,
@@ -362,7 +397,7 @@ fn render_policy(egress: &ProxiedEgress) -> gateway::Policy {
         egress,
         host_loopback: None,
         custom_proxy: None,
-        port_mappings: Vec::new(),
+        port_mappings: relayed,
     }
 }
 
@@ -927,12 +962,46 @@ mod tests {
             ports: None,
         };
 
-        let policy = render_policy(&egress(gateway::Action::Deny, vec![rule]));
+        let policy = render_policy(&egress(gateway::Action::Deny, vec![rule]), &[]);
         assert!(policy.forward_dns);
         assert_eq!(policy.workload_address, GATEWAY_WORKLOAD_ADDRESS);
         assert_eq!(proxy_url(), "http://10.231.1.254:3128");
-        assert!(render_policy(&egress(gateway::Action::Allow, Vec::new())).forward_dns);
-        assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new())).forward_dns);
+        assert!(render_policy(&egress(gateway::Action::Allow, Vec::new()), &[]).forward_dns);
+        assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new()), &[]).forward_dns);
+    }
+
+    #[test]
+    fn each_mapped_container_port_is_relayed_once_to_the_workload() {
+        let mapping = |windows_port, container_port| PortMapping {
+            windows_port,
+            container_port,
+            protocol: "tcp".to_string(),
+        };
+        let egress = ProxiedEgress {
+            egress: gateway::Egress {
+                default: gateway::Action::Deny,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+            warnings: Vec::new(),
+        };
+        let policy = render_policy(
+            &egress,
+            &[
+                mapping(18080, 8080),
+                mapping(18081, 8080),
+                mapping(2222, 22),
+            ],
+        );
+        assert!(!policy.forward_dns);
+        assert_eq!(
+            policy.port_mappings,
+            [8080, 22].map(|port| gateway::PortMapping {
+                listen_port: port,
+                workload_address: WORKLOAD_ADDRESS,
+                workload_port: port,
+            })
+        );
     }
 
     #[test]
