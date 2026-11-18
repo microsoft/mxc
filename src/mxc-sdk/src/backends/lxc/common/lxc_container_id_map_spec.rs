@@ -18,10 +18,9 @@ fn valid_maps_report_whether_inside_root_is_shifted() {
     ];
 
     for (mapping, expected) in cases {
-        assert_eq!(
-            LxcContainer::validate_id_map(mapping),
-            Ok(expected),
-            "mapping={mapping:?}"
+        assert!(
+            LxcContainer::validate_id_map(mapping) == Ok(expected),
+            "valid ID map reported the wrong shifted-root state"
         );
     }
 }
@@ -54,10 +53,7 @@ fn malformed_maps_are_rejected_even_after_a_shifted_root_row() {
     for mapping in cases {
         let result = LxcContainer::validate_id_map(mapping);
 
-        assert!(
-            result.is_err(),
-            "mapping={mapping:?} must be rejected; got {result:?}"
-        );
+        assert!(result.is_err(), "malformed ID map was accepted");
     }
 }
 
@@ -73,10 +69,7 @@ fn outside_zero_is_rejected_in_any_row() {
     for mapping in cases {
         let result = LxcContainer::validate_id_map(mapping);
 
-        assert!(
-            result.is_err(),
-            "mapping={mapping:?} maps to outside zero; got {result:?}"
-        );
+        assert!(result.is_err(), "ID map covering outside zero was accepted");
     }
 }
 
@@ -94,10 +87,9 @@ fn shifted_inside_root_is_required_for_uid_but_not_gid() {
         fs::write(directory.path().join("gid_map"), gid_map).expect("write GID map");
         let result = LxcContainer::validate_id_maps(directory.path());
 
-        assert_eq!(
-            result.is_ok(),
-            accepted,
-            "uid_map={uid_map:?}, gid_map={gid_map:?}; got {result:?}"
+        assert!(
+            result.is_ok() == accepted,
+            "UID/GID map admission did not match the expected outcome"
         );
     }
 }
@@ -118,10 +110,7 @@ fn invalid_data_in_either_complete_map_is_rejected() {
             fs::write(directory.path().join(filename), mapping).expect("write invalid map");
             let result = LxcContainer::validate_id_maps(directory.path());
 
-            assert!(
-                result.is_err(),
-                "{filename}={mapping:?} must be rejected; got {result:?}"
-            );
+            assert!(result.is_err(), "invalid {filename} was accepted");
         }
     }
 }
@@ -146,7 +135,10 @@ fn missing_unreadable_or_invalid_utf8_map_files_are_rejected() {
             }
             let result = LxcContainer::validate_id_maps(directory.path());
 
-            assert!(result.is_err(), "{filename} is {failure}; got {result:?}");
+            assert!(
+                result.is_err(),
+                "{filename} was accepted for the {failure} case"
+            );
         }
     }
 }
