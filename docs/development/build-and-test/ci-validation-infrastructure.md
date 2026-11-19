@@ -272,14 +272,16 @@ the background, the process timeout, and `SIGTERM` and `SIGKILL` of
 `lxc-exec`. Afterwards no process may still run as the workload's mapped host
 UID. Each case is repeated without `CAP_KILL` in the caller's capability sets.
 
-The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts.
+The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts. The
+Linux SDK integration jobs in GitHub Actions and Azure Pipelines also use it,
+because they run the Node SDK suite, including its Bubblewrap tests, as root.
 It reuses valid root allocations or selects free 65,536-ID blocks from the
 host's `SUB_UID_MIN/MAX` and `SUB_GID_MIN/MAX` pools in `/etc/login.defs`,
 excluding existing allocations, account UIDs, primary GIDs, and group GIDs.
 An unsafe existing root allocation or exhausted pool fails setup.
-The helper backs up both files before writing either one. Build and scheduled
-jobs restore the original contents, metadata, and file absence in `always()`
-cleanup steps, including after test failures. A failed restoration retains the
+The helper backs up both files before writing either one. Each of these jobs
+restores the original contents, metadata, and file absence in an `always()`
+cleanup step, including after test failures. A failed restoration retains the
 backups and fails the job. Run `python3 scripts/ci/test_bwrap_root_ids.py` for
 the selection and backup/restore fixtures; they never modify host configuration.
 The allocation-file cases in

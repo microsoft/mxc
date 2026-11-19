@@ -206,8 +206,11 @@ def main():
     parser.add_argument("--backup-directory", type=Path, required=True)
     parser.add_argument("--disposable-ci-host", action="store_true")
     args = parser.parse_args()
-    if not args.disposable_ci_host or os.environ.get("GITHUB_ACTIONS") != "true":
-        parser.error("this helper is only for explicitly designated disposable GitHub CI hosts")
+    ci_host = os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("TF_BUILD") == "True"
+    if not args.disposable_ci_host or not ci_host:
+        parser.error(
+            "this helper is only for explicitly designated disposable GitHub Actions or Azure Pipelines hosts"
+        )
     if os.getuid() != 0 or os.geteuid() != 0:
         parser.error("root is required")
     if not args.backup_directory.is_absolute():

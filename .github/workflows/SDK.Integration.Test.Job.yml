@@ -216,6 +216,14 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
+      - name: Reserve Bubblewrap root IDs on the disposable CI host
+        if: matrix.os_label == 'linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"
+
       # Linux needs root for Bubblewrap unprivileged-userns paths.
       # Pass test controls explicitly because Ubuntu 26.04's sudo ignores -E.
       #
@@ -241,3 +249,11 @@ jobs:
           else
             npm test
           fi
+
+      - name: Restore Bubblewrap root ID configuration
+        if: always() && matrix.os_label == 'linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"

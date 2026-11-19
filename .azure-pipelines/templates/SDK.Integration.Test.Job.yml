@@ -121,11 +121,28 @@ jobs:
 
         - script: |
             set -euo pipefail
+            sudo -n env TF_BUILD="$TF_BUILD" \
+              python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+              --backup-directory "$(Agent.TempDirectory)/mxc-bwrap-root-ids"
+          workingDirectory: $(Build.SourcesDirectory)
+          displayName: Reserve Bubblewrap root IDs on the disposable CI host
+
+        - script: |
+            set -euo pipefail
             sudo env "PATH=$PATH" \
               MXC_SKIP_LXC_NETWORK_TESTS=1 \
               MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
+
+        - script: |
+            set -euo pipefail
+            sudo -n env TF_BUILD="$TF_BUILD" \
+              python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+              --backup-directory "$(Agent.TempDirectory)/mxc-bwrap-root-ids"
+          workingDirectory: $(Build.SourcesDirectory)
+          condition: always()
+          displayName: Restore Bubblewrap root ID configuration
 
       - ${{ if eq(target.os, 'windows') }}:
         - script: npm test

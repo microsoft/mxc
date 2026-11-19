@@ -152,12 +152,23 @@ class RootIdFixtures(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "setup", "--disposable-ci-host",
                  "--backup-directory", str(backup)],
-                env={**os.environ, "GITHUB_ACTIONS": "false"},
+                env={**os.environ, "GITHUB_ACTIONS": "false", "TF_BUILD": "False"},
                 capture_output=True, text=True,
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("only for explicitly designated disposable", result.stderr)
             self.assertFalse(backup.exists())
+
+    def test_command_accepts_an_azure_pipelines_host(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "setup", "--disposable-ci-host",
+             "--backup-directory", "relative-backup"],
+            env={**os.environ, "GITHUB_ACTIONS": "false", "TF_BUILD": "True"},
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("only for explicitly designated disposable", result.stderr)
+        self.assertRegex(result.stderr, "root is required|backup-directory must be absolute")
 
 
 if __name__ == "__main__":
