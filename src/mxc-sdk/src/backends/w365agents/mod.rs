@@ -124,13 +124,24 @@ impl StatefulSandboxBackend for Runner {
             Some(pool) => vec![pool.clone()],
             None => discovery::assigned_pools()?,
         };
+        if pools.is_empty() {
+            return Err(routing::error(
+                "no_assigned_pools",
+                "Graph returned no assigned pools",
+            ));
+        }
         let mut attempts = Vec::new();
-        let mut last_error =
-            routing::error("no_assigned_pools", "Graph returned no assigned pools");
+        let mut last_error = routing::error(
+            "no_available_sessions",
+            "Graph reported no available sessions in the selected pools",
+        );
         for pool in pools {
-            let (client, source) = discovery::control_plane(&pool)
-                .map_err(|error| with_pool_attempts(error, attempts.clone()))?;
-            match client.checkout(&pool, config, source) {
+            let Some((client, url, source)) = discovery::control_plane(&pool)
+                .map_err(|error| with_pool_attempts(error, attempts.clone()))?
+            else {
+                continue;
+            };
+            match client.checkout(&pool, config, &url, source) {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     if !automatic || !service::can_try_next_pool(&error) {

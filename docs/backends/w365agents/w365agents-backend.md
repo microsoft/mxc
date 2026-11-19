@@ -46,20 +46,17 @@ Supply configuration in the **caller environment**:
 | --- | --- |
 | `W365A_GRAPH_TOKEN` | Separate caller-supplied Graph bearer token, required only for provision. Use a token for the selected Graph environment. |
 | `W365A_GRAPH_ENVIRONMENT` | `public` (default) or `canary`. Selects a fixed Graph deployment, not an arbitrary URL. |
-| `W365A_CONTROLPLANE_URL` | Fallback control-plane ASCII DNS hostname only, without scheme, port or path. Used only when a successfully fetched pool resource lacks `poolUrl`. |
 | `W365A_CP_TOKEN` | Nonempty resource-specific control-plane bearer token, without whitespace or control characters. Required for provision and release. |
 | `W365A_DP_TOKEN` | Nonempty resource-specific data-plane bearer token with the same character constraints. Required for start/exec only; no control-plane token fallback. |
 
 For example, with an approved token already in `$controlPlaneToken`:
 
 ```powershell
-$env:W365A_CONTROLPLANE_URL = 'northeurope.sessionmanagement.regional.cloudinferenceplatform.azure.com'
 $env:W365A_CP_TOKEN = $controlPlaneToken
 $env:W365A_GRAPH_TOKEN = $graphToken
 ```
 
-Set the variables before launching the caller. Use the endpoints authorized for
-your pool; the hostname above is only an example. Never put tokens in request
+Set the variables before launching the caller. Never put tokens in request
 JSON, command-line arguments, shell history or logs.
 
 The caller must acquire and renew tokens, including before cleanup. Each call
@@ -89,14 +86,22 @@ Authentication, transport, HTTP (including resource GET 404), malformed-response
 and pagination failures are errors, not fallback conditions. No administrative
 pool-list fallback is used.
 
-A supplied `poolUrl` must be HTTPS port 443 with path `/sessions`, no credentials,
-query or fragment, and a regional `sessionmanagement` host under
-`cloudinferenceplatform.azure.com` or `cloudinferenceplatform-int.azure.com`.
-MXC extracts that hostname and builds
-`/api/pools/{poolId}/sessions?api-version=3.0`; it does not infer regions or rewrite
-hosts. A missing, null or empty resource `poolUrl` permits the explicit
-environment fallback above. A failed checkout is never retried against another
-host for that pool.
+MXC reads `sessionUsage.availableSessionsCount` from each fetched pool resource.
+Checkout is attempted only when this Int32 count is greater than zero;
+nonpositive counts skip that pool without a checkout request. Automatic
+selection continues to the next assigned pool. An explicitly selected pool
+with no capacity, or an assigned-pool list with no available capacity, returns
+`no_available_sessions`. Missing or malformed usage metadata is a discovery
+error, not assumed capacity. Availability is a snapshot, not a reservation;
+checkout can still fail after a positive count.
+
+Graph is the only source of checkout endpoints. MXC uses `poolUrl`'s destination,
+path and existing query as returned, appending `api-version=3.0` for checkout
+and same-ID completion. It does not rewrite pool IDs, regions or hosts, or impose
+a service host or path pattern. URLs require HTTPS port 443, an ASCII DNS host,
+and no credentials or fragment. For a pool with capacity, missing, null, empty
+or invalid `poolUrl` fails before checkout; there is no endpoint environment fallback. MXC saves the
+selected pool identity and checkout hostname for later lifecycle calls.
 
 Without a supplied `poolId`, MXC fetches each candidate's details and attempts
 checkout in list order, stopping at the first successful checkout whose routing
@@ -119,19 +124,19 @@ the identity, host, path and sole query before using that host for readiness
 `/computers/{sessionId}/microsoft.exec?api-version=1.0`. Other prefixes, versions,
 query parameters or host families are unsupported.
 
-These are deliberately narrow supported mappings. The Graph documentation's
-`poolUrl` example and an observed API 2.0 session-list `computerUrl` do not prove
-API 3.0 checkout compatibility or permissions for both Graph endpoints in a
-deployed tenant. Controlled fixtures verify MXC's behavior, not service
-availability.
+The `computerUrl` mapping remains deliberately narrow. An observed API 2.0
+session-list `computerUrl` does not prove API 3.0 checkout compatibility or
+permissions for both Graph endpoints in a deployed tenant. Controlled fixtures
+verify MXC's behavior, not service availability.
 
 MXC stores versioned, nonsecret `connection.json` records under
 `%LOCALAPPDATA%\Microsoft\MXC\w365\{poolId}\{sessionId}` on Windows,
 `${XDG_DATA_HOME:-$HOME/.local/share}/Microsoft/MXC/w365/{poolId}/{sessionId}`
 on Linux, and `$HOME/Library/Application Support/Microsoft/MXC/w365/{poolId}/{sessionId}`
 on macOS. Records contain only identity, validated destination hostnames and CP
-source; never tokens, tickets or other checkout URLs. Private ownership and
-permissions, per-record locks and atomic publication protect the records.
+source; the full Graph checkout URL is used only during provision and is not
+stored. Records never contain tokens, tickets or other checkout URLs. Private
+ownership and permissions, per-record locks and atomic publication protect the records.
 Local lock contention fails explicitly with `routing_state_lock`; retry an
 existing-ID operation only after contention clears. A provisioning error is
 never permission to repeat allocation.
@@ -368,14 +373,114 @@ With valid credentials, pass the retained ID unchanged:
 Report execution and cleanup failures separately and retain the ID until release
 is accepted.
 
+## PowerShell live-test runner
+
+`tests\scripts\run_w365_command_manual.ps1` runs `Provision`, `Run` (default),
+or explicit `Release` through `wxc-exec.exe`. It requires Windows, PowerShell 7,
+Python with `msal` and `msal-extensions` (`python -m pip install msal msal-extensions`),
+and a current shipping executor built from this checkout, without `test-support`.
+It does not build the executor or create tenant resources.
+
+Supply `TenantId` and a public-client `ClientId` authorized for browser sign-in
+with a localhost redirect. Provision acquires a separate Graph token using
+`https://graph.microsoft.com/CloudPC.Read.All`, or
+`https://canary.graph.microsoft.com/CloudPC.Read.All` with
+`-GraphEnvironment canary`. Graph credentials stay in memory; the helper does not
+open a persistent Graph cache. Consent and permission to both the assigned-pool
+and pool-resource endpoints must be verified in the target tenant.
+
+CP and DP credentials are acquired separately for the same tenant, client and
+authenticated user, only for the operations needing them. Both resource IDs
+default to production `90ecec28-f5a6-42b3-9bde-dae1ca98f8b5` for
+`-GraphEnvironment public` (the default), or INT
+`274133f7-12bb-4bfb-ae3b-bd446b7e8a75` for `canary`.
+`-ControlPlaneResource` and `-DataPlaneResource`, or their config fields, override
+these defaults independently; the sign-in `ClientId` does not change.
+The helper requests each resource's `/.default` and checks delegated
+`Computer.Get`, `Computer.See`, `Computer.Do` and `Computer.Control` permissions.
+Deployments with other permission contracts need a corresponding helper update.
+Service credentials retain the Phase 3 current-user DPAPI cache under
+`%LOCALAPPDATA%\Microsoft\MXC\w365-manual-auth`, bound to tenant/client/resource.
+This test-tool cache is separate from native routing records; no authentication
+provider or token cache is added to MXC.
+
+Pass settings as parameters or an uncommitted JSON config selected by
+`-ConfigPath`. The default path is `tests\scripts\w365-test.json`. For example:
+
+```json
+{
+  "tenantId": "<tenant-guid>",
+  "clientId": "<public-client-guid>",
+  "graphEnvironment": "canary"
+}
+```
+
+Optional config keys are `poolId`, `controlPlaneResource`
+and `dataPlaneResource`; explicit parameters take precedence. Omit `poolId`
+to try assigned pools in order, or supply it to fetch only that pool's details.
+Remove the retired
+`controlPlaneHost` and `dataPlaneSuffix` config keys/parameters.
+The runner does not consume ambient `W365A_*` credentials or endpoints.
+
+From the repository root, using the same config and receipt throughout:
+
+```powershell
+# Provision only, retaining the actual selected pool and full MXC ID.
+.\tests\scripts\run_w365_command_manual.ps1 -Operation Provision -ConfigPath .\w365-test.json -ReceiptPath .\w365-receipt.json
+$id = (Get-Content .\w365-receipt.json -Raw | ConvertFrom-Json).sessionId
+
+# Readiness and execution on that reservation; no Graph sign-in or checkout.
+.\tests\scripts\run_w365_command_manual.ps1 -ConfigPath .\w365-test.json -SessionId $id -CommandLine 'cmd.exe /c whoami' -ReceiptPath .\w365-receipt.json
+
+# Explicit release uses only CP authentication and the native routing record.
+.\tests\scripts\run_w365_command_manual.ps1 -Operation Release -ConfigPath .\w365-test.json -SessionId $id -ReceiptPath .\w365-receipt.json
+```
+
+`Run` without `SessionId` provisions, waits and executes, retaining the session
+even on failure. `-WxcExePath` selects an explicit executor; `-LoginHint`,
+`-ExpectedUserObjectId` and `-ForceSignIn` control browser authentication.
+Tokens go only through private helper output and per-operation child environment
+variables, never command-line arguments, config or receipts. Reuse requires the
+same user and machine's native routing record, not just a copied receipt.
+
+Receipts use `mxc-w365-manual-v3` and retain the actual pool, full opaque MXC ID,
+owner, deployment and operation outcomes. They cannot import old routing or
+Phase 3 v2 receipts. `provisionInvocationCount` counts native calls, not the
+backend's individual pool checkout attempts. The runner never retries a failed
+provision or automatically releases a session; retain reported IDs and recovery
+hosts after failures. An uncertain release cannot be replayed using its receipt.
+Release acceptance does not confirm reset or sanitization.
+
+The provision dry-run precedes authentication; subsequent dry-runs use the
+real ID after its routing record exists. Provision has no additional frontend
+deadline: native listing, resource and per-pool checkout budgets apply across
+all candidates. Cancelled or interrupted provisioning requires reconciliation,
+not another checkout. Long selection runs can outlive a caller's token; there
+is no refresh during a native operation.
+
 ## Offline functional fixtures
+
+The manual runner also has isolated regressions for Graph/service auth separation,
+optional and explicit pools, returned-pool receipts, existing-ID operations,
+recovery after routing-write failures, uncertain outcomes and credential redaction:
+
+```powershell
+# From the repository root; no sign-in, user cache access or service calls.
+python .\tests\scripts\test_w365_auth.py
+pwsh -NoProfile -File .\tests\scripts\test_w365_command_manual.ps1
+```
+
+These require the Python packages above and Windows .NET Framework's C# compiler.
+Python persistence tests use only fresh synthetic DPAPI files.
 
 The `w365_lifecycle` integration target tests lifecycle recovery, readiness,
 binary I/O, backpressure, timeouts and cleanup against loopback TLS services.
 It also tests separate Graph/CP/DP credentials, public/Canary list pagination
-followed by pool-resource retrieval, resource identity validation and Graph
-fallback boundaries, optional pool selection, ordered checkout failover and
-exhaustion, refusal to fail over after uncertain allocation or publication
+followed by pool-resource retrieval, resource identity validation,
+required discovery metadata, skipping unavailable pools, invalid capacity,
+authoritative checkout paths/queries and same-ID
+completion, explicit and automatic pool selection, ordered checkout failover
+and exhaustion, refusal to fail over after uncertain allocation or publication
 failure, API 3.0 same-ID completion, checkout-derived routing,
 private routing records, contention, missing/corrupt/mismatched/linked records,
 atomic-write failure after allocation and fresh-process

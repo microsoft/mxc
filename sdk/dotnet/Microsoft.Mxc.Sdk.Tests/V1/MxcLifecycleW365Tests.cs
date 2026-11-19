@@ -258,7 +258,7 @@ public class MxcLifecycleW365Tests
         public Fixture(TimeSpan? timeout = null)
         {
             cancellation = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(30));
-            environment = new[] { "W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN",
+            environment = new[] { "W365A_CP_TOKEN",
                 "W365A_DP_SUFFIX", "W365A_DP_TOKEN",
                 "W365A_GRAPH_TOKEN", "W365A_GRAPH_ENVIRONMENT",
                 "MXC_W365_TEST_STATE_ROOT", "MXC_W365_TEST_GRAPH_LOCALHOST",
@@ -297,7 +297,6 @@ public class MxcLifecycleW365Tests
             var ca = Path.Combine(directory, "certificate.pem");
             File.WriteAllText(ca, certificate.ExportCertificatePem());
             listener.Start();
-            SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
             SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
             SetEnvironmentVariable("W365A_DP_SUFFIX", "localhost");
             SetEnvironmentVariable("W365A_DP_TOKEN", "synthetic-data-plane-token");
@@ -369,7 +368,7 @@ public class MxcLifecycleW365Tests
                     Assert.Contains("Bearer synthetic-graph-token", headers.ToString());
                     var body = listPools
                         ? $$"""{"value":[{"id":"{{Pool}}"}]}"""
-                        : $$"""{"id":"{{Pool}}"}""";
+                        : $$$"""{"id":"{{{Pool}}}","poolUrl":"https://localhost/api/pools/{{{Pool}}}/sessions","sessionUsage":{"availableSessionsCount":1}}""";
                     await stream.WriteAsync(Encoding.UTF8.GetBytes(
                         $"HTTP/1.1 200 Fixture\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"), cancellation.Token);
                     await stream.FlushAsync(cancellation.Token);

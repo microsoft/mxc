@@ -109,8 +109,6 @@ fn validate_record(record: &Record, identity: &Identity) -> Result<(), MxcError>
             record.control_plane_source.as_str(),
             "graph" | "environment"
         )
-        || (record.control_plane_source == "graph"
-            && !service_host(&record.control_plane_host, "sessionmanagement", None))
         || record
             .computer_host
             .as_deref()
@@ -244,4 +242,28 @@ pub(super) fn client(identity: &Identity, data_plane: bool) -> Result<Client, Mx
         (record.control_plane_host, "W365A_CP_TOKEN")
     };
     Client::for_host(host, token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_control_plane_does_not_require_a_service_host_pattern() {
+        let identity = Identity {
+            pool_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            session_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+        };
+        let mut record = Record {
+            version: 1,
+            pool_id: identity.pool_id.clone(),
+            session_id: identity.session_id.clone(),
+            control_plane_host: "control.example.test".to_owned(),
+            control_plane_source: "graph".to_owned(),
+            computer_host: None,
+        };
+        assert!(validate_record(&record, &identity).is_ok());
+        record.computer_host = Some("control.example.test".to_owned());
+        assert!(validate_record(&record, &identity).is_err());
+    }
 }

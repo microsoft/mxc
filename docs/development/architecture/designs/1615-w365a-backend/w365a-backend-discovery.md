@@ -24,10 +24,17 @@ remain invalid. `userObjectId` remains required and non-nil by the backend.
    order. An empty list is an error.
 
 2. Fetch `{base}/deviceManagement/virtualEndpoint/cloudPcPools/{poolId}`.
-   Require a matching `id` and read `poolUrl` from this resource, not the list.
-   Validate its service destination and extract the hostname for CP checkout.
-   Only a missing/null/empty `poolUrl` permits `W365A_CONTROLPLANE_URL` fallback;
-   Graph errors, including 404, never do.
+   Require a matching `id`.
+   Read `sessionUsage.availableSessionsCount` as Int32 and skip nonpositive
+   counts without checkout. Missing or malformed usage is an error. If all
+   selected pools lack capacity, return `no_available_sessions`; an explicit
+   pool never switches to another pool.
+   For a pool with capacity, read `poolUrl` from this resource, not the list.
+   Use Graph's checkout destination, path and query directly, appending
+   `api-version=3.0`; retain HTTPS/443 and credential/fragment checks without
+   imposing a service host or path pattern. Do not rewrite pool IDs or regions.
+   Missing or invalid metadata and Graph errors fail explicitly; no endpoint
+   environment fallback exists.
 
 3. Use API 3.0 JSON checkout, completing `Created` with the same session ID;
    release remains API 2.0. Without an explicit pool, advance only after an

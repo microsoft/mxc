@@ -314,7 +314,6 @@ impl Environment {
         let state = tempfile::tempdir().unwrap();
         let environment = Self(
             [
-                "W365A_CONTROLPLANE_URL",
                 "W365A_CP_TOKEN",
                 "W365A_DP_SUFFIX",
                 "W365A_DP_TOKEN",
@@ -552,7 +551,8 @@ impl Fixture {
                 let reply = if graph {
                     let body = if data.contains("/deviceManagement/virtualEndpoint/cloudPcPools/") {
                         let path = data.split_whitespace().nth(1).unwrap();
-                        json!({"id":path.rsplit('/').next().unwrap()}).to_string()
+                        let pool = path.rsplit('/').next().unwrap();
+                        graph_pool(pool, 1).to_string()
                     } else {
                         json!({"value":[]}).to_string()
                     };
@@ -599,7 +599,6 @@ impl Fixture {
         }
     }
     fn configure(&self, env: &Environment) {
-        env.set("W365A_CONTROLPLANE_URL", "localhost");
         env.set("W365A_CP_TOKEN", "fixture-token-never-log");
         env.set("MXC_W365_TEST_CA", self.ca.path().to_str().unwrap());
         env.set("MXC_W365_TEST_PORT", &self.port.to_string());
@@ -663,6 +662,16 @@ fn provision() -> Value {
 }
 fn computer_url(session: &str) -> String {
     format!("https://localhost/computers/{session}?api-version=1.0")
+}
+fn pool_url(pool: &str) -> String {
+    format!("https://localhost/api/pools/{pool}/sessions")
+}
+fn graph_pool(pool: &str, available_sessions: i32) -> Value {
+    json!({
+        "id":pool,
+        "poolUrl":pool_url(pool),
+        "sessionUsage":{"availableSessionsCount":available_sessions},
+    })
 }
 fn request(phase: &str, session: &str) -> Value {
     let mut value = json!({"version":"1.1.0-alpha","phase":phase,
@@ -767,7 +776,6 @@ fn lifecycle_contract_and_recovery_fixture() {
     for configured in [false, true] {
         fixture.configure(&env);
         if !configured {
-            std::env::remove_var("W365A_CONTROLPLANE_URL");
             std::env::remove_var("W365A_CP_TOKEN");
         }
         for experimental_enabled in [false, true] {
@@ -822,13 +830,14 @@ fn lifecycle_contract_and_recovery_fixture() {
         "execution refusal must not call the service"
     );
     fixture.configure(&env);
-    for key in ["W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN"] {
+    for key in ["W365A_GRAPH_TOKEN", "W365A_CP_TOKEN"] {
         std::env::remove_var(key);
         assert_eq!(
             invoke(&provision(), true).unwrap_err().code,
             MxcErrorCode::PolicyValidation
         );
         fixture.configure(&env);
+        env.set("W365A_GRAPH_TOKEN", "synthetic-graph-token");
     }
     let before = fixture.count();
     for phase in ["provision", "start", "exec", "stop", "deprovision"] {
@@ -921,21 +930,6 @@ fn lifecycle_contract_and_recovery_fixture() {
         before,
         "exec policy refusal must not call the service"
     );
-    for host in [
-        "",
-        " ",
-        "https://localhost",
-        "localhost:443",
-        "localhost/path",
-        "localhost\r\nx:y",
-    ] {
-        env.set("W365A_CONTROLPLANE_URL", host);
-        assert_eq!(
-            invoke(&provision(), true).unwrap_err().code,
-            MxcErrorCode::PolicyValidation
-        );
-    }
-    fixture.configure(&env);
     for token in ["", " ", "\r\nsecret", "secret token"] {
         env.set("W365A_CP_TOKEN", token);
         assert_eq!(
@@ -1430,11 +1424,22 @@ fn lifecycle_contract_and_recovery_fixture() {
         (302, json!({})),
         (200, json!(null)),
         (200, json!({"value":[{"id":POOL}]})),
-        (200, json!({"id":A,"poolUrl":"https://localhost/sessions"})),
-        (200, json!({"id":POOL,"poolUrl":123})),
+        (200, graph_pool(A, 1)),
         (
             200,
-            json!({"id":POOL,"poolUrl":"https://untrusted.invalid/sessions"}),
+            json!({"id":POOL,"poolUrl":123,"sessionUsage":{"availableSessionsCount":1}}),
+        ),
+        (
+            200,
+            json!({"id":POOL,"poolUrl":"http://localhost/sessions","sessionUsage":{"availableSessionsCount":1}}),
+        ),
+        (
+            200,
+            json!({"id":POOL,"poolUrl":"https://localhost/sessions#fragment","sessionUsage":{"availableSessionsCount":1}}),
+        ),
+        (
+            200,
+            json!({"id":POOL,"poolUrl":"https://user:secret@localhost/sessions","sessionUsage":{"availableSessionsCount":1}}),
         ),
     ] {
         let graphs = fixture.graph_requests.lock().unwrap().len();
@@ -1448,30 +1453,83 @@ fn lifecycle_contract_and_recovery_fixture() {
         );
     }
     for pool in [
-        json!({"id":POOL}),
-        json!({"id":POOL,"poolUrl":null}),
-        json!({"id":POOL,"poolUrl":""}),
+        json!({"id":POOL,"sessionUsage":{"availableSessionsCount":1}}),
+        json!({"id":POOL,"poolUrl":null,"sessionUsage":{"availableSessionsCount":1}}),
+        json!({"id":POOL,"poolUrl":"","sessionUsage":{"availableSessionsCount":1}}),
     ] {
         let calls = fixture.count();
         fixture.graph_reply(200, pool);
-        fixture.reply(401, "{}");
         let error = invoke(&provision(), true).unwrap_err();
-        assert_eq!(error.details.unwrap()["httpStatus"], 401);
+        assert_eq!(error.details.unwrap()["code"], "invalid_pool_url");
         assert_eq!(
             fixture.count(),
-            calls + 1,
-            "missing resource poolUrl uses the configured CP"
+            calls,
+            "missing resource poolUrl must fail before checkout"
         );
     }
+    let discovered = "55555555-5555-5555-5555-555555555555";
+    for (url, target) in [
+        (
+            pool_url(POOL),
+            format!("/api/pools/{POOL}/sessions?api-version=3.0"),
+        ),
+        (
+            format!("https://localhost/api/pools/{POOL}/sessions?route=blue%2Fgreen"),
+            format!("/api/pools/{POOL}/sessions?route=blue%2Fgreen&api-version=3.0"),
+        ),
+        (
+            "https://localhost/graph-owned/checkout?route=blue%2Fgreen".to_owned(),
+            "/graph-owned/checkout?route=blue%2Fgreen&api-version=3.0".to_owned(),
+        ),
+        (
+            "https://localhost/sessions".to_owned(),
+            "/sessions?api-version=3.0".to_owned(),
+        ),
+    ] {
+        let calls = fixture.count();
+        let mut pool = graph_pool(POOL, 1);
+        pool["poolUrl"] = json!(url);
+        fixture.graph_reply(200, pool);
+        fixture.reply(
+            201,
+            &json!({"sessionId":discovered,"status":"Created"}).to_string(),
+        );
+        fixture.reply(
+            200,
+            &json!({"sessionId":discovered,"status":"Succeeded","computerUrl":computer_url(discovered)}).to_string(),
+        );
+        invoke(&provision(), true).unwrap();
+        assert_eq!(fixture.count(), calls + 2);
+        for offset in 0..2 {
+            assert!(
+                fixture
+                    .request(calls + offset)
+                    .starts_with(&format!("POST {target} ")),
+                "checkout and same-ID completion must preserve Graph's path and query"
+            );
+        }
+        assert!(fixture
+            .request(calls + 1)
+            .to_ascii_lowercase()
+            .contains(&format!("x-ms-sessionid: {discovered}")));
+        let stored = std::fs::read_to_string(env.record(discovered)).unwrap();
+        assert!(!stored.contains("graph-owned") && !stored.contains("route="));
+        let record: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(record["controlPlaneHost"], "localhost");
+        assert_eq!(record["controlPlaneSource"], "graph");
+    }
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    fixture.reply(204, "");
+    invoke(&request("deprovision", discovered), true).unwrap();
+    assert!(fixture.request(fixture.count() - 1).starts_with(&format!(
+        "DELETE /api/sessions/{discovered}?api-version=2.0 "
+    )));
+    assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs);
     let c = "44444444-4444-4444-4444-444444444444";
     let graphs = fixture.graph_requests.lock().unwrap().len();
     fixture.graph_reply(200, json!({"value":[], "@odata.nextLink":"https://graph.microsoft.com/beta/me/cloudPcPools?$skiptoken=fixture"}));
     fixture.graph_reply(200, json!({"value":[{"id":POOL}]}));
-    fixture.graph_reply(
-        200,
-        json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
-    );
-    std::env::remove_var("W365A_CONTROLPLANE_URL");
+    fixture.graph_reply(200, graph_pool(POOL, 1));
     fixture.reply(
         200,
         &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c),
@@ -1495,10 +1553,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     }
     env.set("W365A_GRAPH_ENVIRONMENT", "canary");
     let graphs = fixture.graph_requests.lock().unwrap().len();
-    fixture.graph_reply(
-        200,
-        json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
-    );
+    fixture.graph_reply(200, graph_pool(POOL, 1));
     fixture.reply(
         200,
         &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)}).to_string(),
@@ -1512,14 +1567,125 @@ fn lifecycle_contract_and_recovery_fixture() {
         )));
     }
     env.set("W365A_GRAPH_ENVIRONMENT", "public");
+    for available in [-1, 0] {
+        let graphs = fixture.graph_requests.lock().unwrap().len();
+        let calls = fixture.count();
+        fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+        fixture.graph_reply(
+            200,
+            json!({
+                "id":POOL,"sessionUsage":{"availableSessionsCount":available},
+            }),
+        );
+        fixture.graph_reply(200, graph_pool(B, 1));
+        fixture.reply(
+            200,
+            &json!({"sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)}).to_string(),
+        );
+        let selected = invoke(&automatic, true).unwrap();
+        assert_eq!(selected["result"]["sandboxId"], format!("w365:{B}:{c}"));
+        assert_eq!(selected["result"]["metadata"]["poolId"], B);
+        assert_eq!(
+            fixture.count(),
+            calls + 1,
+            "an unavailable pool must not receive checkout"
+        );
+        assert!(fixture
+            .request(calls)
+            .starts_with(&format!("POST /api/pools/{B}/sessions?api-version=3.0 ")));
+        assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs + 3);
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(env.record_for_pool(B, c)).unwrap()).unwrap();
+        assert_eq!(record["poolId"], B);
+    }
+    for list_pools in [false, true] {
+        let graphs = fixture.graph_requests.lock().unwrap().len();
+        let calls = fixture.count();
+        let value = if list_pools {
+            automatic.clone()
+        } else {
+            provision()
+        };
+        let pools: &[&str] = if list_pools { &[POOL, B] } else { &[POOL] };
+        if list_pools {
+            fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+        }
+        for pool in pools {
+            fixture.graph_reply(200, graph_pool(pool, 0));
+        }
+        let error = invoke(&value, true).unwrap_err();
+        assert_eq!(error.details.unwrap()["code"], "no_available_sessions");
+        assert_eq!(fixture.count(), calls, "no capacity must mean no checkout");
+        assert_eq!(
+            fixture.graph_requests.lock().unwrap().len(),
+            graphs + if list_pools { 3 } else { 1 },
+        );
+    }
+    for usage in [
+        None,
+        Some(json!(null)),
+        Some(json!({})),
+        Some(json!({"availableSessionsCount":null})),
+        Some(json!({"availableSessionsCount":"1"})),
+        Some(json!({"availableSessionsCount":1.5})),
+        Some(json!({"availableSessionsCount":2147483648_i64})),
+    ] {
+        let graphs = fixture.graph_requests.lock().unwrap().len();
+        let calls = fixture.count();
+        let mut pool = graph_pool(POOL, 1);
+        if let Some(usage) = usage {
+            pool["sessionUsage"] = usage;
+        } else {
+            pool.as_object_mut().unwrap().remove("sessionUsage");
+        }
+        fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
+        fixture.graph_reply(200, pool);
+        let error = invoke(&automatic, true).unwrap_err();
+        assert_eq!(error.details.unwrap()["code"], "graph_response");
+        assert_eq!(
+            fixture.count(),
+            calls,
+            "invalid capacity must not reach checkout"
+        );
+        assert_eq!(
+            fixture.graph_requests.lock().unwrap().len(),
+            graphs + 2,
+            "invalid discovery metadata must not be skipped",
+        );
+    }
+    let graphs = fixture.graph_requests.lock().unwrap().len();
+    let calls = fixture.count();
+    fixture.graph_reply(200, json!({"value":[{"id":B},{"id":POOL}]}));
+    fixture.graph_reply(200, graph_pool(B, 1));
+    fixture.reply(
+        200,
+        &json!({
+            "sessionId":c,"status":"Succeeded","computerUrl":computer_url(c)
+        })
+        .to_string(),
+    );
+    let selected = invoke(&automatic, true).unwrap();
+    assert_eq!(selected["result"]["sandboxId"], format!("w365:{B}:{c}"));
+    let selected_record: Value =
+        serde_json::from_slice(&std::fs::read(env.record_for_pool(B, c)).unwrap()).unwrap();
+    assert_eq!(selected_record["poolId"], B);
+    assert_eq!(selected_record["controlPlaneSource"], "graph");
+    assert_eq!(fixture.count(), calls + 1);
+    assert!(fixture
+        .request(calls)
+        .starts_with(&format!("POST /api/pools/{B}/sessions?api-version=3.0 ")));
+    assert_eq!(fixture.graph_requests.lock().unwrap().len(), graphs + 2);
+    assert!(
+        fixture.graph_requests.lock().unwrap()[graphs + 1].starts_with(&format!(
+            "GET /beta/deviceManagement/virtualEndpoint/cloudPcPools/{B} "
+        ))
+    );
+
     let graphs = fixture.graph_requests.lock().unwrap().len();
     let calls = fixture.count();
     fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
     for pool in [POOL, B] {
-        fixture.graph_reply(
-            200,
-            json!({"id":pool,"poolUrl":"https://localhost/sessions"}),
-        );
+        fixture.graph_reply(200, graph_pool(pool, 1));
     }
     fixture.reply(403, "{}");
     fixture.reply(
@@ -1528,11 +1694,6 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     let selected = invoke(&automatic, true).unwrap();
     assert_eq!(selected["result"]["sandboxId"], format!("w365:{B}:{c}"));
-    let selected_record = env.record_for_pool(B, c);
-    let selected_record: Value =
-        serde_json::from_slice(&std::fs::read(selected_record).unwrap()).unwrap();
-    assert_eq!(selected_record["poolId"], B);
-    assert_eq!(selected_record["controlPlaneSource"], "graph");
     assert_eq!(fixture.count(), calls + 2);
     for (offset, pool) in [POOL, B].into_iter().enumerate() {
         assert!(fixture
@@ -1543,10 +1704,7 @@ fn lifecycle_contract_and_recovery_fixture() {
 
     fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
     for pool in [POOL, B] {
-        fixture.graph_reply(
-            200,
-            json!({"id":pool,"poolUrl":"https://localhost/sessions"}),
-        );
+        fixture.graph_reply(200, graph_pool(pool, 1));
         fixture.reply(429, "{}");
     }
     let error = invoke(&automatic, true).unwrap_err();
@@ -1578,10 +1736,7 @@ fn lifecycle_contract_and_recovery_fixture() {
         let graphs = fixture.graph_requests.lock().unwrap().len();
         let calls = fixture.count();
         fixture.graph_reply(200, json!({"value":[{"id":POOL},{"id":B}]}));
-        fixture.graph_reply(
-            200,
-            json!({"id":POOL,"poolUrl":"https://localhost/sessions"}),
-        );
+        fixture.graph_reply(200, graph_pool(POOL, 1));
         fixture.reply(status, &response.to_string());
         if write_failure {
             env.set("MXC_W365_TEST_STATE_WRITE_FAIL", "1");
@@ -1619,7 +1774,6 @@ fn lifecycle_contract_and_recovery_fixture() {
     }
     let graphs = fixture.graph_requests.lock().unwrap().len();
     std::env::remove_var("W365A_GRAPH_TOKEN");
-    env.set("W365A_CONTROLPLANE_URL", "must-not-use.invalid");
     env.set("W365A_DP_SUFFIX", "must-not-use.invalid");
     env.set("W365A_DP_TOKEN", "separate-routing-fixture-token");
     fixture.reply(200, r#"{"status":"Ready"}"#);

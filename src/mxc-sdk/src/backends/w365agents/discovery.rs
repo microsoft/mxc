@@ -43,7 +43,9 @@ pub(super) fn validate() -> Result<(), MxcError> {
     service::read_token("W365A_CP_TOKEN").map(|_| ())
 }
 
-pub(super) fn control_plane(pool_id: &str) -> Result<(service::Client, &'static str), MxcError> {
+pub(super) fn control_plane(
+    pool_id: &str,
+) -> Result<Option<(service::Client, Url, &'static str)>, MxcError> {
     service::with_transport_stack(|| pool_resource(pool_id))
 }
 
@@ -69,19 +71,11 @@ fn get(client: &service::Client, url: &Url, deadline: Instant) -> Result<Value, 
         .get(&target)
         .header("Authorization", format!("Bearer {}", client.token))
         .call()
-        .map_err(|_| {
-            routing::error(
-                "graph_transport",
-                "Graph request failed; no CP fallback attempted",
-            )
-        })?;
+        .map_err(|_| routing::error("graph_transport", "Graph request failed"))?;
     if response.status().as_u16() != 200 {
         return Err(routing::error(
             "graph_http",
-            format!(
-                "Graph returned HTTP {}; no CP fallback attempted",
-                response.status().as_u16()
-            ),
+            format!("Graph returned HTTP {}", response.status().as_u16()),
         ));
     }
     let body = response
@@ -153,7 +147,7 @@ fn list_assigned_pools() -> Result<Vec<String>, MxcError> {
     Ok(pool_ids)
 }
 
-fn pool_resource(pool_id: &str) -> Result<(service::Client, &'static str), MxcError> {
+fn pool_resource(pool_id: &str) -> Result<Option<(service::Client, Url, &'static str)>, MxcError> {
     let (client, origin) = configuration()?;
     let deadline = Instant::now() + service::transport_budget(DISCOVERY_BUDGET)?;
     let resource = origin
@@ -172,35 +166,34 @@ fn pool_resource(pool_id: &str) -> Result<(service::Client, &'static str), MxcEr
             "Graph pool resource does not match the selected pool ID",
         ));
     }
-    let host = match pool.get("poolUrl") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) if value.is_empty() => None,
-        Some(Value::String(value)) => {
-            let url = routing::validate_url(value)?;
-            let host = url
-                .host_str()
-                .ok_or_else(|| routing::error("invalid_pool_url", "missing pool host"))?;
-            if url.path() != "/sessions"
-                || url.query().is_some()
-                || !routing::service_host(host, "sessionmanagement", None)
-            {
-                return Err(routing::error(
-                    "invalid_pool_url",
-                    "poolUrl is not a supported session-management URL",
-                ));
-            }
-            Some(host.to_owned())
-        }
-        _ => {
-            return Err(routing::error(
+    let available_sessions = pool
+        .get("sessionUsage")
+        .and_then(|usage| usage.get("availableSessionsCount"))
+        .and_then(Value::as_i64)
+        .and_then(|count| i32::try_from(count).ok())
+        .ok_or_else(|| {
+            routing::error(
                 "graph_response",
-                "poolUrl has an invalid type",
-            ))
-        }
-    };
-    if let Some(host) = host {
-        Ok((service::Client::for_host(host, "W365A_CP_TOKEN")?, "graph"))
-    } else {
-        Ok((service::Client::from_env()?, "environment"))
+                "Graph pool resource requires sessionUsage.availableSessionsCount as an Int32",
+            )
+        })?;
+    if available_sessions <= 0 {
+        return Ok(None);
     }
+    let value = pool
+        .get("poolUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            routing::error("invalid_pool_url", "Graph pool resource requires poolUrl")
+        })?;
+    let url = routing::validate_url(value)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| routing::error("invalid_pool_url", "missing pool host"))?;
+    Ok(Some((
+        service::Client::for_host(host.to_owned(), "W365A_CP_TOKEN")?,
+        url,
+        "graph",
+    )))
 }

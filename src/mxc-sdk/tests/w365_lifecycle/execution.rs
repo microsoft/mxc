@@ -1371,7 +1371,6 @@ fn execution_fresh_executor_fixture() {
             "{}",
             String::from_utf8_lossy(&result.stdout)
         );
-        std::env::remove_var("W365A_CONTROLPLANE_URL");
         std::env::remove_var("W365A_DP_SUFFIX");
         std::env::remove_var("W365A_GRAPH_TOKEN");
         env.set("W365A_DP_TOKEN", "synthetic-data-plane-token");
@@ -1384,7 +1383,6 @@ fn execution_fresh_executor_fixture() {
         );
     }
     let fixture = ExecFixture::new(&env);
-    std::env::remove_var("W365A_CONTROLPLANE_URL");
     std::env::remove_var("W365A_DP_SUFFIX");
     fixture.script(|stream| {
         started(stream);
@@ -1669,7 +1667,6 @@ fn execution_fresh_executor_fixture() {
     }
     let control = Fixture::new();
     control.configure(&env);
-    std::env::remove_var("W365A_CONTROLPLANE_URL");
     control.reply(204, "");
     let result = lifecycle("deprovision");
     assert!(

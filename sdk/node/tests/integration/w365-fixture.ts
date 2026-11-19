@@ -32,7 +32,7 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
     const certificate = join(directory, 'certificate.pem');
     const key = join(directory, 'key.pem');
     const config = join(directory, 'openssl.cnf');
-    const keys = ['W365A_CONTROLPLANE_URL', 'W365A_CP_TOKEN',
+    const keys = ['W365A_CP_TOKEN',
       'W365A_DP_SUFFIX', 'W365A_DP_TOKEN',
       'W365A_GRAPH_TOKEN', 'W365A_GRAPH_ENVIRONMENT',
       'MXC_W365_TEST_STATE_ROOT', 'MXC_W365_TEST_GRAPH_LOCALHOST',
@@ -102,7 +102,9 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
             assert.equal(incoming.headers.authorization, 'Bearer synthetic-graph-token');
             response.writeHead(200, { Connection: 'close' });
             response.end(incoming.url === '/beta/me/cloudPcPools'
-              ? JSON.stringify({ value: [{ id: pool }] }) : JSON.stringify({ id: pool }));
+              ? JSON.stringify({ value: [{ id: pool }] })
+              : JSON.stringify({ id: pool, poolUrl: `https://localhost/api/pools/${pool}/sessions`,
+                sessionUsage: { availableSessionsCount: 1 } }));
             return;
           }
           requests.push({
@@ -173,7 +175,6 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       await once(server, 'listening');
       const address = server.address();
       assert.ok(address && typeof address !== 'string');
-      process.env.W365A_CONTROLPLANE_URL = 'localhost';
       process.env.W365A_CP_TOKEN = 'fixture-token';
       process.env.W365A_DP_SUFFIX = 'localhost';
       process.env.W365A_DP_TOKEN = 'synthetic-data-plane-token';

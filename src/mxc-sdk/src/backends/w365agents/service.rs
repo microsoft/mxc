@@ -7,6 +7,7 @@ use crate::mxc_common::mxc_error::MxcError;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use url::{Position, Url};
 
 const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(45);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -142,27 +143,6 @@ pub(super) struct Client {
 }
 
 impl Client {
-    pub(super) fn from_env() -> Result<Self, MxcError> {
-        Self::from_env_keys("W365A_CONTROLPLANE_URL", "W365A_CP_TOKEN")
-    }
-
-    pub(super) fn from_env_keys(host_key: &str, token_key: &str) -> Result<Self, MxcError> {
-        let read = |name: &str| {
-            std::env::var(name).map_err(|_| {
-                MxcError::policy_validation(format!(
-                    "w365_agents requires {name} in the caller environment"
-                ))
-            })
-        };
-        let host = read(host_key)?;
-        if !valid_host(&host) {
-            return Err(MxcError::policy_validation(format!(
-                "{host_key} must be a bare ASCII DNS hostname (no URL, port or path)"
-            )));
-        }
-        Self::for_host(host, token_key)
-    }
-
     pub(super) fn for_host(host: String, token_key: &str) -> Result<Self, MxcError> {
         if !valid_host(&host) {
             return Err(MxcError::policy_validation("invalid W365 service hostname"));
@@ -204,9 +184,10 @@ impl Client {
         &self,
         pool_id: &str,
         config: &W365AgentsProvisionConfig,
+        url: &Url,
         source: &str,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
-        with_transport_stack(|| self.checkout_once(pool_id, config, source)).map_err(|mut error| {
+        with_transport_stack(|| self.checkout_once(pool_id, config, url, source)).map_err(|mut error| {
             if let Some(details) = error.details.as_mut() {
                 details["poolId"] = json!(pool_id.to_ascii_lowercase());
                 details["controlPlaneHost"] = json!(self.host);
@@ -230,9 +211,12 @@ impl Client {
         &self,
         pool_id: &str,
         config: &W365AgentsProvisionConfig,
+        url: &Url,
         source: &str,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
         let pool = pool_id.to_ascii_lowercase();
+        let mut url = url.clone();
+        url.query_pairs_mut().append_pair("api-version", "3.0");
         let request_id = uuid::Uuid::new_v4().to_string();
         let deadline = Instant::now() + CHECKOUT_TIMEOUT.min(transport_budget(CHECKOUT_TIMEOUT)?);
         let mut identity: Option<Identity> = None;
@@ -263,9 +247,9 @@ impl Client {
                 ));
             }
             let (agent, base) = self.agent(remaining)?;
-            let url = format!("{base}/api/pools/{pool}/sessions?api-version=3.0");
+            let target = format!("{base}{}", &url[Position::BeforePath..]);
             let mut request = agent
-                .post(&url)
+                .post(&target)
                 .header("Authorization", format!("Bearer {}", self.token))
                 .header("x-ms-client-request-id", &request_id)
                 .header("Content-Type", "application/json");
