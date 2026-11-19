@@ -6,6 +6,10 @@
 //! `log stream` only shows events logged after it attaches, so the collector
 //! triggers a tagged marker deny and waits to see it before the workload
 //! starts, and again after the workload exits to drain late events.
+//!
+//! `log stream --style ndjson` silently drops reports when it falls behind,
+//! so after the drain the collector counts the run's reports with `log show`
+//! and marks the capture truncated if the stream delivered fewer.
 
 use std::ffi::CString;
 use std::fs::File;
@@ -36,6 +40,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_RETRY: Duration = Duration::from_millis(250);
 const PROBE_POLL: Duration = Duration::from_millis(5);
+const STORE_COUNT_TIMEOUT: Duration = Duration::from_secs(60);
+// Widens the `log show` window so clock rounding can't cut off early reports.
+const STORE_COUNT_MARGIN: Duration = Duration::from_secs(2);
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: u64 = 4 * 1024;
 pub(crate) const MAX_TRACE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -47,6 +54,9 @@ pub(crate) struct CollectedEvents {
     lines_skipped: bool,
     /// False when the closing marker was not seen, so late events may be missing.
     pub(crate) drained: bool,
+    /// The log store has reports that `log stream` did not deliver, or could
+    /// not be checked.
+    events_dropped: bool,
     /// Why the trace file stopped being written, if it did.
     pub(crate) trace_error: Option<String>,
     /// The trace reached `MAX_TRACE_BYTES` and later lines were not written.
@@ -55,13 +65,16 @@ pub(crate) struct CollectedEvents {
 
 impl CollectedEvents {
     pub(crate) fn into_analysis(self) -> CaptureAnalysis {
-        self.analyzer.finish(self.lines_skipped || !self.drained)
+        self.analyzer
+            .finish(self.lines_skipped || !self.drained || self.events_dropped)
     }
 }
 
 #[derive(Default)]
 struct State {
     analyzer: CaptureAnalyzer,
+    /// Tagged reports delivered by the stream, markers excluded.
+    events_streamed: u64,
     lines_skipped: bool,
     trace_error: Option<String>,
     trace_truncated: bool,
@@ -96,6 +109,7 @@ impl Shared {
 /// A running `log stream` filtered to one run's capture tag.
 pub(crate) struct DenialCollector {
     tag: String,
+    started: Instant,
     child: Option<Child>,
     stdout_reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<String>>,
@@ -114,6 +128,7 @@ impl DenialCollector {
     /// Starts `log stream` and returns once it is confirmed to be receiving
     /// this run's tagged Seatbelt reports. Raw lines are copied to `trace`.
     pub(crate) fn start(tag: &str, trace: Option<File>) -> Result<Self, String> {
+        let started = Instant::now();
         let mut child = Command::new(WATCHDOG_SHELL)
             .args(["-c", WATCHDOG_SCRIPT, "sh"])
             .args(log_command(tag))
@@ -151,6 +166,7 @@ impl DenialCollector {
 
         let mut collector = Self {
             tag: tag.to_string(),
+            started,
             child: Some(child),
             stdout_reader: Some(stdout_reader),
             stderr_reader: Some(stderr_reader),
@@ -182,11 +198,21 @@ impl DenialCollector {
         let drained = self.wait_for_marker(CaptureMarker::Done, marker_timeout(DRAIN_TIMEOUT));
         let stderr = self.stop();
         let drained = drained.map_err(|error| with_log_stderr(error, &stderr))?;
+        let (events_streamed, lines_skipped) = {
+            let state = self.shared.lock();
+            (state.events_streamed, state.lines_skipped)
+        };
+        // Already marked truncated otherwise, so skip the extra `log show`.
+        let events_dropped = drained
+            && !lines_skipped
+            && count_stored_events(&self.tag, self.started.elapsed())
+                .is_none_or(|stored| stored > events_streamed);
         let mut state = self.shared.lock();
         Ok(CollectedEvents {
             analyzer: std::mem::take(&mut state.analyzer),
-            lines_skipped: state.lines_skipped,
+            lines_skipped,
             drained,
+            events_dropped,
             trace_error: state.trace_error.take(),
             trace_truncated: state.trace_truncated,
         })
@@ -263,18 +289,13 @@ fn read_stream(
     let mut line = Vec::new();
     let mut trace_bytes = 0u64;
     loop {
-        line.clear();
-        let limit = MAX_LINE_BYTES as u64 + 1;
-        match (&mut reader).take(limit).read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        if line.len() > MAX_LINE_BYTES {
-            if !line.ends_with(b"\n") && skip_line(&mut reader).is_err() {
-                break;
+        match read_line_bounded(&mut reader, &mut line) {
+            None => break,
+            Some(false) => {
+                shared.lock().lines_skipped = true;
+                continue;
             }
-            shared.lock().lines_skipped = true;
-            continue;
+            Some(true) => {}
         }
         if let Some(writer) = trace.as_mut() {
             let line_bytes = line.len() as u64 + u64::from(!line.ends_with(b"\n"));
@@ -297,7 +318,10 @@ fn read_stream(
         match parsed {
             StreamLine::Marker(CaptureMarker::Ready) => state.ready = true,
             StreamLine::Marker(CaptureMarker::Done) => state.done = true,
-            StreamLine::Event(event) => state.analyzer.add(&event),
+            StreamLine::Event(event) => {
+                state.events_streamed += 1;
+                state.analyzer.add(&event);
+            }
             StreamLine::Ignored => continue,
         }
         shared.changed.notify_all();
@@ -307,6 +331,24 @@ fn read_stream(
     }
     shared.lock().ended = true;
     shared.changed.notify_all();
+}
+
+/// Reads the next line into `line`. Returns `None` at the end of the stream
+/// and `Some(false)` for a line over `MAX_LINE_BYTES`, which is skipped.
+fn read_line_bounded(reader: &mut impl BufRead, line: &mut Vec<u8>) -> Option<bool> {
+    line.clear();
+    let limit = MAX_LINE_BYTES as u64 + 1;
+    match reader.take(limit).read_until(b'\n', line) {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    if line.len() <= MAX_LINE_BYTES {
+        return Some(true);
+    }
+    if !line.ends_with(b"\n") && skip_line(reader).is_err() {
+        return None;
+    }
+    Some(false)
 }
 
 fn write_trace_line(writer: &mut impl Write, line: &[u8]) -> std::io::Result<()> {
@@ -365,6 +407,53 @@ fn emit_marker(tag: &str, marker: CaptureMarker, deadline: Instant) -> Result<()
     }
 }
 
+/// Counts the run's tagged reports in the log store, up to the first done
+/// marker. `None` means `log show` failed or timed out.
+fn count_stored_events(tag: &str, elapsed: Duration) -> Option<u64> {
+    let window = (elapsed + STORE_COUNT_MARGIN).as_secs() + 1;
+    let mut command = show_command(tag, window);
+    let mut show = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = show.stdout.take().expect("stdout is piped");
+    let tag = tag.to_string();
+    let counter = std::thread::spawn(move || count_events_until_done(BufReader::new(stdout), &tag));
+    let deadline = Instant::now() + store_count_timeout();
+    while !counter.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(PROBE_POLL);
+    }
+    if !counter.is_finished() {
+        let _ = show.kill();
+    }
+    let (count, saw_done) = counter.join().ok()?;
+    if saw_done {
+        // Nothing after the done marker counts.
+        let _ = show.kill();
+        let _ = show.wait();
+        return Some(count);
+    }
+    show.wait().ok()?.success().then_some(count)
+}
+
+fn count_events_until_done(mut reader: impl BufRead, tag: &str) -> (u64, bool) {
+    let mut line = Vec::new();
+    let mut count = 0;
+    while let Some(complete) = read_line_bounded(&mut reader, &mut line) {
+        if !complete {
+            continue;
+        }
+        match parse_stream_line(&String::from_utf8_lossy(&line), tag) {
+            StreamLine::Event(_) => count += 1,
+            StreamLine::Marker(CaptureMarker::Done) => return (count, true),
+            StreamLine::Marker(CaptureMarker::Ready) | StreamLine::Ignored => {}
+        }
+    }
+    (count, false)
+}
+
 fn log_command(tag: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(command) = test_tools::get().log {
@@ -375,6 +464,29 @@ fn log_command(tag: &str) -> Vec<String> {
         .map(str::to_string)
         .chain([stream_predicate(tag)])
         .collect()
+}
+
+fn show_command(tag: &str, window_secs: u64) -> Command {
+    #[cfg(test)]
+    if let Some(command) = test_tools::get().show {
+        let mut show = Command::new(&command[0]);
+        show.args(&command[1..]);
+        return show;
+    }
+    let mut show = Command::new(LOG_TOOL);
+    show.args(["show", "--style", "ndjson", "--last"])
+        .arg(format!("{window_secs}s"))
+        .arg("--predicate")
+        .arg(stream_predicate(tag));
+    show
+}
+
+fn store_count_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = test_tools::get().timeout {
+        return timeout;
+    }
+    STORE_COUNT_TIMEOUT
 }
 
 fn marker_command() -> Command {
@@ -407,6 +519,8 @@ pub(crate) mod test_tools {
     pub(crate) struct TestTools {
         /// Replaces `log stream` and its arguments.
         pub(crate) log: Option<Vec<String>>,
+        /// Replaces `log show` and its arguments.
+        pub(crate) show: Option<Vec<String>>,
         /// Replaces the marker probe and its arguments.
         pub(crate) marker: Option<Vec<String>>,
         /// Replaces both the readiness and drain timeouts.
@@ -633,13 +747,52 @@ mod tests {
         assert!(!collected.drained);
     }
 
+    fn show_tools(script: &str) -> test_tools::TestTools {
+        test_tools::TestTools {
+            show: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script.to_string(),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    fn ndjson(message: &str) -> String {
+        serde_json::json!({ "eventMessage": message }).to_string()
+    }
+
     #[test]
-    fn collector_sees_tagged_deny_and_drains() {
-        let tag = "mxc-capture-collectortest";
-        let collector = match DenialCollector::start(tag, None) {
-            Ok(collector) => collector,
-            Err(error) => panic!("log stream unavailable on this host: {error}"),
-        };
+    fn store_count_stops_at_done_and_fails_closed() {
+        let tag = "mxc-capture-storecount";
+        let report = ndjson(&format!("Sandbox: cat(7) deny(1) file-read-data /x\n{tag}"));
+        let ready = ndjson(&format!(
+            "Sandbox: ls(8) deny(1) /private/var/empty\n{tag}:ready"
+        ));
+        let done = ndjson(&format!(
+            "Sandbox: ls(8) deny(1) /private/var/empty\n{tag}:done"
+        ));
+        let output = format!("Filtering\n{ready}\n{report}\n{report}\n{done}\n{report}\n");
+
+        test_tools::set(show_tools(&format!("printf '%s' '{output}'")));
+        assert_eq!(count_stored_events(tag, Duration::ZERO), Some(2));
+
+        test_tools::set(show_tools(&format!("printf '%s\\n' '{report}'")));
+        assert_eq!(count_stored_events(tag, Duration::ZERO), Some(1));
+
+        test_tools::set(show_tools(&format!("printf '%s' '{report}'; exit 1")));
+        assert_eq!(count_stored_events(tag, Duration::ZERO), None);
+
+        test_tools::set(test_tools::TestTools {
+            timeout: Some(Duration::from_secs(1)),
+            ..show_tools("exec /bin/sleep 60")
+        });
+        let started = Instant::now();
+        assert_eq!(count_stored_events(tag, Duration::ZERO), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    fn deny_hosts_read(tag: &str) {
         let profile = format!(
             r#"(version 1)(allow default)(deny file-read-data (with message "{tag}") (literal "/private/etc/hosts"))"#
         );
@@ -650,10 +803,41 @@ mod tests {
             .stderr(Stdio::null());
         apply_profile_before_exec(&mut command, CString::new(profile).unwrap());
         assert!(!command.status().unwrap().success());
+    }
+
+    #[test]
+    fn reports_missing_from_the_stream_mark_the_capture_truncated() {
+        let tag = "mxc-capture-droptest";
+        let collector = DenialCollector::start(tag, None)
+            .unwrap_or_else(|error| panic!("log stream unavailable on this host: {error}"));
+        deny_hosts_read(tag);
+        let report = ndjson(&format!(
+            "Sandbox: cat(7) deny(1) file-read-data /private/etc/hosts\n{tag}"
+        ));
+        test_tools::set(show_tools(&format!("printf '%s\\n' '{report}' '{report}'")));
+
+        let collected = collector.finish().unwrap();
+
+        assert!(collected.drained);
+        let analysis = collected.into_analysis();
+        assert!(analysis.denied_resources_truncated);
+        assert!(analysis.network_verbose_logging.processed_events_truncated);
+    }
+
+    #[test]
+    fn collector_sees_tagged_deny_and_drains() {
+        let tag = "mxc-capture-collectortest";
+        let collector = match DenialCollector::start(tag, None) {
+            Ok(collector) => collector,
+            Err(error) => panic!("log stream unavailable on this host: {error}"),
+        };
+        deny_hosts_read(tag);
 
         let collected = collector.finish().unwrap();
         assert!(collected.drained);
-        let denials = collected.into_analysis().denials;
+        let analysis = collected.into_analysis();
+        assert!(!analysis.denied_resources_truncated, "nothing was dropped");
+        let denials = analysis.denials;
         assert!(
             denials
                 .iter()

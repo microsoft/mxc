@@ -350,7 +350,8 @@ done
 # 11,000 denials of ~1 KB paths (10 files read 1,100 times each), then one new
 # denial. Repeats are counted as they arrive, so even more repeats than the
 # 10,000-denial limit may not push out the late denial or mark the report
-# truncated.
+# truncated. `log stream` drops a few reports from this burst on some runs;
+# the report is then marked truncated for that reason only.
 LONGDIR="$TESTDIR/ungranted/$(/usr/bin/python3 -c 'print("/".join(["d" * 200] * 4))')"
 mkdir -p "$LONGDIR"
 for name in f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 late; do echo x >"$LONGDIR/$name"; done
@@ -358,24 +359,33 @@ chmod -R a+rX "$TESTDIR/ungranted"
 run_config "$(render seatbelt_capture_denials_repeats.json LONGDIR "$LONGDIR" OUTPUT "$TESTDIR/out/repeats.json")"
 expect_ok "a run with heavy repeated denials completes" "CAPTURE_REPEAT_LOOP_DONE"
 read_pointer "a run with heavy repeated denials writes a report"
-[ "$(pointer_field deniedResourcesTruncated)" = False ] ||
-    fail "repeated denials marked the report truncated" "$POINTER"
-pass "repeated denials don't mark the report truncated"
 expect_listed "a repeated denial is listed" file "$LONGDIR/f9" read
-expect_listed "a denial after heavy repeats is still listed" file "$LONGDIR/late" read
-/usr/bin/python3 - "${REPORT%.json}.verbose.json" <<'EOF' || fail "repeated denials were not all counted" "$(head -c 2000 "${REPORT%.json}.verbose.json")"
+DROPPED="$(/usr/bin/python3 - "${REPORT%.json}.verbose.json" <<'EOF'
 import json, sys
 summary = json.load(open(sys.argv[1]))["summary"]
-assert not summary["processedEventsTruncated"], summary
+assert not summary["actionableLimitReached"], summary
 assert summary["totalOccurrences"] > 10000, summary
+print(summary["processedEventsTruncated"])
 EOF
+)" || fail "repeated denials were not all counted" "$(head -c 2000 "${REPORT%.json}.verbose.json")"
 pass "repeated denials are counted past the 10,000-denial limit"
+if [ "$DROPPED" = True ]; then
+    [ "$(pointer_field deniedResourcesTruncated)" = True ] ||
+        fail "a report missing dropped reports is not marked truncated" "$POINTER"
+    pass "log stream dropped reports, so the report is marked truncated"
+else
+    [ "$(pointer_field deniedResourcesTruncated)" = False ] ||
+        fail "repeated denials marked the report truncated" "$POINTER"
+    pass "repeated denials don't mark the report truncated"
+    expect_listed "a denial after heavy repeats is still listed" file "$LONGDIR/late" read
+fi
 rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- different-denial limit ---------------------------------------------------
 
-# 15,000 different denials; the margin covers reports `log stream` drops under
-# load. The report keeps the first 10,000, and the run still finishes cleanly.
+# 15,000 different denials. The report keeps the first 10,000, and the run still
+# finishes cleanly. `log stream` can drop reports under load; MXC then marks the
+# report truncated even if fewer than 10,000 arrived.
 MANYDIR="$TESTDIR/ungranted/many"
 mkdir -p "$MANYDIR"
 /usr/bin/python3 - "$MANYDIR" <<'EOF' || fail "could not create the limit test files"
@@ -398,10 +408,14 @@ pass "a report at the different-denial limit is marked truncated"
 /usr/bin/python3 - "$REPORT" "${REPORT%.json}.verbose.json" <<'EOF' || fail "the different-denial limit was not applied" "$POINTER"
 import json, sys
 report, verbose = (json.load(open(path)) for path in sys.argv[1:])
-assert len(report["denials"]) == 10000, len(report["denials"])
-assert verbose["summary"]["actionableLimitReached"], verbose["summary"]
+summary = verbose["summary"]
+if summary["processedEventsTruncated"]:
+    assert len(report["denials"]) <= 10000, len(report["denials"])
+else:
+    assert len(report["denials"]) == 10000, len(report["denials"])
+    assert summary["actionableLimitReached"], summary
 EOF
-pass "the report stops at 10,000 different denials"
+pass "the report stops at 10,000 different denials, or is marked truncated when reports were dropped"
 expect_collector_gone "a run past the different-denial limit stops its log stream" "$COLLECTOR"
 rm -rf "$MANYDIR" "$REPORT" "${REPORT%.json}.verbose.json"
 

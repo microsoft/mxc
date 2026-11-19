@@ -476,9 +476,15 @@ adds a warning; the report and verbose file are not affected.
   marked truncated. macOS limits each report to about 1 KB. The access is
   still blocked in `block` mode and allowed in `allow` mode.
 
-- MXC reads the reports with `log stream`. If it can't collect every report
-  before the workload exits, the verbose file sets `processedEventsTruncated`
-  to `true`. Accounts that can't run `log stream` haven't been tested.
+- MXC reads the reports live with `log stream`, so it can confirm it can see
+  them before the workload starts. When a workload triggers thousands of
+  denials at once, `log stream` can drop reports without saying so. To catch
+  this, MXC counts the run's reports in the system log with `log show` after
+  the run, which adds about a second. If any reports are missing, if the
+  count fails, or if MXC can't collect every report before the workload
+  exits, the report is marked truncated and the verbose file sets
+  `processedEventsTruncated` to `true`. Accounts that can't run `log stream`
+  haven't been tested.
 
 ## Process environment
 
