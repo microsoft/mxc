@@ -208,9 +208,9 @@ function Invoke-WxcRequest {
             try { $p.Kill() } catch {}
             [void]$p.WaitForExit(10000)
         }
-        $p.WaitForExit()
-        $out = $so.Result + $se.Result
-        $code = $p.ExitCode
+        # Bounded: a failed kill or a child holding the pipes open must not hang the pass.
+        $code = if ($p.HasExited) { $p.ExitCode } else { $null }
+        $out = (@($so, $se) | ForEach-Object { if ($_.Wait(10000)) { $_.Result } }) -join ''
     } finally {
         Remove-Item -Path $dir -Recurse -Force -ErrorAction Ignore
     }
@@ -655,7 +655,7 @@ $counted = $pass + $fail
 if ($fail -gt 0) { Write-Host "$pass/$counted passed, $fail FAILED ($unsup unsupported, $gap known gaps):" }
 else { Write-Host "$pass/$counted passed, $unsup unsupported, $gap known gaps" }
 if ($ResultsPath) {
-    $Rows | ConvertTo-Json -Depth 4 | Set-Content -Path $ResultsPath -Encoding ascii
+    ConvertTo-Json -InputObject @($Rows) -Depth 4 | Set-Content -Path $ResultsPath -Encoding ascii
     Write-Host "Results: $ResultsPath" -ForegroundColor Gray
 }
 if ($fail -gt 0) { exit 1 }
