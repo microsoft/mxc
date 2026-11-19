@@ -678,6 +678,58 @@ Invoke-WslcMappedRun "wslc_network_egress_port_mapping_network_proxy.json" ([ord
         PROXY_ENV = "http://one\.one\.one\.one:8080"; RESOLVED = "10\.231\.1\.254"; VIA_PROXY = "[1-5]\d\d"; DIRECT = "BLOCKED"
     })
 
+# A Windows 127.0.0.1 server answering every connection with an HTTP 200.
+$HostLoopbackPort = 18890
+$hostLoopbackServer = Start-Job -ArgumentList $HostLoopbackPort -ScriptBlock {
+    param($Port)
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+    $listener.Start()
+    $reply = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+    $buffer = [byte[]]::new(4096)
+    while ($true) {
+        $client = $listener.AcceptTcpClient()
+        try {
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 2000
+            try { $null = $stream.Read($buffer, 0, $buffer.Length) } catch {}
+            $stream.Write($reply, 0, $reply.Length)
+            $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        } catch {
+        } finally {
+            $client.Dispose()
+        }
+    }
+}
+$deadline = (Get-Date).AddSeconds(30)
+while (-not (Test-WslcTcpConnect "127.0.0.1" $HostLoopbackPort) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+try {
+    # host.wslc.internal reaches the server directly and through the proxy;
+    # the workload's own loopback stays denied.
+    $null = $results.Add((Run-WslcTest "wslc_network_egress_host_loopback.json" -ForceDebug -OutputNotContains $NotClean `
+        -OutputContains "Session reaches Windows loopback as host.wslc.internal", $Clean `
+        -Probes ([ordered]@{
+            NO_PROXY = "host\.wslc\.internal"; HOST_DNS = "10\.231\.1\.3"; HOST_DIRECT = "200"; HOST_VIA_PROXY = "200"
+            LOOPBACK = "403"; ALLOWED = "200"; DENIED = "403"; DIRECT = "BLOCKED"
+        })))
+    Invoke-WslcMappedRun "wslc_network_egress_port_mapping_host_loopback.json" ([ordered]@{ 18091 = 8091 }) `
+        -Probes ([ordered]@{ HOST_DIRECT = "200"; DIRECT = "BLOCKED" })
+    # A custom proxy on Windows 127.0.0.1 doesn't expose host.wslc.internal.
+    $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_loopback.json" -ForceDebug -OutputNotContains $NotClean `
+        -OutputContains "Built-in proxy ready at http://10.231.1.254:18890/", $Clean `
+        -Probes ([ordered]@{
+            PROXY_ENV = "http://10\.231\.1\.254:18890/"; VIA_PROXY = "200"; HOST_DNS = "REFUSED"; DIRECT = "BLOCKED"
+        })))
+    # Bridged containers reach it without the built-in proxy.
+    $null = $results.Add((Run-WslcTest "wslc_network_bridged.json" -As "wslc_network_bridged.json (host loopback)" `
+        -OutputContains "NET_EGRESS_REACHED", "NET_HOST_LOOPBACK=200"))
+    $null = $results.Add((Run-WslcTest "wslc_network_bridged_host_loopback_denied.json" -ForceDebug `
+        -OutputContains "NET_EGRESS_REACHED", "NET_HOST_LOOPBACK=ERROR" `
+        -OutputNotContains "Built-in proxy ready", "reaches Windows loopback"))
+} finally {
+    Stop-Job $hostLoopbackServer
+    Remove-Job $hostLoopbackServer
+}
+
 # Rejected before any container is created.
 $egressRejections = [ordered]@{
     "allow_udp"           = "network.egress.allow supports only protocol 'tcp' (got 'udp')"
@@ -690,12 +742,10 @@ $egressRejections = [ordered]@{
     "network_proxy"       = "runtimeConfig.networkProxy cannot be combined with egress filtering"
     "network_proxy_egress_allow"  = "runtimeConfig.networkProxy with network.egress.default 'allow' requires bridged networking"
     "network_proxy_https_ip"      = "with an IP address or loopback host must use http://"
-    "network_proxy_loopback"      = "runtimeConfig.networkProxy on Windows loopback is not supported yet"
+    "network_proxy_loopback"      = "runtimeConfig.networkProxy on Windows loopback must use 127.0.0.1 or localhost"
     "network_proxy_unresolvable"  = "runtimeConfig.networkProxy host 'mxc-proxy.invalid' has no IPv4 address on Windows"
-    "rules_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
     "port_mapping_udp"           = "unknown variant ``udp``"
     "port_mapping_duplicate"     = "duplicate windowsPort 18087 for protocol 'tcp'"
-    "port_mapping_host_loopback" = "hostLoopback 'allow' cannot be combined with egress filtering"
 }
 foreach ($name in $egressRejections.Keys) {
     $null = $results.Add((Run-WslcTest "wslc_network_egress_$($name)_rejected.json" -ExpectedExit 1 `

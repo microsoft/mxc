@@ -50,6 +50,12 @@ pub const WSLC_E_NETWORK_NOT_FOUND: HRESULT = wslc_error(9);
 /// Administrative policy on this host forbids reaching the registry.
 pub const WSLC_E_REGISTRY_BLOCKED_BY_POLICY: HRESULT = wslc_error(13);
 
+/// Administrative policy on this host forbids adding container capabilities.
+pub const WSLC_E_CAPABILITY_ADDITIONS_DISABLED: HRESULT = wslc_error(20);
+
+/// The WSL runtime is older than a requested SDK feature.
+pub const WSLC_E_RUNTIME_UPDATE_NEEDED: HRESULT = wslc_error(21);
+
 // ---------------------------------------------------------------------------
 // Raw function-pointer types used by the RAII guards.
 //
@@ -201,6 +207,8 @@ impl WslcSdk {
             WslcListSessionNetworks,
             WslcSetContainerSettingsNetworks,
             WslcSetContainerSettingsCapabilityDrops,
+            WslcSetContainerSettingsCapabilityAdditions,
+            WslcSetSessionSettingsHostLoopback,
             WslcSetContainerSettingsName,
             WslcOpenContainer,
             WslcGetContainerID,

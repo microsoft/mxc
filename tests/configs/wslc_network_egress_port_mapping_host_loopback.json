@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-port-mapping-host-loopback",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "serve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho HOST_DIRECT=$(printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 10 host.wslc.internal 18890 | head -n1 | cut -d' ' -f2)\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8091 1"
+  },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "allow" }
+  },
+  "wslc": {
+    "image": "alpine:latest",
+    "portMappings": [{ "windowsPort": 18091, "containerPort": 8091, "protocol": "tcp" }]
+  }
+}

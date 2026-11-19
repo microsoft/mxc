@@ -115,6 +115,8 @@ const GATEWAY_EGRESS_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 2);
 const GATEWAY_WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 254);
 /// Pinned so the gateway knows where to relay port mappings.
 const WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 2);
+/// The address the workload reaches Windows loopback through.
+const HOST_LOOPBACK_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 3);
 const PROXY_PORT: u16 = 3128;
 const NODE_USE_ENV_PROXY: &str = "NODE_USE_ENV_PROXY";
 
@@ -141,6 +143,7 @@ pub(crate) struct Gateway {
     records: StoreRecords,
     names: ProxyNames,
     proxy_url: String,
+    host_loopback: bool,
     torn_down: AtomicBool,
 }
 
@@ -189,6 +192,7 @@ impl Gateway {
                     records,
                     names,
                     proxy_url,
+                    host_loopback: egress.host_loopback,
                     torn_down: AtomicBool::new(false),
                 })
             }
@@ -238,6 +242,22 @@ impl Gateway {
         if hr != S_OK {
             return Err(sdk_error("WslcSetContainerSettingsNetworks failed", hr, ""));
         }
+        // Only the host loopback relay changes the gateway's own network.
+        let net_admin = [c"NET_ADMIN".as_ptr()];
+        if policy.host_loopback.is_some() {
+            let hr = sdk.WslcSetContainerSettingsCapabilityAdditions(
+                &mut settings,
+                net_admin.as_ptr(),
+                net_admin.len() as u32,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsCapabilityAdditions failed",
+                    hr,
+                    "",
+                ));
+            }
+        }
         // Published ports reach only a container with a non-internal network,
         // so the gateway takes the workload's mappings and relays them.
         let mappings = container_steps::sdk_port_mappings(port_mappings);
@@ -277,6 +297,14 @@ impl Gateway {
         let mut container: WslcContainer = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateContainer(session, &settings, &mut container, err_msg.as_mut_ptr());
+        if hr == WSLC_E_CAPABILITY_ADDITIONS_DISABLED {
+            return Err(WslcError::Unavailable(
+                "WSLc: network.ingress.hostLoopback 'allow' needs the built-in proxy to add \
+                 NET_ADMIN, which the AllowWSLContainerPrivileged policy forbids on this host"
+                    .to_string(),
+            )
+            .into_response());
+        }
         if hr != S_OK {
             return Err(sdk_error(
                 "Could not create the built-in proxy's container",
@@ -366,12 +394,28 @@ impl Gateway {
 
     /// The workload's environment: the caller's, pointed at the proxy.
     pub(crate) fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
-        workload_env(caller_env, scope, &self.proxy_url)
+        workload_env(caller_env, scope, &self.proxy_url, self.host_loopback)
     }
 }
 
-fn workload_env(caller_env: &[String], scope: EnvScope, proxy_url: &str) -> Vec<String> {
+fn workload_env(
+    caller_env: &[String],
+    scope: EnvScope,
+    proxy_url: &str,
+    host_loopback: bool,
+) -> Vec<String> {
     let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, proxy_url);
+    // Windows loopback is reached directly; a custom proxy couldn't reach it.
+    if host_loopback {
+        for entry in env.iter_mut() {
+            if let Some(key) = proxy_env::PROXY_NEUTRALIZE_KEYS
+                .iter()
+                .find(|key| entry.strip_suffix('=') == Some(**key))
+            {
+                *entry = format!("{key}={}", gateway::HOST_LOOPBACK_NAME);
+            }
+        }
+    }
     // Node.js ignores HTTP(S)_PROXY unless this is set. It joins the default
     // environment, so a replacing request doesn't get it.
     if scope == EnvScope::Merge
@@ -427,6 +471,13 @@ fn relayed_custom_proxy(
                     format!("WSLc: runtimeConfig.networkProxy host '{name}' has no IPv4 address on Windows")
                 })?;
             let address = policy::relayed_proxy_address(ip).map_err(|e| e.message)?;
+            if address.is_none() {
+                return Err(format!(
+                    "WSLc: runtimeConfig.networkProxy host '{name}' resolves to Windows loopback; \
+                     use http://127.0.0.1:{} instead",
+                    custom.port
+                ));
+            }
             (Some(name.clone()), address)
         }
         CustomProxyHost::Address(address) => (None, *address),
@@ -443,6 +494,7 @@ fn render_policy(
     custom_proxy: Option<gateway::CustomProxy>,
     port_mappings: &[PortMapping],
 ) -> gateway::Policy {
+    let host_loopback = egress.host_loopback;
     let egress = egress.egress.clone();
     let mut relayed: Vec<gateway::PortMapping> = Vec::new();
     for mapping in port_mappings {
@@ -466,7 +518,10 @@ fn render_policy(
             || !egress.allow.is_empty()
             || custom_proxy.is_some(),
         egress,
-        host_loopback: None,
+        host_loopback: host_loopback.then_some(gateway::HostLoopback {
+            relay_address: HOST_LOOPBACK_RELAY_ADDRESS,
+            prefix_length: SUBNET_PREFIX_LENGTH,
+        }),
         custom_proxy,
         port_mappings: relayed,
     }
@@ -1023,6 +1078,7 @@ mod tests {
                 allow,
                 deny: Vec::new(),
             },
+            host_loopback: false,
             custom_proxy: None,
             warnings: Vec::new(),
         };
@@ -1069,6 +1125,7 @@ mod tests {
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
+            host_loopback: false,
             custom_proxy: None,
             warnings: Vec::new(),
         };
@@ -1149,6 +1206,7 @@ mod tests {
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
+            host_loopback: false,
             custom_proxy: None,
             warnings: Vec::new(),
         };
@@ -1179,21 +1237,67 @@ mod tests {
             &["HTTPS_PROXY=http://other:1".to_string()],
             EnvScope::Merge,
             url,
+            false,
         );
         assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
         assert!(env.contains(&"NODE_USE_ENV_PROXY=1".to_string()));
 
-        let env = workload_env(&[], EnvScope::Replace, url);
+        let env = workload_env(&[], EnvScope::Replace, url, false);
         assert!(env.contains(&"HTTPS_PROXY=http://10.231.1.254:3128".to_string()));
         assert!(!env.iter().any(|e| e.starts_with("NODE_USE_ENV_PROXY=")));
 
-        let env = workload_env(&["NODE_USE_ENV_PROXY=0".to_string()], EnvScope::Merge, url);
+        let env = workload_env(
+            &["NODE_USE_ENV_PROXY=0".to_string()],
+            EnvScope::Merge,
+            url,
+            false,
+        );
         assert_eq!(
             env.iter()
                 .filter(|e| e.starts_with("NODE_USE_ENV_PROXY="))
                 .collect::<Vec<_>>(),
             ["NODE_USE_ENV_PROXY=0"]
         );
+    }
+
+    #[test]
+    fn host_loopback_is_relayed_at_its_own_address_and_bypasses_the_proxy() {
+        let egress = |host_loopback| ProxiedEgress {
+            egress: gateway::Egress {
+                default: gateway::Action::Deny,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+            host_loopback,
+            custom_proxy: None,
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            render_policy(&egress(true), None, &[]).host_loopback,
+            Some(gateway::HostLoopback {
+                relay_address: Ipv4Addr::new(10, 231, 1, 3),
+                prefix_length: 24,
+            })
+        );
+        assert_eq!(render_policy(&egress(false), None, &[]).host_loopback, None);
+
+        let caller = ["NO_PROXY=*".to_string()];
+        let no_proxy = |host_loopback| {
+            workload_env(
+                &caller,
+                EnvScope::Merge,
+                "http://10.231.1.254:3128",
+                host_loopback,
+            )
+            .into_iter()
+            .filter(|e| e.to_ascii_uppercase().starts_with("NO_PROXY="))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            no_proxy(true),
+            ["NO_PROXY=host.wslc.internal", "no_proxy=host.wslc.internal"]
+        );
+        assert_eq!(no_proxy(false), ["NO_PROXY=", "no_proxy="]);
     }
 
     #[test]

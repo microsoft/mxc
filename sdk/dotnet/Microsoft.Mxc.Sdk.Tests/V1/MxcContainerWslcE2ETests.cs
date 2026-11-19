@@ -602,7 +602,6 @@ public class MxcContainerWslcE2ETests
     public static TheoryData<string, string> UnenforceableEgressCases() => new()
     {
         { "external proxy", "runtimeConfig.networkProxy cannot be combined with egress filtering" },
-        { "host loopback", "hostLoopback 'allow' cannot be combined with egress filtering" },
         { "UDP allow", "network.egress.allow supports only protocol 'tcp' (got 'udp')" },
         { "IPv6", "network.egress CIDR 2606:4700::/32 is IPv6" },
         { "reserved subnet", "which the built-in proxy reserves for its own networks" },
@@ -618,9 +617,6 @@ public class MxcContainerWslcE2ETests
         {
             case "external proxy":
                 network.RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8888" };
-                break;
-            case "host loopback":
-                network.Ingress!.HostLoopback = NetworkAction.Allow;
                 break;
             case "UDP allow":
                 network.Egress!.Allow = [Rule("1.1.1.1/32", NetworkProtocol.Udp, 53)];

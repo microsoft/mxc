@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-custom-proxy-loopback",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTP_PROXY#http://}\nhp=${hp%/}\necho PROXY_ENV=$HTTP_PROXY\necho VIA_PROXY=$(printf 'GET http://example.com/ HTTP/1.0\\r\\n\\r\\n' | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2)\nnslookup host.wslc.internal >/dev/null 2>&1 && echo HOST_DNS=RESOLVED || echo HOST_DNS=REFUSED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
+  },
+  "runtimeConfig": { "networkProxy": "http://127.0.0.1:18890" },
+  "wslc": { "image": "alpine:latest" }
+}

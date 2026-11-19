@@ -42,6 +42,7 @@ use crate::wslc_common::process_env;
 use crate::wslc_common::sdk_init;
 use crate::wslc_common::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_common::wslc_bindings::*;
+use crate::wslc_gateway_policy as gateway;
 
 fn sdk_wait_error(operation: &str, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
     WslcError::sdk(format!("{operation} failed"), hr, sdk_msg)
@@ -631,6 +632,7 @@ impl WSLContainerRunner {
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
         session_name_str: &str,
+        host_loopback: bool,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
@@ -693,15 +695,45 @@ impl WSLContainerRunner {
             }
         }
 
+        // The SDK reads the name when the session is created.
+        let host_loopback_name =
+            CString::new(gateway::HOST_LOOPBACK_NAME).expect("the host loopback name has no NUL");
+        if host_loopback {
+            let hr =
+                sdk.WslcSetSessionSettingsHostLoopback(&mut settings, host_loopback_name.as_ptr());
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetSessionSettingsHostLoopback failed",
+                    hr,
+                    "",
+                ));
+            }
+        }
+
         // Create session while string data is still alive
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
+        if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
+            return Err(WslcError::Unavailable(
+                "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
+                 Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
+                    .to_string(),
+            )
+            .into_response());
+        }
         if hr != S_OK {
             let msg = err_msg.to_string_lossy();
             return Err(sdk_error("WslcCreateSession failed", hr, &msg));
         }
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
+        if host_loopback {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Session reaches Windows loopback as {}",
+                gateway::HOST_LOOPBACK_NAME
+            );
+        }
 
         Ok(WslcSessionGuard::from_raw(
             session,
@@ -997,7 +1029,13 @@ impl WSLContainerRunner {
 
         // -- Session (configure + create in one step to keep string data alive) --
         let session_name = resolve_session_name(&request.container_id);
-        let session_guard = self.create_session(sdk, request, &session_name, logger)?;
+        let session_guard = self.create_session(
+            sdk,
+            request,
+            &session_name,
+            network_mode.session_host_loopback(),
+            logger,
+        )?;
 
         // -- Image resolution --
         // An isolated sandbox gets no registry fetch on its behalf; the pull
@@ -1048,7 +1086,7 @@ impl WSLContainerRunner {
                     logger,
                 )?)
             }
-            policy::NetworkMode::None | policy::NetworkMode::Bridged => None,
+            policy::NetworkMode::None | policy::NetworkMode::Bridged { .. } => None,
         };
 
         // -- Process settings --
