@@ -148,6 +148,38 @@ Check(annotatedPreparation.ToJson() == annotatedStorage
     "preparation storage preserves arbitrary comment JSON text and compact escaping");
 Check(MxcJson.Serialize("<", MxcJson.Options) == "\"\\u003C\"",
     "preparation storage leaves the shared SDK encoder unchanged");
+using (var document = JsonDocument.Parse("\"" + new string('<', 64 * 1024) + "é\\n\""))
+{
+    var change = new Dev.PolicyChange
+    {
+        Operation = Dev.PolicyChangeOperation.Replace,
+        Path = "/value",
+        Before = document.RootElement,
+        After = document.RootElement,
+    };
+    var bufferedPreparation = new Dev.PreparedPolicyRequest
+    {
+        RequestJson = "{}",
+        Changes = [change],
+    };
+    Check(Dev.PreparedPolicyRequest.FromJson(bufferedPreparation.ToJson())
+        .Changes[0].After.GetString() == document.RootElement.GetString(),
+        "bounded preparation serialization retains UTF-8 values across buffers");
+    try
+    {
+        _ = new Dev.PreparedPolicyRequest
+        {
+            RequestJson = "{}",
+            Changes = Enumerable.Repeat(change, 512).ToArray(),
+        }.ToJson();
+        Check(false, "bounded preparation serialization rejects oversized aggregate change values");
+    }
+    catch (JsonException error)
+    {
+        Check(error.Message == "invalid prepared policy request" && error.InnerException is null,
+            "bounded preparation serialization has safe validation errors");
+    }
+}
 foreach (var missingValue in new[]
 {
     """{"requestJson":"{}","changes":[{"operation":"add","path":"/x","after":true}]}""",

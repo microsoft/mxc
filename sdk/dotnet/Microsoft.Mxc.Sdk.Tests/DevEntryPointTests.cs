@@ -805,6 +805,146 @@ public class DevEntryPointTests
     }
 
     [Fact]
+    public void PreparedPolicyStorageBoundsSerializationOfAggregateChangeValues()
+    {
+        using var document = JsonDocument.Parse("\"" + new string('x', 512 * 1024) + "\"");
+        var change = new Dev.PolicyChange
+        {
+            Operation = Dev.PolicyChangeOperation.Replace,
+            Path = "/MXC_PRIVATE_PREPARATION_INPUT_5F26AC94",
+            Before = document.RootElement,
+            After = document.RootElement,
+        };
+        var prepared = new Dev.PreparedPolicyRequest
+        {
+            RequestJson = "{}",
+            Changes = Enumerable.Repeat(change, 128).ToArray(),
+        };
+
+        var start = GC.GetAllocatedBytesForCurrentThread();
+        var error = Assert.Throws<JsonException>(() => prepared.ToJson());
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+        // The rejected result's UTF-16 string alone would exceed this budget.
+        Assert.True(allocated < 4L * 32 * 1024 * 1024,
+            $"Oversized preparation serialization allocated {allocated:N0} bytes.");
+        Assert.Equal("invalid prepared policy request", error.Message);
+        Assert.DoesNotContain("MXC_PRIVATE_PREPARATION_INPUT_5F26AC94", error.ToString());
+        Assert.Null(error.InnerException);
+    }
+
+    [Theory]
+    [InlineData(144)]
+    [InlineData(160)]
+    public void PreparedPolicyStorageBoundsScratchForSingleOversizedChangeValue(int valueMiB)
+    {
+        var bytes = new byte[valueMiB * 1024 * 1024 + 2];
+        bytes.AsSpan().Fill((byte)'x');
+        bytes[0] = bytes[^1] = (byte)'"';
+        using var document = JsonDocument.Parse(bytes.AsMemory());
+        var prepared = new Dev.PreparedPolicyRequest
+        {
+            RequestJson = "{}",
+            Changes =
+            [
+                new()
+                {
+                    Operation = Dev.PolicyChangeOperation.Replace,
+                    Path = "/value",
+                    Before = MxcJson.Deserialize<JsonElement>("null"),
+                    After = document.RootElement,
+                },
+            ],
+        };
+
+        var start = GC.GetAllocatedBytesForCurrentThread();
+        var error = Assert.Throws<JsonException>(() => prepared.ToJson());
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+        TestContext.Current.TestOutputHelper?.WriteLine($"Single-token serialization allocated {allocated:N0} bytes.");
+        Assert.True(allocated < 4L * 32 * 1024 * 1024,
+            $"Oversized change-value serialization allocated {allocated:N0} bytes.");
+        Assert.Equal("invalid prepared policy request", error.Message);
+        Assert.Null(error.InnerException);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PreparedPolicyStorageCountsEmittedUtf8BytesAtResultLimit(int offset)
+    {
+        using var document = JsonDocument.Parse("""{"before":"é<\"\\\n","after":null}""");
+        Dev.PreparedPolicyRequest Create(string path) => new()
+        {
+            RequestJson = "{}",
+            Changes =
+            [
+                new()
+                {
+                    Operation = Dev.PolicyChangeOperation.Replace,
+                    Path = path,
+                    Before = document.RootElement.GetProperty("before"),
+                    After = document.RootElement.GetProperty("after"),
+                },
+            ],
+        };
+        var overhead = Encoding.UTF8.GetByteCount(Create("/").ToJson());
+        var expectedBytes = 32 * 1024 * 1024 + offset;
+        var prepared = Create("/" + new string('x', expectedBytes - overhead));
+        if (offset > 0)
+        {
+            Assert.Throws<JsonException>(() => prepared.ToJson());
+        }
+        else
+        {
+            var stored = prepared.ToJson();
+            Assert.Equal(expectedBytes, Encoding.UTF8.GetByteCount(stored));
+            Assert.Contains("\"before\":\"é<\\\"\\\\\\n\",\"after\":null", stored);
+        }
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PreparedPolicyStorageCountsEscapedChangeValueBytesAtResultLimit(int offset)
+    {
+        Dev.PreparedPolicyRequest Create(JsonElement value) => new()
+        {
+            RequestJson = "{}",
+            Changes =
+            [
+                new()
+                {
+                    Operation = Dev.PolicyChangeOperation.Replace,
+                    Path = "/value",
+                    Before = MxcJson.Deserialize<JsonElement>("null"),
+                    After = value,
+                },
+            ],
+        };
+        using var sample = JsonDocument.Parse("\"\\n\"");
+        var overhead = Encoding.UTF8.GetByteCount(Create(sample.RootElement).ToJson());
+        var expectedBytes = 32 * 1024 * 1024 + offset;
+        var bytes = new byte[expectedBytes - overhead + 4];
+        bytes.AsSpan().Fill((byte)'x');
+        bytes[0] = bytes[^1] = (byte)'"';
+        bytes[1] = (byte)'\\';
+        bytes[2] = (byte)'n';
+        using var document = JsonDocument.Parse(bytes.AsMemory());
+        var prepared = Create(document.RootElement);
+        if (offset > 0)
+        {
+            Assert.Throws<JsonException>(() => prepared.ToJson());
+        }
+        else
+        {
+            var stored = prepared.ToJson();
+            Assert.Equal(expectedBytes, Encoding.UTF8.GetByteCount(stored));
+            Assert.Contains("\"after\":\"\\n", stored);
+        }
+    }
+
+    [Fact]
     public unsafe void NativePreparedPolicyDataIsBoundedOwnedAndStrictUtf8()
     {
         const string valid =

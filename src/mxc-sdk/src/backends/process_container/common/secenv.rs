@@ -1021,6 +1021,11 @@ pub(super) fn injected_capture_trace_sources(
 }
 
 #[cfg(test)]
+pub(super) fn record_injected_creation_effect(effect: &'static str) {
+    policy_diagnostics_tests::record_injected_creation_effect(effect);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};

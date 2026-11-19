@@ -72,6 +72,8 @@ impl CaptureSession {
     pub(crate) fn begin_with_environment(
         environment: ProcessSecurityEnvironment,
     ) -> Result<Self, LearningModeError> {
+        #[cfg(test)]
+        secenv::record_injected_creation_effect("trace");
         // SAFETY: `environment` was just created and remains live until this
         // session closes it.
         let trace = unsafe { start_trace(environment.raw()) };

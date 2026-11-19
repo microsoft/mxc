@@ -3,7 +3,7 @@
 
 //! Derive conservative request restrictions from caller-owned observations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::mxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
 use crate::mxc_common::filesystem_probe::FilesystemProbe;
@@ -19,6 +19,10 @@ use crate::process_container_common::network_policy_helpers::{
 };
 use crate::process_container_common::secenv_policy::RestrictionHint;
 use crate::process_container_common::secenv_policy::{PolicyResult, POLICY_RESULT_VERSION};
+
+const MAX_FILESYSTEM_WORK: usize = 16 * 1024 * 1024;
+const FILESYSTEM_WORK_LIMIT: &str =
+    "filesystem restriction exceeds the cumulative safety-check work limit";
 
 fn contradicts_earlier(hints: &[RestrictionHint], index: usize) -> bool {
     let hint = &hints[index];
@@ -59,14 +63,31 @@ fn restrict_request(
         }
         combine_restriction_hints(&mut merged, &hints);
     }
+    let mut resolutions: HashMap<String, PathCanonical> = HashMap::new();
+    let mut resolve_once = |path: &str| {
+        if let Some(resolved) = resolutions.get(path) {
+            return Ok(resolved.clone());
+        }
+        let resolved = resolve(path)?;
+        resolutions.insert(path.to_owned(), resolved.clone());
+        Ok(resolved)
+    };
+    let mut work_remaining = MAX_FILESYSTEM_WORK;
+    charge_filesystem_work(&original.policy, &merged, &mut work_remaining)?;
+    validate_filesystem_paths(&original.policy, &merged, &mut resolve_once)?;
     let mut candidate = original.clone();
     for _ in 0..=merged.len() {
         let applicable = applicable_hints(&candidate, &merged, capture_network_decisions);
         if applicable.is_empty() {
             return Ok(candidate);
         }
-        candidate =
-            restrict_with_hints(&candidate, &applicable, capture_network_decisions, resolve)?;
+        charge_filesystem_work(&candidate.policy, &applicable, &mut work_remaining)?;
+        candidate = restrict_with_hints(
+            &candidate,
+            &applicable,
+            capture_network_decisions,
+            &mut resolve_once,
+        )?;
     }
     Err("the policy restrictions did not converge".into())
 }
@@ -165,6 +186,7 @@ fn restrict_with_hints(
     capture_network_decisions: bool,
     resolve: &mut impl FnMut(&str) -> Result<PathCanonical, String>,
 ) -> Result<ExecutionRequest, String> {
+    validate_filesystem_paths(&original.policy, hints, resolve)?;
     let mut candidate = original.clone();
     for (index, hint) in hints.iter().enumerate() {
         if contradicts_earlier(hints, index) {
@@ -187,7 +209,6 @@ fn restrict_with_hints(
                 path,
                 *requested,
                 *maximum,
-                resolve,
             )?,
             RestrictionHint::ReducePathCount { .. } => {}
         }
@@ -220,6 +241,29 @@ fn restrict_with_hints(
                 }
             }
             RestrictionHint::RestrictPath { .. } => {}
+        }
+    }
+    if hints
+        .iter()
+        .any(|hint| matches!(hint, RestrictionHint::RestrictPath { .. }))
+    {
+        // Check the whole batch once; access changes only at grant boundaries.
+        let points = original
+            .policy
+            .readwrite_paths
+            .iter()
+            .chain(&original.policy.readonly_paths)
+            .chain(&original.policy.denied_paths)
+            .chain(&candidate.policy.readwrite_paths)
+            .chain(&candidate.policy.readonly_paths)
+            .chain(&candidate.policy.denied_paths);
+        if points
+            .into_iter()
+            .any(|path| access_at(&candidate.policy, path) > access_at(&original.policy, path))
+        {
+            return Err(
+                "the proposed filesystem restriction could increase effective access".into(),
+            );
         }
     }
     let before = effective_capabilities(original, capture_network_decisions);
@@ -397,12 +441,86 @@ fn access_at(policy: &ContainerPolicy, point: &str) -> u64 {
         for path in paths {
             let path = path.trim_end_matches('\\');
             if contains(path, point) && best.is_none_or(|length| path.len() >= length) {
+                let same_depth = best == Some(path.len());
                 best = Some(path.len());
-                access = value;
+                access = if same_depth && value != Detail::ACCESS_NONE {
+                    access.max(value)
+                } else {
+                    value
+                };
             }
         }
     }
     access
+}
+
+fn charge_filesystem_work(
+    policy: &ContainerPolicy,
+    hints: &[RestrictionHint],
+    remaining: &mut usize,
+) -> Result<(), String> {
+    let witnesses = hints
+        .iter()
+        .filter(|hint| matches!(hint, RestrictionHint::RestrictPath { .. }))
+        .count();
+    if witnesses == 0 {
+        return Ok(());
+    }
+    let paths = policy.readwrite_paths.len()
+        + policy.readonly_paths.len()
+        + policy.denied_paths.len()
+        + policy.enumerate_paths.len()
+        + witnesses;
+    // Each pass has pairwise grant work; bound all passes, not just each probe.
+    let cost = paths.checked_mul(paths).ok_or(FILESYSTEM_WORK_LIMIT)?;
+    *remaining = remaining.checked_sub(cost).ok_or(FILESYSTEM_WORK_LIMIT)?;
+    Ok(())
+}
+
+fn validate_filesystem_paths(
+    policy: &ContainerPolicy,
+    hints: &[RestrictionHint],
+    resolve: &mut impl FnMut(&str) -> Result<PathCanonical, String>,
+) -> Result<(), String> {
+    if !hints
+        .iter()
+        .any(|hint| matches!(hint, RestrictionHint::RestrictPath { .. }))
+    {
+        return Ok(());
+    }
+    let mut budget = MAX_FILESYSTEM_WORK;
+    charge_filesystem_work(policy, hints, &mut budget)?;
+    let mut checked = HashSet::new();
+    for path in policy
+        .readwrite_paths
+        .iter()
+        .chain(&policy.readonly_paths)
+        .chain(&policy.denied_paths)
+        .map(String::as_str)
+        .chain(hints.iter().filter_map(|hint| match hint {
+            RestrictionHint::RestrictPath { path, .. } => Some(path.as_str()),
+            _ => None,
+        }))
+    {
+        if !checked.insert(path) {
+            continue;
+        }
+        let spelling = literal_path(path)?;
+        let resolved = match resolve(path)? {
+            PathCanonical::Canonical(path) => literal_path(&path)?,
+            _ => {
+                return Err(
+                    "filesystem restriction cannot resolve every relevant path safely".into(),
+                )
+            }
+        };
+        if !spelling.eq_ignore_ascii_case(&resolved) {
+            return Err(
+                "filesystem restriction will not guess the provenance of an aliased path".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn restrict_path(
@@ -411,7 +529,6 @@ fn restrict_path(
     path: &str,
     requested: u64,
     maximum: u64,
-    resolve: &mut impl FnMut(&str) -> Result<PathCanonical, String>,
 ) -> Result<(), String> {
     if maximum > Detail::ACCESS_READ_ONLY
         || requested > Detail::ACCESS_READ_WRITE
@@ -443,29 +560,6 @@ fn restrict_path(
                 .into(),
         );
     }
-    for path in policy
-        .readwrite_paths
-        .iter()
-        .chain(&policy.readonly_paths)
-        .chain(&policy.denied_paths)
-        .map(String::as_str)
-        .chain(std::iter::once(point.as_str()))
-    {
-        let spelling = literal_path(path)?;
-        let resolved = match resolve(path)? {
-            PathCanonical::Canonical(path) => literal_path(&path)?,
-            _ => {
-                return Err(
-                    "filesystem restriction cannot resolve every relevant path safely".into(),
-                )
-            }
-        };
-        if !spelling.eq_ignore_ascii_case(&resolved) {
-            return Err(
-                "filesystem restriction will not guess the provenance of an aliased path".into(),
-            );
-        }
-    }
     if original.readwrite_paths.iter().any(|path| {
         let path = path.trim_end_matches('\\');
         path.len() == 2 || (path.starts_with("\\\\") && path[2..].split('\\').count() == 2)
@@ -475,7 +569,6 @@ fn restrict_path(
         );
     }
 
-    let before = policy.clone();
     policy
         .readwrite_paths
         .retain(|path| !same_path(path, &point));
@@ -490,6 +583,14 @@ fn restrict_path(
         {
             policy.denied_paths.push(point.clone());
         }
+        // Match contract normalization without changing unrelated enumeration.
+        if let Some(denied) = policy
+            .denied_paths
+            .iter()
+            .find(|path| same_path(path, &point))
+        {
+            policy.enumerate_paths.retain(|path| path != denied);
+        }
     } else {
         for grant in readonly_grants {
             if !policy.readonly_paths.contains(&grant) {
@@ -497,19 +598,7 @@ fn restrict_path(
             }
         }
     }
-    // Access is piecewise constant between the old/new path boundaries.
-    let points = before
-        .readwrite_paths
-        .iter()
-        .chain(&before.readonly_paths)
-        .chain(&before.denied_paths)
-        .map(String::as_str)
-        .chain(std::iter::once(point.as_str()));
-    if access_at(policy, &point) > maximum
-        || points
-            .into_iter()
-            .any(|path| access_at(policy, path) > access_at(&before, path))
-    {
+    if access_at(policy, &point) > maximum {
         return Err("the proposed filesystem restriction could increase effective access".into());
     }
     Ok(())

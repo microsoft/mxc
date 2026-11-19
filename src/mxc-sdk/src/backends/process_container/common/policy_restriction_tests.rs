@@ -104,6 +104,48 @@ fn observation(
 }
 
 #[test]
+fn policy_preparation_resolves_each_path_once_for_a_full_constraint_batch() {
+    let paths: Vec<_> = (0..1024).map(|index| format!(r"C:\work\{index}")).collect();
+    let original = request(ContainerPolicy {
+        readwrite_paths: paths.clone(),
+        ..Default::default()
+    });
+    let hints: Vec<_> = paths.iter().map(|path| restrict(path, RW, RO)).collect();
+    let failures = PolicyFailures {
+        results: hints.chunks(64).map(observation).collect(),
+        ..Default::default()
+    };
+    let mut resolutions = HashMap::new();
+    let candidate = restrict_request(&original, &failures, false, &mut |path| {
+        *resolutions.entry(path.to_owned()).or_insert(0usize) += 1;
+        canonical(path)
+    })
+    .unwrap();
+    assert!(candidate.policy.readwrite_paths.is_empty());
+    assert_eq!(candidate.policy.readonly_paths, paths);
+    assert_eq!(resolutions.len(), paths.len());
+    assert!(resolutions.values().all(|count| *count == 1));
+}
+
+#[test]
+fn policy_preparation_rejects_excessive_safety_work_before_filesystem_probes() {
+    let original = request(ContainerPolicy {
+        readwrite_paths: (0..4096).map(|index| format!(r"C:\work\{index}")).collect(),
+        ..Default::default()
+    });
+    let failures = PolicyFailures {
+        results: vec![observation(&[restrict(r"C:\work\0", RW, RO)])],
+        ..Default::default()
+    };
+    let error = restrict_request(&original, &failures, false, &mut |_| {
+        panic!("an over-budget request must fail before any filesystem probe")
+    })
+    .unwrap_err();
+    assert_eq!(error, FILESYSTEM_WORK_LIMIT);
+    assert_eq!(original.policy.readwrite_paths.len(), 4096);
+}
+
+#[test]
 fn policy_restriction_replays_strengthened_observations_against_fresh_requests() {
     let original = request(ContainerPolicy {
         readwrite_paths: vec![r"C:\work".into(), r"C:\unrelated".into()],

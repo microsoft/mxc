@@ -216,7 +216,8 @@ the request text; duplicate preparation-envelope properties are rejected.
 
 Preparation may expand the candidate request beyond the 8 MiB input bound.
 The complete stored result, including its request JSON and changes, must fit
-within 32 MiB.
+within 32 MiB. `ToJson` enforces this byte limit while writing UTF-8 and creates
+the returned string only after serialization succeeds.
 
 The native operation owns remediation decisions and the stricter observation
 input bounds listed below. The async method uses the same safe blocking-call

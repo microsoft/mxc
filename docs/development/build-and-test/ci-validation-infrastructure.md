@@ -436,6 +436,12 @@ builder requires discovery of the same case and runs
 `scripts/ci/test-policy-preparation-test-results.ps1` to check the result gate
 offline; this check invokes no backend or workload.
 
+The same case checks equivalent writable/read-only spellings, suppressed
+authored grants and enumeration/deny overlap. Native deny and enumeration
+cases must enforce the restricted policy when the public capability probe
+advertises support; otherwise preparation must reject them before any workload
+writes. The original read-only scenarios remain required on every PSEC host.
+
 The dispatcher enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET
 `MxcProcessTests` and `DevEntryPointTests` and runs the Node public `run`,
 `spawn`, and tool-discovery filesystem integration cases.

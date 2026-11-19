@@ -97,11 +97,10 @@ public sealed class PreparedPolicyRequest
         try
         {
             ValidateStorage();
-            var json = MxcJson.Serialize(this, PolicyPreparationJson.SerializerOptions);
-            PolicyPreparationJson.ValidateResultSize(json);
-            return json;
+            return MxcJson.Serialize(this, PolicyPreparationJson.SerializerOptions,
+                PolicyPreparationJson.MaximumResultBytes);
         }
-        catch (Exception error) when (error is JsonException or EncoderFallbackException)
+        catch (Exception error) when (error is JsonException or ArgumentException)
         {
             throw new JsonException("invalid prepared policy request");
         }

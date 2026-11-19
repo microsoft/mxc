@@ -858,6 +858,90 @@ it('stores ordered edits with required before/after values and distinct real nul
   assert.deepStrictEqual(dev.parsePreparedPolicyRequest(dev.serializePreparedPolicyRequest(special)), special);
 });
 
+it('bounds shared preparation values before expansion in a memory-limited process', () => {
+  const moduleUrl = new URL('../../src/v1/dev/index.js', import.meta.url).href;
+  const result = spawnSync(process.execPath, [
+    '--max-old-space-size=96', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { serializePreparedPolicyRequest } from ${JSON.stringify(moduleUrl)};
+      const candidate = (after) => ({
+        requestJson: '{}',
+        changes: [{ operation: 'add', path: '/shared', before: null, after }],
+      });
+      let shared = [];
+      for (let depth = 0; depth < 40; depth += 1) shared = [shared, shared];
+      assert.throws(() => serializePreparedPolicyRequest(candidate(shared)), {
+        code: 'malformed_request', message: /JSON result limit exceeded/,
+      });
+      shared = [];
+      for (let depth = 0; depth < 22; depth += 1) shared = [shared, shared];
+      const emptySize = Buffer.byteLength(serializePreparedPolicyRequest(candidate([])), 'utf8');
+      const json = serializePreparedPolicyRequest(candidate(shared));
+      assert.equal(Buffer.byteLength(json, 'utf8'), emptySize - 2 + 5 * 2 ** 22 - 3);
+    `,
+  ], { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 });
+  assert.ifError(result.error);
+  assert.strictEqual(result.status, 0, result.stderr);
+});
+
+it('stores shared JSON values without changing their values or the caller-owned graph', () => {
+  const shared = JSON.parse(
+    '{"__proto__":{"value":true},"é😀":["\\\\","\\u0000",null,false,-0,1e-7]}',
+  ) as dev.JsonValue;
+  const pair = [shared, shared];
+  const candidate: dev.PreparedPolicyRequest = {
+    requestJson: ' { "text": "é😀" } ',
+    changes: [
+      { operation: 'replace', path: '/é😀~0~1', before: pair, after: pair },
+      { operation: 'add', path: '/shared', before: null, after: shared },
+    ],
+  };
+  const expected = JSON.stringify(candidate);
+  const json = dev.serializePreparedPolicyRequest(candidate);
+  assert.strictEqual(json, expected);
+  const restored = dev.parsePreparedPolicyRequest(json);
+  assert.deepStrictEqual(restored, JSON.parse(expected));
+  assert.strictEqual(candidate.changes[0].before, pair);
+  assert.strictEqual(pair[0], pair[1]);
+  (restored.changes[0].after as dev.JsonValue[]).push('owned');
+  assert.strictEqual(JSON.stringify(candidate), expected);
+  pair.push(pair);
+  assert.throws(() => dev.serializePreparedPolicyRequest(candidate), { code: 'malformed_request' });
+});
+
+it('applies the exact cumulative preparation byte limit including UTF-8 and JSON escaping', () => {
+  const limit = 32 * 1024 * 1024;
+  const shared = { 'é😀"\\\0': '\b\f\n\r\t' };
+  const padding: dev.PolicyPreparationChange = {
+    operation: 'replace', path: '/padding', before: shared, after: '',
+  };
+  const candidate: dev.PreparedPolicyRequest = {
+    requestJson: ' { "text": "é😀" } ',
+    changes: [
+      { operation: 'replace', path: '/é😀~0~1', before: 1e9, after: shared },
+      padding,
+    ],
+  };
+  const available = limit - Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+  const unit = 'é\0"\\😀';
+  const unitBytes = Buffer.byteLength(JSON.stringify(unit), 'utf8') - 2;
+  padding.after = unit.repeat(Math.floor(available / unitBytes)) + 'x'.repeat(available % unitBytes);
+  const json = dev.serializePreparedPolicyRequest(candidate);
+  assert.strictEqual(Buffer.byteLength(json, 'utf8'), limit);
+  assert.strictEqual(json, JSON.stringify(candidate));
+  const tooLarge = { code: 'malformed_request', message: /JSON result limit exceeded/ };
+  padding.after += 'x';
+  assert.throws(() => dev.serializePreparedPolicyRequest(candidate), tooLarge);
+
+  // Parsing limits the supplied text, not the longer normalized spelling of 1e9.
+  const compact = JSON.stringify(candidate).replace('"before":1000000000', '"before":1e9');
+  assert.ok(Buffer.byteLength(compact, 'utf8') < limit);
+  const restored = dev.parsePreparedPolicyRequest(compact);
+  assert.strictEqual(restored.changes[0].before, 1e9);
+  assert.strictEqual(restored.changes[1].after, padding.after);
+  assert.throws(() => dev.serializePreparedPolicyRequest(restored), tooLarge);
+});
+
 it('rejects malformed preparation results and invalid JSON values without input disclosure', async () => {
   const valid = {
     requestJson: '{}',

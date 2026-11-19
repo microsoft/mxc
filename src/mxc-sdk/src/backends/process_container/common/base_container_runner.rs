@@ -1211,6 +1211,8 @@ pub(crate) struct BaseProcessLaunch<'a> {
 }
 
 fn create_base_process(launch: BaseProcessLaunch<'_>) -> windows_core::Result<()> {
+    #[cfg(test)]
+    secenv::record_injected_creation_effect("launch");
     // SAFETY: all buffers and startup attributes are borrowed from live launch
     // owners; process_information is the caller's sole writable output.
     unsafe {

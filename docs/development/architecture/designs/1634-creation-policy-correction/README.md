@@ -129,6 +129,10 @@ malformed paths and unresolved safety checks cannot authorize application.
 Enumeration-only paths retain their separate semantics. Preserve the workload,
 environment and original inferred working directory. Recheck all combined
 constraints so one reduction cannot reintroduce a previously removed permission.
+Validate literal path identity before treating a filesystem ceiling as already
+satisfied. Equivalent writable spellings must not be hidden by a read-only
+entry. A new exact deny also removes a conflicting enumeration entry, while
+unrelated enumeration remains unchanged.
 
 ### Caller-owned observations and bounds
 
@@ -168,6 +172,12 @@ Preparation accepts at most 8 MiB of request UTF-8 and returns at most 32 MiB
 of complete result JSON with 4,096 changes. A stored candidate can exceed the
 8 MiB input limit when the entire result fits. Restoring a prepared result
 validates storage shape and bounds, not acceptance or current policy.
+
+Filesystem preparation also bounds cumulative safety-check work. It resolves
+each distinct path spelling once per call and checks the whole restriction
+batch for increased access, rather than repeating that proof for each edit.
+Exceeding the work budget is a terminal preparation error, not a partial
+candidate or permission to skip identity and access checks.
 
 MXC retains no observations between calls. Caller-owned storage can cross
 processes and creators because observations are untrusted advisory data, not

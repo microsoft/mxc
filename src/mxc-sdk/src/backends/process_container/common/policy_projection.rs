@@ -17,6 +17,7 @@ use crate::process_container_common::working_directory::{
     try_launch_working_directory, LaunchWorkingDirectory,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// Prepare a candidate for `request`, which was parsed from `original_json`.
 /// `reparse` parses candidate JSON through the same contract and options as
@@ -87,7 +88,11 @@ fn resolve_launch_directory(
 }
 
 fn is_reserved_learning_capability(entry: &str) -> bool {
-    LearningModeCapability::from_capability_name(entry.trim_matches([' ', '\t'])).is_some()
+    LearningModeCapability::from_capability_name(entry).is_some()
+}
+
+fn path_key(path: &str) -> String {
+    path.trim_end_matches('\\').to_ascii_lowercase()
 }
 
 /// Returns the candidate request JSON and the launch directory of the
@@ -112,6 +117,15 @@ fn project_request(
             .to_owned(),
         )
     };
+    let previous_denies: HashSet<_> = before.policy.denied_paths.iter().collect();
+    let newly_denied: HashSet<_> = after
+        .policy
+        .denied_paths
+        .iter()
+        .filter(|path| !previous_denies.contains(path))
+        .map(|path| path_key(path))
+        .collect();
+    let no_removals = HashSet::new();
     for (name, old, new) in [
         (
             "readwritePaths",
@@ -129,17 +143,37 @@ fn project_request(
             &after.policy.denied_paths,
         ),
     ] {
-        if old != new {
+        let authored = original.pointer(&format!("/filesystem/{name}"));
+        let removed = if name == "deniedPaths" {
+            &no_removals
+        } else {
+            &newly_denied
+        };
+        let has_suppressed_removal = authored.and_then(Value::as_array).is_some_and(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|path| removed.contains(&path_key(path)))
+        });
+        if old != new || has_suppressed_removal {
             set(
                 &mut json,
                 &["filesystem", name],
-                Some(project_path_list(
-                    original.pointer(&format!("/filesystem/{name}")),
-                    old,
-                    new,
-                )?),
+                Some(project_path_list(authored, old, new, removed)?),
             )?;
         }
+    }
+    if before.policy.enumerate_paths != after.policy.enumerate_paths {
+        set(
+            &mut json,
+            &[process_container, "filesystem", "enumeratePaths"],
+            Some(project_path_list(
+                original.pointer(&format!("/{process_container}/filesystem/enumeratePaths")),
+                &before.policy.enumerate_paths,
+                &after.policy.enumerate_paths,
+                &no_removals,
+            )?),
+        )?;
     }
     let authorable_capabilities = |entries: &[String]| {
         entries
@@ -159,7 +193,7 @@ fn project_request(
     }
     if after.policy.capture_denials.is_none()
         && !after.policy.capabilities.iter().any(|entry| {
-            LearningModeCapability::from_capability_name(entry.trim_matches([' ', '\t']))
+            LearningModeCapability::from_capability_name(entry)
                 == Some(LearningModeCapability::Learning)
         })
         && original
@@ -278,6 +312,7 @@ fn project_path_list(
     authored: Option<&Value>,
     before: &[String],
     after: &[String],
+    removed: &HashSet<String>,
 ) -> Result<Value, MxcError> {
     use std::collections::HashMap;
     fn counts(paths: &[String]) -> HashMap<&str, usize> {
@@ -297,7 +332,9 @@ fn project_path_list(
             // Normalization can suppress entries already covered by more
             // restrictive lists. Preserve that unrelated authored data.
             if !old_counts.contains_key(path) {
-                projected.push(value.clone());
+                if !removed.contains(&path_key(path)) {
+                    projected.push(value.clone());
+                }
             } else if let Some(count) = remaining.get_mut(path).filter(|count| **count > 0) {
                 *count -= 1;
                 projected.push(value.clone());
@@ -350,7 +387,7 @@ mod tests {
         let after = vec!["work".into()];
         let authored = json!(["work", "denied", "work", "enumerated", "denied"]);
         assert_eq!(
-            project_path_list(Some(&authored), &before, &after).unwrap(),
+            project_path_list(Some(&authored), &before, &after, &HashSet::new()).unwrap(),
             json!(["work", "denied", "enumerated", "denied"]),
         );
         let authored = json!(["read", "denied", "read"]);
@@ -359,12 +396,13 @@ mod tests {
                 Some(&authored),
                 &["read".into(), "read".into()],
                 &["read".into(), "work".into()],
+                &HashSet::new(),
             )
             .unwrap(),
             json!(["read", "denied", "work"]),
         );
         assert_eq!(
-            project_path_list(Some(&Value::Null), &[], &["work".into()]).unwrap(),
+            project_path_list(Some(&Value::Null), &[], &["work".into()], &HashSet::new()).unwrap(),
             json!(["work"]),
         );
     }

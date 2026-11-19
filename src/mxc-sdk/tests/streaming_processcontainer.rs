@@ -232,6 +232,101 @@ fn dev_json_processcontainer_policy_feedback_restricts_current_request() {
         assert_eq!(std::fs::read(&target).unwrap(), b"seed");
         println!("MXC_POLICY_PREPARATION_STRICT_CREATE_OK:{version}");
     }
+    let denied_directory = restricted.join("denied");
+    std::fs::create_dir(&denied_directory).unwrap();
+    let denied_target = denied_directory.join("target.txt");
+    let enumerated = canonical_root.join("enumerated");
+    std::fs::create_dir(&enumerated).unwrap();
+    let capabilities = mxc_sdk::v1::probe(None)
+        .expect("native filesystem capabilities")
+        .probes;
+    for (scenario, writable, readonly, enumeration, ceiling_path, maximum, write_target) in [
+        (
+            "equivalent-case",
+            resource.clone(),
+            Some(resource.to_ascii_uppercase()),
+            None,
+            resource.clone(),
+            D::ACCESS_READ_ONLY,
+            target.clone(),
+        ),
+        (
+            "suppressed-trailing-grant",
+            format!("{resource}\\"),
+            Some(format!("{resource}\\")),
+            None,
+            resource.clone(),
+            D::ACCESS_NONE,
+            target.clone(),
+        ),
+        (
+            "enumeration-deny",
+            resource.clone(),
+            None,
+            Some(denied_directory.clone()),
+            denied_directory.to_string_lossy().into_owned(),
+            D::ACCESS_NONE,
+            denied_target.clone(),
+        ),
+    ] {
+        let supported = (maximum != D::ACCESS_NONE
+            || capabilities.base_container_supports_deny_paths)
+            && (enumeration.is_none() || capabilities.base_container_supports_enumerate_paths);
+        std::fs::write(&write_target, b"seed").unwrap();
+        std::fs::write(&control, b"seed").unwrap();
+        let mut request = serde_json::json!({
+            "version": "1.1.0-alpha", "containment": "processcontainer",
+            "process": {
+                "commandLine": format!(
+                    "cmd.exe /d /c echo CHANGED>>\"{}\" & echo CONTROL>>\"{}\" & exit /b 0",
+                    write_target.display(), control.display(),
+                ),
+                "cwd": unrelated, "timeout": 30000,
+            },
+            "filesystem": { "readwritePaths": [writable, unrelated] },
+        });
+        if let Some(readonly) = readonly {
+            request["filesystem"]["readonlyPaths"] = serde_json::json!([readonly]);
+        }
+        if let Some(enumeration) = enumeration {
+            request["processContainer"] = serde_json::json!({
+                "filesystem": { "enumeratePaths": [enumeration, enumerated] },
+            });
+        }
+        let mut observations: serde_json::Value =
+            serde_json::from_str(&failures.to_json().unwrap()).unwrap();
+        observations["results"][0]["details"][0]["resource"] = ceiling_path.into();
+        observations["results"][0]["details"][0]["requiredValue"] = maximum.to_string().into();
+        let observations = PolicyFailures::from_json(&observations.to_string()).unwrap();
+        let prepared =
+            dev::prepare_policy_json(&request.to_string(), &observations, Default::default());
+        assert_eq!(std::fs::read(&write_target).unwrap(), b"seed");
+        assert_eq!(std::fs::read(&control).unwrap(), b"seed");
+        if !supported {
+            assert_eq!(
+                prepared.unwrap_err().code,
+                mxc_sdk::v1::ErrorCode::BackendUnavailable
+            );
+            println!("MXC_POLICY_PREPARATION_FILESYSTEM_UNSUPPORTED_OK:{scenario}");
+            continue;
+        }
+        let prepared = prepared.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+        assert!(!prepared.changes.is_empty());
+        let output = dev::run_json(&prepared.request_json, JsonOptions::default())
+            .unwrap_or_else(|error| panic!("{scenario}: strict creation failed: {error}"));
+        assert_eq!(std::fs::read(&write_target).unwrap(), b"seed", "{scenario}");
+        assert!(std::fs::read_to_string(&control)
+            .unwrap()
+            .contains("CONTROL"));
+        assert_eq!(
+            output.outcome,
+            WaitResult::Exited(0),
+            "{scenario}: stdout={:?}, stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        println!("MXC_POLICY_PREPARATION_FILESYSTEM_OK:{scenario}");
+    }
 }
 
 #[test]

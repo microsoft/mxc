@@ -92,6 +92,12 @@ pub(super) fn injected_capture_trace_sources(
     injected_api().map(|_| STATE.with(|state| state.borrow().capture_sources))
 }
 
+pub(super) fn record_injected_creation_effect(effect: &'static str) {
+    if injected_api().is_some() {
+        STATE.with(|state| state.borrow_mut().calls.push(effect));
+    }
+}
+
 pub(super) fn policy_buffer_freed(_: *mut u8) {
     STATE.with(|state| state.borrow_mut().frees += 1);
 }

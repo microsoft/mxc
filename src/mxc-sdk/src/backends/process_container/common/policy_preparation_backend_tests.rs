@@ -59,6 +59,226 @@ fn execute_accepted_candidate(json: &str) {
     drop(process);
 }
 
+fn filesystem_ceiling(path: &str, maximum: u64) -> PolicyFailures {
+    failures(D {
+        failure_class: D::CLASS_FILESYSTEM,
+        failure_reason: D::REASON_ACCESS_EXCEEDS_CEILING,
+        required_action: D::ACTION_RESTRICT_FILESYSTEM_ACCESS,
+        resource_kind: D::RESOURCE_KIND_PATH,
+        value_kind: D::VALUE_KIND_ACCESS,
+        flags: D::FLAG_HAS_ACTIONABLE_DETAILS | D::FLAG_RESOURCE_COMPLETE,
+        requested_value: D::ACCESS_READ_WRITE,
+        required_value: maximum,
+        resource: Some(path.to_owned()),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn policy_refusal_through_public_dispatch_preserves_owned_details_without_starting_work() {
+    let _host = PolicyCapabilityGuard::set(true, true, true);
+    for capture in [false, true] {
+        let mut api = reset();
+        api.version_support = Some(version);
+        let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+        let expected = STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.handle = true;
+            state.report.details[0].resource = Some(r"C:\PUBLIC_DISPATCH_POLICY_RESOURCE".into());
+            state.report.clone()
+        });
+        let mut request = json!({
+            "version": "1.1.0-alpha", "containment": "processcontainer",
+            "process": { "commandLine": "cmd.exe /d /c exit 0" },
+        });
+        if capture {
+            request["processContainer"] = json!({ "captureDenials": { "mode": "block" } });
+        }
+        let error = crate::v1::dev::spawn_json(&request.to_string(), Default::default())
+            .err()
+            .expect("public dispatch must return the injected native refusal");
+        assert_eq!(error.code, crate::v1::ErrorCode::BackendError);
+        assert_eq!(
+            error.operation.as_deref(),
+            Some("CreateProcessSecurityEnvironment")
+        );
+        assert_eq!(error.native_code.as_deref(), Some("0x800704EC"));
+        assert!(!format!("{error} {error:?}").contains("PUBLIC_DISPATCH_POLICY_RESOURCE"));
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let effects: Vec<_> = state
+                .calls
+                .iter()
+                .copied()
+                .filter(|call| matches!(*call, "create" | "get" | "close" | "launch" | "trace"))
+                .collect();
+            assert_eq!(effects, ["create", "get", "close"], "capture={capture}");
+            assert_eq!(state.frees, 1);
+            assert_eq!(state.closes, 1);
+            state.report.details.clear();
+        });
+        let owned = crate::v1::dev::PolicyFailures::from_error(&error)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owned.results, [expected]);
+        assert_eq!(
+            crate::v1::dev::PolicyFailures::from_json(&owned.to_json().unwrap()).unwrap(),
+            owned,
+        );
+    }
+}
+
+#[test]
+fn policy_preparation_projects_equivalent_and_suppressed_filesystem_grants() {
+    let _host = PolicyCapabilityGuard::set(true, true, true);
+    let mut api = reset();
+    api.version_support = Some(version);
+    let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+    let directory = tempfile::tempdir().unwrap();
+    let PathCanonical::Canonical(root) = canonicalize_path(directory.path().to_str().unwrap())
+    else {
+        panic!("resolve the fixture directory");
+    };
+    let work = std::path::Path::new(&root).join("work");
+    std::fs::create_dir(&work).unwrap();
+    let path = work.to_str().unwrap();
+    for (writable, readonly, maximum) in [
+        (
+            path.to_owned(),
+            path.to_ascii_uppercase(),
+            D::ACCESS_READ_ONLY,
+        ),
+        (format!("{path}\\"), path.to_owned(), D::ACCESS_READ_ONLY),
+        (format!("{path}\\"), format!("{path}\\"), D::ACCESS_NONE),
+    ] {
+        let original = json!({
+            "version": "1.1.0-alpha", "containment": "processcontainer",
+            "process": { "commandLine": "must-not-run", "cwd": root },
+            "filesystem": { "readwritePaths": [writable], "readonlyPaths": [readonly] },
+        });
+        let observed = filesystem_ceiling(path, maximum);
+        let prepared = prepare_candidate(&original.to_string(), &observed);
+        let candidate: Value = serde_json::from_str(&prepared.request_json).unwrap();
+        assert_eq!(candidate["filesystem"]["readwritePaths"], json!([]));
+        if maximum == D::ACCESS_NONE {
+            assert_eq!(candidate["filesystem"]["readonlyPaths"], json!([]));
+            assert_eq!(candidate["filesystem"]["deniedPaths"], json!([path]));
+        }
+        let repeated = prepare_candidate(&prepared.request_json, &observed);
+        assert!(repeated.changes.is_empty());
+        assert_eq!(original["filesystem"]["readwritePaths"], json!([writable]));
+    }
+}
+
+#[test]
+fn policy_preparation_projects_only_enumeration_entries_conflicting_with_new_denies() {
+    let _host = PolicyCapabilityGuard::set(true, true, true);
+    let mut api = reset();
+    api.version_support = Some(version);
+    let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+    let directory = tempfile::tempdir().unwrap();
+    let PathCanonical::Canonical(root) = canonicalize_path(directory.path().to_str().unwrap())
+    else {
+        panic!("resolve the fixture directory");
+    };
+    let work = std::path::Path::new(&root).join("work");
+    let denied = work.join("sub");
+    let unrelated = std::path::Path::new(&root).join("unrelated");
+    for path in [&work, &denied, &unrelated] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let original = json!({
+        "version": "1.1.0-alpha", "containment": "processcontainer",
+        "process": { "commandLine": "must-not-run", "cwd": root },
+        "filesystem": { "readwritePaths": [work] },
+        "processContainer": { "filesystem": { "enumeratePaths": [denied, unrelated] } },
+    });
+    let prepared = prepare_candidate(
+        &original.to_string(),
+        &filesystem_ceiling(denied.to_str().unwrap(), D::ACCESS_NONE),
+    );
+    let candidate: Value = serde_json::from_str(&prepared.request_json).unwrap();
+    assert_eq!(
+        candidate["processContainer"]["filesystem"]["enumeratePaths"],
+        json!([unrelated])
+    );
+    assert_eq!(
+        candidate["filesystem"]["readwritePaths"],
+        original["filesystem"]["readwritePaths"]
+    );
+    assert_eq!(candidate["filesystem"]["deniedPaths"], json!([denied]));
+}
+
+#[test]
+fn policy_preparation_projects_removal_of_authored_padded_learning_capabilities() {
+    let _host = PolicyCapabilityGuard::set(true, true, true);
+    let mut api = reset();
+    api.version_support = Some(version);
+    let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+    let original = json!({
+        "version": "1.1.0-alpha", "containment": "processcontainer",
+        "process": { "commandLine": "must-not-run" },
+        "processContainer": { "capabilities": [" learningModeLogging ", "registryRead"] },
+    });
+    let prepared = prepare_candidate(
+        &original.to_string(),
+        &remove_capability("learningModeLogging"),
+    );
+    let candidate: Value = serde_json::from_str(&prepared.request_json).unwrap();
+    assert_eq!(
+        candidate["processContainer"]["capabilities"],
+        json!(["registryRead"])
+    );
+    assert_eq!(prepared.changes.len(), 1);
+}
+
+#[test]
+fn policy_preparation_rejects_aliases_before_treating_a_ceiling_as_satisfied() {
+    use std::os::windows::process::CommandExt;
+    let _host = PolicyCapabilityGuard::set(true, true, true);
+    let mut api = reset();
+    api.version_support = Some(version);
+    let _scope = ApiScope(INJECTED_API.with(|slot| slot.replace(Some(api))));
+    let directory = tempfile::tempdir().unwrap();
+    let PathCanonical::Canonical(root) = canonicalize_path(directory.path().to_str().unwrap())
+    else {
+        panic!("resolve the fixture directory");
+    };
+    let real = std::path::Path::new(&root).join("real");
+    let alias = std::path::Path::new(&root).join("alias");
+    std::fs::create_dir(&real).unwrap();
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&alias)
+        .arg(&real)
+        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "junction fixture failed: {output:?}"
+    );
+    let original = json!({
+        "version": "1.1.0-alpha", "containment": "processcontainer",
+        "process": { "commandLine": "must-not-run", "cwd": root },
+        "filesystem": { "readwritePaths": [alias] },
+    });
+    let error = crate::v1::dev::prepare_policy_json(
+        &original.to_string(),
+        &filesystem_ceiling(real.to_str().unwrap(), D::ACCESS_READ_ONLY),
+        Default::default(),
+    )
+    .expect_err("an alias must not make an unapplied ceiling look satisfied");
+    assert_eq!(error.code, crate::v1::ErrorCode::PolicyValidation);
+    assert!(
+        error.details.as_deref().unwrap()["policyFeedbackError"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("aliased")
+    );
+    STATE.with(|state| assert!(state.borrow().specifications.is_empty()));
+}
+
 #[test]
 fn policy_preparation_preserves_contract_metadata_presence_and_inferred_cwd_in_submitted_psec() {
     let _host = PolicyCapabilityGuard::set(true, true, true);

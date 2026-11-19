@@ -157,6 +157,12 @@ stored results throw `MxcError` with `code: 'malformed_request'`; malformed
 native results reject preparation with `code: 'backend_error'`. Diagnostics do
 not echo the supplied request, observations, or result JSON.
 
+Shared objects and arrays serialize as repeated JSON values; cyclic references
+are rejected. Serialization counts the complete result's UTF-8 bytes, including
+JSON escaping and every repeated value, before expanding shared values into
+JSON text. Parsing limits the supplied UTF-8 text; serializing the parsed value
+can exceed the result limit if JavaScript writes its numbers with more digits.
+
 ### Models and storage helpers
 
 All types and helpers below are exported only from
