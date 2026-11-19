@@ -620,12 +620,9 @@ describe('WSLC SDK E2E — built-in proxy', {
   });
 
   it('should reject egress rules the built-in proxy cannot enforce before starting a container', { timeout: 120_000 }, async () => {
-    const rules = ALLOW_CLOUDFLARE_443.egress!;
     const cases: Array<[string, NetworkPolicy, Record<string, unknown>, string]> = [
       ['external proxy', { ...ALLOW_CLOUDFLARE_443, runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' } }, {},
         'runtimeConfig.networkProxy cannot be combined with egress filtering'],
-      ['host loopback', { egress: rules, ingress: { default: 'deny', hostLoopback: 'allow' } }, {},
-        "hostLoopback 'allow' cannot be combined with egress filtering"],
       ['UDP allow', { egress: { default: 'deny', allow: [{ to: [{ cidr: '1.1.1.1/32' }], ports: [{ protocol: 'udp', port: 53 }] }] }, ingress: DENY_INGRESS }, {},
         "network.egress.allow supports only protocol 'tcp' (got 'udp')"],
       ['IPv6', { egress: { default: 'deny', allow: [{ to: [{ cidr: '2606:4700::/32' }], ports: [{ protocol: 'tcp', port: 443 }] }] }, ingress: DENY_INGRESS }, {},

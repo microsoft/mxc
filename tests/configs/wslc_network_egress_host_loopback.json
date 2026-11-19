@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-host-loopback",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho NO_PROXY=$NO_PROXY\necho HOST_DNS=$(nslookup host.wslc.internal 2>/dev/null | awk '/^Address/ { a = $NF } END { print a }')\necho HOST_DIRECT=$(printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 10 host.wslc.internal 18890 | head -n1 | cut -d' ' -f2)\necho HOST_VIA_PROXY=$(p host.wslc.internal:18890)\necho LOOPBACK=$(p 127.0.0.1:18890)\necho ALLOWED=$(p 1.1.1.1:443)\necho DENIED=$(p 8.8.8.8:443)\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "1.1.1.1/32" }], "ports": [{ "port": 443, "protocol": "tcp" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "allow" }
+  },
+  "wslc": { "image": "alpine:latest" }
+}
