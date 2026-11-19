@@ -112,7 +112,7 @@ pub(crate) fn create_and_run_network_policy_support() -> NetworkPolicySupport {
 pub(crate) enum NetworkMode {
     /// No network at all.
     None,
-    /// The session's NAT network, unfiltered, including Windows loopback.
+    /// The session's NAT network, unfiltered.
     Bridged,
     /// An internal network whose only way out is the built-in proxy.
     Proxied(ProxiedEgress),
@@ -124,7 +124,6 @@ impl NetworkMode {
     /// own session.
     pub(crate) fn session_host_loopback(&self) -> bool {
         match self {
-            NetworkMode::Bridged => true,
             NetworkMode::Proxied(proxied) => {
                 proxied.host_loopback
                     || matches!(
@@ -135,7 +134,7 @@ impl NetworkMode {
                         })
                     )
             }
-            NetworkMode::None => false,
+            NetworkMode::None | NetworkMode::Bridged => false,
         }
     }
 }
@@ -1393,12 +1392,10 @@ mod tests {
         .unwrap();
         assert!(proxied.session_host_loopback());
 
-        let bridged = r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
-        assert!(mode(bridged).unwrap().session_host_loopback());
-
         for network in [
             "{}",
             r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#,
+            r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
         ] {
             assert!(!mode(network).unwrap().session_host_loopback(), "{network}");
         }

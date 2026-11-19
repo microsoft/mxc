@@ -4,7 +4,7 @@
   "containerId": "wslc-network-bridged",
   "containment": "wslc",
   "process": {
-    "commandLine": "python3 -c \"import socket\ns = socket.socket(); s.settimeout(8)\ntry:\n    s.connect(('1.1.1.1', 443)); print('NET_EGRESS_REACHED')\nexcept OSError as e:\n    print('NET_EGRESS_BLOCKED', e.errno)\ntry:\n    c = socket.create_connection(('host.wslc.internal', 18890), timeout=8)\n    c.sendall(b'GET / HTTP/1.0\\r\\n\\r\\n')\n    print('NET_HOST_LOOPBACK=' + c.recv(64).split(b' ')[1].decode())\nexcept (OSError, IndexError) as e:\n    print('NET_HOST_LOOPBACK=ERROR', e)\nprint('NET_PROBE_DONE')\""
+    "commandLine": "python3 -c \"import socket\ns = socket.socket(); s.settimeout(8)\ntry:\n    s.connect(('1.1.1.1', 443)); print('NET_EGRESS_REACHED')\nexcept OSError as e:\n    print('NET_EGRESS_BLOCKED', e.errno)\nprint('NET_PROBE_DONE')\""
   },
   "network": {
     "egress": { "default": "allow" },
