@@ -20,6 +20,8 @@ pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;
 pub mod bwrap_version;
+#[cfg(target_os = "linux")]
+pub(crate) mod capability_check;
 pub(crate) mod host_tools;
 /// Forks `bwrap` from a process-lifetime thread (see the module docs).
 #[cfg(target_os = "linux")]

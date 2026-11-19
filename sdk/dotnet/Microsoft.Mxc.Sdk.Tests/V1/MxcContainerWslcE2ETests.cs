@@ -15,6 +15,9 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcContainerWslcE2ETests
 {
+    private const string ForcedWaitFailureCommand =
+        "true # mxc-test-force-wslc-get-exit-code-failure";
+
     private static void RequireWslc()
     {
 #if MXC_WITH_WSLC
@@ -26,11 +29,18 @@ public class MxcContainerWslcE2ETests
 #endif
     }
 
-    private static ContainerRequest Request(string command) => new(command)
+    private static ContainerRequest Request(string command, string? containerName = null) => new(command)
     {
         TimeoutMs = 60_000,
+        ContainerName = containerName,
         Containment = new Containment.Wslc(),
     };
+
+    private static string UniqueContainerName() => $"mxc-wait-{Guid.NewGuid():N}";
+
+    // WSLc refuses a session name that is still in use.
+    private static void AssertContainerNameReleased(string containerName, string marker) =>
+        Assert.Equal(marker, MxcContainer.Run(Request($"echo {marker}", containerName)).Stdout.Trim());
 
     [Fact]
     public async Task Spawn_ForwardsEveryByteAndClosingStdinEndsInput()
@@ -591,7 +601,6 @@ public class MxcContainerWslcE2ETests
 
     public static TheoryData<string, string> UnenforceableEgressCases() => new()
     {
-        { "port mappings", "wslc.portMappings cannot be combined with egress filtering" },
         { "external proxy", "runtimeConfig.networkProxy cannot be combined with egress filtering" },
         { "host loopback", "hostLoopback 'allow' cannot be combined with egress filtering" },
         { "UDP allow", "network.egress.allow supports only protocol 'tcp' (got 'udp')" },
@@ -605,12 +614,8 @@ public class MxcContainerWslcE2ETests
     {
         RequireWslc();
         var network = AllowCloudflare443();
-        var containment = new Containment.Wslc();
         switch (name)
         {
-            case "port mappings":
-                containment.PortMappings.Add(new WslcPortMapping(39001, 80));
-                break;
             case "external proxy":
                 network.RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8888" };
                 break;
@@ -630,7 +635,7 @@ public class MxcContainerWslcE2ETests
         var request = new ContainerRequest("echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN")
         {
             Network = network,
-            Containment = containment,
+            Containment = new Containment.Wslc(),
         };
 
         var run = await Assert.ThrowsAsync<MxcException>(
@@ -640,5 +645,65 @@ public class MxcContainerWslcE2ETests
         var spawn = Assert.Throws<MxcException>(() => MxcContainer.Spawn(request));
         Assert.Equal(ErrorCode.PolicyValidation, spawn.Code);
         Assert.Contains(message, spawn.Message);
+    }
+
+    [Fact]
+    public void Run_PreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        var containerName = UniqueContainerName();
+
+        var error = Assert.Throws<MxcException>(() =>
+            MxcContainer.Run(Request(ForcedWaitFailureCommand, containerName)));
+
+        AssertForcedWaitFailure(error);
+        AssertContainerNameReleased(containerName, "RUN-RECOVERED");
+    }
+
+    [Fact]
+    public async Task Spawn_WaitPreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        var containerName = UniqueContainerName();
+
+        using (var process = MxcContainer.Spawn(Request(ForcedWaitFailureCommand, containerName)))
+        {
+            AssertForcedWaitFailure(PollForWaitFailure(process));
+            AssertForcedWaitFailure(Assert.Throws<MxcException>(() => process.Wait()));
+            AssertForcedWaitFailure(await Assert.ThrowsAsync<MxcException>(
+                () => process.WaitAsync(TestContext.Current.CancellationToken)));
+        }
+
+        AssertContainerNameReleased(containerName, "PROCESS-RECOVERED");
+    }
+
+    private static MxcException PollForWaitFailure(MxcProcess process)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (true)
+        {
+            try
+            {
+                Assert.False(process.TryGetExitCode(out var exitCode), $"the poll reported exit code {exitCode}");
+            }
+            catch (MxcException error)
+            {
+                return error;
+            }
+
+            Assert.True(DateTime.UtcNow < deadline, "the poll did not report the wait failure within 60 s");
+            Thread.Sleep(100);
+        }
+    }
+
+    private static void AssertForcedWaitFailure(MxcException error)
+    {
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Equal(
+            "WslcGetProcessExitCode failed: HRESULT 0x80004005",
+            error.Message);
+        Assert.Equal("WslcGetProcessExitCode", error.Operation);
+        Assert.Equal("0x80004005", error.NativeCode);
+        Assert.Null(error.Remediation);
     }
 }

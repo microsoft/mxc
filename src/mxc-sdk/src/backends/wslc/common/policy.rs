@@ -22,8 +22,9 @@
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 //!
-//! Create-and-run also accepts egress rules and mixed postures, which
-//! [`create_and_run_network_mode`] routes through the built-in proxy.
+//! Create-and-run also accepts egress rules, mixed postures and port mappings
+//! without bridged networking, which [`create_and_run_network_mode`] routes
+//! through the built-in proxy.
 //!
 //! Checks run filesystem → ui → network, so a request that trips several gets a
 //! stable message rather than one that depends on field order (asserted by
@@ -112,10 +113,10 @@ pub(crate) struct ProxiedEgress {
 }
 
 /// Choose how a create-and-run container is networked, rejecting what the
-/// chosen mode cannot enforce. `field_path` names the port mappings list.
+/// chosen mode cannot enforce. Port mappings are their own grant, so an
+/// otherwise isolated container with them is proxied rather than unnetworked.
 pub(crate) fn create_and_run_network_mode(
     request: &ExecutionRequest,
-    field_path: &str,
     has_port_mappings: bool,
 ) -> Result<NetworkMode, MxcError> {
     let egress = request.policy.network_egress.clone().unwrap_or_default();
@@ -132,10 +133,10 @@ pub(crate) fn create_and_run_network_mode(
         if proxy {
             return Err(MxcError::policy_validation(ERR_PROXY_WITHOUT_ROUTE));
         }
-        reject_port_mappings_without_bridged_network(request, field_path, has_port_mappings)?;
-        return Ok(NetworkMode::None);
-    }
-    if egress.default == NetworkAction::Allow
+        if !has_port_mappings {
+            return Ok(NetworkMode::None);
+        }
+    } else if egress.default == NetworkAction::Allow
         && egress.allow.is_empty()
         && egress.deny.is_empty()
         && ingress.default == NetworkAction::Allow
@@ -144,14 +145,6 @@ pub(crate) fn create_and_run_network_mode(
         return Ok(NetworkMode::Bridged);
     }
 
-    if has_port_mappings {
-        return Err(MxcError::policy_validation(format!(
-            "WSLc: {field_path} cannot be combined with egress filtering by the built-in proxy. \
-             Remove the port mappings, or use bridged networking: network.egress.default, \
-             network.ingress.default and network.ingress.hostLoopback all 'allow', with no \
-             egress rules"
-        )));
-    }
     if ingress.host_loopback == NetworkAction::Allow {
         return Err(MxcError::policy_validation(
             "WSLc: network.ingress.hostLoopback 'allow' cannot be combined with egress filtering \
@@ -166,12 +159,15 @@ pub(crate) fn create_and_run_network_mode(
     }
     let mut proxied = proxied_egress(&egress)?;
     if ingress.default == NetworkAction::Allow {
-        let warning = if egress.default == NetworkAction::Deny && egress.allow.is_empty() {
+        let warning = if egress.default == NetworkAction::Deny
+            && egress.allow.is_empty()
+            && !has_port_mappings
+        {
             "the workload has no network access: network.ingress.default 'allow' has no effect \
              behind the built-in proxy, and everything else is denied"
         } else {
-            "network.ingress.default 'allow' has no effect: nothing can connect in to a \
-             workload behind the built-in proxy"
+            "network.ingress.default 'allow' has no effect: a workload behind the built-in \
+             proxy accepts connections only through port mappings on Windows 127.0.0.1"
         };
         proxied.warnings.push(warning.to_string());
     }
@@ -1136,7 +1132,7 @@ mod tests {
     }
 
     fn mode(network: &str) -> Result<NetworkMode, MxcError> {
-        create_and_run_network_mode(&one_shot(network), "wslc.portMappings", false)
+        create_and_run_network_mode(&one_shot(network), false)
     }
 
     fn proxied(network: &str) -> ProxiedEgress {
@@ -1206,17 +1202,55 @@ mod tests {
     }
 
     #[test]
+    fn port_mappings_are_proxied_unless_bridged() {
+        let with_mappings = |network: &str| create_and_run_network_mode(&one_shot(network), true);
+        for network in [
+            "{}",
+            r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]}}"#,
+        ] {
+            let NetworkMode::Proxied(p) = with_mappings(network).unwrap() else {
+                panic!("{network} was not proxied");
+            };
+            assert_eq!(p.egress.default, gateway::Action::Deny);
+            assert!(p.egress.allow.is_empty());
+        }
+        let NetworkMode::Proxied(p) = with_mappings(r#"{"ingress":{"default":"allow"}}"#).unwrap()
+        else {
+            panic!("ingress-only was not proxied");
+        };
+        assert!(
+            p.warnings
+                .iter()
+                .any(|w| w.contains("only through port mappings")),
+            "{:?}",
+            p.warnings
+        );
+        assert!(matches!(
+            with_mappings(r#"{"egress":{"allow":[{"ports":[{"protocol":"tcp","port":443}]}]}}"#)
+                .unwrap(),
+            NetworkMode::Proxied(_)
+        ));
+        assert_eq!(
+            with_mappings(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#)
+                .unwrap(),
+            NetworkMode::Bridged
+        );
+    }
+
+    #[test]
     fn the_proxy_rejects_what_it_cannot_enforce() {
         let rule = r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}]}]}}"#;
-        assert_policy_validation(
-            create_and_run_network_mode(&one_shot(rule), "wslc.portMappings", true).unwrap_err(),
-            "wslc.portMappings cannot be combined",
-        );
         let mut with_proxy = one_shot(rule);
         with_proxy.policy.network_proxy = url_proxy();
         assert_policy_validation(
-            create_and_run_network_mode(&with_proxy, "wslc.portMappings", false).unwrap_err(),
+            create_and_run_network_mode(&with_proxy, false).unwrap_err(),
             "runtimeConfig.networkProxy cannot be combined",
+        );
+        let mut isolated_with_proxy = one_shot("{}");
+        isolated_with_proxy.policy.network_proxy = url_proxy();
+        assert_policy_validation(
+            create_and_run_network_mode(&isolated_with_proxy, true).unwrap_err(),
+            "requires bridged networking",
         );
         for (network, needle) in [
             (

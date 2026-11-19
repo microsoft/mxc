@@ -167,11 +167,11 @@ Current platforms:
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
 |-------------|--------|----------|------------|--------------------------|------------|
 | `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
-| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isosesh-arm64` | same as above | same as above |
+| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc | — |
@@ -238,6 +238,17 @@ container provisioning. LXC mount cases run as root against an empty, stopped
 container in private storage and verify cleanup. The blocked-call hook is test-only. See
 [filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
 for local commands and watchdog behavior.
+
+Bubblewrap's build and scheduled validation run
+`run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
+isolated, firewall, and proxy cases require empty workload capability sets,
+denied privileged socket creation and read-only bind remounts. The
+network-enabled modes also require working supervisor-provided connectivity,
+and a live blocked endpoint that stays blocked after the workload tries to
+flush its firewall. Each case is repeated through a `bwrap` wrapper whose
+seccomp filter refuses `capset` and the bounding-set drop; that launch must
+fail without running the workload. The test's last line names the modes that
+passed, and CI requires all three.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
