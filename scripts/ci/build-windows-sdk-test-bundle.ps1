@@ -213,7 +213,7 @@ Copy-Item -LiteralPath $nodeExe, (Join-Path (Split-Path -Parent $nodeExe) 'LICEN
 
 Copy-Item -Path (Join-Path $repoRoot 'tests\configs\isolation_session_*.json') -Destination (New-Directory (Join-Path $OutputDirectory 'test_configs'))
 $scriptsOut = New-Directory (Join-Path $OutputDirectory 'test_scripts')
-foreach ($name in 'run_isolation_session_tests.ps1', 'run_isolation_session_state_aware_tests.ps1', 'run_isolation_session_resize_smoke.ps1') {
+foreach ($name in 'run_isolation_session_tests.ps1', 'run_isolation_session_state_aware_tests.ps1', 'run_isolation_session_resize_smoke.ps1', 'run_isolation_session_network_test.ps1') {
     Copy-Item -LiteralPath (Join-Path $repoRoot "tests\scripts\$name") -Destination $scriptsOut
 }
 $helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helpers.ps1') `
@@ -307,7 +307,8 @@ $required = @(
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\mxc-wslc-gateway.tar",
     'test_scripts\run_isolation_session_tests.ps1',
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
-    'test_scripts\run_isolation_session_resize_smoke.ps1'
+    'test_scripts\run_isolation_session_resize_smoke.ps1',
+    'test_scripts\run_isolation_session_network_test.ps1'
 )
 if ($Architecture -eq 'x64') {
     $required += @(

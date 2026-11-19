@@ -1,0 +1,31 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "127.0.0.1/32"
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 5001
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
