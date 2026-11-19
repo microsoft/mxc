@@ -388,8 +388,8 @@ pub struct Seatbelt {
     /// replaces guiAccess's IOKit grant.
     #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_io_kits: OptionalField<SeatbeltCustomRules>,
-    /// Mach service names the process may register. Each present block
-    /// replaces guiAccess's registration grant for its names.
+    /// Mach service names the process may register. Each present scope
+    /// (`global` or `local`) replaces guiAccess's registration grant for it.
     #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_mach_registers: OptionalField<SeatbeltCustomMachRegisters>,
     /// Mach service global names the process may resolve. When present, this

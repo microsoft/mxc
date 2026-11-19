@@ -373,8 +373,10 @@ Set under a top-level `"seatbelt"` key.
 <summary><code>guiAccess</code> — exactly what it opens</summary>
 
 All `mach-lookup`, plus `mach-register`, `iokit-open` for GPU/Metal,
-and POSIX shared memory. A `customMachLookups`, `customMachRegisters`,
-`customIoKits`, or `customPosixShm` block replaces the matching grant.
+and POSIX shared memory. A `customMachLookups`, `customIoKits`, or
+`customPosixShm` block replaces the matching grant. `customMachRegisters`
+replaces the registration grant only for each scope (`global` or `local`) it
+sets: `{}` keeps both grants, so set both scopes to replace both.
 
 It also grants read **and** write across all of `/private/tmp` and
 `/private/var/folders`. `readonlyPaths` entries at or inside those folders

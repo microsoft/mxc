@@ -719,7 +719,7 @@ export interface Seatbelt {
    */
   customMachLookups?: SeatbeltCustomRules;
   /**
-   * Mach service names the process may register. Each present block replaces guiAccess's registration grant for its names.
+   * Mach service names the process may register. Each present scope (`global` or `local`) replaces guiAccess's registration grant for it.
    */
   customMachRegisters?: SeatbeltCustomMachRegisters;
   /**

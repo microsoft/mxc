@@ -2532,7 +2532,8 @@ mod tests {
         assert_eq!(shm.own, ["/myapp.tmp"]);
         assert!(shm.deny.is_empty());
 
-        // Empty blocks are kept: they replace guiAccess's grant with nothing.
+        // Empty blocks are kept. `customPosixShm: {}` replaces guiAccess's grant
+        // with nothing; `customMachRegisters: {}` sets no scope, so it replaces nothing.
         let json = r#"{
             "version": "1.1.0-alpha",
             "containment": "seatbelt",
