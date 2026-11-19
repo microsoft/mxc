@@ -398,6 +398,20 @@ impl Gateway {
     }
 }
 
+/// Exempts `host.wslc.internal` from the proxy in an environment from
+/// [`proxy_env::apply_cooperative_proxy_env`]: Windows loopback is reached
+/// directly, and a custom proxy couldn't reach it.
+pub(crate) fn exempt_host_loopback(env: &mut [String]) {
+    for entry in env.iter_mut() {
+        if let Some(key) = proxy_env::PROXY_NEUTRALIZE_KEYS
+            .iter()
+            .find(|key| entry.strip_suffix('=') == Some(**key))
+        {
+            *entry = format!("{key}={}", gateway::HOST_LOOPBACK_NAME);
+        }
+    }
+}
+
 fn workload_env(
     caller_env: &[String],
     scope: EnvScope,
@@ -405,16 +419,8 @@ fn workload_env(
     host_loopback: bool,
 ) -> Vec<String> {
     let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, proxy_url);
-    // Windows loopback is reached directly; a custom proxy couldn't reach it.
     if host_loopback {
-        for entry in env.iter_mut() {
-            if let Some(key) = proxy_env::PROXY_NEUTRALIZE_KEYS
-                .iter()
-                .find(|key| entry.strip_suffix('=') == Some(**key))
-            {
-                *entry = format!("{key}={}", gateway::HOST_LOOPBACK_NAME);
-            }
-        }
+        exempt_host_loopback(&mut env);
     }
     // Node.js ignores HTTP(S)_PROXY unless this is set. It joins the default
     // environment, so a replacing request doesn't get it.

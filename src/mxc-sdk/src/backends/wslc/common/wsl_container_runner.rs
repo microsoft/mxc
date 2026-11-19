@@ -1164,10 +1164,14 @@ impl WSLContainerRunner {
                 "[WSLC] Cooperative network proxy configured: {}",
                 crate::mxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
-            crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
+            let mut env = crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
                 request.env_entries(),
                 &proxy_url,
-            )
+            );
+            if network_mode.session_host_loopback() {
+                egress_gateway::exempt_host_loopback(&mut env);
+            }
+            env
         } else {
             request.env_entries().to_vec()
         };

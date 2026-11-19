@@ -722,6 +722,11 @@ try {
     # Bridged containers reach it without the built-in proxy.
     $null = $results.Add((Run-WslcTest "wslc_network_bridged.json" -As "wslc_network_bridged.json (host loopback)" `
         -OutputContains "NET_EGRESS_REACHED", "NET_HOST_LOOPBACK=200"))
+    # Proxy-aware clients skip an unreachable advisory proxy for host.wslc.internal.
+    $null = $results.Add((Run-WslcTest "wslc_network_bridged_network_proxy_host_loopback.json" `
+        -Probes ([ordered]@{
+            PROXY_ENV = "http://192\.0\.2\.1:8080"; NO_PROXY = "host\.wslc\.internal"; HOST_VIA_CLIENT = "200"
+        })))
 } finally {
     Stop-Job $hostLoopbackServer
     Remove-Job $hostLoopbackServer

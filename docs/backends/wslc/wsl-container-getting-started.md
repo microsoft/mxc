@@ -684,8 +684,10 @@ them use your proxy. With any other policy, it goes through the built-in proxy
 instead; see [Custom proxy](#custom-proxy).
 
 - MXC sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy` and `https_proxy` to the
-  URL, and `NO_PROXY`/`no_proxy` to empty so an image's `ENV NO_PROXY` can't
-  bypass it. Caller-supplied values for these keys are dropped.
+  URL. It sets `NO_PROXY`/`no_proxy` to `host.wslc.internal` in create-and-run
+  execution and to empty with container lifecycle operations, so an image's
+  `ENV NO_PROXY` can't bypass the proxy. Caller-supplied values for these keys
+  are dropped.
 
 - Nothing is enforced. Clients that ignore the variables (raw sockets, some
   static binaries) connect directly, and the workload can change its own
