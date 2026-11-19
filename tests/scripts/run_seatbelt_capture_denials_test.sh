@@ -182,6 +182,13 @@ read_pointer "block mode with deniedPaths writes a report"
 expect_listed "block mode lists the default-denied read" file "$SECRET" read
 expect_listed "block mode lists the explicitly denied read" file "$TESTDIR/denied/secret.txt" read
 
+# Capture tags only real deny rules, not text inside a quoted name.
+config="$(render seatbelt_capture_denials_block.json TESTDIR "$TESTDIR" OUTPUT "$TESTDIR/out/denials.json")"
+edit_config "$config" 'config["seatbelt"]["customMachLookups"] = {"allow": ["com.example\n(deny embedded)"]}'
+run_config "$config"
+expect_ok "a custom name containing a newline still launches with capture" "CAPTURE_READ_BLOCKED"
+read_pointer "the multi-line custom name run writes a report"
+
 # --- retainEtl keeps the raw log stream ---------------------------------------
 
 config="$(render seatbelt_capture_denials_block.json TESTDIR "$TESTDIR" OUTPUT "$TESTDIR/out/denials.json")"
@@ -682,8 +689,6 @@ expect_ok "allow mode runs the GUI app despite empty custom lists" "GUI_WINDOW_O
 read_pointer "the allow-mode custom-list run writes a report"
 expect_listed "allow mode lists the Core Animation lookup to grant" other "$GUI_MACH" unknown
 expect_listed "allow mode lists the IOSurface driver to grant" other "$GUI_IOKIT" unknown
-expect_listed "allow mode lists the shared memory to grant" other \
-    "ipc-posix-shm-read-data:apple.shm.notification_center" read
 
 # Shared memory names start with "/" but are not paths, so the verbose report
 # keeps them for customPosixShm. Only a `default` grant is reported, and `own`
@@ -705,6 +710,18 @@ run_config "$(render seatbelt_capture_denials_shm_grant.json TESTDIR "$TESTDIR" 
 expect_ok "the shared memory workload ran" "SHM_OK"
 read_pointer "the shared memory run writes a report"
 expect_granted "the verbose report names the shared memory it granted" ipc-posix-shm-write-create "/$SHM"
+
+# In allow mode an empty customPosixShm doesn't block the workload; the report
+# names the shared memory it created and deleted.
+config="$(render seatbelt_capture_denials_shm_grant.json TESTDIR "$TESTDIR" SHM "$SHM" OUTPUT "$TESTDIR/out/shm_unlisted.json")"
+edit_config "$config" 'config["seatbelt"]["customPosixShm"] = {}; config["seatbelt"]["captureDenials"]["mode"] = "allow"'
+run_config "$config"
+expect_ok "allow mode runs the shared memory workload despite an empty list" "SHM_OK"
+read_pointer "the allow-mode shared memory run writes a report"
+expect_listed "allow mode lists the shared memory create to grant" other \
+    "ipc-posix-shm-write-create:/$SHM" write
+expect_listed "allow mode lists the shared memory delete to grant" other \
+    "ipc-posix-shm-write-unlink:/$SHM" write
 
 # --- rejections --------------------------------------------------------------
 

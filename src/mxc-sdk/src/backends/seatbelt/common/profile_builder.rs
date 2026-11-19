@@ -224,12 +224,16 @@ pub(crate) fn build_profile_with_terminals(
 }
 
 /// Adds `(with message "<tag>")` to every rule that starts with `(deny `,
-/// right after its operation names.
+/// right after its operation names. Lines that continue a quoted string, such
+/// as a name containing a newline, are left unchanged.
 fn tag_deny_rules(profile: &str, tag: &str) -> String {
     let modifier = format!(" (with message {})", quote_scheme(tag));
     let mut out = String::with_capacity(profile.len() + 256);
+    let mut in_string = false;
     for line in profile.split_inclusive('\n') {
-        let Some(rest) = line.strip_prefix("(deny ") else {
+        let starts_in_string = in_string;
+        in_string = ends_in_string(line, in_string);
+        let Some(rest) = line.strip_prefix("(deny ").filter(|_| !starts_in_string) else {
             out.push_str(line);
             continue;
         };
@@ -241,6 +245,22 @@ fn tag_deny_rules(profile: &str, tag: &str) -> String {
         out.push_str(&rest[ops.len()..]);
     }
     out
+}
+
+/// Whether a quoted string is still open at the end of `line`.
+fn ends_in_string(line: &str, mut in_string: bool) -> bool {
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if in_string => {
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            ';' if !in_string => break,
+            _ => {}
+        }
+    }
+    in_string
 }
 
 /// Baseline allow rules required for any sandboxed process to start.
@@ -2753,6 +2773,47 @@ mod tests {
             ),
             "{p}"
         );
+    }
+
+    #[test]
+    fn capture_tagging_leaves_multiline_names_and_paths_unchanged() {
+        let names = [
+            "com.example\n(deny embedded)",
+            "com.example.blocked\n(deny \"quoted\") ; end",
+        ];
+        let path = "/tmp/mxc\n(deny file-read-data";
+        let mut r = capture_request(CaptureDenialsMode::Block, false);
+        r.seatbelt.as_mut().unwrap().custom_mach_lookups = Some(custom_rules(
+            SeatbeltCustomDefault::Allow,
+            &names[..1],
+            &names[1..],
+        ));
+        let inputs = ProfileInputs {
+            readonly_paths: vec![path.into()],
+            capture_tag: Some("mxc-capture-test".into()),
+            ..Default::default()
+        };
+        let p = super::build_profile_with_proxy(&r, None, &inputs).unwrap();
+        for text in names.into_iter().chain([path]) {
+            assert!(p.contains(&quote_scheme(text)), "{text:?}\n{p}");
+        }
+        assert!(
+            p.contains("(deny default (with message \"mxc-capture-test\"))"),
+            "{p}"
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &p, "/usr/bin/true"])
+                .output()
+                .expect("sandbox-exec runs");
+            assert!(
+                output.status.success(),
+                "{}\n{p}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

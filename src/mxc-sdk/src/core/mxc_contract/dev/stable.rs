@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::primitives::{NonEmptyString, OptionalField};
+use super::primitives::{deserialize_optional_object, NonEmptyString, OptionalField};
 use serde::{de, Deserialize, Deserializer};
 
 /// Container lifecycle settings.
@@ -386,22 +386,22 @@ pub struct Seatbelt {
     pub extra_mach_lookups: OptionalField<Vec<String>>,
     /// IOKit user-client classes the process may open. When present, this
     /// replaces guiAccess's IOKit grant.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_io_kits: OptionalField<SeatbeltCustomRules>,
     /// Mach service names the process may register. Each present block
     /// replaces guiAccess's registration grant for its names.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_mach_registers: OptionalField<SeatbeltCustomMachRegisters>,
     /// Mach service global names the process may resolve. When present, this
     /// replaces guiAccess's Mach lookup grant.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_mach_lookups: OptionalField<SeatbeltCustomRules>,
     /// POSIX shared memory names the process may use. When present, this
     /// replaces guiAccess's shared memory grant.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub custom_posix_shm: OptionalField<SeatbeltCustomPosixShm>,
     /// Records sandbox denials to a JSON report.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub capture_denials: OptionalField<SeatbeltCaptureDenials>,
 }
 
@@ -458,10 +458,10 @@ pub struct SeatbeltCustomRules {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SeatbeltCustomMachRegisters {
     /// Names registered with launchd, visible to other processes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub global: OptionalField<SeatbeltCustomRules>,
     /// Per-process names, shown as `(per-pid)` in denial reports.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_object")]
     pub local: OptionalField<SeatbeltCustomRules>,
 }
 

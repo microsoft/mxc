@@ -15,6 +15,7 @@ use crate::mxc_common::models::{
     SeatbeltCustomDefault, SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
 use crate::mxc_common::{escape_diagnostic_text, host_is_canonical_loopback};
+use std::collections::HashMap;
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
 /// policy leaves UI enabled, since every GUI grant is emitted alongside the
@@ -336,7 +337,7 @@ fn validate_custom_entry(
     all_names: &str,
 ) -> Result<(), String> {
     reject_nul(list, entry)?;
-    let shown = escape_diagnostic_text(entry);
+    let shown = || escape_diagnostic_text(entry);
     let name = match NamePattern::parse(entry) {
         NamePattern::Exact(name) | NamePattern::Prefix(name) => name,
     };
@@ -348,8 +349,9 @@ fn validate_custom_entry(
     }
     if name.contains('*') {
         return Err(format!(
-            "Seatbelt: {list} entry '{shown}' has a '*' that is not at the end. \
-             Only a single trailing '*' (prefix match) is supported."
+            "Seatbelt: {list} entry '{}' has a '*' that is not at the end. \
+             Only a single trailing '*' (prefix match) is supported.",
+            shown()
         ));
     }
     let is_class_name = |name: &str| {
@@ -360,14 +362,16 @@ fn validate_custom_entry(
     };
     if kind == CustomNameKind::IoKit && !is_class_name(name) {
         return Err(format!(
-            "Seatbelt: {list} entry '{shown}' is not an IOKit user-client class name \
-             (letters, digits, and '_', optionally ending in '*')."
+            "Seatbelt: {list} entry '{}' is not an IOKit user-client class name \
+             (letters, digits, and '_', optionally ending in '*').",
+            shown()
         ));
     }
     if kind == CustomNameKind::PosixShm && name.len() > POSIX_SHM_NAME_MAX {
         return Err(format!(
-            "Seatbelt: {list} entry '{shown}' is longer than {POSIX_SHM_NAME_MAX} bytes, \
-             the longest POSIX shared memory name macOS accepts."
+            "Seatbelt: {list} entry '{}' is longer than {POSIX_SHM_NAME_MAX} bytes, \
+             the longest POSIX shared memory name macOS accepts.",
+            shown()
         ));
     }
     Ok(())
@@ -465,14 +469,19 @@ fn validate_posix_shm_rules(shm: &SeatbeltCustomPosixShm) -> Result<(), String> 
         )?;
     }
     // Each name needs one access level; deny entries override any level.
-    for (i, (list, _, entries)) in lists.iter().enumerate() {
-        for (other, _, other_entries) in &lists[i + 1..] {
-            if let Some(entry) = entries.iter().find(|e| other_entries.contains(e)) {
-                return Err(format!(
-                    "Seatbelt: seatbelt.customPosixShm entry '{}' is in both '{list}' \
-                     and '{other}'. List each name once, with the access it needs.",
-                    escape_diagnostic_text(entry)
-                ));
+    let mut first_list = HashMap::new();
+    for (list, _, entries) in lists {
+        for entry in entries {
+            if let Some(&earlier) = first_list.get(entry.as_str()) {
+                if earlier != list {
+                    return Err(format!(
+                        "Seatbelt: seatbelt.customPosixShm entry '{}' is in both '{earlier}' \
+                         and '{list}'. List each name once, with the access it needs.",
+                        escape_diagnostic_text(entry)
+                    ));
+                }
+            } else {
+                first_list.insert(entry.as_str(), list);
             }
         }
     }
@@ -931,6 +940,37 @@ mod tests {
         });
         assert!(
             msg.contains("'/app.*' is in both 'read' and 'own'"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn checks_large_posix_shm_lists_for_shared_names_quickly() {
+        let names = |prefix: &str| (0..50_000).map(|i| format!("/{prefix}{i}")).collect();
+        let mut shm = SeatbeltCustomPosixShm {
+            read: names("r"),
+            own: names("o"),
+            ..Default::default()
+        };
+        let request = seatbelt_request(SeatbeltConfig {
+            custom_posix_shm: Some(shm.clone()),
+            ..Default::default()
+        });
+        let started = std::time::Instant::now();
+        validate_seatbelt_custom_rules(&request).unwrap();
+        assert!(
+            started.elapsed().as_secs() < 2,
+            "took {:?}",
+            started.elapsed()
+        );
+
+        shm.own.push("/r49999".into());
+        let msg = custom_error(SeatbeltConfig {
+            custom_posix_shm: Some(shm),
+            ..Default::default()
+        });
+        assert!(
+            msg.contains("'/r49999' is in both 'read' and 'own'"),
             "{msg}"
         );
     }

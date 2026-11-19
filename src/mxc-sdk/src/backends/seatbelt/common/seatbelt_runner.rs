@@ -514,7 +514,8 @@ fn plan_denial_capture(
 const TRACE_SUFFIX: &str = "seatbelt.log";
 
 const ALLOW_MODE_WARNING: &str = "Seatbelt captureDenials mode 'allow' ran the workload without \
-     enforcing default-denied operations; denials.json lists what would have been blocked";
+     enforcing default-denied operations, including blocks from settings the config leaves out \
+     (such as keychainAccess or ui.clipboard); denials.json lists what would have been blocked";
 
 /// A running Seatbelt-sandboxed process: the child plus, for the pipes path,
 /// its parent-side pipe ends. See [`SandboxProcess`] for the contract.

@@ -217,6 +217,7 @@ fn accepts_seatbelt_capture_denials() {
 fn rejects_invalid_seatbelt_capture_denials() {
     for body in [
         r#"true"#,
+        r#"["allow"]"#,
         r#"{"mode": "audit"}"#,
         r#"{"outputPath": 1}"#,
         r#"{"retainEtl": "yes"}"#,
@@ -261,6 +262,12 @@ fn accepts_seatbelt_custom_rules() {
 fn rejects_invalid_seatbelt_custom_rules() {
     for body in [
         r#""customIoKits": true"#,
+        r#""customIoKits": ["allow"]"#,
+        r#""customMachLookups": ["allow"]"#,
+        r#""customMachRegisters": [{"default": "allow"}]"#,
+        r#""customMachRegisters": {"global": ["allow"]}"#,
+        r#""customMachRegisters": {"local": ["allow"]}"#,
+        r#""customPosixShm": ["own"]"#,
         r#""customIoKits": {"default": "audit"}"#,
         r#""customMachLookups": {"allow": "com.example.a"}"#,
         r#""customMachLookups": {"extra": []}"#,

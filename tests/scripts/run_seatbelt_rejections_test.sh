@@ -70,6 +70,12 @@ expect_rejected "a bare '*' custom entry is refused" \
     "seatbelt_reject_custom_bare_star.json" \
     "a bare '*' is not supported" "$S"
 
+# A list would otherwise fill the block's fields by position: ["allow"] became
+# default "allow".
+expect_rejected "a custom block written as a list is refused" \
+    "seatbelt_reject_custom_list_not_object.json" \
+    "seatbelt.customMachLookups\`: invalid type: sequence, expected a settings object" "$S"
+
 expect_rejected "custom lists with profileOverride are refused" \
     "seatbelt_reject_custom_with_profile_override.json" \
     "it cannot be combined with customIoKits" "$S"
