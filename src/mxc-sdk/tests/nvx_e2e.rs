@@ -2035,17 +2035,36 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             let [(old_ref, old), (new_ref, new), (third_ref, third)] = images;
             assert_ne!(
                 old.id, new.id,
-                "fixture references must have distinct images"
+                "fixture references {old_ref} and {new_ref} have the same content"
             );
-            assert_ne!(third.id, old.id);
-            assert_ne!(third.id, new.id);
+            assert_ne!(
+                third.id, old.id,
+                "fixture references {third_ref} and {old_ref} have the same content"
+            );
+            assert_ne!(
+                third.id, new.id,
+                "fixture references {third_ref} and {new_ref} have the same content"
+            );
             assert!(
                 new.length > MIB && old.length > new.length && old.length < CAPACITY,
-                "{old:?} {new:?}"
+                "fixture sizes must satisfy 1 MiB < {new_ref} ({}) < {old_ref} ({}) < \
+                 10 GiB; choose suitable distinct references",
+                new.length,
+                old.length
             );
             assert!(
                 third.length > 0 && new.length + third.length < CAPACITY,
-                "{new:?} {third:?}"
+                "fixture sizes for {new_ref} ({}) and {third_ref} ({}) must fit below 10 GiB; \
+                 choose suitable distinct references",
+                new.length,
+                third.length
+            );
+            assert!(
+                new.length > third.length,
+                "fixture images must have distinct sizes: {new_ref} ({}), {third_ref} ({}); \
+                 choose distinct stable references",
+                new.length,
+                third.length
             );
             assert!(seed.unregister_image(&new.id).unwrap());
             assert!(seed.unregister_image(&third.id).unwrap());
@@ -2063,11 +2082,23 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             // Both the initial eviction and the later largest-first check must fit.
             let padding_length =
                 ((CAPACITY - old.length).min(CAPACITY - new.length - third.length) / MIB) * MIB;
-            assert!(padding_length >= 2 * MIB);
-            assert!(padding_length + old.length <= CAPACITY);
-            assert!(padding_length + old.length + new.length > CAPACITY);
-            assert!(padding_length + new.length + third.length <= CAPACITY);
-            assert!(padding_length + old.length + third.length > CAPACITY);
+            assert!(padding_length >= 2 * MIB, "padding must be at least 2 MiB");
+            assert!(
+                padding_length + old.length <= CAPACITY,
+                "padding plus the larger image must fit"
+            );
+            assert!(
+                padding_length + old.length + new.length > CAPACITY,
+                "padding plus both images must exceed capacity"
+            );
+            assert!(
+                padding_length + new.length + third.length <= CAPACITY,
+                "the smaller and incoming images must fit with padding"
+            );
+            assert!(
+                padding_length + old.length + third.length > CAPACITY,
+                "the larger and incoming images must exceed capacity with padding"
+            );
             let vhd = padding_image(&bundle, fixture.path(), padding_length);
 
             let setup = bundle
@@ -2171,8 +2202,12 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .filter(|image| image.id != padding)
                 .collect();
             assert_eq!(current.len(), 1, "{registered:?}");
-            assert_eq!(current[0].length, new.length);
+            assert_eq!(
+                current[0].length, new.length,
+                "fixture reference {new_ref} changed size between registrations"
+            );
             let current_id = current[0].id;
+            assert_ne!(current_id, padding, "fixture images must be distinct");
 
             let offline = [
                 environment[0],
@@ -2202,38 +2237,77 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .filter(|image| image.id != padding)
                 .collect();
             assert_eq!(restored.len(), 1, "{registered:?}");
-            assert_eq!(restored[0].length, old.length);
+            assert_eq!(
+                restored[0].length, old.length,
+                "fixture reference {old_ref} changed size between registrations"
+            );
             if lifecycle {
                 let mut container = container_from_output(&output, &local);
                 deprovision(&mut container, &local);
             }
 
-            // An older unlimited host can leave this root above the new limit.
+            // Register the smaller candidate first so oldest-first cannot pass this check.
+            assert!(
+                seed.unregister_image(&restored[0].id).unwrap(),
+                "remove the larger image before arranging registration order"
+            );
+            let empty_candidates = protected.images().unwrap();
+            assert_eq!(empty_candidates.len(), 1, "{empty_candidates:?}");
+            assert_eq!(empty_candidates[0].id, padding);
             let extra = seed
                 .register_reference(new_ref, ImageDigest::Compute)
-                .expect("seed an existing over-limit cache");
+                .expect("register the older, smaller eviction candidate");
+            let smaller_only = protected.images().unwrap();
+            assert_eq!(smaller_only.len(), 2, "{smaller_only:?}");
+            assert!(smaller_only.iter().any(|image| image.id == padding));
+            assert!(smaller_only.iter().any(|image| image.id == extra.id));
+            assert_eq!(
+                extra.length, new.length,
+                "fixture reference {new_ref} changed size between registrations"
+            );
+            assert_ne!(extra.id, padding, "fixture images must be distinct");
+            assert!(
+                !smaller_only.iter().any(|image| image.id == restored[0].id),
+                "larger candidate must be absent before its later registration: {smaller_only:?}"
+            );
+            let largest = seed
+                .register_reference(old_ref, ImageDigest::Compute)
+                .expect("register the newer, larger eviction candidate");
+            assert_eq!(
+                largest.length, old.length,
+                "fixture reference {old_ref} changed size between registrations"
+            );
+            assert_ne!(largest.id, extra.id, "eviction candidates must be distinct");
+            assert_ne!(largest.id, padding, "fixture images must be distinct");
+
+            // An older unlimited host can leave this root above the new limit.
             let before = protected.images().unwrap();
             assert!(before.iter().map(|image| image.length).sum::<u64>() > CAPACITY);
             assert!(before.iter().any(|image| image.id == extra.id));
             assert_eq!(before.len(), 3, "{before:?}");
             assert!(before.iter().any(|image| image.id == padding));
-            assert!(before.iter().any(|image| image.id == restored[0].id));
+            assert!(before.iter().any(|image| image.id == largest.id));
             assert_eq!(extra.length, new.length);
             assert!(old.length > extra.length);
+            let total = before.iter().map(|image| image.length).sum::<u64>();
+            let after_largest = total - largest.length + third.length;
+            let after_smaller = total - extra.length + third.length;
             assert!(
-                before.iter().map(|image| image.length).sum::<u64>() - old.length + third.length
-                    <= CAPACITY,
-                "evicting the largest image alone must make room for the incoming image: {before:?}"
+                after_largest <= CAPACITY,
+                "evicting the largest image alone must make room: {after_largest} > {CAPACITY}; \
+                 {before:?}"
             );
             assert!(
-                before.iter().map(|image| image.length).sum::<u64>() - extra.length + third.length
-                    > CAPACITY,
-                "evicting only the smaller image must not make enough room: {before:?}"
+                after_smaller > CAPACITY,
+                "evicting only the smaller image must not make room: {after_smaller} <= \
+                 {CAPACITY}; {before:?}"
             );
             println!(
-                "image cache largest-first fixture: capacity={CAPACITY}, padding={padding_length}, \
-                 largest={}, smaller={}, incoming={}",
-                old.length, extra.length, third.length
+                "image cache largest-first fixture: lifecycle={lifecycle}, capacity={CAPACITY}, \
+                 padding={padding_length}, older smaller={new_ref}:{}:{}, \
+                 newer largest={old_ref}:{}:{}, incoming={third_ref}:{}, \
+                 after-largest={after_largest}, after-smaller={after_smaller}",
+                extra.id, extra.length, largest.id, largest.length, third.length
             );
             let output = executor_output_with_env(&old_request, false, false, &environment);
             assert!(output.status.success(), "{output:?}");
@@ -2269,9 +2343,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                     <= CAPACITY
             );
             assert!(
-                !after_admission
-                    .iter()
-                    .any(|image| image.id == restored[0].id),
+                !after_admission.iter().any(|image| image.id == largest.id),
                 "admission must evict the largest unused image"
             );
             assert!(
@@ -2283,7 +2355,14 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 .filter(|image| image.id != padding && image.id != extra.id)
                 .collect();
             assert_eq!(admitted.len(), 1, "{after_admission:?}");
-            assert_eq!(admitted[0].length, third.length);
+            assert_eq!(
+                admitted[0].length, third.length,
+                "fixture reference {third_ref} changed size between registrations"
+            );
+            assert_ne!(
+                admitted[0].id, largest.id,
+                "fixture images must be distinct"
+            );
             protected.close().unwrap();
             seed.close().unwrap();
         }
