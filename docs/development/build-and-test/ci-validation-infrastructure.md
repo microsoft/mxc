@@ -349,6 +349,16 @@ capture followed by reuse without recapture in later processes. Concurrent first
 requests exercise both template capture and image registration; later concurrent
 requests must still clone the same template with the registry unreachable.
 
+The image-cache capacity scenario uses the signed image tool to create a
+large protected image and verifies admission across the actual 10 GiB boundary
+in both agent state roots. It checks root independence, concurrent create-and-run
+requests, eviction and re-pull, reuse of an existing over-limit cache, dry-run,
+subsequent admission, and protection of provisioned, running, and stopped
+containers. It also checks oversized-image rejection through the signed agent's
+local-image registration. The test needs registry access and at least 30 GiB of
+free disk space on the volume holding the staged test executable. The limit
+covers counted staged images, not temporary files or other agent state.
+
 Explicit 256-MiB and 512-MiB requests exercise create-and-run execution and
 lifecycle starts. Native diagnostics must report a clone for 256 MiB and a cold
 boot with a memory-capacity reason for 512 MiB, without an initialization-fallback
@@ -404,7 +414,8 @@ and unpack the Rust crate package to check that its tests compile. Actual VM
 scenarios run only in the scheduled Windows x64 job. Its dispatcher requires
 completion markers for CLI and SDK snapshots, lifecycle adoption, fallback
 warnings and lifecycle diagnostics, concurrent image reuse, and all three
-interruption phases, as well as the existing execution and policy scenarios.
+interruption phases, the image-cache capacity scenario, and the existing
+execution and policy scenarios.
 Missing markers, empty suites, skips, ignored tests, and filtered tests fail
 the job.
 

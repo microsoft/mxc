@@ -57,6 +57,7 @@ foreach ($name in @(
     'windows_x64::signed_bundle_executor_configs',
     'windows_x64::signed_bundle_executor_create_and_run',
     'windows_x64::signed_bundle_executor_reuses_registered_images',
+    'windows_x64::signed_bundle_image_cache_capacity',
     'windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots',
     'windows_x64::signed_bundle_snapshot_memory_capacity',
     'windows_x64::signed_bundle_executor_console_interrupt',

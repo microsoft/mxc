@@ -1870,6 +1870,339 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     }
 
     #[test]
+    #[ignore = "VM: requires Windows x64, WHP, signed bundle, registry access and 30 GiB free disk"]
+    fn signed_bundle_image_cache_capacity() {
+        use aci_edge_sandboxes::agent::{
+            AgentBackend, BundledAgent, ImageDigest, ImageSettings, SandboxDefaults,
+        };
+        use aci_edge_sandboxes::ImageSource;
+        use std::ffi::OsStr;
+
+        fn container_from_output(output: &Output, local: &Path) -> LifecycleContainer {
+            LifecycleContainer {
+                id: serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["sandboxId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                local_app_data: Some(local.to_owned()),
+                cleaned: false,
+            }
+        }
+
+        fn deprovision(container: &mut LifecycleContainer, local: &Path) {
+            let output = executor_output_with_env(
+                &lifecycle_phase(&container.id, "deprovision"),
+                false,
+                false,
+                &[("LOCALAPPDATA", local.as_os_str())],
+            );
+            assert!(output.status.success(), "{output:?}");
+            container.cleaned = true;
+        }
+
+        const CAPACITY: u64 = 10_737_418_240;
+        const MIB: u64 = 1024 * 1024;
+        fn padding_image(bundle: &BundledAgent, directory: &Path, length: u64) -> PathBuf {
+            let raw = directory.join("padding.raw");
+            let vhd = directory.join("padding.vhd");
+            std::fs::File::create(&raw)
+                .unwrap()
+                .set_len(length - MIB)
+                .unwrap();
+            let output = Command::new(bundle.directory().join(r"bin\direct-images.exe"))
+                .arg("create-gpt")
+                .arg("--raw-file")
+                .arg(&raw)
+                .arg("--output")
+                .arg(&vhd)
+                .arg("--format")
+                .arg("json")
+                .output()
+                .expect("generate capacity fixture");
+            assert!(output.status.success(), "{output:?}");
+            std::fs::remove_file(raw).unwrap();
+            vhd
+        }
+
+        let bundle = BundledAgent::discover().expect("signed NVX bundle");
+        let test_dir = std::env::current_exe()
+            .expect("test executable")
+            .parent()
+            .expect("test executable directory")
+            .to_path_buf();
+
+        for lifecycle in [false, true] {
+            let fixture = tempfile::tempdir_in(&test_dir).expect("capacity fixture directory");
+            let local = fixture.path().join("local");
+            std::fs::create_dir(&local).unwrap();
+            let environment = [("LOCALAPPDATA", local.as_os_str())];
+            let dry_request = if lifecycle {
+                lifecycle_provision()
+            } else {
+                process_only_request("printf cache")
+            };
+            let output = executor_output_with_env(&dry_request, false, true, &environment);
+            assert!(output.status.success(), "{output:?}");
+            let root = if lifecycle {
+                local.join(r"Microsoft\MXC\nvx")
+            } else {
+                agent_state_directory(&local)
+            };
+
+            let seed = AgentBackend::new(bundle.config(bundle.setup(&root)))
+                .expect("open unlimited fixture host");
+            let mut images = [
+                "mcr.microsoft.com/azurelinux/base/core:3.0",
+                "mcr.microsoft.com/cbl-mariner/base/core:2.0",
+                "docker.io/library/python:3.12-alpine",
+            ]
+            .map(|reference| {
+                let image = seed
+                    .register_reference(reference, ImageDigest::Compute)
+                    .expect("register fixture reference");
+                (reference, image)
+            });
+            images.sort_by_key(|(_, image)| std::cmp::Reverse(image.length));
+            let [(old_ref, old), (new_ref, new), (third_ref, third)] = images;
+            assert_ne!(
+                old.id, new.id,
+                "fixture references must have distinct images"
+            );
+            assert_ne!(third.id, old.id);
+            assert_ne!(third.id, new.id);
+            assert!(
+                new.length > MIB && old.length > new.length && old.length < CAPACITY,
+                "{old:?} {new:?}"
+            );
+            assert!(seed.unregister_image(&new.id).unwrap());
+            assert!(seed.unregister_image(&third.id).unwrap());
+
+            let mut old_request = if lifecycle {
+                lifecycle_provision()
+            } else {
+                process_only_request("printf cache")
+            };
+            old_request["microvm"]["image"] = json!(old_ref);
+            let output = executor_output_with_env(&old_request, false, false, &environment);
+            assert!(output.status.success(), "{output:?}");
+            let mut old_container = lifecycle.then(|| container_from_output(&output, &local));
+
+            // Leave less than one MiB free, so the next image must trigger admission.
+            let padding_length = ((CAPACITY - old.length) / MIB) * MIB;
+            assert!(padding_length >= 2 * MIB);
+            assert!(padding_length + old.length <= CAPACITY);
+            assert!(padding_length + old.length + new.length > CAPACITY);
+            let vhd = padding_image(&bundle, fixture.path(), padding_length);
+
+            let setup = bundle
+                .setup(&root)
+                .with_defaults(SandboxDefaults::default().with_image(ImageSource::Path(vhd)))
+                .with_images(ImageSettings::default().with_max_cache_capacity_bytes(CAPACITY));
+            let protected =
+                AgentBackend::new(bundle.config(setup)).expect("protect capacity fixture");
+            let padding = protected.image_id().expect("protected fixture ID");
+            let registered = protected.images().unwrap();
+            let actual_padding = registered.iter().find(|image| image.id == padding).unwrap();
+            assert_eq!(actual_padding.length, padding_length);
+
+            if !lifecycle {
+                let mut other_root = lifecycle_provision();
+                other_root["microvm"]["image"] = json!(new_ref);
+                let output = executor_output_with_env(&other_root, false, false, &environment);
+                assert!(output.status.success(), "{output:?}");
+                let mut container = container_from_output(&output, &local);
+                deprovision(&mut container, &local);
+                assert!(protected
+                    .images()
+                    .unwrap()
+                    .iter()
+                    .any(|image| image.id == old.id));
+            }
+
+            let mut new_request = if lifecycle {
+                lifecycle_provision()
+            } else {
+                process_only_request("printf cache")
+            };
+            new_request["microvm"]["image"] = json!(new_ref);
+            if let Some(container) = &mut old_container {
+                let dry = executor_output_with_env(&new_request, false, true, &environment);
+                assert!(dry.status.success(), "{dry:?}");
+                assert!(protected
+                    .images()
+                    .unwrap()
+                    .iter()
+                    .any(|image| image.id == old.id));
+                for phase in [None, Some("start"), Some("stop")] {
+                    if let Some(phase) = phase {
+                        let output = executor_output_with_env(
+                            &lifecycle_phase(&container.id, phase),
+                            false,
+                            false,
+                            &environment,
+                        );
+                        assert!(output.status.success(), "{output:?}");
+                    }
+                    let blocked =
+                        executor_output_with_env(&new_request, false, false, &environment);
+                    assert!(!blocked.status.success(), "{blocked:?}");
+                    let message = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&blocked.stdout),
+                        String::from_utf8_lossy(&blocked.stderr)
+                    );
+                    assert!(message.contains("backend_unavailable"), "{message}");
+                    assert!(message.contains("image cache"), "{message}");
+                    assert!(message.contains("unused and evictable"), "{message}");
+                    assert!(protected
+                        .images()
+                        .unwrap()
+                        .iter()
+                        .any(|image| image.id == old.id));
+                }
+
+                deprovision(container, &local);
+            }
+
+            let output = if lifecycle {
+                executor_output_with_env(&new_request, false, false, &environment)
+            } else {
+                std::thread::scope(|scope| {
+                    let runs = (0..2)
+                        .map(|_| {
+                            scope.spawn(|| {
+                                executor_output_with_env(&new_request, false, false, &environment)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut outputs = runs
+                        .into_iter()
+                        .map(|run| run.join().expect("concurrent capacity request"));
+                    let first = outputs.next().unwrap();
+                    for output in outputs {
+                        assert!(output.status.success(), "{output:?}");
+                    }
+                    first
+                })
+            };
+            assert!(output.status.success(), "{output:?}");
+            let mut new_container = lifecycle.then(|| container_from_output(&output, &local));
+            let registered = protected.images().unwrap();
+            assert!(!registered.iter().any(|image| image.id == old.id));
+            assert!(registered.iter().any(|image| image.id == padding));
+            let current: Vec<_> = registered
+                .iter()
+                .filter(|image| image.id != padding)
+                .collect();
+            assert_eq!(current.len(), 1, "{registered:?}");
+            assert_eq!(current[0].length, new.length);
+            let current_id = current[0].id;
+
+            let offline = [
+                environment[0],
+                ("HTTPS_PROXY", OsStr::new("http://127.0.0.1:9")),
+                ("HTTP_PROXY", OsStr::new("http://127.0.0.1:9")),
+            ];
+            let output = executor_output_with_env(&old_request, false, false, &offline);
+            assert!(
+                !output.status.success(),
+                "evicted reference must be pulled again"
+            );
+            let failure = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(failure.contains(old_ref), "{failure}");
+            if let Some(container) = &mut new_container {
+                deprovision(container, &local);
+            }
+            let output = executor_output_with_env(&old_request, false, false, &environment);
+            assert!(output.status.success(), "{output:?}");
+            let registered = protected.images().unwrap();
+            assert!(!registered.iter().any(|image| image.id == current_id));
+            let restored: Vec<_> = registered
+                .iter()
+                .filter(|image| image.id != padding)
+                .collect();
+            assert_eq!(restored.len(), 1, "{registered:?}");
+            assert_eq!(restored[0].length, old.length);
+            if lifecycle {
+                let mut container = container_from_output(&output, &local);
+                deprovision(&mut container, &local);
+            }
+
+            // An older unlimited host can leave this root above the new limit.
+            let extra = seed
+                .register_reference(new_ref, ImageDigest::Compute)
+                .expect("seed an existing over-limit cache");
+            let before = protected.images().unwrap();
+            assert!(before.iter().map(|image| image.length).sum::<u64>() > CAPACITY);
+            assert!(before.iter().any(|image| image.id == extra.id));
+            let output = executor_output_with_env(&old_request, false, false, &environment);
+            assert!(output.status.success(), "{output:?}");
+            if lifecycle {
+                let mut container = container_from_output(&output, &local);
+                deprovision(&mut container, &local);
+            }
+            let after = protected.images().unwrap();
+            assert_eq!(
+                before.iter().map(|image| image.id).collect::<BTreeSet<_>>(),
+                after.iter().map(|image| image.id).collect::<BTreeSet<_>>(),
+                "reusing an existing image must not trim an over-limit cache"
+            );
+            let mut third_request = if lifecycle {
+                lifecycle_provision()
+            } else {
+                process_only_request("printf cache")
+            };
+            third_request["microvm"]["image"] = json!(third_ref);
+            let output = executor_output_with_env(&third_request, false, false, &environment);
+            assert!(output.status.success(), "{output:?}");
+            if lifecycle {
+                let mut container = container_from_output(&output, &local);
+                deprovision(&mut container, &local);
+            }
+            let after_admission = protected.images().unwrap();
+            assert!(after_admission.iter().any(|image| image.id == padding));
+            assert!(
+                after_admission
+                    .iter()
+                    .map(|image| image.length)
+                    .sum::<u64>()
+                    <= CAPACITY
+            );
+            assert!(
+                !after_admission
+                    .iter()
+                    .any(|image| image.id == restored[0].id),
+                "admission must evict the largest unused image"
+            );
+            protected.close().unwrap();
+            seed.close().unwrap();
+        }
+        let fixture = tempfile::tempdir_in(&test_dir).expect("oversized fixture directory");
+        let oversized = padding_image(&bundle, fixture.path(), CAPACITY + MIB);
+        assert_eq!(
+            std::fs::metadata(&oversized).unwrap().len(),
+            CAPACITY + MIB + 512
+        );
+        let setup = bundle
+            .setup(fixture.path().join("state"))
+            .with_defaults(SandboxDefaults::default().with_image(ImageSource::Path(oversized)))
+            .with_images(ImageSettings::default().with_max_cache_capacity_bytes(CAPACITY));
+        let error = AgentBackend::new(bundle.config(setup)).unwrap_err();
+        assert_eq!(
+            error.code(),
+            aci_edge_sandboxes::ErrorCode::PolicyValidation
+        );
+        assert!(error
+            .to_string()
+            .contains("more than the image cache's capacity"));
+        println!("VM_EXECUTED image cache 10 GiB eviction repull and lifecycle protection");
+    }
+
+    #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_starts_sandboxes_from_platform_snapshots() {
         const CHILD: &str = "MXC_NVX_PLATFORM_SNAPSHOTS_CHILD";

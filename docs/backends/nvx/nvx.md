@@ -114,10 +114,10 @@ characters are rejected. The signed runtime validates the remaining reference
 syntax and pulls the selected image on the host. Host-side image
 acquisition does not grant the guest network access. MXC has no separate
 registry-credentials input. The runtime registers each reference once and keeps
-it by its text in the [agent state directory](#agent-state-directory), so later
-requests boot it without contacting the registry, and a moving tag such as
-`latest` keeps naming the content first pulled. Use a version tag or a digest
-(`repository@sha256:…`) to control what a sandbox boots.
+it by its text in the [agent state directory](#agent-state-directory). While
+it remains registered, later requests boot it without contacting the registry,
+and a moving tag such as `latest` keeps naming the content first pulled. Use a
+version tag or a digest (`repository@sha256:…`) to control what a sandbox boots.
 
 ## Supported operations and policy
 
@@ -272,20 +272,38 @@ runtime keeps its own state. MXC obtains that digest from the pinned
 MXC makes the current user the directory's owner
 and gives it an access list for only that user and Local SYSTEM, so the user's
 elevated and non-elevated requests can share it. Every create-and-run request
-reuses it, so an image is pulled once rather than for every request, and
-concurrent requests share it. MXC coordinates the agent's stop and deprovision
-operations and closes the client after each request; it does not maintain a
-persistent container database.
+reuses it, and concurrent requests share registered images. MXC coordinates the
+agent's stop and deprovision operations and closes the client after each request;
+it does not maintain a persistent container database.
 
-To pull a reference again or reclaim disk space, delete the directory while no
-MicroVM request or platform-owning SDK process is using it; the next request
-creates it again and captures new templates. Lifecycle operations retain their
-separate, unversioned root, `%LOCALAPPDATA%\Microsoft\MXC\nvx`, so existing
-container IDs and records do not move. Removing a bundle-specific directory does
-not remove lifecycle containers, registered images, or templates in that root.
-An upgrade that changes the runtime file digests cannot start containers
-provisioned with the previous files. Deprovision those containers and provision
-them again with the selected bundle; do not move or edit their records.
+Lifecycle operations retain their separate, unversioned root,
+`%LOCALAPPDATA%\Microsoft\MXC\nvx`, so existing container IDs and records do not
+move. Each root has a 10 GiB (10,737,418,240 bytes) limit on the combined size of
+counted staged images. The limit is not a total disk-usage limit: temporary
+conversion files, templates, other state, and older bundle-specific roots are
+outside it. Other agent hosts sharing a root can use different limits.
+
+When a new image needs space, the agent evicts the largest eligible unused
+images first. Images used by provisioned, running, or stopped sandboxes are
+retained until the sandboxes are deprovisioned. The agent also retains images
+protected as host defaults or prefetched paths and images registered by a
+caller-owned path. A newly admitted image larger than the limit, or one that
+cannot fit without evicting protected or in-use images, fails registration. If
+an eviction fails, earlier successful evictions can remain in effect.
+
+The limit applies during admission; it does not immediately trim an existing
+cache above 10 GiB, and reusing a registered image does not trigger a trim. An
+evicted reference must be pulled again and cannot be used while its registry is
+unreachable. There is no age-based refresh: an intact registered reference can
+continue to use its original content indefinitely.
+
+Removing a bundle-specific directory while no MicroVM request or platform-owning
+SDK process is using it removes that root's cache and templates; the next request
+creates it again. It does not remove lifecycle containers, registered images, or
+templates in the separate lifecycle root. An upgrade that changes the runtime
+file digests cannot start containers provisioned with the previous files.
+Deprovision those containers and provision them again with the selected bundle;
+do not move or edit their records.
 
 If deprovisioning fails, MXC reports the failure and the directory's location.
 The agent's records for that sandbox remain there rather than being deleted

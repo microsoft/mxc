@@ -181,9 +181,12 @@ pub(super) struct NvxClient(Option<ClientInner>);
 // unless a request sets their memory, so the smallest templates fit them.
 const PLATFORM_SNAPSHOT_MAX_VCPUS: u32 = 1;
 const PLATFORM_SNAPSHOT_MAX_MEMORY_MIB: u32 = 256;
+const IMAGE_CACHE_CAPACITY_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
-    bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
+    let mut setup = bundle.setup(state_root).with_cpu_profile(CpuProfile::Host);
+    setup.images.max_cache_capacity_bytes = Some(IMAGE_CACHE_CAPACITY_BYTES);
+    setup
 }
 
 static RUNTIME_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
@@ -1549,11 +1552,20 @@ mod tests {
         let bundle = BundledAgent::from_dir(r"C:\bundle").unwrap();
         let setup = agent_setup(&bundle, Path::new(r"C:\state"));
         assert_eq!(setup.cpu_profile, CpuProfile::Host);
+        assert_eq!(setup.images.max_cache_capacity_bytes, Some(10_737_418_240));
+        let mut other_image_settings = setup.images.clone();
+        other_image_settings.max_cache_capacity_bytes = None;
+        assert_eq!(
+            other_image_settings,
+            aci_edge_sandboxes::agent::ImageSettings::default()
+        );
         let json = serde_json::to_value(&setup).unwrap();
         assert_eq!(json["cpuProfile"], "host");
+        assert_eq!(json["images"]["maxCacheCapacityBytes"], 10_737_418_240_u64);
         assert!(json.get("platformSnapshots").is_none(), "{json}");
 
         let setup = setup.with_platform_snapshots(platform_snapshots());
+        assert_eq!(setup.images.max_cache_capacity_bytes, Some(10_737_418_240));
         assert_eq!(
             serde_json::to_value(&setup).unwrap()["platformSnapshots"],
             serde_json::json!({"enabled": true, "maxVcpus": 1, "maxMemoryMib": 256})

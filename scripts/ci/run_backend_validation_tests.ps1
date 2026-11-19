@@ -539,6 +539,7 @@ function Invoke-MicroVmTests {
         'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup confirmed clones'
         'executor' = 'VM_EXECUTED executor sequential '
         'executor image reuse' = 'VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation'
+        'image cache capacity' = 'VM_EXECUTED image cache 10 GiB eviction repull and lifecycle protection'
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption capture/startup/execution/owned-vmm/cleanup'
         'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement confirmed clones'

@@ -203,6 +203,9 @@ fn main() {
         if mode != "missing-image-reuse-discovery" {
             println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
         }
+        if mode != "missing-image-capacity-discovery" {
+            println!("windows_x64::signed_bundle_image_cache_capacity: test");
+        }
         if mode != "missing-platform-snapshots-discovery" {
             println!("windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots: test");
         }
@@ -292,6 +295,9 @@ fn main() {
         println!("VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation");
     } else {
         println!("VM_EXECUTED executor registered-image reuse offline and concurrent");
+    }
+    if mode != "missing-image-capacity" {
+        println!("VM_EXECUTED image cache 10 GiB eviction repull and lifecycle protection");
     }
     if mode != "missing-network" {
         let suffix = if mode == "unconfirmed-network" { "" } else { " confirmed clones" };
@@ -696,6 +702,7 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption capture\/startup\/execution\/owned-vmm\/cleanup/);
   assert.match(log, /VM_EXECUTED executor registered-image reuse offline concurrent first-capture clone isolation/);
+  assert.match(log, /VM_EXECUTED image cache 10 GiB eviction repull and lifecycle protection/);
   assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement confirmed clones/);
   assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges confirmed clones/);
   assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls confirmed clones/);
@@ -719,6 +726,7 @@ for (const [mode, message] of [
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
   ["missing-image-reuse", /did not execute the executor image reuse VM scenario/],
+  ["missing-image-capacity", /did not execute the image cache capacity VM scenario/],
   ["missing-network", /did not execute the network rules VM scenario/],
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
   ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
@@ -888,6 +896,7 @@ for (const [mode, message] of [
   ["missing-sdk-lifecycle-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
   ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
+  ["missing-image-capacity-discovery", /did not discover windows_x64::signed_bundle_image_cache_capacity/],
   ["missing-platform-snapshots-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots/],
   ["missing-snapshot-memory-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_snapshot_memory_capacity/],
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
@@ -911,6 +920,7 @@ for (const [mode, message] of [
       "missing-sdk-lifecycle-discovery",
       "missing-interruption-discovery",
       "missing-image-reuse-discovery",
+      "missing-image-capacity-discovery",
       "missing-platform-snapshots-discovery",
       "missing-snapshot-memory-discovery",
       "missing-network-discovery",
