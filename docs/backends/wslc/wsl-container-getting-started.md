@@ -641,13 +641,16 @@ nothing else. Your proxy decides where traffic goes.
   `host.wslc.internal`; the workload still can't reach `host.wslc.internal`
   unless [host loopback](#host-loopback) is allowed.
 
-- DNS lookups are forwarded. [Port mappings](#port-mappings) work as usual.
+- Other DNS lookups are refused; your proxy resolves the hostnames it's sent.
+  [Port mappings](#port-mappings) work as usual.
 
 - Rejected: egress rules, `network.egress.default: "allow"` without bridged
   networking, `https://` with an IP address or `localhost`, IPv6 addresses,
-  addresses inside `10.231.0.0/16`, port 53, hostnames with no IPv4 address on
-  Windows or that resolve to loopback, and other loopback addresses
-  (`127.0.0.2`, `0.0.0.0`).
+  addresses inside `10.231.0.0/16`, link-local, multicast, broadcast, or
+  reserved addresses, port 53, hostnames with no IPv4 address on Windows or
+  that resolve to a rejected address, and other loopback addresses
+  (`127.0.0.2`, `0.0.0.0`). If Windows can't resolve the hostname, the run
+  fails as `backend_unavailable`.
 
 #### Cleanup
 

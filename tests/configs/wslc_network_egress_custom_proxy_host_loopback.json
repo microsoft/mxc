@@ -1,0 +1,15 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-custom-proxy-host-loopback",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport os, socket, urllib.error, urllib.request\nprint('NO_PROXY=' + os.environ.get('NO_PROXY', 'unset'))\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args):\n        return None\nopener = urllib.request.build_opener(NoRedirect)\ndef get(url):\n    try:\n        with opener.open(url, timeout=10) as r:\n            return str(r.status)\n    except urllib.error.HTTPError as e:\n        return str(e.code)\n    except OSError as e:\n        return 'ERROR ' + str(e)\nprint('HOST_DIRECT=' + get('http://host.wslc.internal:18890/'))\nprint('VIA_PROXY=' + get('http://one.one.one.one/cdn-cgi/trace'))\ntry:\n    socket.create_connection(('1.1.1.1', 80), timeout=3).close()\n    print('DIRECT=REACHED')\nexcept OSError:\n    print('DIRECT=BLOCKED')\nEOF"
+  },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "allow" }
+  },
+  "runtimeConfig": { "networkProxy": "http://1.1.1.1:8080" },
+  "wslc": { "image": "python:3.12-alpine" }
+}

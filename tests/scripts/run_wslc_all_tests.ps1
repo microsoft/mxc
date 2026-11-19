@@ -663,7 +663,7 @@ $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_ip.json" -F
     -OutputContains "Built-in proxy ready at http://10.231.1.254:8080/", "custom proxy: 10.231.1.254:8080 relays to 1.1.1.1:8080", $Clean `
     -Probes ([ordered]@{
         PROXY_ENV = "http://10\.231\.1\.254:8080/ http://10\.231\.1\.254:8080/"; NO_PROXY = ""; VIA_PROXY = "[1-5]\d\d"
-        BUILT_IN = "ERROR .*"; DIRECT = "ERROR .*"; RESOLVED = "\d+\.\d+\.\d+\.\d+"
+        BUILT_IN = "ERROR .*"; DIRECT = "ERROR .*"; RESOLVED = "ERROR .*"
     })))
 # TLS to the proxy verifies against its hostname through the relay.
 $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_https_name.json" -ForceDebug -OutputNotContains $NotClean `
@@ -678,50 +678,72 @@ Invoke-WslcMappedRun "wslc_network_egress_port_mapping_network_proxy.json" ([ord
         PROXY_ENV = "http://one\.one\.one\.one:8080"; RESOLVED = "10\.231\.1\.254"; VIA_PROXY = "[1-5]\d\d"; DIRECT = "BLOCKED"
     })
 
-# A Windows 127.0.0.1 server answering every connection with an HTTP 200.
+# Windows 127.0.0.1 servers answering every connection with an HTTP 200. The
+# second port is never relayed to the workload.
 $HostLoopbackPort = 18890
-$hostLoopbackServer = Start-Job -ArgumentList $HostLoopbackPort -ScriptBlock {
-    param($Port)
-    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
-    $listener.Start()
-    $reply = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
-    $buffer = [byte[]]::new(4096)
-    while ($true) {
-        $client = $listener.AcceptTcpClient()
-        try {
-            $stream = $client.GetStream()
-            $stream.ReadTimeout = 2000
-            try { $null = $stream.Read($buffer, 0, $buffer.Length) } catch {}
-            $stream.Write($reply, 0, $reply.Length)
-            $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
-        } catch {
-        } finally {
-            $client.Dispose()
+$UnrelayedPort = 18892
+$hostLoopbackServers = foreach ($port in $HostLoopbackPort, $UnrelayedPort) {
+    Start-Job -ArgumentList $port -ScriptBlock {
+        param($Port)
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        $reply = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+        $buffer = [byte[]]::new(4096)
+        while ($true) {
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                $stream.ReadTimeout = 2000
+                try { $null = $stream.Read($buffer, 0, $buffer.Length) } catch {}
+                $stream.Write($reply, 0, $reply.Length)
+                $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+            } catch {
+            } finally {
+                $client.Dispose()
+            }
         }
     }
 }
+function Test-HostLoopbackServers {
+    (Test-WslcTcpConnect "127.0.0.1" $HostLoopbackPort) -and (Test-WslcTcpConnect "127.0.0.1" $UnrelayedPort)
+}
 $deadline = (Get-Date).AddSeconds(30)
-while (-not (Test-WslcTcpConnect "127.0.0.1" $HostLoopbackPort) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+while (-not (Test-HostLoopbackServers) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
 try {
-    # host.wslc.internal reaches the server directly and through the proxy;
-    # the workload's own loopback stays denied.
-    $null = $results.Add((Run-WslcTest "wslc_network_egress_host_loopback.json" -ForceDebug -OutputNotContains $NotClean `
-        -OutputContains "Session reaches Windows loopback as host.wslc.internal", $Clean `
-        -Probes ([ordered]@{
-            NO_PROXY = "host\.wslc\.internal"; HOST_DNS = "10\.231\.1\.3"; HOST_DIRECT = "200"; HOST_VIA_PROXY = "200"
-            LOOPBACK = "403"; ALLOWED = "200"; DENIED = "403"; DIRECT = "BLOCKED"
-        })))
-    Invoke-WslcMappedRun "wslc_network_egress_port_mapping_host_loopback.json" ([ordered]@{ 18091 = 8091 }) `
-        -Probes ([ordered]@{ HOST_DIRECT = "200"; DIRECT = "BLOCKED" })
-    # A custom proxy on Windows 127.0.0.1 doesn't expose host.wslc.internal.
-    $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_loopback.json" -ForceDebug -OutputNotContains $NotClean `
-        -OutputContains "Built-in proxy ready at http://10.231.1.254:18890/", $Clean `
-        -Probes ([ordered]@{
-            PROXY_ENV = "http://10\.231\.1\.254:18890/"; VIA_PROXY = "200"; HOST_DNS = "REFUSED"; DIRECT = "BLOCKED"
-        })))
+    if (-not (Test-HostLoopbackServers)) {
+        $null = $results.Add(@{ Name = "host loopback tests"; Pass = $false; Skipped = $false
+            Reason = "Windows 127.0.0.1:$HostLoopbackPort or :$UnrelayedPort never accepted connections" })
+    } else {
+        # host.wslc.internal reaches the server directly and through the proxy;
+        # the workload's own loopback stays denied.
+        $null = $results.Add((Run-WslcTest "wslc_network_egress_host_loopback.json" -ForceDebug -OutputNotContains $NotClean `
+            -OutputContains "Session reaches Windows loopback as host.wslc.internal", $Clean `
+            -Probes ([ordered]@{
+                NO_PROXY = "host\.wslc\.internal"; HOST_DNS = "10\.231\.1\.3"; HOST_DIRECT = "200"; HOST_VIA_PROXY = "200"
+                LOOPBACK = "403"; ALLOWED = "200"; DENIED = "403"; DIRECT = "BLOCKED"
+            })))
+        Invoke-WslcMappedRun "wslc_network_egress_port_mapping_host_loopback.json" ([ordered]@{ 18091 = 8091 }) `
+            -Probes ([ordered]@{ HOST_DIRECT = "200"; DIRECT = "BLOCKED" })
+        # A custom proxy on Windows 127.0.0.1 doesn't expose host.wslc.internal,
+        # and the built-in proxy relays only the custom proxy's port.
+        $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_loopback.json" -ForceDebug -OutputNotContains $NotClean `
+            -OutputContains "Built-in proxy ready at http://10.231.1.254:18890/", $Clean `
+            -Probes ([ordered]@{
+                PROXY_ENV = "http://10\.231\.1\.254:18890/"; VIA_PROXY = "200"; OTHER_PORT = "BLOCKED"
+                HOST_DNS = "REFUSED"; DIRECT = "BLOCKED"
+            })))
+        # With a custom proxy, a proxy-aware client reaches host.wslc.internal
+        # directly and everything else through the proxy.
+        $null = $results.Add((Run-WslcTest "wslc_network_egress_custom_proxy_host_loopback.json" -ForceDebug -OutputNotContains $NotClean `
+            -OutputContains "Built-in proxy ready at http://10.231.1.254:8080/", "Session reaches Windows loopback as host.wslc.internal", $Clean `
+            -Probes ([ordered]@{
+                NO_PROXY = "host\.wslc\.internal"; HOST_DIRECT = "200"; VIA_PROXY = "[1-5]\d\d"
+                DIRECT = "BLOCKED"
+            })))
+    }
 } finally {
-    Stop-Job $hostLoopbackServer
-    Remove-Job $hostLoopbackServer
+    $hostLoopbackServers | Stop-Job
+    $hostLoopbackServers | Remove-Job
 }
 
 # Rejected before any container is created.
@@ -737,14 +759,17 @@ $egressRejections = [ordered]@{
     "network_proxy_egress_allow"  = "runtimeConfig.networkProxy with network.egress.default 'allow' requires bridged networking"
     "network_proxy_https_ip"      = "with an IP address or loopback host must use http://"
     "network_proxy_loopback"      = "runtimeConfig.networkProxy on Windows loopback must use 127.0.0.1 or localhost"
-    "network_proxy_unresolvable"  = "runtimeConfig.networkProxy host 'mxc-proxy.invalid' has no IPv4 address on Windows"
+    "network_proxy_link_local"    = "runtimeConfig.networkProxy address 169.254.169.254 is inside 169.254.0.0/16"
     "port_mapping_udp"           = "unknown variant ``udp``"
     "port_mapping_duplicate"     = "duplicate windowsPort 18087 for protocol 'tcp'"
 }
 foreach ($name in $egressRejections.Keys) {
     $null = $results.Add((Run-WslcTest "wslc_network_egress_$($name)_rejected.json" -ExpectedExit 1 `
         -OutputContains $egressRejections[$name] -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
-}
+}# A proxy host Windows can't resolve leaves the backend unavailable.
+$null = $results.Add((Run-WslcTest "wslc_network_egress_network_proxy_unresolvable.json" -ExpectedExit -1 `
+    -OutputContains "could not resolve runtimeConfig.networkProxy host 'mxc-proxy.invalid' on Windows" `
+    -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
 
 # The proxy image is imported into each store on first use from the tar beside
 # wxc-exec. A copy of wxc-exec without the tar, then with the other

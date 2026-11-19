@@ -662,5 +662,7 @@ mod tests {
         assert_eq!(WSLC_E_CONTAINER_NOT_FOUND as u32, 0x8004_0603);
         assert_eq!(WSLC_E_NETWORK_NOT_FOUND as u32, 0x8004_0609);
         assert_eq!(WSLC_E_REGISTRY_BLOCKED_BY_POLICY as u32, 0x8004_060D);
+        assert_eq!(WSLC_E_CAPABILITY_ADDITIONS_DISABLED as u32, 0x8004_0614);
+        assert_eq!(WSLC_E_RUNTIME_UPDATE_NEEDED as u32, 0x8004_0615);
     }
 }

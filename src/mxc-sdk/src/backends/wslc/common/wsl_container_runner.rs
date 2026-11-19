@@ -527,8 +527,9 @@ impl ScriptRunner for WSLContainerRunner {
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::create_and_run_network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
-        self.network_mode(request).map_err(as_wslc_rejection)?;
+        let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
+        resolve_custom_proxy(&network_mode)?;
         Ok(())
     }
 
@@ -541,6 +542,28 @@ impl ScriptRunner for WSLContainerRunner {
 /// `policy_validation` with the same message the state-aware surface emits.
 fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
+}
+
+fn create_session_error(hr: HRESULT, host_loopback: bool, sdk_msg: &str) -> WslcError {
+    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
+        return WslcError::Unavailable(
+            "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
+             Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
+                .to_string(),
+        );
+    }
+    WslcError::sdk("WslcCreateSession failed", hr, sdk_msg)
+}
+
+fn resolve_custom_proxy(
+    network_mode: &policy::NetworkMode,
+) -> Result<Option<crate::wslc_gateway_policy::CustomProxy>, ScriptResponse> {
+    match network_mode {
+        policy::NetworkMode::Proxied(egress) => {
+            egress_gateway::resolve_custom_proxy(egress).map_err(WslcError::into_response)
+        }
+        policy::NetworkMode::None | policy::NetworkMode::Bridged => Ok(None),
+    }
 }
 
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
@@ -714,17 +737,10 @@ impl WSLContainerRunner {
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
-        if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
-            return Err(WslcError::Unavailable(
-                "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
-                 Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
-                    .to_string(),
-            )
-            .into_response());
-        }
         if hr != S_OK {
-            let msg = err_msg.to_string_lossy();
-            return Err(sdk_error("WslcCreateSession failed", hr, &msg));
+            return Err(
+                create_session_error(hr, host_loopback, &err_msg.to_string_lossy()).into_response(),
+            );
         }
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
         if host_loopback {
@@ -1025,6 +1041,8 @@ impl WSLContainerRunner {
 
         // -- Init: COM + SDK + preflight --
         let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
+        // Resolved again so this run relays to an address checked just now.
+        let custom_proxy = resolve_custom_proxy(&network_mode)?;
         let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
@@ -1082,6 +1100,7 @@ impl WSLContainerRunner {
                     &storage_path,
                     &session_name,
                     egress,
+                    custom_proxy,
                     &self.config.port_mappings,
                     logger,
                 )?)
@@ -3650,5 +3669,20 @@ mod tests {
     #[test]
     fn minted_session_names_do_not_repeat() {
         assert_ne!(resolve_session_name(""), resolve_session_name(""));
+    }
+
+    #[test]
+    fn an_old_runtime_is_unavailable_only_when_host_loopback_was_requested() {
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, true, ""),
+            WslcError::Unavailable(m) if m.contains("wsl --update")
+        ));
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, false, ""),
+            WslcError::Sdk {
+                hr: WSLC_E_RUNTIME_UPDATE_NEEDED,
+                ..
+            }
+        ));
     }
 }

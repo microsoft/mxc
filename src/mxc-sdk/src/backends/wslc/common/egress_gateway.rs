@@ -149,26 +149,23 @@ pub(crate) struct Gateway {
 
 impl Gateway {
     /// Create this session's networks and start its gateway. Call
-    /// [`sweep_leftovers`] on the session first.
+    /// [`sweep_leftovers`] on the session first, and pass the custom proxy
+    /// from [`resolve_custom_proxy`].
     ///
     /// # Safety
     /// `sdk` must hold valid function pointers, `session` must outlive the
     /// returned value, and COM must be initialized on the calling thread.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn start(
         sdk: &'static WslcSdk,
         session: WslcSession,
         store_path: &str,
         session_name: &str,
         egress: &ProxiedEgress,
+        custom_proxy: Option<gateway::CustomProxy>,
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<Self, ScriptResponse> {
-        let custom_proxy = egress
-            .custom_proxy
-            .as_ref()
-            .map(|proxy| relayed_custom_proxy(proxy, |host, port| (host, port).to_socket_addrs()))
-            .transpose()
-            .map_err(|e| WslcError::Rejected(e).into_response())?;
         let proxy_url = workload_proxy_url(egress.custom_proxy.as_ref()).map_err(host_error)?;
         let policy = render_policy(egress, custom_proxy, port_mappings);
 
@@ -297,20 +294,8 @@ impl Gateway {
         let mut container: WslcContainer = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateContainer(session, &settings, &mut container, err_msg.as_mut_ptr());
-        if hr == WSLC_E_CAPABILITY_ADDITIONS_DISABLED {
-            return Err(WslcError::Unavailable(
-                "WSLc: network.ingress.hostLoopback 'allow' needs the built-in proxy to add \
-                 NET_ADMIN, which the AllowWSLContainerPrivileged policy forbids on this host"
-                    .to_string(),
-            )
-            .into_response());
-        }
         if hr != S_OK {
-            return Err(sdk_error(
-                "Could not create the built-in proxy's container",
-                hr,
-                &err_msg.to_string_lossy(),
-            ));
+            return Err(create_container_error(hr, &err_msg.to_string_lossy()).into_response());
         }
         let container = WslcContainerGuard::from_raw(container, sdk.release_container_fn());
         let mut err_msg = CoTaskMemPWSTR::null();
@@ -452,31 +437,52 @@ fn workload_proxy_url(custom: Option<&CustomProxy>) -> Result<String, String> {
     Ok(url.into())
 }
 
-/// The custom proxy as the gateway relays it. A hostname is resolved here,
-/// on Windows, so the gateway never resolves it.
-fn relayed_custom_proxy(
+/// Resolves a custom proxy hostname on Windows and checks the address it
+/// resolves to, so the gateway never resolves it. Each call looks the name up
+/// and checks it again.
+pub(crate) fn resolve_custom_proxy(
+    egress: &ProxiedEgress,
+) -> Result<Option<gateway::CustomProxy>, WslcError> {
+    egress
+        .custom_proxy
+        .as_ref()
+        .map(|proxy| {
+            resolve_custom_proxy_with_lookup(proxy, |host, port| (host, port).to_socket_addrs())
+        })
+        .transpose()
+}
+
+fn resolve_custom_proxy_with_lookup(
     custom: &CustomProxy,
     lookup: impl FnOnce(&str, u16) -> std::io::Result<std::vec::IntoIter<SocketAddr>>,
-) -> Result<gateway::CustomProxy, String> {
+) -> Result<gateway::CustomProxy, WslcError> {
     let (name, address) = match &custom.host {
         CustomProxyHost::Name(name) => {
             let ip = lookup(name, custom.port)
-                .into_iter()
-                .flatten()
+                .map_err(|e| {
+                    WslcError::Unavailable(format!(
+                        "WSLc: could not resolve runtimeConfig.networkProxy host '{name}' on \
+                         Windows: {e}"
+                    ))
+                })?
                 .find_map(|a| match a.ip() {
                     IpAddr::V4(ip) => Some(ip),
                     IpAddr::V6(_) => None,
                 })
                 .ok_or_else(|| {
-                    format!("WSLc: runtimeConfig.networkProxy host '{name}' has no IPv4 address on Windows")
+                    WslcError::Rejected(format!(
+                        "WSLc: runtimeConfig.networkProxy host '{name}' has no IPv4 address on Windows"
+                    ))
                 })?;
-            let address = policy::relayed_proxy_address(ip).map_err(|e| e.message)?;
+            let address = policy::relayed_proxy_address(ip).map_err(|e| {
+                WslcError::Rejected(format!("{} (resolved from '{name}')", e.message))
+            })?;
             if address.is_none() {
-                return Err(format!(
+                return Err(WslcError::Rejected(format!(
                     "WSLc: runtimeConfig.networkProxy host '{name}' resolves to Windows loopback; \
                      use http://127.0.0.1:{} instead",
                     custom.port
-                ));
+                )));
             }
             (Some(name.clone()), address)
         }
@@ -514,9 +520,7 @@ fn render_policy(
         egress_address: GATEWAY_EGRESS_ADDRESS,
         // The workload keeps the custom proxy's port.
         proxy_port: custom_proxy.as_ref().map_or(PROXY_PORT, |proxy| proxy.port),
-        forward_dns: egress.default == gateway::Action::Allow
-            || !egress.allow.is_empty()
-            || custom_proxy.is_some(),
+        forward_dns: egress.default == gateway::Action::Allow || !egress.allow.is_empty(),
         egress,
         host_loopback: host_loopback.then_some(gateway::HostLoopback {
             relay_address: HOST_LOOPBACK_RELAY_ADDRESS,
@@ -1000,6 +1004,21 @@ fn host_error(message: String) -> ScriptResponse {
     WslcError::Host(message).into_response()
 }
 
+fn create_container_error(hr: HRESULT, sdk_msg: &str) -> WslcError {
+    if hr == WSLC_E_CAPABILITY_ADDITIONS_DISABLED {
+        return WslcError::Unavailable(
+            "WSLc: network.ingress.hostLoopback 'allow' needs the built-in proxy to add \
+             NET_ADMIN, which the AllowWSLContainerPrivileged policy forbids on this host"
+                .to_string(),
+        );
+    }
+    WslcError::sdk(
+        "Could not create the built-in proxy's container",
+        hr,
+        sdk_msg,
+    )
+}
+
 pub(crate) unsafe fn open_container(
     sdk: &WslcSdk,
     session: WslcSession,
@@ -1118,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_proxy_is_relayed_on_its_own_port_with_dns_forwarded() {
+    fn a_custom_proxy_is_relayed_on_its_own_port_without_dns_forwarding() {
         let egress = ProxiedEgress {
             egress: gateway::Egress {
                 default: gateway::Action::Deny,
@@ -1136,7 +1155,7 @@ mod tests {
         };
         let policy = render_policy(&egress, Some(relayed.clone()), &[]);
         assert_eq!(policy.proxy_port, 8080);
-        assert!(policy.forward_dns);
+        assert!(!policy.forward_dns);
         assert_eq!(policy.custom_proxy, Some(relayed));
     }
 
@@ -1147,9 +1166,11 @@ mod tests {
             CustomProxyHost::Name("proxy.example".to_string()),
             8080,
         );
-        let relayed =
-            relayed_custom_proxy(&proxy, resolves_to(&["[2001:db8::1]:8080", "1.2.3.4:8080"]))
-                .unwrap();
+        let relayed = resolve_custom_proxy_with_lookup(
+            &proxy,
+            resolves_to(&["[2001:db8::1]:8080", "1.2.3.4:8080"]),
+        )
+        .unwrap();
         assert_eq!(relayed.name.as_deref(), Some("proxy.example"));
         assert_eq!(relayed.address, Some(Ipv4Addr::new(1, 2, 3, 4)));
         assert_eq!(relayed.port, 8080);
@@ -1158,11 +1179,31 @@ mod tests {
             ["[2001:db8::1]:8080"],
             ["127.0.0.1:8080"],
             ["10.231.1.9:8080"],
+            ["169.254.169.254:8080"],
         ] {
-            assert!(relayed_custom_proxy(&proxy, resolves_to(&addrs)).is_err());
+            assert!(matches!(
+                resolve_custom_proxy_with_lookup(&proxy, resolves_to(&addrs)),
+                Err(WslcError::Rejected(_))
+            ));
         }
-        let failed = relayed_custom_proxy(&proxy, |_, _| Err(std::io::ErrorKind::NotFound.into()));
-        assert!(failed.unwrap_err().contains("has no IPv4 address"));
+        let failed = resolve_custom_proxy_with_lookup(&proxy, |_, _| {
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert!(
+            matches!(failed, Err(WslcError::Unavailable(m)) if m.contains("could not resolve"))
+        );
+    }
+
+    #[test]
+    fn a_capability_policy_refusal_reports_the_host_unavailable() {
+        assert!(matches!(
+            create_container_error(WSLC_E_CAPABILITY_ADDITIONS_DISABLED, ""),
+            WslcError::Unavailable(m) if m.contains("AllowWSLContainerPrivileged")
+        ));
+        assert!(matches!(
+            create_container_error(E_FAIL, "boom"),
+            WslcError::Sdk { hr: E_FAIL, .. }
+        ));
     }
 
     #[test]

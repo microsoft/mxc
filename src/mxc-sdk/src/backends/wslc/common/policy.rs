@@ -293,6 +293,12 @@ pub(crate) fn relayed_proxy_address(ip: Ipv4Addr) -> Result<Option<Ipv4Addr>, Mx
             gateway::GATEWAY_SUBNETS
         )));
     }
+    if let Some(range) = gateway::ALWAYS_DENIED.iter().find(|c| c.contains(ip)) {
+        return Err(MxcError::policy_validation(format!(
+            "WSLc: runtimeConfig.networkProxy address {ip} is inside {range}, which the built-in \
+             proxy never relays to"
+        )));
+    }
     Ok(Some(ip))
 }
 
@@ -1494,6 +1500,10 @@ mod tests {
                 "http://10.231.1.254:3128",
                 "reserves for its own networks",
             ),
+            ("{}", "http://169.254.169.254:8080", "inside 169.254.0.0/16"),
+            ("{}", "http://0.1.2.3:8080", "inside 0.0.0.0/8"),
+            ("{}", "http://224.0.0.1:8080", "inside 224.0.0.0/4"),
+            ("{}", "http://255.255.255.255:8080", "inside 240.0.0.0/4"),
         ] {
             assert_policy_validation(proxy_mode(network, url, false).unwrap_err(), needle);
         }
