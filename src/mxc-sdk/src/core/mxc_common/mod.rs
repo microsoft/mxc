@@ -6,7 +6,7 @@
 pub mod audit;
 pub mod cmdline;
 mod common_request_ir;
-mod config_deserialize;
+pub(crate) mod config_deserialize;
 pub mod config_parser;
 pub mod default_env;
 pub mod encoding;

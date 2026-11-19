@@ -124,7 +124,9 @@ function Invoke-PolicyCase {
             throw "$Name did not report native ProcessContainer execution."
         }
         if ($Reject) {
-            if ($result.ExitCode -eq 0 -or -not $result.Stderr.Contains($RejectionMessage) -or
+            $encodedMessage = ConvertTo-Json -InputObject $RejectionMessage -Compress
+            $escapedMessage = $encodedMessage.Substring(1, $encodedMessage.Length - 2)
+            if ($result.ExitCode -eq 0 -or -not $result.Stderr.Contains($escapedMessage) -or
                 $result.Log -match '"event":"mxc.ProcessExited"' -or
                 (Test-Path -LiteralPath $sentinel)) {
                 throw "$Name was not rejected before execution: $($result.Stderr)"
@@ -237,20 +239,24 @@ foreach ($field in @('readwritePaths', 'readonlyPaths', 'deniedPaths', 'enumerat
         $relative = New-PolicyRequest -Mode 'denied-file'
         if (-not $explicitCwd) { $relative.process.Remove('cwd') }
         $fieldPath = "filesystem.$field"
-        $index = 0
         if ($field -eq 'enumeratePaths') {
             $relative.processContainer.filesystem = @{ enumeratePaths = @('secret.txt') }
             $fieldPath = 'processContainer.filesystem.enumeratePaths'
         } else {
             if (-not $relative.filesystem.ContainsKey($field)) { $relative.filesystem[$field] = @() }
-            $index = @($relative.filesystem[$field]).Count
             $relative.filesystem[$field] += @('secret.txt')
         }
         Invoke-PolicyCase -Name "relative-$field-cwd-$explicitCwd-rejected" -Request $relative -Reject `
-            -RejectionMessage "${fieldPath}[$index] must be a fully qualified Windows filesystem path" `
+            -RejectionMessage "$fieldPath contains an invalid path `"secret.txt`": expected a fully qualified Windows filesystem path" `
             -WorkingDirectory (Join-Path $ScratchRoot 'launcher')
     }
 }
+$overlapping = New-PolicyRequest -Mode 'denied-file'
+$overlapping.filesystem.readonlyPaths = @($ScratchRoot, 'secret.txt')
+$overlapping.filesystem.deniedPaths = @($ScratchRoot)
+Invoke-PolicyCase -Name 'overlapping-lists-report-invalid-path' -Request $overlapping -Reject `
+    -RejectionMessage 'filesystem.readonlyPaths contains an invalid path "secret.txt": expected a fully qualified Windows filesystem path' `
+    -WorkingDirectory (Join-Path $ScratchRoot 'launcher')
 if ((Get-Content -LiteralPath (Join-Path $ScratchRoot 'ro\seed.txt') -Raw) -cne 'seed') {
     throw 'The read-only host seed changed.'
 }

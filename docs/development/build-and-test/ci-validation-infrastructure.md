@@ -198,7 +198,8 @@ The policy suite checks a readable file beneath a broad directory grant, an
 absolute deny that blocks that file, and rejection of relative paths in every
 ProcessContainer filesystem policy list before workload execution. Rejection
 cases vary whether `process.cwd` is supplied and use a separate launcher
-directory.
+directory. An overlapping-list case checks that the diagnostic identifies the
+invalid path after normalization removes duplicate entries.
 
 The policy suite also runs the native CLI contract boundary cases, including
 the six network-policy rejection shapes and a launched valid control for each

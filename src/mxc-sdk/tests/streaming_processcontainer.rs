@@ -50,13 +50,53 @@ fn processcontainer_relative_denied_path_rejected_before_run_and_spawn() {
         for error in [run_error, spawn_error] {
             assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
             assert!(
-                error.message.contains("filesystem.deniedPaths[0]")
-                    && error.message.contains("fully qualified"),
+                error.message.contains(&format!(
+                    "filesystem.deniedPaths contains an invalid path \"{path}\""
+                )) && error.message.contains("fully qualified"),
                 "{error}"
             );
         }
         assert!(!executed.exists(), "rejected request launched its workload");
     }
+}
+
+#[test]
+fn processcontainer_overlapping_lists_report_invalid_path() {
+    use mxc_sdk::v1::dev::{self, JsonOptions};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let executed = workspace.path().join("executed.txt");
+    let request = serde_json::json!({
+        "version": "1.0.0",
+        "containment": "processcontainer",
+        "filesystem": {
+            "readonlyPaths": [workspace.path(), "secret.txt"],
+            "deniedPaths": [workspace.path()],
+        },
+        "process": {
+            "commandLine": "cmd.exe /d /c echo executed>executed.txt",
+            "cwd": workspace.path(),
+        },
+    })
+    .to_string();
+
+    let run_error =
+        dev::run_json(&request, JsonOptions::default()).expect_err("relative path must reject run");
+    let spawn_error = dev::spawn_json(&request, JsonOptions::default())
+        .err()
+        .expect("relative path must reject spawn");
+    for error in [run_error, spawn_error] {
+        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+        assert!(
+            error.message.contains(
+                "filesystem.readonlyPaths contains an invalid path \"secret.txt\": \
+                 expected a fully qualified Windows filesystem path"
+            ),
+            "{error}"
+        );
+        assert!(!error.message.contains("readonlyPaths["), "{error}");
+    }
+    assert!(!executed.exists(), "rejected request launched its workload");
 }
 
 #[test]

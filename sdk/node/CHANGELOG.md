@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ProcessContainer rejects filesystem policy paths that are not fully qualified
+  Windows paths, including relative denies that could leave files accessible
+  through broader grants. This applies to all supported contracts and SDK V1,
+  including dry runs. Policy paths are not resolved against `process.cwd`.
+  See [filesystem policy](../../docs/schema.md#filesystem-policy).
+
 - Reading a process's `warnings` or output metadata no longer corrupts the
   native heap and crashes Node when the native side returns a value.
 
