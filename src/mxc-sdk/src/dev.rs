@@ -30,7 +30,7 @@ pub struct JsonOptions {
 }
 
 /// Controls for preparing a candidate request without creating a container.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PolicyPreparationOptions {
     /// Authorize experimental backends independently of the JSON contract version.

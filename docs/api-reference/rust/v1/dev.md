@@ -76,7 +76,9 @@ pub enum PolicyChangeOperation { Add, Remove, Replace }
 ```
 
 Construct `PolicyPreparationOptions` with `Default` and set `experimental`
-when needed. It authorizes a backend independently of the JSON contract;
+when needed. Preparation takes ownership of the options; use `clone()` to
+reuse them. The type is `Clone`, not `Copy`, so future options can own data.
+It authorizes a backend independently of the JSON contract;
 it cannot change the declared `version` or authorize unsupported policy.
 
 The candidate preserves the original contract version, container metadata,
