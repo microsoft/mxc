@@ -24,7 +24,9 @@
       PASS         admitted and the requested posture held: every target the
                    request allows was reached, every other target was
                    blocked. Rejection-surface rows (X*) pass when rejected.
-                   E13 also passes when rejected naming linkLocal.
+                   E13 also passes when rejected naming linkLocal; P01/P02
+                   (invalid proxy shapes) pass when rejected by the shared
+                   proxy rule.
       UNSUPPORTED  rejected with the named network rejection. The row records
                    the capability it needs. Not a failure.
       FAIL         admitted but broader than requested (a target outside the
@@ -38,7 +40,8 @@
 
     Probe targets (inside the session):
       external   TCP to -ExternalAddress:-ExternalPort
-      udp        UDP send to -ExternalAddress:53
+      udp        DNS query over UDP to -ExternalAddress:53; reached only when
+                 a reply with the same transaction id comes back
       dns        resolve -DnsName
       declared   TCP to a host loopback listener whose port the request names
       other      TCP to a second host loopback listener the request never names
@@ -46,7 +49,11 @@
       linklocal  TCP to 169.254.169.254:80 (instance metadata); judged only
                  in E13, recorded in every other row
     Loopback listeners answer with a per-run nonce, so a relay that accepts
-    locally cannot pass as reaching the host. DNS is report-only in every
+    locally cannot pass as reaching the host. udp and linklocal have host
+    positive controls: udp is report-only if the host gets no DNS answer.
+    E13 checks non-reachability, so a blocked metadata probe passes either
+    way; whether the host reaches the address is recorded in the row
+    detail. DNS is report-only in every
     restricted row: name resolution may leave a default-deny session, so it
     is recorded but never fails a restricted row. In the all-allow row it
     must resolve.
@@ -260,7 +267,7 @@ $Lo = '127.0.0.1/32'
 
 # Runs inside the session under Windows PowerShell 5.1. Prints one
 # 'PROBE <name> <verdict>' line per target; verdicts are REACHED, CONNECTED,
-# CLOSED, RESOLVED, SENT, TIMEOUT, or WSA<code>.
+# CLOSED, RESOLVED, ANSWERED, MISMATCH, TIMEOUT, or WSA<code>.
 $ProbeBody = @'
 function Get-Wsa($e) {
     while ($e) {
@@ -293,12 +300,30 @@ function Test-Tcp($name, $addr, $port, $nonce) {
         $c.Close()
     }
 }
-function Test-Udp($name, $addr, $port) {
+# A sent datagram proves nothing, so this sends a DNS query and needs a reply
+# from the same peer carrying the same transaction id.
+function Test-Udp($name, $addr, $port, $qname) {
+    $id = [guid]::NewGuid().ToByteArray()
+    $q = New-Object Collections.Generic.List[byte]
+    $q.AddRange([byte[]]@($id[0], $id[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    foreach ($label in $qname.Split('.')) {
+        $b = [Text.Encoding]::ASCII.GetBytes($label)
+        $q.Add([byte]$b.Length)
+        $q.AddRange($b)
+    }
+    $q.AddRange([byte[]]@(0, 0, 1, 0, 1))
     $u = New-Object Net.Sockets.UdpClient
     try {
-        $u.Connect($addr, $port)
-        [void]$u.Send([byte[]](1, 2, 3), 3)
-        "PROBE $name SENT"
+        $u.Client.ReceiveTimeout = 5000
+        [void]$u.Send($q.ToArray(), $q.Count, $addr, $port)
+        $peer = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
+        $resp = $u.Receive([ref]$peer)
+        if ($peer.Address.ToString() -eq $addr -and $peer.Port -eq $port -and $resp.Length -ge 12 -and
+            $resp[0] -eq $id[0] -and $resp[1] -eq $id[1] -and ($resp[2] -band 128) -ne 0) {
+            "PROBE $name ANSWERED"
+        } else {
+            "PROBE $name MISMATCH"
+        }
     } catch {
         "PROBE $name $(Get-Wsa $_.Exception)"
     } finally {
@@ -354,9 +379,19 @@ function Get-FreeLoopbackPort {
 }
 
 $Reach = @{
-    external = 'CONNECTED'; udp = 'SENT'; dns = 'RESOLVED'; declared = 'REACHED'; other = 'REACHED'
+    external = 'CONNECTED'; udp = 'ANSWERED'; dns = 'RESOLVED'; declared = 'REACHED'; other = 'REACHED'
     linklocal = 'CONNECTED'
 }
+
+# Host positive controls, run with the same probe code as the session. A target
+# the host itself cannot reach cannot show that a policy blocked it.
+. ([ScriptBlock]::Create($ProbeBody))
+$hostUdp = (Test-Udp 'udp' $ExternalAddress 53 $DnsName) -eq "PROBE udp $($Reach.udp)"
+if (-not $hostUdp) {
+    Write-Host ("WARNING: the host gets no DNS answer from $ExternalAddress`:53; udp is report-only " +
+        'in every row.') -ForegroundColor Yellow
+}
+$script:HostLinkLocal = $null
 $Targets = @('external', 'udp', 'dns', 'declared', 'other', 'down', 'linklocal')
 
 function Test-Blocked([string]$v) { return $v -match '^(WSA\d+|TIMEOUT|CLOSED)$' }
@@ -372,6 +407,7 @@ function Get-PostureVerdict {
         if (-not $got) { $got = 'NORUN' }
         if ($t -eq 'dns' -and -not $DnsRequired) { continue }
         if ($t -eq 'linklocal' -and -not $LinkLocalJudged) { continue }
+        if ($t -eq 'udp' -and -not $hostUdp) { continue }
         if ($Allow -contains $t) {
             if ($got -ne $Reach[$t]) {
                 if (Test-Blocked $got) { $narrower += "$t=$got" } else { $unknown += "$t=$got" }
@@ -477,12 +513,14 @@ $Matrix = @(
        Allow = @('declared'); Note = 'inbound path not probed' }
     @{ Id = 'L11'; Area = 'loopback'; Cap = 'egress allow, host loopback denied'; Needs = 'egressFiltering'
        Net = @{ egress = @{ default = 'allow' }; ingress = $DenyIngress }; Allow = @('external', 'udp') }
-    # Bring-your-own proxy (PC: proxy). The proxy is the declared listener.
-    @{ Id = 'P01'; Area = 'proxy'; Cap = 'networkProxy with all-allow'; Needs = 'runtimeProxy'
-       Net = $AllowAll; Rc = @{ networkProxy = $proxyUrl }; Allow = @('external', 'udp', 'declared', 'other') }
-    @{ Id = 'P02'; Area = 'proxy'; Cap = 'networkProxy with its port declared'; Needs = 'loopbackPorts'
+    # Bring-your-own proxy (PC: proxy). The proxy is the declared listener. A proxy needs
+    # egress.default=deny with no direct rules, so P01/P02 are invalid shapes: admitted is FAIL,
+    # the shared proxy rejection is PASS, the isolation session rejection is UNSUPPORTED.
+    @{ Id = 'P01'; Area = 'proxy'; Cap = 'networkProxy with all-allow (invalid)'; Needs = 'runtimeProxy'
+       Net = $AllowAll; Rc = @{ networkProxy = $proxyUrl }; Invalid = $true }
+    @{ Id = 'P02'; Area = 'proxy'; Cap = 'networkProxy with a direct rule (invalid)'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port $D)); Rc = @{ networkProxy = $proxyUrl }
-       Allow = @('declared') }
+       Invalid = $true }
     @{ Id = 'P03'; Area = 'proxy'; Cap = 'networkProxy port implied (no rules)'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @()); Rc = @{ networkProxy = $proxyUrl }; Allow = @('declared') }
     # Rejection surface (PC: rejections). Never admitted on any build.
@@ -505,14 +543,21 @@ $calls = @(
     "Test-Tcp 'other' '127.0.0.1' $($other.Port) '$($other.Nonce)'",
     "Test-Tcp 'external' '$ExternalAddress' $ExternalPort `$null",
     "Test-Tcp 'linklocal' '169.254.169.254' 80 `$null",
-    "Test-Udp 'udp' '$ExternalAddress' 53",
+    "Test-Udp 'udp' '$ExternalAddress' 53 '$DnsName'",
     "Test-Dns 'dns' '$DnsName'",
-    "Test-Tcp 'down' '127.0.0.1' $downPort `$null",
+    # A nonce forces the read, so a relay reset (10054) is observed rather than its local accept.
+    "Test-Tcp 'down' '127.0.0.1' $downPort 'MXC-NO-LISTENER'",
     "Test-Tcp 'declared' '127.0.0.1' $D '$($declared.Nonce)'"
 )
-$probeScript = $ProbeBody + "`n" + ($calls -join "`n")
+$probeScript = ((($ProbeBody -split "`r?`n") | ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n") + "`n" + ($calls -join "`n")
 $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
 $probeCommand = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -EncodedCommand $b64"
+# Session launch refuses longer command lines ("The command line is too long."); keep under 8191.
+if ($probeCommand.Length -gt 8191) {
+    Write-Host "FAILED: probe command is $($probeCommand.Length) characters; the limit is 8191." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "Listeners: declared=$D other=$($other.Port) down=$downPort; external=$ExternalAddress`:$ExternalPort" -ForegroundColor DarkGray
 try {
@@ -527,7 +572,9 @@ try {
         $admitted = $verdicts.Count -gt 0
         $tail = (($run.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' | '
         $crashed = $run.ExitCode -le -1073741824
-        $expected = if ($r.Reject) { 'rejected' } else { "admitted with {$($r.Allow -join ',')} or rejected naming network" }
+        $expected = if ($r.Reject) { 'rejected' }
+            elseif ($r.Invalid) { 'rejected: networkProxy needs deny-by-default egress with no direct rules' }
+            else { "admitted with {$($r.Allow -join ',')} or rejected naming network" }
         if ($run.Killed) {
             Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "killed after $($SessionTimeoutMs + $KillGraceMs) ms" 'FAIL' $tail
         } elseif ($r.Reject) {
@@ -538,6 +585,8 @@ try {
             } else {
                 Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "exit $($run.ExitCode)" 'FAIL' $tail
             }
+        } elseif ($admitted -and $r.Invalid) {
+            Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'admitted' 'FAIL' 'an invalid proxy shape was admitted'
         } elseif ($admitted) {
             $pv = Get-PostureVerdict -Verdicts $verdicts -Allow $r.Allow -DnsRequired:([bool]$r.DnsRequired) `
                 -LinkLocalJudged:([bool]$r.LinkLocalJudged)
@@ -547,8 +596,19 @@ try {
                 $ok = $false; $why = "declared port with no listener must fail with $($r.DownCode)"
             }
             if ($ok -and $run.ExitCode -ne 0) { $ok = $false; $why = "session exited $($run.ExitCode)" }
-            $detail = @($why, $r.Note) | Where-Object { $_ }
+            $llNote = $null
+            if ($ok -and $r.LinkLocalJudged) {
+                # The property is non-reachability, so a block passes; the host control is recorded only.
+                if ($null -eq $script:HostLinkLocal) {
+                    $script:HostLinkLocal = (Test-Tcp 'linklocal' '169.254.169.254' 80 $null) -eq 'PROBE linklocal CONNECTED'
+                }
+                if (-not $script:HostLinkLocal) {
+                    $llNote = 'blocked (no host control: the host cannot reach 169.254.169.254:80)'
+                }
+            }
+            $detail = @($why, $llNote, $r.Note) | Where-Object { $_ }
             if (-not $r.DnsRequired) { $detail += "dns=$($verdicts['dns']) (report-only)" }
+            if (-not $hostUdp) { $detail += "udp=$($verdicts['udp']) (report-only, no host control)" }
             Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "admitted: $($pv.Actual)" `
                 ($(if ($ok) { 'PASS' } else { 'FAIL' })) ($detail -join '; ')
         } elseif (-not $crashed -and $run.ExitCode -ne 0 -and $run.Output -match $NetworkRejection) {
@@ -561,6 +621,9 @@ try {
             } else {
                 Add-Row $r.Id $r.Area $r.Cap $needs $expected 'rejected (network)' 'UNSUPPORTED'
             }
+        } elseif ($r.Invalid -and -not $crashed -and $run.ExitCode -ne 0 -and
+                  $run.Output -match 'networkProxy requires network\.egress\.default') {
+            Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'rejected (proxy shape)' 'PASS'
         } else {
             Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "exit $($run.ExitCode), no probe output" 'FAIL' $tail
         }
