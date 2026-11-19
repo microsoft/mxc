@@ -290,9 +290,14 @@ function Test-Tcp($name, $addr, $port, $nonce) {
         $s = $c.GetStream()
         $s.ReadTimeout = 5000
         $buf = New-Object byte[] 256
-        $n = $s.Read($buf, 0, $buf.Length)
-        if ($n -eq 0) { "PROBE $name CLOSED"; return }
-        $text = [Text.Encoding]::ASCII.GetString($buf, 0, $n)
+        $text = ''
+        # TCP may split the nonce across reads; read until it is seen, EOF, or timeout.
+        while (-not $text.Contains($nonce) -and $text.Length -lt 256) {
+            try { $n = $s.Read($buf, 0, $buf.Length) } catch { if ($text) { break } else { throw } }
+            if ($n -eq 0) { break }
+            $text += [Text.Encoding]::ASCII.GetString($buf, 0, $n)
+        }
+        if (-not $text) { "PROBE $name CLOSED"; return }
         if ($text.Contains($nonce)) { "PROBE $name REACHED" } else { "PROBE $name CONNECTED" }
     } catch {
         "PROBE $name $(Get-Wsa $_.Exception)"
