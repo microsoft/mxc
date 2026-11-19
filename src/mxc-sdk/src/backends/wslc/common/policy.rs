@@ -72,8 +72,8 @@ const ERR_PROXY_WITH_RULES: &str =
      proxy";
 const ERR_PROXY_WITH_EGRESS_ALLOW: &str =
     "WSLc: runtimeConfig.networkProxy with network.egress.default 'allow' requires bridged \
-     networking. Set network.ingress.default to 'allow', or set network.egress.default to 'deny' \
-     so traffic leaves only through the proxy";
+     networking. Set network.ingress.default and network.ingress.hostLoopback to 'allow', or set \
+     network.egress.default to 'deny' so traffic leaves only through the proxy";
 const ERR_PROXY_NOT_URL: &str =
     "WSLc: runtimeConfig.networkProxy requires a URL-backed proxy address";
 const ERR_PROXY_LOOPBACK: &str =
@@ -112,9 +112,8 @@ pub(crate) fn create_and_run_network_policy_support() -> NetworkPolicySupport {
 pub(crate) enum NetworkMode {
     /// No network at all.
     None,
-    /// The session's NAT network, unfiltered. It reaches Windows loopback only
-    /// with `host_loopback`, which enables it for the session.
-    Bridged { host_loopback: bool },
+    /// The session's NAT network, unfiltered, including Windows loopback.
+    Bridged,
     /// An internal network whose only way out is the built-in proxy.
     Proxied(ProxiedEgress),
 }
@@ -125,7 +124,7 @@ impl NetworkMode {
     /// own session.
     pub(crate) fn session_host_loopback(&self) -> bool {
         match self {
-            NetworkMode::Bridged { host_loopback } => *host_loopback,
+            NetworkMode::Bridged => true,
             NetworkMode::Proxied(proxied) => {
                 proxied.host_loopback
                     || matches!(
@@ -195,10 +194,9 @@ pub(crate) fn create_and_run_network_mode(
         && egress.allow.is_empty()
         && egress.deny.is_empty()
         && ingress.default == NetworkAction::Allow
+        && ingress.host_loopback == NetworkAction::Allow
     {
-        return Ok(NetworkMode::Bridged {
-            host_loopback: ingress.host_loopback == NetworkAction::Allow,
-        });
+        return Ok(NetworkMode::Bridged);
     }
 
     let host_loopback = ingress.host_loopback == NetworkAction::Allow;
@@ -1283,26 +1281,23 @@ mod tests {
             "{:?}",
             ingress_only.warnings
         );
-        for (network, host_loopback) in [
-            (
-                r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
-                true,
-            ),
-            (
-                r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#,
-                false,
-            ),
-        ] {
-            assert_eq!(
-                mode(network).unwrap(),
-                NetworkMode::Bridged { host_loopback },
-                "{network}"
-            );
-        }
+        assert_eq!(
+            mode(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#)
+                .unwrap(),
+            NetworkMode::Bridged
+        );
 
-        let open = proxied(r#"{"egress":{"default":"allow"}}"#);
+        let open = proxied(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#);
         assert_eq!(open.egress.default, gateway::Action::Allow);
         assert!(open.egress.allow.is_empty() && open.egress.deny.is_empty());
+        assert!(!open.host_loopback);
+        assert!(
+            open.warnings
+                .iter()
+                .any(|w| w.contains("ingress.default 'allow' has no effect")),
+            "{:?}",
+            open.warnings
+        );
 
         let filtered = proxied(
             r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24","except":["192.0.2.8/29"]}],"ports":[{"protocol":"tcp","port":8000,"endPort":8010},{"protocol":"tcp","port":443}]}]}}"#,
@@ -1364,9 +1359,7 @@ mod tests {
         assert_eq!(
             with_mappings(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#)
                 .unwrap(),
-            NetworkMode::Bridged {
-                host_loopback: true
-            }
+            NetworkMode::Bridged
         );
     }
 
@@ -1489,7 +1482,7 @@ mod tests {
                 "cannot be combined with egress filtering rules",
             ),
             (
-                r#"{"egress":{"default":"allow"}}"#,
+                r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#,
                 "http://proxy.example:8080",
                 "requires bridged networking",
             ),

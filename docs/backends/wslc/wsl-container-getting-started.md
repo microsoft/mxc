@@ -523,7 +523,7 @@ no separate `--setup-wslc` step is required.
 
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
-| Bridged | Egress and ingress defaults `allow`, without egress rules. Container lifecycle operations also require the host-loopback default `allow`. | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. In create-and-run execution with `hostLoopback: "allow"`, it reaches Windows `127.0.0.1` at `host.wslc.internal`; otherwise it can't. Nothing else is filtered. |
+| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. In create-and-run execution, it reaches Windows `127.0.0.1` at `host.wslc.internal`; with container lifecycle operations, Windows host loopback isn't accessible. Nothing is filtered. |
 | Isolated | All three defaults omitted or `deny`, without egress allow rules, port mappings, or `runtimeConfig.networkProxy` | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
 | Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
 | Built-in proxy | Any other combination, container lifecycle operations | Rejected |
@@ -693,8 +693,8 @@ instead; see [Custom proxy](#custom-proxy).
   to it.
 
 - The URL must be reachable from the container. `127.0.0.1` is the
-  container's own loopback; reach Windows loopback at `host.wslc.internal`
-  with [`hostLoopback: "allow"`](#network-configuration).
+  container's own loopback; in create-and-run execution, Windows loopback is
+  `host.wslc.internal`.
 
 - Container lifecycle operations set the proxy on `exec`, not at provision.
 

@@ -1086,7 +1086,7 @@ impl WSLContainerRunner {
                     logger,
                 )?)
             }
-            policy::NetworkMode::None | policy::NetworkMode::Bridged { .. } => None,
+            policy::NetworkMode::None | policy::NetworkMode::Bridged => None,
         };
 
         // -- Process settings --
