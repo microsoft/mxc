@@ -356,6 +356,9 @@ backends are detected independently; the host is unsupported when none are avail
 MicroVM is reported when available, but execution requires the development
 JSON API; typed V1 requests cannot select it. Availability is advisory.
 
+For what IsolationSession availability depends on, see
+[IsolationSession availability](https://github.com/microsoft/mxc/blob/main/docs/backends/isolation-session/availability.md).
+
 ```csharp
 public static PlatformSupport GetPlatformSupport();
 ```
