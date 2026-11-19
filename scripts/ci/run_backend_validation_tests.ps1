@@ -324,13 +324,27 @@ function Invoke-NamedSuites {
 }
 
 # Daemon discovery reuses any running daemon, including one another suite started.
+# An idle daemon terminates its WSLc session on exit. A killed one leaves WSL
+# holding the session's store, so the next session cannot open it until WSL
+# shuts down.
 function Stop-WslcDaemons {
+    $idleExitSecs = [int]$env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS + 3 * [int]$env:MXC_WSLC_DAEMON_IDLE_POLL_SECS + 15
+    $killed = $false
     foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
-        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id) from an earlier suite."
+        Write-Host "Waiting up to $idleExitSecs s for wxc-wslc-daemon $($daemon.Id) from an earlier suite to idle out."
+        if ($daemon.WaitForExit($idleExitSecs * 1000)) { continue }
+
+        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id); it did not idle out."
         Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
         if (-not $daemon.WaitForExit(30000)) {
             throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
         }
+        $killed = $true
+    }
+    if ($killed) {
+        Write-Host 'Shutting down WSL to release the killed daemon''s store.'
+        wsl.exe --shutdown | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "wsl --shutdown exited $LASTEXITCODE." }
     }
 }
 
@@ -372,6 +386,11 @@ function Invoke-WslcSuites {
     # The SDK suites skip unless asked to run, and a skip is reported as a
     # failure below.
     $env:MXC_ENABLE_WSLC_TESTS = '1'
+
+    # Daemons the suites spawn inherit these, so Stop-WslcDaemons can wait for
+    # one to idle out rather than kill it.
+    $env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS = '20'
+    $env:MXC_WSLC_DAEMON_IDLE_POLL_SECS = '5'
 
     Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
         'filesystem probe deadlines' = {

@@ -4,7 +4,7 @@
   "containerId": "wslc-network-egress-allow-everything",
   "containment": "wslc",
   "process": {
-    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho ALLOWED=$(p 8.8.8.8:443)\necho LOOPBACK=$(p 127.0.0.1:80)\necho PROXY_SELF=$(p 10.231.1.254:3128)\necho LINK_LOCAL=$(p 169.254.169.254:80)"
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { for i in 1 2 3; do s=$(printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2); [ \"$s\" = 502 ] || break; sleep 2; done; echo \"$s\"; }\necho ALLOWED=$(p 8.8.8.8:443)\necho LOOPBACK=$(p 127.0.0.1:80)\necho PROXY_SELF=$(p 10.231.1.254:3128)\necho LINK_LOCAL=$(p 169.254.169.254:80)"
   },
   "network": {
     "egress": { "default": "deny", "allow": [{ "to": [{ "cidr": "0.0.0.0/0" }], "ports": [{ "protocol": "tcp" }] }] },
