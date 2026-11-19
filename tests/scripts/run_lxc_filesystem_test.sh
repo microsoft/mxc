@@ -38,6 +38,9 @@ mkdir -p "$POLICY_DIR/work/secret" "$POLICY_DIR/work/a" "$POLICY_DIR/work/b"
 CANARY="$POLICY_DIR/work/secret/canary.txt"
 echo HOST_ORIGINAL > "$CANARY"
 
+VISIBLE="$POLICY_DIR/work/a/visible.txt"
+echo VISIBLE_ORIGINAL > "$VISIBLE"
+
 run_policy() {
     local filesystem="$1"
     cat <<EOF | "$LXC_EXEC" --config /dev/stdin
@@ -47,7 +50,7 @@ run_policy() {
   "lxc": {"distribution": "alpine", "release": "3.23"},
   "lifecycle": {"destroyOnExit": true},
   "process": {
-    "commandLine": "echo WORKLOAD_STARTED; cat $CANARY; echo MODIFIED > $CANARY",
+    "commandLine": "echo WORKLOAD_STARTED; cat $VISIBLE; cat $CANARY; echo MODIFIED > $CANARY",
     "timeout": 30000
   },
   "filesystem": {$filesystem}
@@ -58,6 +61,7 @@ EOF
 for path in "$POLICY_DIR/work" "$POLICY_DIR/work/././"; do
     OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$POLICY_DIR/work/secret\"]" 2>&1 || true)
     if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
+        ! grep -q VISIBLE_ORIGINAL <<< "$OUTPUT" ||
         grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
         [[ $(cat "$CANARY") != HOST_ORIGINAL ]]; then
         echo "FAIL: parent grant $path must preserve its child's deny."
