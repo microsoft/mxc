@@ -1,0 +1,21 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "python3 -c \"import pty;pty.openpty();print('PTY_OK')\" </dev/null 2>/dev/null || echo PTY_BLOCKED",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{DEVDIR}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true,
+        "nestedPty": false
+    }
+}

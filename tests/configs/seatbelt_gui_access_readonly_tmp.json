@@ -1,0 +1,20 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/ro/file.txt; (echo changed > {{TESTDIR}}/ro/file.txt) 2>/dev/null && echo TMP_WRITE_OK || echo TMP_WRITE_BLOCKED",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{TESTDIR}}/ro"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true
+    }
+}

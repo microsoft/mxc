@@ -61,7 +61,7 @@ temp report afterward.
 
 | Field | Default | Behavior |
 |---|---|---|
-| `mode` | `"block"` | `block`: denied accesses stay denied and are recorded. `allow`: accesses the default policy would deny are allowed and recorded. Explicit denies (`deniedPaths`, `ui` denies) stay enforced. MXC prints a warning. |
+| `mode` | `"block"` | `block`: denied accesses stay denied and are recorded. `allow`: accesses the default policy would deny are allowed and recorded. Settings the request omits don't block either. `deniedPaths` and written settings stay enforced. MXC prints a warning. |
 | `outputPath` | Temp file | Absolute or `~/` path. The parent directory must exist. Empty, relative, root, and directory paths are rejected. A name without an extension gets `.json`. |
 | `retainEtl` | `false` | Keep the run's filtered raw log as `.seatbelt.log` next to the report, and return its path in `etlPath`. The Windows name is reused; see [compatibility](#contracts-apis-and-compatibility). |
 
@@ -189,7 +189,7 @@ capture after parsing.
 | Component | Change |
 |---|---|
 | `mxc_contract::dev` | New Seatbelt field |
-| Seatbelt `profile_builder` | Adds a per-run tag to deny rules. `allow` mode uses a reporting allow baseline and keeps explicit denies. |
+| Seatbelt `profile_builder` | Adds a per-run tag to deny rules. `allow` mode uses a reporting allow baseline, reports omitted settings' denies, and keeps written ones. |
 | Seatbelt `denial_capture` | Runs `log stream` filtered on the tag, and uses ready and drain markers. Enforces the limits above. |
 | Seatbelt `capture_analysis` | Converts log events into shared report records. Uses the Windows fast path once verbose groups fill up. |
 | `learning_mode_core` | Shared report writer, moved from `process_container` |

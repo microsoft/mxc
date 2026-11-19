@@ -1,0 +1,17 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "mkdir /Users/agos/Library/Keychains/test1",
+        "timeout": 20000,
+        "env": [
+            "HOME=/Users/agos"
+        ]
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/Users/agos/Library"
+        ]
+    }
+}

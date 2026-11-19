@@ -183,6 +183,10 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        custom_io_kits: None,
+        custom_mach_registers: None,
+        custom_mach_lookups: None,
+        custom_posix_shm: None,
         capture_denials: None,
     }
 }

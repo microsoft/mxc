@@ -64,4 +64,54 @@ expect_rejected "guiAccess=true with no ui section is refused" \
     "seatbelt_reject_gui_without_ui_section.json" \
     "guiAccess=true cannot be combined with ui.disable=true" "$S"
 
+# --- Custom Mach, IOKit, and shared memory lists -----------------------------
+
+expect_rejected "a bare '*' custom entry is refused" \
+    "seatbelt_reject_custom_bare_star.json" \
+    "a bare '*' is not supported" "$S"
+
+# A list would otherwise fill the block's fields by position: ["allow"] became
+# default "allow".
+expect_rejected "a custom block written as a list is refused" \
+    "seatbelt_reject_custom_list_not_object.json" \
+    "seatbelt.customMachLookups\`: invalid type: sequence, expected a settings object" "$S"
+
+expect_rejected "custom lists with profileOverride are refused" \
+    "seatbelt_reject_custom_with_profile_override.json" \
+    "it cannot be combined with customIoKits" "$S"
+
+expect_rejected "customMachLookups with extraMachLookups is refused" \
+    "seatbelt_reject_custom_with_extra_mach_lookups.json" \
+    "cannot be combined with seatbelt.customMachLookups" "$S"
+
+expect_rejected "a custom entry in MXC's cleanup prefix is refused" \
+    "seatbelt_reject_custom_reserved_name.json" \
+    "which MXC reserves for its process cleanup rules" "$S"
+
+expect_rejected "an allow entry a setting denies is refused" \
+    "seatbelt_reject_custom_allow_denied_by_setting.json" \
+    "which the current ui.injection setting denies" "$S"
+
+expect_rejected "a deny entry a setting grants is refused" \
+    "seatbelt_reject_custom_deny_granted_by_setting.json" \
+    "which the current ui.clipboard setting allows" "$S"
+
+expect_rejected "a shared memory name in two access lists is refused" \
+    "seatbelt_reject_shm_name_in_two_lists.json" \
+    "is in both 'read' and 'own'" "$S"
+
+expect_rejected "a shared memory name over 31 bytes is refused" \
+    "seatbelt_reject_shm_name_too_long.json" \
+    "longer than 31 bytes" "$S"
+
+expect_rejected "a custom name with a NUL character is refused" \
+    "seatbelt_reject_custom_nul_name.json" \
+    "contains a NUL character" "$S"
+
+# --dry-run prints the message as plain text, where raw control characters
+# would reach the terminal.
+expect_rejected "a rejected entry's control characters are escaped" \
+    "seatbelt_reject_custom_control_characters.json" \
+    'a*\u{1b}[2J\nSeatbelt: forged' "$S" --dry-run
+
 summary "Seatbelt rejections"

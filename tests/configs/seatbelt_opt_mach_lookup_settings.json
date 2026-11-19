@@ -1,0 +1,21 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c 'import ctypes,sys; l=ctypes.CDLL(None); bp=ctypes.c_uint.in_dll(l,\"bootstrap_port\").value; f=l.bootstrap_look_up; f.argtypes=[ctypes.c_uint,ctypes.c_char_p,ctypes.POINTER(ctypes.c_uint)]; p=ctypes.c_uint(); [print(n+\"=\"+(\"BLOCKED\" if f(bp,n.encode(),ctypes.byref(p))==1100 else \"ALLOWED\")) for n in sys.argv[1:]]' com.apple.SecurityServer com.apple.securityd.xpc com.apple.pasteboard.1",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{DEVDIR}}"
+        ]
+    },
+    "seatbelt": {
+        "extraMachLookups": [
+            "com.apple.SecurityServer",
+            "com.apple.securityd.xpc",
+            "com.apple.pasteboard.1"
+        ]
+    }
+}

@@ -89,7 +89,7 @@ with contextlib.ExitStack() as cleanup:
         ("explicit filesystem grant", None, "allow", "allow"),
         ("default policy", None, "deny", "allow"),
         ("nestedPty=false", {"nestedPty": False}, "deny", "deny"),
-        ("guiAccess", {"guiAccess": True, "nestedPty": False}, "deny", "allow"),
+        ("guiAccess", {"guiAccess": True, "nestedPty": False}, "deny", "deny"),
     ]
     for inherited in (False, True):
         for label, options, access, nested in cases:
