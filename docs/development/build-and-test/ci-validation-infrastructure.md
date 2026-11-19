@@ -356,8 +356,13 @@ requests, eviction and re-pull, reuse of an existing over-limit cache, dry-run,
 subsequent admission, and protection of provisioned, running, and stopped
 containers. It also checks oversized-image rejection through the signed agent's
 local-image registration. The test needs registry access and at least 30 GiB of
-free disk space on the volume holding the staged test executable. The limit
-covers counted staged images, not temporary files or other agent state.
+free disk space available to the test process on the volume holding the staged
+test executable. It checks that volume before creating its fixtures and fails
+with the available and required byte counts when space is insufficient. If the
+volume cannot be queried, it reports the directory and error. The check does not
+reserve space; concurrent use and temporary files on other volumes can still
+cause the test to fail. The limit covers counted staged images, not temporary
+files or other agent state.
 
 Explicit 256-MiB and 512-MiB requests exercise create-and-run execution and
 lifecycle starts. Native diagnostics must report a clone for 256 MiB and a cold

@@ -203,6 +203,9 @@ fn main() {
         if mode != "missing-image-reuse-discovery" {
             println!("windows_x64::signed_bundle_executor_reuses_registered_images: test");
         }
+        if mode != "missing-image-space-check-discovery" {
+            println!("windows_x64::image_cache_fixture_space_check_fails_closed: test");
+        }
         if mode != "missing-image-capacity-discovery" {
             println!("windows_x64::signed_bundle_image_cache_capacity: test");
         }
@@ -896,6 +899,7 @@ for (const [mode, message] of [
   ["missing-sdk-lifecycle-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
   ["missing-image-reuse-discovery", /did not discover windows_x64::signed_bundle_executor_reuses_registered_images/],
+  ["missing-image-space-check-discovery", /did not discover windows_x64::image_cache_fixture_space_check_fails_closed/],
   ["missing-image-capacity-discovery", /did not discover windows_x64::signed_bundle_image_cache_capacity/],
   ["missing-platform-snapshots-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_executor_starts_sandboxes_from_platform_snapshots/],
   ["missing-snapshot-memory-discovery", /did not discover[\s\S]*windows_x64::signed_bundle_snapshot_memory_capacity/],
@@ -920,6 +924,7 @@ for (const [mode, message] of [
       "missing-sdk-lifecycle-discovery",
       "missing-interruption-discovery",
       "missing-image-reuse-discovery",
+      "missing-image-space-check-discovery",
       "missing-image-capacity-discovery",
       "missing-platform-snapshots-discovery",
       "missing-snapshot-memory-discovery",

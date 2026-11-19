@@ -220,6 +220,73 @@ mod windows_x64 {
     const CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
     const CAPTURE_ERROR: &str =
         "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded";
+    const IMAGE_CACHE_FIXTURE_FREE_BYTES: u64 = 30 * 1024 * 1024 * 1024;
+
+    fn validate_image_cache_fixture_space(
+        directory: &Path,
+        available: u64,
+        required: u64,
+    ) -> Result<(), String> {
+        if available < required {
+            return Err(format!(
+                "image cache fixture directory {} has {available} bytes available; \
+                 at least {required} bytes are required. Free space on this volume or \
+                 run the test from a volume with sufficient space",
+                directory.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_image_cache_fixture_space(directory: &Path, required: u64) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+        let mut path: Vec<u16> = directory.as_os_str().encode_wide().collect();
+        if path.last() != Some(&(b'\\' as u16)) {
+            path.push(b'\\' as u16);
+        }
+        path.push(0);
+        let mut available = 0;
+        unsafe { GetDiskFreeSpaceExW(PCWSTR(path.as_ptr()), Some(&mut available), None, None) }
+            .map_err(|error| {
+                format!(
+                    "cannot determine free space for image cache fixture directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+        println!(
+            "image cache fixture directory {}: {available} bytes available; \
+             {required} bytes required",
+            directory.display()
+        );
+        validate_image_cache_fixture_space(directory, available, required)
+    }
+
+    #[test]
+    fn image_cache_fixture_space_check_fails_closed() {
+        let directory = tempfile::tempdir().expect("space-check test directory");
+        let required = IMAGE_CACHE_FIXTURE_FREE_BYTES;
+        assert!(validate_image_cache_fixture_space(directory.path(), required, required).is_ok());
+        assert!(
+            validate_image_cache_fixture_space(directory.path(), required + 1, required).is_ok()
+        );
+        let error = validate_image_cache_fixture_space(directory.path(), required - 1, required)
+            .unwrap_err();
+        assert!(
+            error.contains(&directory.path().display().to_string()),
+            "{error}"
+        );
+        assert!(error.contains(&(required - 1).to_string()), "{error}");
+        assert!(error.contains(&required.to_string()), "{error}");
+        assert!(check_image_cache_fixture_space(directory.path(), 0).is_ok());
+        assert!(check_image_cache_fixture_space(directory.path(), u64::MAX).is_err());
+        let missing = directory.path().join("missing");
+        let error = check_image_cache_fixture_space(&missing, 0).unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(error.contains("cannot determine free space"), "{error}");
+    }
 
     #[test]
     fn native_validation_rejects_requests_without_booting_a_vm() {
@@ -1930,6 +1997,8 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             .parent()
             .expect("test executable directory")
             .to_path_buf();
+        check_image_cache_fixture_space(&test_dir, IMAGE_CACHE_FIXTURE_FREE_BYTES)
+            .unwrap_or_else(|error| panic!("{error}"));
 
         for lifecycle in [false, true] {
             let fixture = tempfile::tempdir_in(&test_dir).expect("capacity fixture directory");
@@ -1974,6 +2043,10 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                 new.length > MIB && old.length > new.length && old.length < CAPACITY,
                 "{old:?} {new:?}"
             );
+            assert!(
+                third.length > 0 && new.length + third.length < CAPACITY,
+                "{new:?} {third:?}"
+            );
             assert!(seed.unregister_image(&new.id).unwrap());
             assert!(seed.unregister_image(&third.id).unwrap());
 
@@ -1987,11 +2060,14 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             assert!(output.status.success(), "{output:?}");
             let mut old_container = lifecycle.then(|| container_from_output(&output, &local));
 
-            // Leave less than one MiB free, so the next image must trigger admission.
-            let padding_length = ((CAPACITY - old.length) / MIB) * MIB;
+            // Both the initial eviction and the later largest-first check must fit.
+            let padding_length =
+                ((CAPACITY - old.length).min(CAPACITY - new.length - third.length) / MIB) * MIB;
             assert!(padding_length >= 2 * MIB);
             assert!(padding_length + old.length <= CAPACITY);
             assert!(padding_length + old.length + new.length > CAPACITY);
+            assert!(padding_length + new.length + third.length <= CAPACITY);
+            assert!(padding_length + old.length + third.length > CAPACITY);
             let vhd = padding_image(&bundle, fixture.path(), padding_length);
 
             let setup = bundle
@@ -2139,6 +2215,26 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             let before = protected.images().unwrap();
             assert!(before.iter().map(|image| image.length).sum::<u64>() > CAPACITY);
             assert!(before.iter().any(|image| image.id == extra.id));
+            assert_eq!(before.len(), 3, "{before:?}");
+            assert!(before.iter().any(|image| image.id == padding));
+            assert!(before.iter().any(|image| image.id == restored[0].id));
+            assert_eq!(extra.length, new.length);
+            assert!(old.length > extra.length);
+            assert!(
+                before.iter().map(|image| image.length).sum::<u64>() - old.length + third.length
+                    <= CAPACITY,
+                "evicting the largest image alone must make room for the incoming image: {before:?}"
+            );
+            assert!(
+                before.iter().map(|image| image.length).sum::<u64>() - extra.length + third.length
+                    > CAPACITY,
+                "evicting only the smaller image must not make enough room: {before:?}"
+            );
+            println!(
+                "image cache largest-first fixture: capacity={CAPACITY}, padding={padding_length}, \
+                 largest={}, smaller={}, incoming={}",
+                old.length, extra.length, third.length
+            );
             let output = executor_output_with_env(&old_request, false, false, &environment);
             assert!(output.status.success(), "{output:?}");
             if lifecycle {
@@ -2178,6 +2274,16 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
                     .any(|image| image.id == restored[0].id),
                 "admission must evict the largest unused image"
             );
+            assert!(
+                after_admission.iter().any(|image| image.id == extra.id),
+                "admission must retain the smaller unused image"
+            );
+            let admitted: Vec<_> = after_admission
+                .iter()
+                .filter(|image| image.id != padding && image.id != extra.id)
+                .collect();
+            assert_eq!(admitted.len(), 1, "{after_admission:?}");
+            assert_eq!(admitted[0].length, third.length);
             protected.close().unwrap();
             seed.close().unwrap();
         }
