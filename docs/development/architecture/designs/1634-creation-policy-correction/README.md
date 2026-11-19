@@ -5,7 +5,7 @@
 - **Status:** Accepted
 - **Issue:** [#1634](https://github.com/microsoft/mxc/issues/1634)
 - **Contributor:** @rossnichols
-- **Implementation PRs:** None submitted.
+- **Implementation PRs:** [#1718](https://github.com/microsoft/mxc/pull/1718).
 
 Return structured native creation-policy failures and provide a separate
 operation that prepares a candidate restricted request without creating a
@@ -87,8 +87,9 @@ request JSON field carries observations. See [api.md](api.md).
 
 1. Parse the request through its registered authoring contract and select the
    ordinary backend. Validate observation shape, format and input limits.
-   Empty observations return the request unchanged on every backend and OS;
-   experimental backends still require the experimental opt-in.
+   Empty observations (`results: []`) return the original request text with
+   no changes on every backend and OS; experimental backends still require
+   the experimental opt-in.
    Non-empty observations require the backend that reported them, currently a
    serviceable native Windows ProcessContainer create-and-run path; never
    ignore unsupported observations or obtain a fallback.
@@ -104,6 +105,13 @@ request JSON field carries observations. See [api.md](api.md).
    changes. Each change has an operation, JSON Pointer, and required before
    and after JSON values. Arrays may be reported as one replacement. Unsafe
    projection fails explicitly; no partial candidate or truncated report.
+
+The empty-observation case skips backend serviceability and backend-specific
+policy checks. It is not validation or approval of the request: the host may
+be unable to run the selected backend. Invalid request contracts, phases other
+than create-and-run and missing experimental authorization still fail before
+this no-op. A native batch with an empty `details` array is not an empty
+observation collection.
 
 Preparation may query host support and perform bounded filesystem probes.
 It does not call `CreateProcessSecurityEnvironment`, start a trace, create a
@@ -140,9 +148,14 @@ unrelated enumeration remains unchanged.
 administrative policy. SDK merge helpers return a new bounded history in
 first-seen order, deduplicating identical whole batches without changing either
 input. Keep batch boundaries, detail order, native versions, unknown codes/flag
-bits, observed values and resource presence. Preparation combines compatible
-ceilings conservatively; it never rewrites historical observations as
-current-request facts.
+bits, observed values and valid resource text, including empty versus absent
+resources. Preparation combines compatible ceilings conservatively; it never
+rewrites historical observations as current-request facts.
+
+Resources are optional Unicode strings. Invalid native UTF-16 is omitted:
+set `ResourceUnavailable` and clear `ResourceComplete`. The original invalid
+code units are not retained, and the affected detail cannot authorize a
+change. Stored resources with unpaired surrogates are rejected.
 
 | Bound | Preparation observations | JSON storage and merge |
 | --- | ---: | ---: |
@@ -174,8 +187,9 @@ of complete result JSON with 4,096 changes. A stored candidate can exceed the
 validates storage shape and bounds, not acceptance or current policy.
 
 Filesystem preparation also bounds cumulative safety-check work. It resolves
-each distinct path spelling once per call and checks the whole restriction
-batch for increased access, rather than repeating that proof for each edit.
+each distinct path spelling once within the restriction pass, sharing those
+results across iterations, and checks the whole restriction batch for increased
+access rather than repeating that proof for each edit.
 Exceeding the work budget is a terminal preparation error, not a partial
 candidate or permission to skip identity and access checks.
 
@@ -187,7 +201,7 @@ current policy; the application chooses its inputs and accepted request.
 
 ## Execution and container lifecycle support
 
-| Operation | Planned behavior |
+| Operation | Behavior |
 | --- | --- |
 | V1.Dev policy preparation | Prepare a create-and-run request on any backend without creation or execution; return owned candidate and changes. Empty observations return the request unchanged; only native Windows ProcessContainer applies non-empty observations. |
 | Dev captured create-and-run | Strict creation of caller-chosen JSON; fresh structured refusal where available. Ordinary output/timeout results remain. |
@@ -208,10 +222,11 @@ normal caller disposal/stream/wait responsibilities.
 This table concerns the feature, not whether a backend can otherwise run.
 Every backend accepts preparation with empty observations and returns the
 request unchanged; experimental backends also require the experimental opt-in.
+This no-op does not require that backend to be available on the current host.
 Support below means reporting and applying observations;
 observations are specific to the backend that reported them.
 
-| Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
+| Backend | Reporting and application support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
 | ProcessContainer | Yes, native Windows path only | Existing PSEC/request-version checks. Resolve the optional getter and advertised capture support for fresh diagnostics; denial capture retains separate checks. | Existing serviceability/request-error results, not policy approval or guaranteed diagnostic availability. |
 | WSLC | No; different creation/enforcement system | Preparation rejects non-empty observations for this backend; no new host checks. Ordinary execution remains unchanged. | Unchanged backend availability. |
@@ -230,8 +245,9 @@ MXC can depend on the Windows policy-result API when runtime detection finds
 the getter and advertised reporting support. Runtime capability detection is
 the support requirement; no minimum Windows build is inferred from a request
 or SDK version.
-Preparation of supplied observations remains subject to request/serviceability
-and safety checks; it does not require obtaining a fresh refusal first.
+Preparation of non-empty supplied observations remains subject to request,
+serviceability and safety checks; it does not require obtaining a fresh refusal
+first.
 Creation errors cannot return history they were not given. API availability
 does not establish that the current creator is subject to administrative policy.
 
@@ -270,9 +286,10 @@ container, selecting fallback or weakening permissions.
 
 `mxc_engine` remains the single router. SDKs/FFI transport observations,
 candidate JSON and structured error details. The ProcessContainer backend
-owns host checks and restrictive permission derivation; the engine projects
-and verifies authoring JSON through existing contract parsing. Shared DTOs
-stay passive. Binaries delegate routing; no new implementation crate or
+owns host checks, restrictive permission derivation, authoring JSON projection
+and prospective-policy verification. The engine routes the operation and
+provides the existing contract parser for reparsing the candidate. Shared
+DTOs stay passive. Binaries delegate routing; no new implementation crate or
 parallel launch path is needed.
 
 ```mermaid
@@ -310,9 +327,11 @@ retain their bounded waits/workers, but synchronous native creation/getter
 calls do not acquire a new end-to-end cancellation/deadline guarantee.
 
 Observations can contain sensitive paths/capability names. Do not render them
-into ordinary error, debug/console or warning text. The application controls
-storage and access to explicit structured serialization. This feature adds
-no telemetry consent or data collection.
+into ordinary error messages, default diagnostic inspection, CLI error
+envelopes or warning text. Explicit structured serialization and application
+inspection of `details` retain them; applications must filter that data before
+logging it. The application controls storage and access. This feature adds no
+telemetry consent or data collection.
 
 The main alternative is diagnostics-only operation with caller-authored
 changes. That remains available without preparation. Shared transformation
@@ -349,8 +368,8 @@ additional close status. See [SDK differences](api.md#inputs-results-and-sdk-dif
 
 ## Acceptance criteria and validation plan
 
-These are implementation acceptance requirements, not results from this
-documentation-only PR. Unit/injected tests complement native enforcement.
+These are implementation acceptance requirements, not claims that a host
+validation suite has run. Unit/injected tests complement native enforcement.
 Use trusted instrumentation for exact creation/trace/launch counts; absence
 of workload markers alone cannot prove that no transient environment was created.
 
@@ -364,8 +383,9 @@ of workload markers alone cannot prove that no transient environment was created
 | Native decode/ownership/support | Cover absent getter/unadvertised or failed support, failed getter, malformed/bounded versions/resources and unexpected native outputs: preserve original failure and free every allocation once. |
 | Restriction interactions | Decode submitted PSEC for current CA/proxy/capture inputs, stronger/repeated/satisfied constraints, intra-batch contradictions, deny/alias/root/enumeration rules and duplicate-only path budgets. Assert no access increase or permission reintroduction. |
 | Unknown data, limits and terminal state | Preserve unknown codes/flag bits, full u64 values and absent/empty resource text. Omit invalid native UTF-16 and mark the resource unavailable; it must not authorize a repair. Over-limit merging leaves inputs intact; unsafe or over-limit preparation returns no partial result. Missing fresh data cannot invent progress. |
-| Errors, cleanup and cancellation | Policy details never appear in ordinary error/debug/console/warning text. Unrelated launch/wait/cleanup failures retain normal semantics and never relaunch. Verify disposed/late handles and subsequent fresh creation. |
-| Unsupported surfaces and compatibility | Preparation rejects non-empty observations for another backend and any non-create-and-run phase; empty observations on any backend return the request unchanged. Existing Rust Dev literals/lifetime-free storage and all creation/stdin/PTY/lifecycle signatures remain usable. Strict old-host creation remains available. |
+| Errors, cleanup and cancellation | Ordinary messages, default diagnostic inspection and CLI error envelopes omit policy specifics; explicit SDK serialization retains owned details. Unrelated launch/wait/cleanup failures retain normal semantics and never relaunch. Verify disposed/late handles and subsequent fresh creation. |
+| Empty observations | Supply `results: []` for a valid create-and-run request, including a backend unavailable on the current host: return the original request text and no changes without checking backend serviceability. Malformed contracts, other phases and missing experimental opt-in still fail. Assert no native creation, trace or workload launch; this result does not approve later creation. |
+| Unsupported surfaces and compatibility | Preparation rejects non-empty observations for another backend and any non-create-and-run phase. Existing Rust Dev literals/lifetime-free storage and all creation/stdin/PTY/lifecycle signatures remain usable. Strict old-host creation remains available. |
 | Cross-SDK storage/ABI/AOT | Public extraction/merging, required before/after JSON values, null-versus-absence operations, JSON Pointers and limits survive storage and owned native transport. Source-generated .NET net8.0/net10.0 and AOT roots must not fall back to reflection. |
 
 Run the public preparation and strict-creation cases in the existing scheduled
@@ -385,7 +405,7 @@ See the [validation runbook](../../../build-and-test/ci-validation-infrastructur
 
 ## Delivery and documentation
 
-After this accepted feature/API spec is merged:
+Implementation is delivered in these layers:
 
 1. Deliver native capture/ownership, structured error transport and owned
    observation storage, with refusal and unknown-data coverage.

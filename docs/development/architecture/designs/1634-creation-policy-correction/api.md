@@ -207,9 +207,11 @@ pub struct PolicyFailureDetail {
 These are declaration shapes, not implementation bodies. Existing
 `JsonOptions { experimental: false }` literals and `Vec<JsonOptions>` remain
 valid. Construct the new non-exhaustive `PolicyPreparationOptions` with
-`Default` and set fields. Preparation borrows observations for the call and
-returns owned candidate/change data. Defaults are experimental authorization
-off, the supported observation format and native versions
+`Default` and set fields. These options are `Clone`, not `Copy`; use `clone()`
+when reusing them. Existing creation options retain their traits.
+Preparation borrows observations for the call and returns owned candidate/change
+data. Defaults are experimental authorization off, the supported observation
+format and native versions
 (`FORMAT_VERSION`, `VERSION` and `MINIMUM_READER_VERSION`), `OUTCOME_UNKNOWN`
 and empty results/details. There is no cancellation token addition.
 
@@ -416,9 +418,16 @@ stream for an automated controller.
 | Input | Meaning, omission and rejection |
 | --- | --- |
 | Request JSON | Required complete create-and-run request in a registered contract, bounded to 8 MiB UTF-8. Empty, malformed or unsupported input fails without a candidate or creation. The original string remains unchanged. |
-| `failures` | Required owned observation value, borrowed for the Rust call. A valid empty result collection returns the request unchanged on every backend and OS; it is not an omitted input or authorization to create. Missing/malformed data is rejected, not silently ignored. |
+| `failures` | Required owned observation value, borrowed for the Rust call. A valid empty result collection uses the no-op below; it is not an omitted input or authorization to create. Missing/malformed data is rejected, not silently ignored. |
 | `PolicyPreparationOptions` | Separate extensible type. Rust requires a value, normally `Default`; .NET accepts null/omitted options and Node accepts omitted options. Experimental authorization defaults off. |
 | `experimental` / `Experimental` | Existing experimental-backend authorization; it neither selects a request version nor grants administrative approval. Supply it separately to subsequent strict creation when required. |
+
+An empty collection means `results: []`, not a native batch whose `details`
+array is empty. Request-contract, create-and-run phase and experimental opt-in
+checks precede the no-op; backend serviceability and backend-specific policy
+checks do not run. It returns the original request string and no changes on
+every backend and OS, even when that host cannot run the selected backend.
+Ordinary creation independently validates and enforces the chosen request.
 
 The shared [observation bounds](README.md#caller-owned-observations-and-bounds)
 apply. Creation, PTY, lifecycle and validation options do not accept
@@ -466,6 +475,11 @@ over-limit preparation returns no partial candidate or truncated changes.
 Storage helpers validate shape and bounds, not caller approval, correspondence
 to a particular original request, or current backend policy. The report is
 not a generic patch-execution API or an approval token.
+
+Serialization enforces the complete UTF-8 output limit without first building
+unbounded JSON text. Node counts every repeated occurrence of shared JSON
+values before expanding them and rejects cycles. This is an output-size
+limit, not a whole-process memory cap.
 
 Rust uses `serde_json::Value`, .NET uses owned `JsonElement`, and Node uses
 JSON-compatible values. Node numeric change values use JavaScript `number`
@@ -572,6 +586,7 @@ and application stop/budget state are not retained by observation serialization.
 | --- | --- |
 | Native policy refusal | Ordinary error plus fresh structured failures where available, preserving high-level policy guidance/native operation/status. |
 | Preparation succeeds | Owned candidate request and exact changes, no container/process handle. The caller can inspect, accept, edit, reject or store it. |
+| Empty observation collection after request/phase/experimental checks | Original request text and no changes, regardless of backend serviceability. Not validation or approval of later creation. |
 | Unsafe/unsupported preparation or exceeded input/result limit | Existing validation/unsupported error; structured terminal context where applicable. No guessed edit, partial candidate, fallback or workload. |
 | Non-empty observations for a backend that cannot apply them | Rust `UnsupportedContainment`; Node/.NET corresponding existing unsupported-containment category. |
 | Experimental backend without the experimental opt-in | Existing `BackendUnavailable` category, for empty and non-empty observations alike. |
