@@ -324,13 +324,13 @@ function Invoke-NamedSuites {
 }
 
 # Daemon discovery reuses any running daemon, including one another suite started.
-# An idle daemon terminates its WSLc session on exit. A killed one leaves WSL
-# holding the session's store, so the next session cannot open it until WSL
-# shuts down.
+# Until WSL shuts down, it holds the store of a session that a killed daemon left
+# behind or an idle one failed to terminate, and the next session cannot open it.
 function Stop-WslcDaemons {
     $idleExitSecs = [int]$env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS + 3 * [int]$env:MXC_WSLC_DAEMON_IDLE_POLL_SECS + 15
-    $killed = $false
+    $leftover = $false
     foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
+        $leftover = $true
         Write-Host "Waiting up to $idleExitSecs s for wxc-wslc-daemon $($daemon.Id) from an earlier suite to idle out."
         if ($daemon.WaitForExit($idleExitSecs * 1000)) { continue }
 
@@ -339,10 +339,9 @@ function Stop-WslcDaemons {
         if (-not $daemon.WaitForExit(30000)) {
             throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
         }
-        $killed = $true
     }
-    if ($killed) {
-        Write-Host 'Shutting down WSL to release the killed daemon''s store.'
+    if ($leftover) {
+        Write-Host 'Shutting down WSL to release the earlier daemon''s store.'
         wsl.exe --shutdown | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "wsl --shutdown exited $LASTEXITCODE." }
     }
