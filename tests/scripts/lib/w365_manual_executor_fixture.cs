@@ -58,13 +58,15 @@ class W365ManualExecutorFixture
         Check((string)request["version"] == "1.1.0-alpha");
         Check(!request.ContainsKey("phase") && !request.ContainsKey("sandboxId"));
         bool cp = operation == "provision" || operation == "deprovision";
-        string credential = cp ? "W365A_CP_TOKEN" : "W365A_DP_TOKEN";
+        bool useDpToken = !cp && Environment.GetEnvironmentVariable("W365_MANUAL_FIXTURE_CP_RESOURCE") !=
+            Environment.GetEnvironmentVariable("W365_MANUAL_FIXTURE_DP_RESOURCE");
+        string credential = useDpToken ? "W365A_DP_TOKEN" : "W365A_CP_TOKEN";
         string resource = Environment.GetEnvironmentVariable(cp ? "W365_MANUAL_FIXTURE_CP_RESOURCE" : "W365_MANUAL_FIXTURE_DP_RESOURCE");
         string token = resource == "90ecec28-f5a6-42b3-9bde-dae1ca98f8b5" ? "synthetic-private-production-token" : resource ==
             "66666666-6666-6666-6666-666666666666" ? "synthetic-private-dp-token" : "synthetic-private-computer-token";
         string supplied = Environment.GetEnvironmentVariable(credential);
         Check(supplied == token || (dry && supplied == "synthetic-preflight-token"));
-        Check(Environment.GetEnvironmentVariable(cp ? "W365A_DP_TOKEN" : "W365A_CP_TOKEN") == null);
+        Check(Environment.GetEnvironmentVariable(useDpToken ? "W365A_CP_TOKEN" : "W365A_DP_TOKEN") == null);
         Check(Environment.GetEnvironmentVariable("W365A_DP_SUFFIX") == null);
         if (operation == "provision")
         {

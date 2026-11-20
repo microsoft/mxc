@@ -138,19 +138,29 @@ pub(super) fn read_token(key: &str) -> Result<String, MxcError> {
 
 // Deliberately no Debug: the client owns the caller's bearer token.
 pub(super) struct Client {
-    pub(super) host: String,
+    pub(super) url: Url,
     pub(super) token: String,
 }
 
 impl Client {
-    pub(super) fn for_host(host: String, token_key: &str) -> Result<Self, MxcError> {
-        if !valid_host(&host) {
-            return Err(MxcError::policy_validation("invalid W365 service hostname"));
-        }
+    pub(super) fn for_url(url: Url, token_key: &str) -> Result<Self, MxcError> {
+        super::routing::validate_url(url.as_str())?;
         Ok(Self {
-            host,
+            url,
             token: read_token(token_key)?,
         })
+    }
+
+    pub(super) fn host(&self) -> &str {
+        &self.url[Position::BeforeHost..Position::AfterHost]
+    }
+
+    pub(super) fn operation_url(&self, operation: &str) -> Result<Url, MxcError> {
+        let mut url = self.url.clone();
+        url.path_segments_mut()
+            .map_err(|_| MxcError::policy_validation("W365 URL cannot contain operation paths"))?
+            .push(operation);
+        Ok(url)
     }
 
     pub(super) fn agent(&self, timeout: Duration) -> Result<(ureq::Agent, String), MxcError> {
@@ -161,7 +171,7 @@ impl Client {
         #[cfg(feature = "test-support")]
         let (tls, port) = test_tls(tls)?;
         #[cfg(feature = "test-support")]
-        if port != 443 && self.host != "localhost" {
+        if port != 443 && self.host() != "localhost" {
             return Err(MxcError::policy_validation(
                 "W365 fixture ports require localhost",
             ));
@@ -177,28 +187,27 @@ impl Client {
             // Never send caller credentials through an ambient HTTP proxy.
             .proxy(None)
             .build();
-        Ok((config.into(), format!("https://{}:{port}", self.host)))
+        Ok((config.into(), format!("https://{}:{port}", self.host())))
     }
 
     pub(super) fn checkout(
         &self,
         pool_id: &str,
         config: &W365AgentsProvisionConfig,
-        url: &Url,
         source: &str,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
-        with_transport_stack(|| self.checkout_once(pool_id, config, url, source)).map_err(|mut error| {
+        with_transport_stack(|| self.checkout_once(pool_id, config, source)).map_err(|mut error| {
             if let Some(details) = error.details.as_mut() {
                 details["poolId"] = json!(pool_id.to_ascii_lowercase());
-                details["controlPlaneHost"] = json!(self.host);
+                details["controlPlaneHost"] = json!(self.host());
                 if let Some(id) = details.get("sandboxId").and_then(Value::as_str)
                     .and_then(|id| Identity::parse(id).ok())
                 {
-                    if let Err(state_error) = super::routing::save(&id, &self.host, source, None) {
+                    if let Err(state_error) = super::routing::save(&id, &self.url, source, None) {
                         details["routingError"] = json!(state_error.message);
                         error.message.push_str(&format!(
                             "; local routing could not be saved; controlPlaneHost={}; retain the ID and host for service-operator cleanup; do not retry provision",
-                            self.host,
+                            self.host(),
                         ));
                     }
                 }
@@ -211,11 +220,10 @@ impl Client {
         &self,
         pool_id: &str,
         config: &W365AgentsProvisionConfig,
-        url: &Url,
         source: &str,
     ) -> Result<ProvisionResult<CheckoutMetadata>, MxcError> {
         let pool = pool_id.to_ascii_lowercase();
-        let mut url = url.clone();
+        let mut url = self.url.clone();
         url.query_pairs_mut().append_pair("api-version", "3.0");
         let request_id = uuid::Uuid::new_v4().to_string();
         let deadline = Instant::now() + CHECKOUT_TIMEOUT.min(transport_budget(CHECKOUT_TIMEOUT)?);
@@ -369,7 +377,7 @@ impl Client {
                 }
             }
             if value.get("status").and_then(Value::as_str) == Some("Created") {
-                super::routing::save(id, &self.host, source, None).map_err(|state_error| {
+                super::routing::save(id, &self.url, source, None).map_err(|state_error| {
                     let mut error = reject("routing_state_write");
                     if let Some(details) = error.details.as_mut() {
                         details["routingError"] = json!(state_error.message);
@@ -388,9 +396,9 @@ impl Client {
                 .get("computerUrl")
                 .and_then(Value::as_str)
                 .ok_or_else(|| reject("missing_computer_url"))?;
-            let computer_host = super::routing::computer_host(computer_url, id)
+            let computer_url = super::routing::computer_url(computer_url, id)
                 .map_err(|_| reject("invalid_computer_url"))?;
-            super::routing::save(id, &self.host, source, Some(computer_host)).map_err(
+            super::routing::save(id, &self.url, source, Some(computer_url)).map_err(
                 |state_error| {
                     let mut error = reject("routing_state_write");
                     if let Some(details) = error.details.as_mut() {

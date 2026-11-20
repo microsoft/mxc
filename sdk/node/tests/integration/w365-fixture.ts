@@ -213,6 +213,11 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       const value = JSON.parse(await provisionContainerJson(
         provision.replace(`"poolId":"${pool}",`, ''), options));
       assert.equal(value.result.sandboxId, id);
+      const routing = JSON.parse(readFileSync(
+        join(directory, 'Microsoft', 'MXC', 'w365', pool, session, 'connection.json'), 'utf8'));
+      assert.equal(routing.version, 2);
+      assert.equal(routing.controlPlaneUrl, `https://localhost/api/pools/${pool}/sessions`);
+      assert.equal(routing.computerUrl, `https://localhost/computers/${session}?api-version=1.0`);
       for (const phase of ['stop', 'deprovision']) {
         reply(204);
         const call = phase === 'stop' ? stopContainerJson : deprovisionContainerJson;

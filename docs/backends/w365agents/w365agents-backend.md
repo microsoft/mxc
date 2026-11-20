@@ -46,8 +46,8 @@ Supply configuration in the **caller environment**:
 | --- | --- |
 | `W365A_GRAPH_TOKEN` | Separate caller-supplied Graph bearer token, required only for provision. Use a token for the selected Graph environment. |
 | `W365A_GRAPH_ENVIRONMENT` | `public` (default) or `canary`. Selects a fixed Graph deployment, not an arbitrary URL. |
-| `W365A_CP_TOKEN` | Nonempty resource-specific control-plane bearer token, without whitespace or control characters. Required for provision and release. |
-| `W365A_DP_TOKEN` | Nonempty resource-specific data-plane bearer token with the same character constraints. Required for start/exec only; no control-plane token fallback. |
+| `W365A_CP_TOKEN` | Nonempty resource-specific control-plane bearer token, without whitespace or control characters. Required for provision and release; also used for start/exec when `W365A_DP_TOKEN` is absent. |
+| `W365A_DP_TOKEN` | Optional data-plane bearer token for start/exec, overriding `W365A_CP_TOKEN`. An explicitly set empty or invalid value fails validation rather than falling back. |
 
 For example, with an approved token already in `$controlPlaneToken`:
 
@@ -100,8 +100,9 @@ path and existing query as returned, appending `api-version=3.0` for checkout
 and same-ID completion. It does not rewrite pool IDs, regions or hosts, or impose
 a service host or path pattern. URLs require HTTPS port 443, an ASCII DNS host,
 and no credentials or fragment. For a pool with capacity, missing, null, empty
-or invalid `poolUrl` fails before checkout; there is no endpoint environment fallback. MXC saves the
-selected pool identity and checkout hostname for later lifecycle calls.
+or invalid `poolUrl` fails before checkout; there is no endpoint environment
+fallback. MXC saves the selected pool identity and complete checkout URL for
+later lifecycle calls. Authentication query parameters are rejected.
 
 Without a supplied `poolId`, MXC fetches each candidate's details and attempts
 checkout in list order, stopping at the first successful checkout whose routing
@@ -119,7 +120,7 @@ operation rather than skipping a pool. No automatic release is performed.
 Successful checkout must supply a `computerUrl` for
 `https://{poolId}.{region}.remotinginterface.regional.cloudinferenceplatform[-int].azure.com/computers/{sessionId}?api-version=1.0`.
 This is a computer-resource URL, not a bare origin or MCP endpoint. MXC validates
-the identity, host, path and sole query before using that host for readiness
+the identity, host, path and sole query before appending operations for readiness
 `/computers/{sessionId}/status?api-version=1.0` and Desktop Exec
 `/computers/{sessionId}/microsoft.exec?api-version=1.0`. Other prefixes, versions,
 query parameters or host families are unsupported.
@@ -133,18 +134,22 @@ MXC stores versioned, nonsecret `connection.json` records under
 `%LOCALAPPDATA%\Microsoft\MXC\w365\{poolId}\{sessionId}` on Windows,
 `${XDG_DATA_HOME:-$HOME/.local/share}/Microsoft/MXC/w365/{poolId}/{sessionId}`
 on Linux, and `$HOME/Library/Application Support/Microsoft/MXC/w365/{poolId}/{sessionId}`
-on macOS. Records contain only identity, validated destination hostnames and CP
-source; the full Graph checkout URL is used only during provision and is not
-stored. Records never contain tokens, tickets or other checkout URLs. Private
-ownership and permissions, per-record locks and atomic publication protect the records.
+on macOS. Records contain identity, the complete validated `poolUrl` and
+`computerUrl`, and CP source. Release uses the saved control-plane authority
+with `/api/sessions/{sessionId}?api-version=2.0`, not the checkout path.
+Hostname-only records are unsupported. Records never contain tokens, tickets
+or complete service responses. Private ownership and permissions, per-record
+locks and atomic publication protect the records.
 Local lock contention fails explicitly with `routing_state_lock`; retry an
 existing-ID operation only after contention clears. A provisioning error is
 never permission to repeat allocation.
 
 Later operations require the matching local record and ignore ambient endpoint
 variables, including `W365A_DP_SUFFIX`. They do not call Graph. Credentials
-remain separate, caller-owned and resource-specific; no token cache or renewal
-provider is added. Do not copy records between users or machines. Missing,
+remain caller-owned and resource-specific; CP credentials are reused for DP
+only when no explicit DP token is set. The caller must ensure the reused token
+is authorized for the data plane. No token cache or renewal provider is added.
+Do not copy records between users or machines. Missing,
 corrupt, unsupported-version, foreign-owned or conflicting records fail
 explicitly; automatic import, endpoint refresh and legacy-ID fallback are not
 implemented. Backend storage errors require correction or service-operator
@@ -396,6 +401,9 @@ default to production `90ecec28-f5a6-42b3-9bde-dae1ca98f8b5` for
 `274133f7-12bb-4bfb-ae3b-bd446b7e8a75` for `canary`.
 `-ControlPlaneResource` and `-DataPlaneResource`, or their config fields, override
 these defaults independently; the sign-in `ClientId` does not change.
+When both resources match, the runner supplies only `W365A_CP_TOKEN` to
+start/exec, exercising the backend's token fallback. A different DP resource
+uses `W365A_DP_TOKEN` instead. Inherited W365 credentials are not forwarded.
 The helper requests each resource's `/.default` and checks delegated
 `Computer.Get`, `Computer.See`, `Computer.Do` and `Computer.Control` permissions.
 Deployments with other permission contracts need a corresponding helper update.

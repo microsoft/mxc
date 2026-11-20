@@ -275,7 +275,9 @@ fails locally; MXC does not acquire or renew tokens. Read configuration again
 for each invocation, including release in a fresh process with renewed credentials.
 The existing design budgets are 45000 ms for checkout and 30000 ms for release;
 there are no per-request timeout overrides or new renewal mechanism.
-Readiness and exec use separate data-plane service configuration.
+Readiness and exec use `W365A_DP_TOKEN` when explicitly set, otherwise
+`W365A_CP_TOKEN`. An empty or invalid explicit DP token fails locally.
+Callers must ensure a reused CP token is authorized for the data plane.
 
 Service defaults are HTTPS port 443, checkout API `3.0`, release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional

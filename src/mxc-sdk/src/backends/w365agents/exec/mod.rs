@@ -31,7 +31,7 @@ pub(super) fn run(
 ) -> Result<ExecHandle, MxcError> {
     let identity = Identity::parse(id)?;
     let start = payload::ExecStartPayload::from_request(request)?;
-    let target = transport::UpgradeTarget::new(data_plane::client(&identity)?, &identity);
+    let target = transport::UpgradeTarget::new(data_plane::client(&identity)?, &identity)?;
     let result = piped::run(target, start)
         .map(|handle| {
             let ExecHandle {

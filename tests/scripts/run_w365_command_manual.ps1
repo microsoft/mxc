@@ -148,7 +148,8 @@ try {
     foreach ($phase in $preflight) {
         $request = if ($phase -eq 'provision') { $provisionRequest } elseif ($phase -eq 'exec') { $execRequest } else { $base }
         $native = Invoke-W365Native $exe $phase $request $sandboxId $GraphEnvironment `
-            'synthetic-preflight-token' 'synthetic-preflight-graph-token' 15000 -DryRun
+            'synthetic-preflight-token' 'synthetic-preflight-graph-token' 15000 -DryRun `
+            -UseDataPlaneToken:($phase -in @('start', 'exec') -and $DataPlaneResource -ne $ControlPlaneResource)
         $envelope = ConvertFrom-W365Envelope $native
         if ($native.ExitCode -ne 0 -or $envelope.Contains('error')) {
             throw "Executor development-contract/experimental $phase dry-run failed; no sign-in or service request performed."
@@ -187,9 +188,10 @@ try {
             $auth = Get-W365CleanupAuth $auth $TenantId $ClientId $LoginHint $ControlPlaneResource
             $token = $auth.Token
         }
+        $useDataPlaneToken = $phase -in @('start', 'exec') -and $DataPlaneResource -ne $ControlPlaneResource
         $request = if ($phase -eq 'provision') { $provisionRequest } elseif ($phase -eq 'exec') { $execRequest } else { $base }
         if ($newProvision -and $phase -ne 'provision') {
-            $native = Invoke-W365Native $exe $phase $request $sandboxId $GraphEnvironment $token '' 15000 -DryRun
+            $native = Invoke-W365Native $exe $phase $request $sandboxId $GraphEnvironment $token '' 15000 -DryRun -UseDataPlaneToken:$useDataPlaneToken
             $envelope = ConvertFrom-W365Envelope $native
             if ($native.ExitCode -ne 0 -or $envelope.Contains('error')) {
                 throw "Executor $phase dry-run failed; no $phase service request performed."
@@ -204,7 +206,7 @@ try {
             'deprovision' { 45000 }
         }
         $graphToken = if ($phase -eq 'provision') { $graphAuth.Token } else { '' }
-        $native = Invoke-W365Native $exe $phase $request $sandboxId $GraphEnvironment $token $graphToken $budget -Stream:($phase -eq 'exec')
+        $native = Invoke-W365Native $exe $phase $request $sandboxId $GraphEnvironment $token $graphToken $budget -Stream:($phase -eq 'exec') -UseDataPlaneToken:$useDataPlaneToken
         $record = @{ operation = $phase; nativeExitCode = $native.ExitCode; outcome = 'FailedOrUnknown' }
         $journal.operations += $record
         if ($phase -eq 'exec') {

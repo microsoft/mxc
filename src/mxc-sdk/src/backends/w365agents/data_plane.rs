@@ -6,6 +6,7 @@ use crate::mxc_common::mxc_error::MxcError;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::{Duration, Instant};
+use url::Position;
 
 const READY_BUDGET: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -54,6 +55,7 @@ pub(super) fn poll(
     let deadline = Instant::now()
         .checked_add(budget)
         .ok_or_else(|| MxcError::policy_validation("W365 readiness budget is too large"))?;
+    let status_url = client.operation_url("status")?;
     let mut last_state = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -84,10 +86,7 @@ pub(super) fn poll(
             }
         };
         let (agent, base) = client.agent(remaining.min(Duration::from_secs(30)))?;
-        let url = format!(
-            "{base}/computers/{}/status?api-version=1.0",
-            identity.session_id
-        );
+        let url = format!("{base}{}", &status_url[Position::BeforePath..]);
         let mut response = agent
             .get(&url)
             .header("Authorization", format!("Bearer {}", client.token))

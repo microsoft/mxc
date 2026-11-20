@@ -136,12 +136,12 @@ impl StatefulSandboxBackend for Runner {
             "Graph reported no available sessions in the selected pools",
         );
         for pool in pools {
-            let Some((client, url, source)) = discovery::control_plane(&pool)
+            let Some((client, source)) = discovery::control_plane(&pool)
                 .map_err(|error| with_pool_attempts(error, attempts.clone()))?
             else {
                 continue;
             };
-            match client.checkout(&pool, config, &url, source) {
+            match client.checkout(&pool, config, source) {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     if !automatic || !service::can_try_next_pool(&error) {

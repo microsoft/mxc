@@ -98,13 +98,14 @@ function Get-W365CleanupAuth([hashtable] $Auth, [string] $Tenant, [string] $Clie
 function Invoke-W365Native([string] $Exe, [string] $Operation, [hashtable] $Request,
         [string] $Id, [string] $GraphEnvironment, [string] $Token,
         [string] $GraphToken,
-        [int] $BudgetMs, [switch] $DryRun, [switch] $Stream) {
+        [int] $BudgetMs, [switch] $DryRun, [switch] $Stream,
+        [switch] $UseDataPlaneToken) {
     $start = New-W365Child $Exe
     if ($Operation -eq 'provision') {
         $start.Environment['W365A_GRAPH_ENVIRONMENT'] = $GraphEnvironment
         $start.Environment['W365A_GRAPH_TOKEN'] = $GraphToken
     }
-    $credential = if ($Operation -in @('provision', 'deprovision')) { 'W365A_CP_TOKEN' } else { 'W365A_DP_TOKEN' }
+    $credential = if ($UseDataPlaneToken -and $Operation -in @('start', 'exec')) { 'W365A_DP_TOKEN' } else { 'W365A_CP_TOKEN' }
     $start.Environment[$credential] = $Token
     foreach ($arg in @('--experimental', '--operation', $Operation, '--config-base64',
             [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(

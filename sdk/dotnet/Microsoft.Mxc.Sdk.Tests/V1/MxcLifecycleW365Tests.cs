@@ -60,6 +60,12 @@ public class MxcLifecycleW365Tests
             await Dev.MxcLifecycle.ProvisionContainerJsonAsync(
                 Provision.Replace($"\"poolId\":\"{Pool}\",", "", StringComparison.Ordinal), options));
         Assert.Equal(Id, provision.RootElement.GetProperty("result").GetProperty("sandboxId").GetString());
+        using var routing = JsonDocument.Parse(File.ReadAllText(fixture.RoutingRecordPath));
+        Assert.Equal(2, routing.RootElement.GetProperty("version").GetInt32());
+        Assert.Equal($"https://localhost/api/pools/{Pool}/sessions",
+            routing.RootElement.GetProperty("controlPlaneUrl").GetString());
+        Assert.Equal($"https://localhost/computers/{Session}?api-version=1.0",
+            routing.RootElement.GetProperty("computerUrl").GetString());
         foreach (var phase in new[] { "stop", "deprovision" })
         {
             fixture.Reply(204, "");
@@ -254,6 +260,8 @@ public class MxcLifecycleW365Tests
         private readonly ConcurrentQueue<(Func<SslStream, Task> Script, uint? TimeoutMs)> executions = new();
         private readonly Task worker;
         public ConcurrentQueue<string> Requests { get; } = new();
+        public string RoutingRecordPath =>
+            Path.Combine(directory, "state", "Microsoft", "MXC", "w365", Pool, Session, "connection.json");
 
         public Fixture(TimeSpan? timeout = null)
         {

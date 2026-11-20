@@ -18,9 +18,9 @@ struct Record {
     version: u32,
     pool_id: String,
     session_id: String,
-    control_plane_host: String,
+    control_plane_url: String,
     control_plane_source: String,
-    computer_host: Option<String>,
+    computer_url: Option<String>,
 }
 
 pub(super) fn error(code: &str, message: impl std::fmt::Display) -> MxcError {
@@ -83,7 +83,23 @@ pub(super) fn service_host(host: &str, service: &str, pool: Option<&str>) -> boo
     !region.contains('.') && super::service::valid_host(region)
 }
 
-pub(super) fn computer_host(value: &str, identity: &Identity) -> Result<String, MxcError> {
+pub(super) fn control_plane_url(value: &str) -> Result<Url, MxcError> {
+    let url = validate_url(value)?;
+    if url.query_pairs().any(|(name, _)| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "access_token" | "token" | "ticket" | "authorization" | "sig" | "signature"
+        )
+    }) {
+        return Err(error(
+            "invalid_pool_url",
+            "poolUrl must not contain authentication query parameters",
+        ));
+    }
+    Ok(url)
+}
+
+pub(super) fn computer_url(value: &str, identity: &Identity) -> Result<Url, MxcError> {
     let url = validate_url(value)?;
     let host = url
         .host_str()
@@ -97,22 +113,22 @@ pub(super) fn computer_host(value: &str, identity: &Identity) -> Result<String, 
             "computerUrl must identify this session's supported RemotingInterface computer resource",
         ));
     }
-    Ok(host.to_owned())
+    Ok(url)
 }
 
 fn validate_record(record: &Record, identity: &Identity) -> Result<(), MxcError> {
-    if record.version != 1
+    if record.version != 2
         || record.pool_id != identity.pool_id
         || record.session_id != identity.session_id
-        || !super::service::valid_host(&record.control_plane_host)
+        || control_plane_url(&record.control_plane_url).is_err()
         || !matches!(
             record.control_plane_source.as_str(),
             "graph" | "environment"
         )
         || record
-            .computer_host
+            .computer_url
             .as_deref()
-            .is_some_and(|host| !service_host(host, "remotinginterface", Some(&identity.pool_id)))
+            .is_some_and(|value| computer_url(value, identity).is_err())
     {
         return Err(error(
             "invalid_routing_record",
@@ -161,37 +177,43 @@ pub(super) fn preflight() -> Result<(), MxcError> {
 
 pub(super) fn save(
     identity: &Identity,
-    control_plane_host: &str,
+    control_plane_url: &Url,
     source: &str,
-    computer_host: Option<String>,
+    computer_url: Option<Url>,
 ) -> Result<(), MxcError> {
     let record = Record {
-        version: 1,
+        version: 2,
         pool_id: identity.pool_id.clone(),
         session_id: identity.session_id.clone(),
-        control_plane_host: control_plane_host.to_owned(),
+        control_plane_url: control_plane_url.as_str().to_owned(),
         control_plane_source: source.to_owned(),
-        computer_host,
+        computer_url: computer_url.map(String::from),
     };
     validate_record(&record, identity)?;
     let directory = storage::Directory::session(identity)?;
     let _lock = directory.lock()?;
     if let Some(previous) = read(&directory, identity)? {
-        if previous.control_plane_host != record.control_plane_host
-            || (previous.computer_host.is_some()
-                && record.computer_host.is_some()
-                && previous.computer_host != record.computer_host)
+        if previous.control_plane_url != record.control_plane_url
+            || (previous.computer_url.is_some()
+                && record.computer_url.is_some()
+                && previous.computer_url != record.computer_url)
         {
             return Err(error(
                 "routing_state_conflict",
                 "an existing record names different destinations",
             ));
         }
-        if previous.computer_host.is_some() || record.computer_host.is_none() {
+        if previous.computer_url.is_some() || record.computer_url.is_none() {
             return Ok(());
         }
     }
     let bytes = serde_json::to_vec(&record).map_err(|e| error("routing_state_write", e))?;
+    if bytes.len() as u64 > MAX_RECORD {
+        return Err(error(
+            "routing_state_write",
+            "record exceeds the size limit",
+        ));
+    }
     let name = format!("connection.{}.tmp", uuid::Uuid::new_v4());
     let result = (|| {
         let mut file = directory.create(&name)?;
@@ -228,20 +250,24 @@ pub(super) fn client(identity: &Identity, data_plane: bool) -> Result<Client, Mx
             "no local connection record for this ID; legacy/cross-machine recovery requires service-operator assistance",
         )
     })?;
-    let (host, token) = if data_plane {
+    let (url, token) = if data_plane {
         (
-            record.computer_host.ok_or_else(|| {
+            record.computer_url.ok_or_else(|| {
                 error(
                     "routing_state_incomplete",
                     "checkout did not supply usable computerUrl; retain the ID for explicit release",
                 )
             })?,
-            "W365A_DP_TOKEN",
+            if std::env::var_os("W365A_DP_TOKEN").is_some() {
+                "W365A_DP_TOKEN"
+            } else {
+                "W365A_CP_TOKEN"
+            },
         )
     } else {
-        (record.control_plane_host, "W365A_CP_TOKEN")
+        (record.control_plane_url, "W365A_CP_TOKEN")
     };
-    Client::for_host(host, token)
+    Client::for_url(validate_url(&url)?, token)
 }
 
 #[cfg(test)]
@@ -255,15 +281,18 @@ mod tests {
             session_id: "22222222-2222-2222-2222-222222222222".to_owned(),
         };
         let mut record = Record {
-            version: 1,
+            version: 2,
             pool_id: identity.pool_id.clone(),
             session_id: identity.session_id.clone(),
-            control_plane_host: "control.example.test".to_owned(),
+            control_plane_url: "https://control.example.test/custom/checkout?route=blue".to_owned(),
             control_plane_source: "graph".to_owned(),
-            computer_host: None,
+            computer_url: None,
         };
         assert!(validate_record(&record, &identity).is_ok());
-        record.computer_host = Some("control.example.test".to_owned());
+        record.computer_url = Some(format!(
+            "https://control.example.test/computers/{}?api-version=1.0",
+            identity.session_id
+        ));
         assert!(validate_record(&record, &identity).is_err());
     }
 }

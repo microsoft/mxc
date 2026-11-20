@@ -1181,6 +1181,59 @@ impl Write for FragmentedHandshake {
 }
 
 #[test]
+fn data_plane_token_fallback_fixture() {
+    let _lock = ENV.lock().unwrap();
+    let env = Environment::new();
+    let fixture = Fixture::new();
+    fixture.configure(&env);
+    for (cp, dp, expected) in [
+        ("cp-fallback", None, "cp-fallback"),
+        ("cp-renewed", None, "cp-renewed"),
+        ("cp-unused", Some("dp-explicit"), "dp-explicit"),
+    ] {
+        env.set("W365A_CP_TOKEN", cp);
+        match dp {
+            Some(token) => env.set("W365A_DP_TOKEN", token),
+            None => std::env::remove_var("W365A_DP_TOKEN"),
+        }
+        fixture.reply(200, r#"{"status":"Ready"}"#);
+        invoke(&request("start", A), true).unwrap();
+        assert!(fixture
+            .request(fixture.count() - 1)
+            .contains(&format!("Bearer {expected}\r\n")));
+        fixture.reply(401, "");
+        let error = spawn(&exec_request()).err().unwrap();
+        assert_eq!(error.details.unwrap()["httpStatus"], 401);
+        assert!(fixture
+            .request(fixture.count() - 1)
+            .contains(&format!("Bearer {expected}\r\n")));
+    }
+    let calls = fixture.count();
+    for token in ["", " ", "invalid token"] {
+        env.set("W365A_DP_TOKEN", token);
+        assert_eq!(
+            invoke(&request("start", A), true).unwrap_err().code,
+            MxcErrorCode::PolicyValidation
+        );
+        assert_eq!(
+            spawn(&exec_request()).err().unwrap().code,
+            ErrorCode::PolicyValidation
+        );
+    }
+    std::env::remove_var("W365A_DP_TOKEN");
+    std::env::remove_var("W365A_CP_TOKEN");
+    assert_eq!(
+        invoke(&request("start", A), true).unwrap_err().code,
+        MxcErrorCode::PolicyValidation
+    );
+    assert_eq!(
+        spawn(&exec_request()).err().unwrap().code,
+        ErrorCode::PolicyValidation
+    );
+    assert_eq!(fixture.count(), calls, "invalid credentials must not dial");
+}
+
+#[test]
 fn execution_upgrade_validation_fixture() {
     let _lock = ENV.lock().unwrap();
     let env = Environment::new();

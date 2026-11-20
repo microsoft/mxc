@@ -408,8 +408,8 @@ impl Environment {
                 .unwrap();
         }
         std::fs::write(&path, json!({
-            "version":1,"poolId":POOL,"sessionId":session,
-            "controlPlaneHost":"localhost","controlPlaneSource":"environment","computerHost":"localhost",
+            "version":2,"poolId":POOL,"sessionId":session,
+            "controlPlaneUrl":pool_url(POOL),"controlPlaneSource":"graph","computerUrl":computer_url(session),
         }).to_string()).unwrap();
         #[cfg(windows)]
         {
@@ -868,13 +868,14 @@ fn lifecycle_contract_and_recovery_fixture() {
             );
         }
     }
-    for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN"] {
+    for key in ["W365A_DP_SUFFIX", "W365A_DP_TOKEN", "W365A_CP_TOKEN"] {
         std::env::remove_var(key);
     }
     for phase in ["start", "exec"] {
         let error = invoke(&request(phase, A), true).unwrap_err();
         assert_eq!(error.code, MxcErrorCode::PolicyValidation, "{error:?}");
     }
+    fixture.configure(&env);
     for phase in ["stop", "deprovision"] {
         for bad in [
             "",
@@ -993,6 +994,7 @@ fn lifecycle_contract_and_recovery_fixture() {
             mxc_sdk::v1::ErrorCode::BackendUnavailable
         );
         sdk::validate_provision_json(&source, options).unwrap();
+        env.set("W365A_DP_TOKEN", "");
         for error in [
             sdk::start_container_json(&request("start", A).to_string(), options).err(),
             sdk::run_in_container_json(&request("exec", A).to_string(), options).err(),
@@ -1011,6 +1013,7 @@ fn lifecycle_contract_and_recovery_fixture() {
                 mxc_sdk::v1::ErrorCode::PolicyValidation
             );
         }
+        std::env::remove_var("W365A_DP_TOKEN");
         assert_eq!(
             fixture.count(),
             before,
@@ -1441,6 +1444,10 @@ fn lifecycle_contract_and_recovery_fixture() {
             200,
             json!({"id":POOL,"poolUrl":"https://user:secret@localhost/sessions","sessionUsage":{"availableSessionsCount":1}}),
         ),
+        (
+            200,
+            json!({"id":POOL,"poolUrl":"https://localhost/sessions?access_token=must-not-persist","sessionUsage":{"availableSessionsCount":1}}),
+        ),
     ] {
         let graphs = fixture.graph_requests.lock().unwrap().len();
         fixture.graph_reply(status, body);
@@ -1486,9 +1493,12 @@ fn lifecycle_contract_and_recovery_fixture() {
             "/sessions?api-version=3.0".to_owned(),
         ),
     ] {
+        if env.record(discovered).exists() {
+            std::fs::remove_file(env.record(discovered)).unwrap();
+        }
         let calls = fixture.count();
         let mut pool = graph_pool(POOL, 1);
-        pool["poolUrl"] = json!(url);
+        pool["poolUrl"] = json!(&url);
         fixture.graph_reply(200, pool);
         fixture.reply(
             201,
@@ -1513,10 +1523,36 @@ fn lifecycle_contract_and_recovery_fixture() {
             .to_ascii_lowercase()
             .contains(&format!("x-ms-sessionid: {discovered}")));
         let stored = std::fs::read_to_string(env.record(discovered)).unwrap();
-        assert!(!stored.contains("graph-owned") && !stored.contains("route="));
         let record: Value = serde_json::from_str(&stored).unwrap();
-        assert_eq!(record["controlPlaneHost"], "localhost");
+        assert_eq!(record["version"], 2);
+        assert_eq!(record["controlPlaneUrl"], url);
+        assert_eq!(record["computerUrl"], computer_url(discovered));
+        assert!(record.get("controlPlaneHost").is_none());
+        assert!(record.get("computerHost").is_none());
         assert_eq!(record["controlPlaneSource"], "graph");
+    }
+    let unchanged = std::fs::read(env.record(discovered)).unwrap();
+    for changed in [
+        "https://localhost/different-checkout",
+        "https://localhost/sessions?route=changed",
+    ] {
+        let mut pool = graph_pool(POOL, 1);
+        pool["poolUrl"] = json!(changed);
+        fixture.graph_reply(200, pool);
+        fixture.reply(
+            200,
+            &json!({"sessionId":discovered,"status":"Succeeded","computerUrl":computer_url(discovered)}).to_string(),
+        );
+        let error = invoke(&provision(), true).unwrap_err();
+        assert_eq!(
+            error.details.as_ref().unwrap()["code"],
+            "routing_state_write"
+        );
+        assert!(error.details.as_ref().unwrap()["routingError"]
+            .as_str()
+            .unwrap()
+            .contains("different destinations"));
+        assert_eq!(std::fs::read(env.record(discovered)).unwrap(), unchanged);
     }
     let graphs = fixture.graph_requests.lock().unwrap().len();
     fixture.reply(204, "");
@@ -1541,7 +1577,7 @@ fn lifecycle_contract_and_recovery_fixture() {
     assert!(!stored.contains("token") && !stored.contains("ticket"));
     let record: Value = serde_json::from_str(&stored).unwrap();
     assert_eq!(record["controlPlaneSource"], "graph");
-    assert_eq!(record["computerHost"], "localhost");
+    assert_eq!(record["computerUrl"], computer_url(c));
     {
         let requests = fixture.graph_requests.lock().unwrap();
         assert_eq!(requests.len(), graphs + 3);
@@ -1885,11 +1921,16 @@ fn lifecycle_contract_and_recovery_fixture() {
     }
     for malformed in [
         "{}".to_owned(),
-        stored.replace("\"version\":1", "\"version\":2"),
+        stored.replace("\"version\":2", "\"version\":99"),
+        json!({
+            "version":1,"poolId":POOL,"sessionId":c,
+            "controlPlaneHost":"localhost","controlPlaneSource":"graph","computerHost":"localhost",
+        })
+        .to_string(),
         stored.replace(c, B),
         stored.replace(
-            "\"computerHost\":\"localhost\"",
-            "\"computerHost\":\"untrusted.invalid\"",
+            &computer_url(c),
+            &format!("https://untrusted.invalid/computers/{c}?api-version=1.0"),
         ),
     ] {
         std::fs::write(env.record(c), malformed).unwrap();
@@ -1968,7 +2009,8 @@ fn lifecycle_contract_and_recovery_fixture() {
     );
     let record: Value =
         serde_json::from_str(&std::fs::read_to_string(env.record(c)).unwrap()).unwrap();
-    assert!(record["computerHost"].is_null());
+    assert!(record["computerUrl"].is_null());
+    assert_eq!(record["controlPlaneUrl"], pool_url(POOL));
     assert!(invoke(&request("start", c), true).is_err());
     fixture.reply(204, "");
     invoke(&request("deprovision", c), true).unwrap();
@@ -2050,6 +2092,7 @@ fn lifecycle_fresh_executor_fixture() {
         .starts_with(&format!("POST /api/pools/{POOL}/sessions?api-version=3.0 ")));
     std::env::remove_var("W365A_DP_SUFFIX");
     std::env::remove_var("W365A_DP_TOKEN");
+    std::env::remove_var("W365A_CP_TOKEN");
     assert!(!run(request("start", A), true).status.success());
     assert!(!run(request("exec", A), true).status.success());
     assert_eq!(fixture.count(), 1);

@@ -48,8 +48,11 @@ remain invalid. `userObjectId` remains required and non-nil by the backend.
    or invalid `computerUrl` fails; never derive DP routing from a region or
    `W365A_DP_SUFFIX`.
 
-Graph, CP and DP tokens are separate, caller-supplied credentials; none is
-acquired, refreshed or stored. Provision needs Graph and CP tokens, not DP.
+Graph and service tokens are caller-supplied; none is acquired, refreshed or
+stored. Provision needs Graph and CP tokens, not DP. Start/exec use an explicit
+`W365A_DP_TOKEN` when set, otherwise `W365A_CP_TOKEN`; an empty or invalid
+explicit DP token fails rather than falling back. Callers must ensure a reused
+CP token is authorized for the data plane.
 Listing has a 30-second budget across pages; each resource fetch has 30 seconds
 and each checkout has 45 seconds. Supported URL shapes and environment settings
 are specified in the [backend guide](../../../../backends/w365agents/w365agents-backend.md).
@@ -57,10 +60,20 @@ are specified in the [backend guide](../../../../backends/w365agents/w365agents-
 ## Routing and recovery
 
 Preflight storage before discovery. Store bounded, versioned records keyed by
-canonical pool/session GUIDs, containing validated destination hostnames and CP
-source, never credentials, tickets or complete responses. Use private per-user
+canonical pool/session GUIDs. Format version 2 stores complete validated
+`controlPlaneUrl` (Graph's `poolUrl`) and `computerUrl`, plus CP source, never
+credentials, tickets or complete responses. Hostname-only records are rejected;
+there is no migration or compatibility reader. Use private per-user
 storage on Windows/Linux/macOS, owner and link checks, locks and atomic writes.
-Identical publication is allowed; conflicting records fail.
+Identical publication is allowed; different paths or queries also count as
+conflicting destinations.
+
+Checkout appends API version 3.0 without modifying the saved Graph URL.
+Readiness and exec append `status` and `microsoft.exec` to the saved computer
+resource path, retaining its API-version query. Release uses the saved CP
+authority with `/api/sessions/{sessionId}?api-version=2.0`; the pool checkout
+URL is not a release endpoint. Extract hosts only for transport and safe
+recovery diagnostics. Reject authentication query parameters before saving.
 
 Later lifecycle calls require the matching local record and ignore endpoint
 variables. They do not query Graph: start/exec use caller-supplied DP credentials;

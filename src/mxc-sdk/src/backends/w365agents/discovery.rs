@@ -33,7 +33,12 @@ fn configuration() -> Result<(service::Client, Url), MxcError> {
         host
     };
     Ok((
-        service::Client::for_host(host.to_owned(), "W365A_GRAPH_TOKEN")?,
+        service::Client::for_url(
+            Url::parse(&format!("https://{host}/")).map_err(|_| {
+                routing::error("graph_configuration", "invalid fixed Graph endpoint")
+            })?,
+            "W365A_GRAPH_TOKEN",
+        )?,
         url,
     ))
 }
@@ -45,7 +50,7 @@ pub(super) fn validate() -> Result<(), MxcError> {
 
 pub(super) fn control_plane(
     pool_id: &str,
-) -> Result<Option<(service::Client, Url, &'static str)>, MxcError> {
+) -> Result<Option<(service::Client, &'static str)>, MxcError> {
     service::with_transport_stack(|| pool_resource(pool_id))
 }
 
@@ -147,7 +152,7 @@ fn list_assigned_pools() -> Result<Vec<String>, MxcError> {
     Ok(pool_ids)
 }
 
-fn pool_resource(pool_id: &str) -> Result<Option<(service::Client, Url, &'static str)>, MxcError> {
+fn pool_resource(pool_id: &str) -> Result<Option<(service::Client, &'static str)>, MxcError> {
     let (client, origin) = configuration()?;
     let deadline = Instant::now() + service::transport_budget(DISCOVERY_BUDGET)?;
     let resource = origin
@@ -187,13 +192,9 @@ fn pool_resource(pool_id: &str) -> Result<Option<(service::Client, Url, &'static
         .ok_or_else(|| {
             routing::error("invalid_pool_url", "Graph pool resource requires poolUrl")
         })?;
-    let url = routing::validate_url(value)?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| routing::error("invalid_pool_url", "missing pool host"))?;
+    let url = routing::control_plane_url(value)?;
     Ok(Some((
-        service::Client::for_host(host.to_owned(), "W365A_CP_TOKEN")?,
-        url,
+        service::Client::for_url(url, "W365A_CP_TOKEN")?,
         "graph",
     )))
 }

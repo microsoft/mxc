@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
+use url::Position;
 
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(30);
 const MAX_DNS_WORKERS: usize = 4;
@@ -18,15 +19,18 @@ pub(crate) struct UpgradeTarget {
     host: String,
     token: String,
     computer_id: String,
+    request_target: String,
 }
 
 impl UpgradeTarget {
-    pub(super) fn new(client: Client, identity: &Identity) -> Self {
-        Self {
-            host: client.host,
+    pub(super) fn new(client: Client, identity: &Identity) -> Result<Self, MxcError> {
+        let url = client.operation_url("microsoft.exec")?;
+        Ok(Self {
+            host: client.host().to_owned(),
             token: client.token,
             computer_id: identity.session_id.clone(),
-        }
+            request_target: url[Position::BeforePath..].to_owned(),
+        })
     }
 }
 
@@ -347,10 +351,10 @@ fn connect_exec_inner(
         .socket
         .set_write_timeout(Some(remaining))
         .map_err(|_| error("exec_socket"))?;
-    // These fields have already passed the environment/identity validation.
+    // The target has already passed persisted URL and identity validation.
     let request = format!(
-        "GET /computers/{}/microsoft.exec?api-version=1.0 HTTP/1.1\r\nHost: {}:{port}\r\nUser-Agent: {USER_AGENT}\r\nConnection: Upgrade\r\nUpgrade: exec\r\nAuthorization: Bearer {}\r\nx-ms-computerId: {}\r\n\r\n",
-        target.computer_id, target.host, target.token, target.computer_id
+        "GET {} HTTP/1.1\r\nHost: {}:{port}\r\nUser-Agent: {USER_AGENT}\r\nConnection: Upgrade\r\nUpgrade: exec\r\nAuthorization: Bearer {}\r\nx-ms-computerId: {}\r\n\r\n",
+        target.request_target, target.host, target.token, target.computer_id
     );
     stream
         .write_all(request.as_bytes())
