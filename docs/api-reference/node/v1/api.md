@@ -91,6 +91,9 @@ MicroVM is reported when available, but execution requires the development
 JSON API; typed V1 requests cannot select it. Availability is advisory.
 Windows native backend availability is refreshed on each call.
 
+For what IsolationSession availability depends on, see
+[IsolationSession availability](https://github.com/microsoft/mxc/blob/main/docs/backends/isolation-session/availability.md).
+
 ```typescript
 export function getPlatformSupport(): PlatformSupport;
 ```
