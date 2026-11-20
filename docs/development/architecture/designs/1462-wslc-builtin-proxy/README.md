@@ -511,8 +511,10 @@ probes used direct TCP connections, ignoring the proxy variables.
   entirely inside the /16. Create-and-run uses `10.231.0.0/24` (egress) and
   `10.231.1.0/24` (internal). The daemon allocates two free /24s per proxied
   container, skipping subnets used by the session's other networks, so a
-  session holds up to 128 proxied containers. When none are free, provision
-  fails with an error asking the caller to deprovision a container.
+  session holds up to 128 proxied containers. Bridged lifecycle sandboxes take
+  one /24 each from the same range, which lowers that number. When none are
+  free, provision fails with an error asking the caller to deprovision a
+  container.
 
 ### Components
 

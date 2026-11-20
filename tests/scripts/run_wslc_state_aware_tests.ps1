@@ -36,7 +36,9 @@
     Prerequisite probes (skip, not fail, if missing):
       - wxc-wslc-daemon.exe present next to wxc-exec.exe
       - a state-aware provision does not return `backend_unavailable`
-        (catches feature-flag-off builds and a missing WSLC runtime)
+        (catches feature-flag-off builds and a missing WSLC runtime). A
+        running daemon that speaks another control protocol version fails
+        the run instead.
 
     To make the idle-teardown assertion observable in a test run this script
     shortens the daemon's idle watchdog via the
@@ -832,6 +834,15 @@ function Provision-Sandbox {
     [string]$envObj.result.sandboxId
 }
 
+function Get-SandboxNetworkRecord {
+    param([string]$SandboxId)
+    $hash = [System.Security.Cryptography.SHA256]::HashData(
+        [System.Text.Encoding]::UTF8.GetBytes($SandboxId))
+    $key = -join ($hash[0..7] | ForEach-Object { $_.ToString('x2') })
+    $stores = Join-Path $env:LOCALAPPDATA 'Microsoft\MXC\wslc\stores'
+    Get-ChildItem -Path $stores -Filter "$key.network.json" -Recurse -File -ErrorAction SilentlyContinue
+}
+
 # ---------------- Backend-availability probe ----------------
 
 # The shortened idle watchdog ($env:MXC_WSLC_DAEMON_IDLE_*) is only honored by a
@@ -848,6 +859,10 @@ if ($script:PreExistingDaemon) {
 $probe = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
 if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
+    if ("$($probeEnv.error.message)" -match 'control protocol') {
+        Write-Host "FAILED: a daemon from another build is running, so this build can't be tested: $($probeEnv.error.message)" -ForegroundColor Red
+        exit 1
+    }
     Write-Host "SKIPPED: wxc-exec reports backend_unavailable (built without --features wslc, or no WSLC runtime)" -ForegroundColor Yellow
     exit 0
 }
@@ -1903,6 +1918,194 @@ try {
     }
     if ($null -ne $script:mcSandboxB -and -not $mcBDeprovisionedOk) {
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:mcSandboxB } catch { }
+    }
+}
+
+# ---------------- Lifecycle N: per-sandbox networks ----------------
+
+# The listener serves every connection, so a connection that should have been
+# blocked doesn't hide the port-mapping check after it.
+$nwListenerScript = @'
+cat > /tmp/listen.py <<'EOF'
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 8080))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    c.sendall(b"PER_SANDBOX_NETWORK_LISTENER")
+    c.close()
+EOF
+nohup python3 /tmp/listen.py >/tmp/listener.log 2>&1 &
+sleep 1
+echo LISTENER_STARTED
+'@
+function Get-NwAddress {
+    param([string]$SandboxId)
+
+    $r = Invoke-StateAware -Request @{
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{ commandLine = 'hostname -i'; timeout = 30000 }
+    }
+    if ($r.Stdout -match '\b(\d{1,3}(\.\d{1,3}){3})\b') { return $Matches[1] }
+    return $null
+}
+
+function Get-NwSubnet {
+    param([string]$Ip)
+    ($Ip -split '\.')[0..2] -join '.'
+}
+
+function Start-NwListener {
+    param([string]$SandboxId)
+
+    $r = Invoke-StateAware -Request @{
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{ commandLine = $nwListenerScript; timeout = 30000 }
+    }
+    Assert-True ($r.Stdout -match 'LISTENER_STARTED') "$SandboxId started its listener (stdout: $($r.Stdout.Trim()))"
+    $ip = Get-NwAddress -SandboxId $SandboxId
+    Assert-True ($null -ne $ip) "$SandboxId reports its IPv4 address"
+    return $ip
+}
+
+function Connect-NwListener {
+    param([string]$From, [string]$Ip)
+
+    $connect = @"
+python3 -c "
+import socket
+try:
+    c = socket.create_connection(('$Ip', 8080), 5)
+    print('REACHED', c.recv(64).decode())
+except OSError as e:
+    print('BLOCKED', type(e).__name__)
+"
+"@
+    $r = Invoke-StateAware -Request @{
+        phase = 'exec'
+        sandboxId = $From
+        process = @{ commandLine = $connect; timeout = 30000 }
+    }
+    return $r.Stdout.Trim()
+}
+
+$script:nwListenerId = $null
+$script:nwPeerId = $null
+$script:nwReuseId = $null
+$script:nwListenerIp = $null
+$script:nwPeerIp = $null
+$script:nwListenerGone = $false
+$nwSandbox = New-PortMappedSandbox
+$nwPort = $nwSandbox.Port
+$script:nwListenerId = $nwSandbox.SandboxId
+try {
+    $nwReady = Run-StateAwareTest "N: a port-mapped bridged sandbox listens on its address" {
+        if (-not (Assert-ResultEnvelope $nwSandbox.Provision "listener provision")) { return }
+        if (-not (Assert-ResultEnvelope $nwSandbox.Start "listener start")) { return }
+        $script:nwListenerIp = Start-NwListener -SandboxId $script:nwListenerId
+    }
+
+    $nwPeerReady = $false
+    if ($nwReady) {
+        $nwPeerReady = Run-StateAwareTest "N: a second bridged sandbox in the same session listens on its address" {
+            $script:nwPeerId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_unmapped_sibling.json'
+            Assert-True ($null -ne $script:nwPeerId) "peer provisioned"
+            if ($null -eq $script:nwPeerId) { return }
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:nwPeerId
+            if (-not (Assert-ResultEnvelope $r "peer start")) { return }
+            $script:nwPeerIp = Start-NwListener -SandboxId $script:nwPeerId
+        }
+    }
+
+    if ($nwPeerReady) {
+        Run-StateAwareTest "N: both sandboxes run in one VM on separate networks" {
+            $listenerBoot = Get-SandboxBootId -SandboxId $script:nwListenerId -What 'the listener'
+            $peerBoot = Get-SandboxBootId -SandboxId $script:nwPeerId -What 'the peer'
+            Assert-True ($null -ne $listenerBoot -and $listenerBoot -ceq $peerBoot) `
+                "both sandboxes report the same VM boot ID (listener $listenerBoot, peer $peerBoot)"
+            Assert-True ((Get-NwSubnet $script:nwListenerIp) -ne (Get-NwSubnet $script:nwPeerIp)) `
+                "the sandboxes are on different /24s (listener $($script:nwListenerIp), peer $($script:nwPeerIp))"
+        } | Out-Null
+
+        Run-StateAwareTest "N: each sandbox reaches its own listener but not the other's" {
+            foreach ($s in @(
+                    @{ Id = $script:nwListenerId; Own = $script:nwListenerIp; Other = $script:nwPeerIp },
+                    @{ Id = $script:nwPeerId; Own = $script:nwPeerIp; Other = $script:nwListenerIp })) {
+                $own = Connect-NwListener -From $s.Id -Ip $s.Own
+                Assert-True ($own -ceq 'REACHED PER_SANDBOX_NETWORK_LISTENER') `
+                    "$($s.Id) reached its own listener at $($s.Own):8080 (got '$own')"
+                $other = Connect-NwListener -From $s.Id -Ip $s.Other
+                Assert-True ($other -cmatch '^BLOCKED ') `
+                    "$($s.Id) couldn't connect to the other sandbox at $($s.Other):8080 (got '$other')"
+            }
+        } | Out-Null
+
+        Run-StateAwareTest "N: the mapped port still reaches its sandbox ($nwPort -> 8080)" {
+            $response = Get-TcpResponse -Port $nwPort
+            Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
+                "host read the listener's sentinel through the forward (got '$response')"
+        } | Out-Null
+
+        Run-StateAwareTest "N: each sandbox keeps DNS and outbound access" {
+            $egress = 'python3 -c "import socket; socket.create_connection((''mcr.microsoft.com'', 443), 10); print(''EGRESS_OK'')"'
+            foreach ($id in @($script:nwListenerId, $script:nwPeerId)) {
+                $r = Invoke-StateAware -Request @{
+                    phase = 'exec'
+                    sandboxId = $id
+                    process = @{ commandLine = $egress; timeout = 30000 }
+                }
+                Assert-True ($r.Stdout -match 'EGRESS_OK') `
+                    "$id resolved and reached mcr.microsoft.com:443 (stdout: $($r.Stdout.Trim()); stderr: $($r.Stderr.Trim()))"
+            }
+        } | Out-Null
+    }
+
+    # A daemon that predates this harness may keep its records under another
+    # LOCALAPPDATA.
+    $nwIds = @($script:nwListenerId, $script:nwPeerId) | Where-Object { $_ }
+    if ($nwIds -and -not $script:PreExistingDaemon) {
+        Run-StateAwareTest "N: each bridged sandbox records its own network" {
+            foreach ($id in $nwIds) {
+                $count = @(Get-SandboxNetworkRecord $id).Count
+                Assert-True ($count -eq 1) "$id has one network record (found $count)"
+            }
+        } | Out-Null
+    }
+
+    # Subnets are allocated lowest first, so the next sandbox gets the freed /24.
+    if ($nwPeerReady -and $script:nwListenerIp) {
+        Run-StateAwareTest "N: deprovision deletes the network and frees its subnet" {
+            $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:nwListenerId
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:nwListenerId
+            if (-not (Assert-ResultEnvelope $r "listener deprovision")) { return }
+            $script:nwListenerGone = $true
+            if (-not $script:PreExistingDaemon) {
+                $count = @(Get-SandboxNetworkRecord $script:nwListenerId).Count
+                Assert-True ($count -eq 0) "the listener left no network record (found $count)"
+            }
+
+            $script:nwReuseId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_unmapped_sibling.json'
+            Assert-True ($null -ne $script:nwReuseId) "a third bridged sandbox provisioned"
+            if ($null -eq $script:nwReuseId) { return }
+            $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:nwReuseId
+            $reuseIp = Get-NwAddress -SandboxId $script:nwReuseId
+            Assert-True ($reuseIp -and (Get-NwSubnet $reuseIp) -eq (Get-NwSubnet $script:nwListenerIp)) `
+                "the third sandbox reused the listener's /24 (got '$reuseIp', listener $($script:nwListenerIp))"
+        } | Out-Null
+    }
+} finally {
+    $remaining = @($script:nwReuseId, $script:nwPeerId)
+    if (-not $script:nwListenerGone) { $remaining += $script:nwListenerId }
+    foreach ($id in $remaining) {
+        if ($id) {
+            Write-Host "[cleanup] deprovision of $id" -ForegroundColor DarkGray
+            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $id } catch { }
+            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $id } catch { }
+        }
     }
 }
 

@@ -25,14 +25,14 @@ use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::string_util::CoTaskMemPWSTR;
 use mxc_sdk::wslc_common::container_steps::{
     create_daemon_container, create_daemon_session, load_sdk_checked, start_daemon_container,
-    ProcessSettings, SessionSizing, KEEPALIVE_SCRIPT,
+    DaemonNetworking, ProcessSettings, SessionSizing, KEEPALIVE_SCRIPT,
 };
 use mxc_sdk::wslc_common::image::{resolve_image, RegistryAccess, StoreHint};
 use mxc_sdk::wslc_common::process_env::EnvScope;
 use mxc_sdk::wslc_common::wslc_bindings::{
-    WslcContainer, WslcContainerNetworkingMode, WslcContainerStartFlags, WslcProcess,
-    WslcProcessCallbacks, WslcProcessFlags, WslcProcessGuard, WslcProcessIOHandle, WslcSdk,
-    WslcSession, WslcSignal, BYTE, HANDLE, HRESULT, INT32, PVOID, S_OK,
+    WslcContainer, WslcContainerStartFlags, WslcProcess, WslcProcessCallbacks, WslcProcessFlags,
+    WslcProcessGuard, WslcProcessIOHandle, WslcSdk, WslcSession, WslcSignal, BYTE, HANDLE, HRESULT,
+    INT32, PVOID, S_OK,
 };
 
 const E_INVALIDARG: HRESULT = 0x8007_0057_u32 as HRESULT;
@@ -243,7 +243,7 @@ unsafe fn probe_attached_init(
         "alpine:latest",
         &[],
         &[],
-        WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE,
+        DaemonNetworking::Isolated,
         false,
         &mut init,
         logger,
@@ -354,7 +354,7 @@ fn stdin_handle_requires_the_stdin_process_flag() {
             "alpine:latest",
             &[],
             &[],
-            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE,
+            DaemonNetworking::Isolated,
             false,
             &mut keepalive,
             &mut logger,
