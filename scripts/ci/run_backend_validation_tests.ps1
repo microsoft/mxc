@@ -5,6 +5,11 @@ Runs a Windows backend test from a downloaded CI artifact.
 .DESCRIPTION
 Takes the matrix backend id straight from the catalog, so there is no
 id-to-command mapping to keep in sync. 
+
+.PARAMETER AllowMachineMutation
+Allows suites that change host state outside MXC. WSLC needs it to run the Node
+and C# suites, whose cleanup stops every wslcsession.exe on the host, including
+WSLC sessions MXC did not start. Without it, those suites are skipped.
 #>
 [CmdletBinding()]
 param(
@@ -25,7 +30,9 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string]$Architecture,
 
-    [string]$TempDirectory
+    [string]$TempDirectory,
+
+    [switch]$AllowMachineMutation
 )
 
 $ErrorActionPreference = 'Stop'
@@ -324,13 +331,12 @@ function Invoke-NamedSuites {
 }
 
 # Daemon discovery reuses any running daemon, including one another suite started.
-# Until WSL shuts down, it holds the store of a session that a killed daemon left
-# behind or an idle one failed to terminate, and the next session cannot open it.
+# A session that a killed daemon left behind, or an idle one failed to terminate,
+# keeps wslcsession.exe running and holding its store; wsl --shutdown does not
+# end it. This stops every wslcsession.exe, including sessions MXC did not start.
 function Stop-WslcDaemons {
     $idleExitSecs = [int]$env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS + 3 * [int]$env:MXC_WSLC_DAEMON_IDLE_POLL_SECS + 15
-    $leftover = $false
     foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
-        $leftover = $true
         Write-Host "Waiting up to $idleExitSecs s for wxc-wslc-daemon $($daemon.Id) from an earlier suite to idle out."
         if ($daemon.WaitForExit($idleExitSecs * 1000)) { continue }
 
@@ -340,10 +346,18 @@ function Stop-WslcDaemons {
             throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
         }
     }
-    if ($leftover) {
-        Write-Host 'Shutting down WSL to release the earlier daemon''s store.'
-        wsl.exe --shutdown | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "wsl --shutdown exited $LASTEXITCODE." }
+    foreach ($session in @(Get-Process -Name 'wslcsession' -ErrorAction SilentlyContinue)) {
+        Write-Host "Stopping wslcsession $($session.Id) left by an earlier suite."
+        Stop-Process -Id $session.Id -Force -ErrorAction SilentlyContinue
+        if (-not $session.WaitForExit(30000)) {
+            throw "wslcsession $($session.Id) did not exit within 30 s."
+        }
+    }
+    # The store stays attached until the session's VM exits, shortly after wslcsession.
+    $deadline = (Get-Date).AddSeconds(30)
+    while ($vm = Get-Process -Name 'vmmemmxc-wslc-daemon-*' -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $deadline) { throw "WSLc VM $($vm[0].Name) did not exit within 30 s." }
+        Start-Sleep -Milliseconds 250
     }
 }
 
@@ -391,7 +405,7 @@ function Invoke-WslcSuites {
     $env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS = '20'
     $env:MXC_WSLC_DAEMON_IDLE_POLL_SECS = '5'
 
-    Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
+    $suites = [ordered]@{
         'filesystem probe deadlines' = {
             $tests = Join-Path $binaryDirectoryPath 'mxc-filesystem-probe-tests.exe'
             Assert-File -Path $tests
@@ -427,7 +441,16 @@ function Invoke-WslcSuites {
                 if ($failure) { throw "${case}: $failure" }
             }
         }
-    })
+    }
+    if ($AllowMachineMutation) {
+        Write-Warning 'The WSLC Node and C# suites stop every wslcsession.exe on this host, including WSLC sessions MXC did not start.'
+    }
+    else {
+        Write-Warning 'Skipping the WSLC Node and C# suites: their cleanup stops every wslcsession.exe on this host. Pass -AllowMachineMutation to run them.'
+        $suites.Remove('Node')
+        $suites.Remove('C#')
+    }
+    Invoke-NamedSuites -Backend 'wslc' -Suites $suites
 }
 
 function Invoke-IsolationSessionSuites {

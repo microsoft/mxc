@@ -192,6 +192,10 @@ scripts\ci\run_backend_validation_tests.ps1 -Backend process `
     -BinaryDirectory <dir> -Architecture x64
 ```
 
+For `wslc`, the Node lifecycle and .NET suites run only with
+`-AllowMachineMutation`, because their cleanup stops every `wslcsession.exe` on
+the host, including WSLC sessions MXC did not start. CI passes it.
+
 ```bash
 scripts/ci/run_backend_validation_tests.sh bubblewrap <binary-directory>
 ```
