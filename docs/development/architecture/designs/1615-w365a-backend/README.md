@@ -268,16 +268,15 @@ omission. Parsers preserve presence; backend code owns defaults.
 | Provision `userObjectId` | If supplied, a canonical GUID sent as `user-object-id`; empty/blank fails. Omission sends no header. |
 
 Service configuration belongs to the caller environment, not request JSON.
-Checkout discovers its endpoint from Graph; release uses saved local routing.
-Both require `W365A_CP_TOKEN` (a nonempty resource-specific bearer token without whitespace
+Checkout and release require `W365A_CONTROLPLANE_URL` (a bare ASCII DNS
+hostname without scheme, port, path, query, credentials or whitespace) and
+`W365A_CP_TOKEN` (a nonempty resource-specific bearer token without whitespace
 or control characters). Missing, blank, invalid or non-Unicode configuration
 fails locally; MXC does not acquire or renew tokens. Read configuration again
 for each invocation, including release in a fresh process with renewed credentials.
 The existing design budgets are 45000 ms for checkout and 30000 ms for release;
 there are no per-request timeout overrides or new renewal mechanism.
-Readiness and exec use `W365A_DP_TOKEN` when explicitly set, otherwise
-`W365A_CP_TOKEN`. An empty or invalid explicit DP token fails locally.
-Callers must ensure a reused CP token is authorized for the data plane.
+Readiness and exec use separate data-plane service configuration.
 
 Service defaults are HTTPS port 443, checkout API `3.0`, release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional
@@ -578,7 +577,7 @@ follow the [phase settings](#routing-and-phase-settings):
 | Request routing | `version: "1.1.0-alpha"`, `phase: "provision"` and `containment: "w365_agents"`. |
 | `w365Agents.provision.poolId` | Required canonical 36-character pool GUID for an existing, authorized test pool. The harness selects the pool; MXC does not discover or create it. |
 | `userType` and `userObjectId` | The delegated human-user scenario supplies `"HumanUser"` and the selected user's canonical object GUID. Both fields are optional in the proposed MXC contract; omission sends no corresponding header and does not infer a human identity. The caller supplies the identity information required by its service deployment. |
-| Service credentials (environment only) | Supply `W365A_GRAPH_TOKEN` for discovery and `W365A_CP_TOKEN` for checkout/release. Neither belongs in the provision document. |
+| Service configuration (environment only) | Supply `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN` in the caller environment. Neither belongs in the provision document. |
 
 Stop/deprovision use the checkout/release environment again, including
 caller-renewed credentials when needed for cleanup.
