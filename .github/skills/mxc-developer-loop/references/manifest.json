@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "source": "schemas\\stable\\mxc-config.schema.1.0.0.json",
+      "file": "mxc-config.schema.1.0.0.json",
+      "sha256": "207254fa94966a800fa70f01a2da73ae813d27fe8847200c92f4dd0e219649c2"
+    },
+    {
+      "source": "docs\\containment-policy\\1.0.0\\policy.md",
+      "file": "policy-1.0.0.md",
+      "sha256": "d12bb8c7674c4ed097e10c70d1f8c5c79c7ff1c7118cff698ddc877da92e9748"
+    },
+    {
+      "source": "skill-authored notes; source locations are cited in the document",
+      "file": "configuration-notes.md",
+      "sha256": "eb03f105938985ff260220c8555f0264775917287c3530226698b8d2057e5487"
+    }
+  ],
+  "contractVersion": "1.0.0",
+  "schemaId": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.1.0.0.json",
+  "sourceRevision": "28fbad40e17415c3c08eed8a4bbba0aac48725f5"
+}

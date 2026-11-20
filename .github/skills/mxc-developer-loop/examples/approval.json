@@ -1,0 +1,8 @@
+{
+  "proposalPath": "<absolute-results-directory>\\.internal\\proposal.json",
+  "proposalId": 1,
+  "candidateDigest": "<copy the exact candidateDigest from the saved proposal>",
+  "approvedByCaller": false,
+  "retryApproved": false,
+  "reason": "<record actual consent: normally approve and retest once (both flags true); otherwise activate only or decline>"
+}

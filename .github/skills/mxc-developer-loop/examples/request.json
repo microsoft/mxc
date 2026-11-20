@@ -1,0 +1,19 @@
+{
+  "mxcExecutable": "<absolute-mxcExecutable-returned-by-setup>",
+  "applicationPath": "<absolute-workload-executable-path>",
+  "commandLine": "<exact-windows-command-line>",
+  "cwd": "<absolute-workload-working-directory>",
+  "expectedExitCode": 0,
+  "functionalChecks": [],
+  "maxRuns": 5,
+  "maxWorkloadMs": 120000,
+  "replaySafe": false,
+  "allowedChanges": {
+    "readonlyPaths": ["<approved-readonly-directory>"],
+    "readwritePaths": [],
+    "enumeratePaths": [],
+    "capabilities": [],
+    "ui": [],
+    "networkEgress": []
+  }
+}
