@@ -33,6 +33,23 @@ fn invalid_identity_mapping_configurations_are_rejected() {
             &[] as &[&str],
         ),
         (
+            "host-root",
+            "lxc.idmap = u 0 100000 65536\n\
+             lxc.idmap = g 0 0 1\n\
+             lxc.idmap = g 1 100001 65535",
+            false,
+            &["/gid_map:", "maps to outside ID 0"],
+        ),
+        (
+            "host-root-user",
+            "lxc.idmap = u 0 100000 1\n\
+             lxc.idmap = u 1 0 1\n\
+             lxc.idmap = u 2 100002 65534\n\
+             lxc.idmap = g 0 100000 65536",
+            false,
+            &["/uid_map:", "maps to outside ID 0"],
+        ),
+        (
             "garbled",
             "lxc.idmap = g garbled",
             false,
