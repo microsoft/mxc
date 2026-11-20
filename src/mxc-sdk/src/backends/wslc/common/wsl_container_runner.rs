@@ -34,7 +34,7 @@ use crate::mxc_common::validator::validate_network_policy_support;
 
 use crate::wslc_common::container_steps::{self, sdk_error, SESSION_BOOT_TIMEOUT_MS};
 use crate::wslc_common::egress_gateway;
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::image;
 use crate::wslc_common::policy;
 use crate::wslc_common::policy_mapping;
@@ -42,6 +42,13 @@ use crate::wslc_common::process_env;
 use crate::wslc_common::sdk_init;
 use crate::wslc_common::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_common::wslc_bindings::*;
+use crate::wslc_gateway_policy as gateway;
+
+fn sdk_wait_error(operation: &str, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
+    WslcError::sdk(format!("{operation} failed"), hr, sdk_msg)
+        .into_step_error()
+        .with_api_failure(sdk_api_failure(operation, hr))
+}
 
 /// Where the bytes the WSLC SDK hands us in its stdout/stderr callbacks go.
 ///
@@ -481,11 +488,7 @@ impl WSLContainerRunner {
     }
 
     fn network_mode(&self, request: &ExecutionRequest) -> Result<policy::NetworkMode, MxcError> {
-        policy::create_and_run_network_mode(
-            request,
-            "wslc.portMappings",
-            !self.config.port_mappings.is_empty(),
-        )
+        policy::create_and_run_network_mode(request, !self.config.port_mappings.is_empty())
     }
 
     fn validate_target_os(&self) -> Result<(), ScriptResponse> {
@@ -524,8 +527,9 @@ impl ScriptRunner for WSLContainerRunner {
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::create_and_run_network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
-        self.network_mode(request).map_err(as_wslc_rejection)?;
+        let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
+        resolve_custom_proxy(&network_mode)?;
         Ok(())
     }
 
@@ -538,6 +542,28 @@ impl ScriptRunner for WSLContainerRunner {
 /// `policy_validation` with the same message the state-aware surface emits.
 fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
+}
+
+fn create_session_error(hr: HRESULT, host_loopback: bool, sdk_msg: &str) -> WslcError {
+    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
+        return WslcError::Unavailable(
+            "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
+             Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
+                .to_string(),
+        );
+    }
+    WslcError::sdk("WslcCreateSession failed", hr, sdk_msg)
+}
+
+fn resolve_custom_proxy(
+    network_mode: &policy::NetworkMode,
+) -> Result<Option<crate::wslc_gateway_policy::CustomProxy>, ScriptResponse> {
+    match network_mode {
+        policy::NetworkMode::Proxied(egress) => {
+            egress_gateway::resolve_custom_proxy(egress).map_err(WslcError::into_response)
+        }
+        policy::NetworkMode::None | policy::NetworkMode::Bridged => Ok(None),
+    }
 }
 
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
@@ -629,6 +655,7 @@ impl WSLContainerRunner {
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
         session_name_str: &str,
+        host_loopback: bool,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
@@ -691,15 +718,38 @@ impl WSLContainerRunner {
             }
         }
 
+        // The SDK reads the name when the session is created.
+        let host_loopback_name =
+            CString::new(gateway::HOST_LOOPBACK_NAME).expect("the host loopback name has no NUL");
+        if host_loopback {
+            let hr =
+                sdk.WslcSetSessionSettingsHostLoopback(&mut settings, host_loopback_name.as_ptr());
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetSessionSettingsHostLoopback failed",
+                    hr,
+                    "",
+                ));
+            }
+        }
+
         // Create session while string data is still alive
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
         if hr != S_OK {
-            let msg = err_msg.to_string_lossy();
-            return Err(sdk_error("WslcCreateSession failed", hr, &msg));
+            return Err(
+                create_session_error(hr, host_loopback, &err_msg.to_string_lossy()).into_response(),
+            );
         }
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
+        if host_loopback {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Session reaches Windows loopback as {}",
+                gateway::HOST_LOOPBACK_NAME
+            );
+        }
 
         Ok(WslcSessionGuard::from_raw(
             session,
@@ -722,7 +772,7 @@ impl WSLContainerRunner {
         exit_event: HANDLE,
         abort_event: HANDLE,
         logger: &mut Logger,
-    ) -> Result<(i32, WaitOutcome), ScriptResponse> {
+    ) -> Result<(i32, WaitOutcome), WslcStepError> {
         let sdk = started.sdk;
         let process_guard = &started.process_guard;
         let container_guard = &started.container_guard;
@@ -767,7 +817,7 @@ impl WSLContainerRunner {
                         0,
                     );
                 }
-                Err(message) => return Err(WslcError::Runtime(message).into_response()),
+                Err(message) => return Err(WslcError::Runtime(message).into_step_error()),
             }
         }
         let exit_seen = std::time::Instant::now();
@@ -831,9 +881,13 @@ impl WSLContainerRunner {
         io_ctx.close_streams();
 
         let mut exit_code: i32 = -1;
-        let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
+        let natural_exit_confirmed = exit_signalled || confirmed;
+        let hr = started.test_exit_code_result(
+            natural_exit_confirmed,
+            sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code),
+        );
         if hr != S_OK && stopped.is_none() {
-            return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
+            return Err(sdk_wait_error("WslcGetProcessExitCode", hr, ""));
         }
         let outcome = match (stopped, confirmed) {
             // Reported only on positive evidence the process ended: the exit
@@ -849,7 +903,7 @@ impl WSLContainerRunner {
                      SDK's exit callback did not fire, so the container may still be running"
                         .to_string(),
                 )
-                .into_response());
+                .into_step_error());
             }
             (Some(StopReason::ForwardingFailure), _) => {
                 let confirmed = confirmed || started.exit_signalled();
@@ -987,11 +1041,19 @@ impl WSLContainerRunner {
 
         // -- Init: COM + SDK + preflight --
         let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
+        // Resolved again so this run relays to an address checked just now.
+        let custom_proxy = resolve_custom_proxy(&network_mode)?;
         let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
         let session_name = resolve_session_name(&request.container_id);
-        let session_guard = self.create_session(sdk, request, &session_name, logger)?;
+        let session_guard = self.create_session(
+            sdk,
+            request,
+            &session_name,
+            network_mode.session_host_loopback(),
+            logger,
+        )?;
 
         // -- Image resolution --
         // An isolated sandbox gets no registry fetch on its behalf; the pull
@@ -1038,6 +1100,8 @@ impl WSLContainerRunner {
                     &storage_path,
                     &session_name,
                     egress,
+                    custom_proxy,
+                    &self.config.port_mappings,
                     logger,
                 )?)
             }
@@ -1091,8 +1155,8 @@ impl WSLContainerRunner {
         // belongs to the proxy. Inject HTTP(S)_PROXY after scrubbing caller
         // proxy variables.
         // See crate::mxc_common::proxy_env.
-        let effective_env: Vec<String> = if gateway.is_some() {
-            egress_gateway::workload_env(request.env_entries(), process_env::EnvScope::of(request))
+        let effective_env: Vec<String> = if let Some(gateway) = &gateway {
+            gateway.workload_env(request.env_entries(), process_env::EnvScope::of(request))
         } else if request.policy.network_proxy.is_enabled() {
             // A directly constructed request must retain its proxy URL so the
             // guest receives a routable endpoint instead of an empty setting.
@@ -1177,32 +1241,13 @@ impl WSLContainerRunner {
         // -- Port mappings (host<->container) --
         // Apply before networking mode so the SDK has the complete picture
         // when the container is created. Empty list = no forwarding (default).
-        // The parser rejects `"udp"` up front: the C header declares
-        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime returns
-        // `E_NOTIMPL` when UDP is actually requested. The protocol match below
-        // therefore only ever sees `"tcp"` today, but the explicit branch is
-        // retained so this code keeps compiling cleanly if/when the parser
-        // starts accepting UDP after an SDK update.
-        // Built at function scope: these arrays must outlive
-        // `WslcCreateContainer` below, which is the call that actually consumes
-        // the pointers handed to `WslcSetContainerSettingsPortMappings`.
-        let mappings: Vec<WslcContainerPortMapping> = self
-            .config
-            .port_mappings
-            .iter()
-            .map(|pm| WslcContainerPortMapping {
-                windowsPort: pm.windows_port,
-                containerPort: pm.container_port,
-                protocol: if pm.protocol == "udp" {
-                    WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                } else {
-                    WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                },
-                // Default bind address (typically loopback/0.0.0.0 per
-                // SDK config). Not exposed in the MXC config today.
-                windowsAddress: ptr::null_mut(),
-            })
-            .collect();
+        // Read by WslcCreateContainer below. Behind the built-in proxy, the
+        // gateway owns the mappings.
+        let mappings = if gateway.is_some() {
+            Vec::new()
+        } else {
+            container_steps::sdk_port_mappings(&self.config.port_mappings)
+        };
         if !mappings.is_empty() {
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut container_settings,
@@ -1433,6 +1478,8 @@ impl WSLContainerRunner {
             settled: AtomicBool::new(false),
             destroy_on_exit: request.lifecycle.destroy_on_exit,
             timeout_ms: wait_timeout_ms(request),
+            #[cfg(all(feature = "test-support", debug_assertions))]
+            test_script_code: request.script_code.clone().into_boxed_str(),
         })
     }
 
@@ -1619,7 +1666,7 @@ impl WSLContainerRunner {
                 // context and unloading the DLL under live callbacks, so settle
                 // the container first.
                 started.quiesce(logger);
-                e
+                e.into_response()
             }
         };
 
@@ -2003,6 +2050,8 @@ pub(crate) struct StartedContainer {
     pub(crate) destroy_on_exit: bool,
     /// Wait deadline in milliseconds; `u32::MAX` waits forever.
     pub(crate) timeout_ms: u32,
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    test_script_code: Box<str>,
 }
 
 impl Drop for StartedContainer {
@@ -2066,7 +2115,7 @@ impl StartedContainer {
     pub(crate) fn wait_for_exit(
         &self,
         logger: &mut Logger,
-    ) -> Result<(i32, WaitOutcome), ScriptResponse> {
+    ) -> Result<(i32, WaitOutcome), WslcStepError> {
         self.wait_for_exit_or_abort(ptr::null_mut(), logger)
     }
 
@@ -2074,15 +2123,30 @@ impl StartedContainer {
         &self,
         abort_event: HANDLE,
         logger: &mut Logger,
-    ) -> Result<(i32, WaitOutcome), ScriptResponse> {
+    ) -> Result<(i32, WaitOutcome), WslcStepError> {
         // The handle is `Send`, so this may run on a thread that never entered
         // the apartment `init_and_load_sdk` established; join it for the call.
-        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_response())?;
-        let exit_event = self
-            .exit_event()
-            .map_err(|e| WslcError::Runtime(e).into_response())?;
+        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_step_error())?;
+        let exit_event = self.exit_event()?;
         // SAFETY: `self` owns live process / container handles and a live SDK.
         unsafe { WSLContainerRunner::wait_for_process(self, exit_event, abort_event, logger) }
+    }
+
+    fn test_exit_code_result(&self, natural_exit_confirmed: bool, result: HRESULT) -> HRESULT {
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        {
+            container_steps::test_exit_code_result(
+                &self.test_script_code,
+                natural_exit_confirmed,
+                result,
+            )
+        }
+
+        #[cfg(not(all(feature = "test-support", debug_assertions)))]
+        {
+            let _ = natural_exit_confirmed;
+            result
+        }
     }
 
     pub(crate) fn add_stdin_closer(&self, closer: Box<dyn StreamCloser>) {
@@ -2109,7 +2173,7 @@ impl StartedContainer {
         use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
         use windows::Win32::System::Threading::GetCurrentProcess;
 
-        let event = self.exit_event()?;
+        let event = self.exit_event().map_err(|error| error.error_message)?;
         if event.is_null() {
             return Ok(None);
         }
@@ -2136,12 +2200,12 @@ impl StartedContainer {
     }
 
     /// The process's exit event, or a null handle if the SDK has none.
-    fn exit_event(&self) -> Result<HANDLE, String> {
+    fn exit_event(&self) -> Result<HANDLE, WslcStepError> {
         let mut cached = lock(&self.exit_event);
         if let Some(event) = *cached {
             return Ok(event as HANDLE);
         }
-        let _com = ComApartment::enter()?;
+        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_step_error())?;
         let mut event: HANDLE = ptr::null_mut();
 
         // SAFETY: `self` owns a live process handle and SDK.
@@ -2150,10 +2214,7 @@ impl StartedContainer {
                 .WslcGetProcessExitEvent(self.process_guard.as_raw(), &mut event)
         };
         if hr != S_OK {
-            return Err(format!(
-                "WslcGetProcessExitEvent failed: HRESULT 0x{:08X}",
-                hr as u32
-            ));
+            return Err(sdk_wait_error("WslcGetProcessExitEvent", hr, ""));
         }
         *cached = Some(event as usize);
         Ok(event)
@@ -2394,17 +2455,16 @@ impl StartedContainer {
     ///
     /// # Safety
     /// Requires a live process handle and SDK, which `self` owns.
-    pub(crate) unsafe fn exit_code(&self) -> Result<i32, String> {
-        let _com = ComApartment::enter()?;
+    pub(crate) unsafe fn confirmed_exit_code(&self) -> Result<i32, WslcStepError> {
+        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_step_error())?;
         let mut exit_code: i32 = -1;
-        let hr = self
-            .sdk
-            .WslcGetProcessExitCode(self.process_guard.as_raw(), &mut exit_code);
+        let hr = self.test_exit_code_result(
+            true,
+            self.sdk
+                .WslcGetProcessExitCode(self.process_guard.as_raw(), &mut exit_code),
+        );
         if hr != S_OK {
-            return Err(format!(
-                "WslcGetProcessExitCode failed (HRESULT 0x{:08X})",
-                hr as u32
-            ));
+            return Err(sdk_wait_error("WslcGetProcessExitCode", hr, ""));
         }
         Ok(exit_code)
     }
@@ -2805,7 +2865,7 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_rejects_port_mappings_under_isolated_networking() {
+    fn one_shot_proxies_port_mappings_under_isolated_networking() {
         let config = WslcConfig {
             port_mappings: vec![crate::mxc_common::models::PortMapping {
                 windows_port: 8080,
@@ -2819,18 +2879,12 @@ mod tests {
             ..Default::default()
         };
 
-        let err = WSLContainerRunner::new(&config)
-            .validate_runner(&request)
-            .unwrap_err();
-        assert_eq!(
-            err.failure_phase,
-            crate::mxc_common::models::FailurePhase::Rejected
-        );
-        assert!(
-            err.error_message.contains("wslc.portMappings"),
-            "the message must name the one-shot list; got: {}",
-            err.error_message
-        );
+        let runner = WSLContainerRunner::new(&config);
+        runner.validate_runner(&request).unwrap();
+        assert!(matches!(
+            runner.network_mode(&request).unwrap(),
+            policy::NetworkMode::Proxied(_)
+        ));
     }
 
     #[test]
@@ -3615,5 +3669,20 @@ mod tests {
     #[test]
     fn minted_session_names_do_not_repeat() {
         assert_ne!(resolve_session_name(""), resolve_session_name(""));
+    }
+
+    #[test]
+    fn an_old_runtime_is_unavailable_only_when_host_loopback_was_requested() {
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, true, ""),
+            WslcError::Unavailable(m) if m.contains("wsl --update")
+        ));
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, false, ""),
+            WslcError::Sdk {
+                hr: WSLC_E_RUNTIME_UPDATE_NEEDED,
+                ..
+            }
+        ));
     }
 }

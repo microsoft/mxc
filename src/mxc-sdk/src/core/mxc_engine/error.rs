@@ -215,6 +215,7 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///
@@ -225,6 +226,7 @@ mod tests {
     #[test]
     fn the_conversion_preserves_the_api_detail() {
         let inner = MxcError::backend_error("The provision was not found.")
+            .with_details(serde_json::json!({"backend": "test"}))
             .with_api_failure(
                 InnerFailure::new("IsoSessionOps.StopSessionAsync").with_native_code("0x80070490"),
             )
@@ -234,6 +236,10 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::BackendError);
         assert_eq!(error.message, "The provision was not found.");
+        assert_eq!(
+            error.details,
+            Some(Box::new(serde_json::json!({"backend": "test"})))
+        );
         assert_eq!(
             error.operation.as_deref(),
             Some("IsoSessionOps.StopSessionAsync")
@@ -268,12 +274,24 @@ mod tests {
         assert_eq!(converted.operation, None);
         assert_eq!(converted.native_code, None);
         assert_eq!(converted.remediation, None);
+        assert_eq!(converted.details, None);
 
         let constructed = Error::new(ErrorCode::BackendError, "x");
 
         assert_eq!(constructed.operation, None);
         assert_eq!(constructed.native_code, None);
         assert_eq!(constructed.remediation, None);
+        assert_eq!(constructed.details, None);
+    }
+
+    #[test]
+    fn the_conversion_round_trip_preserves_details() {
+        let inner = MxcError::backend_error("boom")
+            .with_details(serde_json::json!({"phase": "wait"}))
+            .with_api_failure(InnerFailure::new("Iface.Wait").with_native_code("0x80004005"))
+            .with_remediation("Retry.");
+
+        assert_eq!(Error::from(inner.clone()).into_mxc_error(), inner);
     }
 
     /// A hint with no API call behind it survives the conversion, and `Display`

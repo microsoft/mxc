@@ -16,6 +16,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -26,6 +27,22 @@ import { sdk } from './test-helpers.js';
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
 // Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
 const isWslcAvailable = os.platform() === 'win32' && process.env.MXC_ENABLE_WSLC_TESTS === '1';
+const forcedWaitFailureCommand =
+  'true # mxc-test-force-wslc-get-exit-code-failure';
+const uniqueContainerName = () => `mxc-wait-${randomUUID().replace(/-/g, '')}`;
+
+function assertForcedWaitFailure(error: unknown): boolean {
+  assert.ok(error instanceof MxcError);
+  assert.equal(error.code, 'backend_error');
+  assert.equal(
+    error.message,
+    'WslcGetProcessExitCode failed: HRESULT 0x80004005',
+  );
+  assert.equal(error.operation, 'WslcGetProcessExitCode');
+  assert.equal(error.nativeCode, '0x80004005');
+  assert.equal(error.remediation, undefined);
+  return true;
+}
 
 // Probe a small range of host ports and return the first one we can
 // successfully bind to. Avoids both the fixed-port collision risk (any
@@ -226,6 +243,40 @@ srv.handle_request()
     timeoutMs: 60_000,
     network: { egress: { default: 'deny' as const } },
     containment: { type: 'wslc' as const, config: { image: 'alpine:latest' } },
+  });
+
+  const namedRequest = (command: string, containerName: string) => ({
+    ...stdinRequest(command),
+    containerName,
+  });
+
+  // WSLc refuses a session name that is still in use.
+  async function assertContainerNameReleased(containerName: string, marker: string): Promise<void> {
+    const recovered = await sdk.run(namedRequest(`echo ${marker}`, containerName));
+    assert.equal(recovered.stdout.trim(), marker);
+  }
+
+  it('captured run preserves structured post-admission wait failures', { timeout: 180_000 }, async () => {
+    const containerName = uniqueContainerName();
+    await assert.rejects(
+      sdk.run(namedRequest(forcedWaitFailureCommand, containerName)),
+      assertForcedWaitFailure,
+    );
+
+    await assertContainerNameReleased(containerName, 'RUN-RECOVERED');
+  });
+
+  it('spawned process wait preserves structured post-admission wait failures', { timeout: 180_000 }, async () => {
+    const containerName = uniqueContainerName();
+    const process = await sdk.spawn(namedRequest(forcedWaitFailureCommand, containerName));
+    try {
+      await assert.rejects(process.wait(), assertForcedWaitFailure);
+      await assert.rejects(process.wait(), assertForcedWaitFailure);
+    } finally {
+      process.dispose();
+    }
+
+    await assertContainerNameReleased(containerName, 'PROCESS-RECOVERED');
   });
 
   it('should forward every stdin byte to a spawned command', { timeout: 120_000 }, async () => {
@@ -569,14 +620,9 @@ describe('WSLC SDK E2E — built-in proxy', {
   });
 
   it('should reject egress rules the built-in proxy cannot enforce before starting a container', { timeout: 120_000 }, async () => {
-    const rules = ALLOW_CLOUDFLARE_443.egress!;
     const cases: Array<[string, NetworkPolicy, Record<string, unknown>, string]> = [
-      ['port mappings', ALLOW_CLOUDFLARE_443, { portMappings: [{ windowsPort: 39001, containerPort: 80, protocol: 'tcp' }] },
-        'wslc.portMappings cannot be combined with egress filtering'],
       ['external proxy', { ...ALLOW_CLOUDFLARE_443, runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' } }, {},
         'runtimeConfig.networkProxy cannot be combined with egress filtering'],
-      ['host loopback', { egress: rules, ingress: { default: 'deny', hostLoopback: 'allow' } }, {},
-        "hostLoopback 'allow' cannot be combined with egress filtering"],
       ['UDP allow', { egress: { default: 'deny', allow: [{ to: [{ cidr: '1.1.1.1/32' }], ports: [{ protocol: 'udp', port: 53 }] }] }, ingress: DENY_INGRESS }, {},
         "network.egress.allow supports only protocol 'tcp' (got 'udp')"],
       ['IPv6', { egress: { default: 'deny', allow: [{ to: [{ cidr: '2606:4700::/32' }], ports: [{ protocol: 'tcp', port: 443 }] }] }, ingress: DENY_INGRESS }, {},

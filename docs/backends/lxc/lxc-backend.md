@@ -112,6 +112,18 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 | `distribution` | string | **Yes** | Linux distribution for the container rootfs (e.g., `"alpine"`, `"ubuntu"`) |
 | `release` | string | **Yes** | Distribution release version (e.g., `"3.20"`, `"24.04"`) |
 
+### Filesystem paths
+
+Entries in `filesystem.readwritePaths`, `filesystem.readonlyPaths` and
+`filesystem.deniedPaths` must not contain a `..` path segment. LXC rejects
+such a request before creating a container. Supply a fully resolved path
+without `..`; MXC does not remove it automatically because symbolic links
+can change where the path leads. This keeps parent mounts from hiding
+restrictions on their children. Filenames such as `report..txt` remain valid.
+
+`.` segments and repeated `/` separators do not change parent/child policy
+precedence. Backslashes are filename characters, not path separators.
+
 ### Supported Distributions
 
 Any combination that lxc-create supports.
