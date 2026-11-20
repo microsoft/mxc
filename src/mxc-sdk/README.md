@@ -18,8 +18,9 @@ request has no selected tier and an explanatory error, while host facts remain
 available.
 
 Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
-for caller-authored MXC request JSON. It supports execution, container
-lifecycle operations, and validation through the in-process engine.
+for caller-authored MXC request JSON, including execution, container lifecycle
+operations, validation, and caller-owned policy preparation through the
+in-process engine.
 
 ## Run to completion and spawn
 

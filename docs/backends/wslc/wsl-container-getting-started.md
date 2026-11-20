@@ -567,7 +567,7 @@ as follows:
   link-local, multicast, and `10.231.0.0/16` are always denied.
 
 - Most HTTP clients use the proxy automatically through `HTTPS_PROXY` and
-  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use 
+  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use
   the proxy with `CONNECT`.
 
 - The proxy forwards DNS when
@@ -808,8 +808,8 @@ than `"FOO=bar"`) is dropped, as it is on every other backend.
 > which hands it to the SDK's environment setter and keeps it off the command
 > line, or supply it to the workload through a mounted file.
 
-`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an 
-exception to every row: its variables are injected, and any caller-supplied 
+`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an
+exception to every row: its variables are injected, and any caller-supplied
 proxy variable is scrubbed, whatever `process.env` asks for. Egress policy is enforced cooperatively through those
 variables, so a verbatim environment cannot be used to opt out of it. Because
 MXC injects the proxy URL itself, a replacing row cannot choose to keep it off

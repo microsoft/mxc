@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Buffers;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -50,6 +52,13 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(SpawnExtendedJsonOptions))]
 [JsonSerializable(typeof(JsonOptions))]
 [JsonSerializable(typeof(PtyJsonOptions))]
+[JsonSerializable(typeof(PolicyPreparationOptions))]
+[JsonSerializable(typeof(PreparedPolicyRequest))]
+[JsonSerializable(typeof(PolicyChange))]
+[JsonSerializable(typeof(PolicyChangeOperation))]
+[JsonSerializable(typeof(PolicyFailures))]
+[JsonSerializable(typeof(PolicyFailureResult))]
+[JsonSerializable(typeof(PolicyFailureDetail))]
 [JsonSerializable(typeof(ProvisionOptions))]
 [JsonSerializable(typeof(StartOptions))]
 [JsonSerializable(typeof(StopOptions))]
@@ -103,6 +112,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(bool?))]
+[JsonSerializable(typeof(JsonElement))]
 internal sealed partial class MxcJsonContext : JsonSerializerContext
 {
 }
@@ -190,6 +200,21 @@ internal static class MxcJson
     internal static string Serialize<T>(T value, JsonSerializerOptions options) =>
         JsonSerializer.Serialize(value, TypeInfo<T>(options));
 
+    internal static string Serialize<T>(T value, JsonSerializerOptions options, int maximumUtf8Bytes)
+    {
+        using var output = new BoundedUtf8BufferWriter(maximumUtf8Bytes);
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions
+        {
+            Encoder = options.Encoder,
+            Indented = options.WriteIndented,
+            MaxDepth = options.MaxDepth,
+        }))
+        {
+            JsonSerializer.Serialize(writer, value, TypeInfo<T>(options));
+        }
+        return output.GetJson();
+    }
+
     internal static JsonNode? SerializeToNode<T>(T value, JsonSerializerOptions options) =>
         JsonSerializer.SerializeToNode(value, TypeInfo<T>(options));
 
@@ -197,4 +222,79 @@ internal static class MxcJson
         JsonSerializer.Deserialize(json, TypeInfo<T>(options));
 
     internal static T? Deserialize<T>(string json) => Deserialize<T>(json, Options);
+
+    internal static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new JsonException("duplicate JSON property");
+                }
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                RejectDuplicateProperties(item);
+            }
+        }
+    }
+
+    private sealed class BoundedUtf8BufferWriter(int maximumBytes) : IBufferWriter<byte>, IDisposable
+    {
+        private const int MinimumBufferBytes = 4096;
+        private readonly MemoryStream output = new();
+        private byte[] buffer = [];
+
+        public void Advance(int count)
+        {
+            if ((uint)count > (uint)buffer.Length)
+            {
+                throw new ArgumentOutOfRangeException(nameof(count));
+            }
+            if (count > maximumBytes - output.Length)
+            {
+                throw new JsonException("JSON byte limit exceeded");
+            }
+            var length = output.Length + count;
+            if (length > output.Capacity)
+            {
+                // Keep MemoryStream's capacity growth within the result limit.
+                output.Capacity = (int)Math.Min(maximumBytes,
+                    Math.Max(length, Math.Max(256, output.Capacity * 2L)));
+            }
+            output.Write(buffer, 0, count);
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(sizeHint);
+            // Utf8JsonWriter reserves up to three bytes per UTF-16 code unit.
+            // A larger reservation cannot fit even without non-ASCII expansion.
+            var maximumReservation = Math.Max(MinimumBufferBytes, 3L * (maximumBytes - output.Length));
+            if (sizeHint > maximumReservation)
+            {
+                throw new JsonException("JSON byte limit exceeded");
+            }
+            // Size hints reserve space; only committed bytes count toward the limit.
+            if (buffer.Length < Math.Max(1, sizeHint))
+            {
+                buffer = new byte[Math.Max(MinimumBufferBytes, sizeHint)];
+            }
+            return buffer;
+        }
+
+        public Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
+
+        internal string GetJson() =>
+            Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+
+        public void Dispose() => output.Dispose();
+    }
 }

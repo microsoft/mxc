@@ -106,7 +106,7 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 
 - Allow rules must be TCP. Allow rules for `udp`, `icmp` or `any` are rejected
   because the controller can't carry that traffic. Deny rules for any protocol
-  are accepted, since nothing but TCP and DNS leaves the workload. Deny rules 
+  are accepted, since nothing but TCP and DNS leaves the workload. Deny rules
   for `udp` or `icmp` should warn that they effectively do nothing, currently.
 
 - `egress.default: allow` permits all TCP. UDP (other than DNS) and ICMP stay
@@ -339,7 +339,7 @@ These are rejected before the workload is created:
   - On WSL 3.0.5 or later, where MXC enables session host loopback, existing
     all-allow `BRIDGED` configs gain outbound access to Windows loopback
     services. This will happen
-    regardless when updating the WSL SDK in the future. 
+    regardless when updating the WSL SDK in the future.
   - Moving a config to proxied mode blocks UDP (other than DNS) and ICMP.
   - No contract version change. Requests that are valid today behave the
     same, apart from the host loopback change above.

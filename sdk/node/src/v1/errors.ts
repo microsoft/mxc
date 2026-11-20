@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { inspect } from 'node:util';
+
 /**
  * Closed set of MXC wire-format error codes. Mirrors `MxcErrorCode` on the
  * Rust side one-for-one and serialises as the same snake_case strings on
@@ -56,6 +58,10 @@ export interface MxcErrorFields {
   /**
    * Open extension point for backend-specific structured data that has no
    * dedicated field. Named fields are reserved for backend-neutral concepts.
+   *
+   * `details` is not shown by console inspection, but `JSON.stringify` and
+   * object copies include it. It can carry policy resource paths, so filter
+   * it before logging or serializing an error.
    */
   details?: Record<string, unknown>;
 }
@@ -81,7 +87,8 @@ export class MxcError extends Error {
   readonly operation?: string;
   readonly nativeCode?: string;
   readonly remediation?: string;
-  readonly details?: Record<string, unknown>;
+  /** Backend-specific structured data. JSON serialization and copies include it; filter before logging. */
+  declare readonly details?: Record<string, unknown>;
 
   /** Canonical form: pass the full field set as one object. */
   constructor(fields: MxcErrorFields);
@@ -114,13 +121,37 @@ export class MxcError extends Error {
     this.operation = fields.operation;
     this.nativeCode = fields.nativeCode;
     this.remediation = fields.remediation;
-    this.details = fields.details;
+    // An enumerable accessor keeps `details` in copies and JSON, while Node's
+    // uncaught-error printer shows only `[Getter/Setter]` unless the
+    // application enables `inspect.defaultOptions.getters`.
+    let detailsValue = fields.details;
+    Object.defineProperty(this, 'details', {
+      configurable: true,
+      enumerable: true,
+      get: () => detailsValue,
+      set: (value: Record<string, unknown> | undefined) => { detailsValue = value; },
+    });
     // Restore the prototype chain so `instanceof MxcError` keeps working
     // after the TypeScript ES2020 → ES5-compatible class downlevelling.
     Object.setPrototypeOf(this, new.target.prototype);
     this.name = 'MxcError';
   }
 }
+
+Object.defineProperty(MxcError.prototype, inspect.custom, {
+  configurable: true,
+  writable: true,
+  value(this: MxcError): string {
+    const context = [this.code, this.operation, this.nativeCode]
+      .filter((value) => value !== undefined).join(' ');
+    const remediation =
+      this.remediation === undefined ? '' : `\nRemediation: ${this.remediation}`;
+    const header = `${this.name}: ${this.message} [${context}]${remediation}`;
+    const messageLines = this.message.split('\n').length;
+    const frames = this.stack?.split('\n').slice(messageLines).join('\n');
+    return frames ? `${header}\n${frames}` : header;
+  },
+});
 
 /**
  * Constructs an `MxcError` from a wire-format error code. Accepts a plain

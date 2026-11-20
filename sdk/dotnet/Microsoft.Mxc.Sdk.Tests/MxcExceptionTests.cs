@@ -3,6 +3,7 @@
 
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Xunit;
@@ -67,6 +68,23 @@ public class MxcExceptionTests
         Assert.Null(ex.Operation);
         Assert.Null(ex.NativeCode);
         Assert.Null(ex.Remediation);
+        Assert.Null(ex.Details);
+    }
+
+    [Fact]
+    public void BackendDetailsAreIndependentOfTheOriginalJsonDocument()
+    {
+        const string accessDeniedHResult = "0x80070005";
+        MxcException exception;
+        using (var document = JsonDocument.Parse("""{"backend":{"observations":[1,true,"value"]}}"""))
+        {
+            exception = new MxcException(ErrorCode.BackendError, "unchanged",
+                "PSEC.Create", accessDeniedHResult, null, document.RootElement);
+        }
+
+        Assert.Equal("value", exception.Details!.Value.GetProperty("backend").GetProperty("observations")[2].GetString());
+        Assert.Equal("unchanged", exception.Message);
+        Assert.Equal(accessDeniedHResult, exception.NativeCode);
     }
 
     [Fact]

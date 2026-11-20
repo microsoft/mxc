@@ -261,6 +261,7 @@ jobs:
         run: |
           # No `-e`: each run's status is checked below so a failure names it.
           set -uo pipefail
+          # Usage: run_pinned LABEL CARGO_TEST_ARGS...
           run_pinned() {
             local label="$1"; shift
             local log status

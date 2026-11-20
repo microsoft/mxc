@@ -168,6 +168,9 @@ fn backend_error_envelope_line(response: &ScriptResponse) -> Option<String> {
         return None;
     }
 
+    if let Some(error) = response.structured_error() {
+        return Some(console_error_envelope(error.clone()));
+    }
     let mut envelope = serde_json::json!({
         "error": {
             "code": response.failure_phase.error_code().as_str(),
@@ -179,6 +182,13 @@ fn backend_error_envelope_line(response: &ScriptResponse) -> Option<String> {
             serde_json::Value::String(response.extended_error.clone());
     }
     serde_json::to_string(&envelope).ok()
+}
+
+fn console_error_envelope(mut error: crate::mxc_common::mxc_error::ErrorEnvelope) -> String {
+    error.details = None;
+    serde_json::to_string(&serde_json::json!({ "error": error })).unwrap_or_else(|_| {
+        MxcError::backend_error("failed to serialise error envelope").to_envelope_string()
+    })
 }
 
 /// The stderr lines a run's warnings are emitted as, one JSON object each.
@@ -216,7 +226,7 @@ pub fn emit_warning_envelopes(warnings: &[String]) {
 /// bare line and exits 1, which a caller cannot tell from a typed policy
 /// rejection.
 pub fn emit_mxc_error_exit(error: &MxcError) -> ! {
-    eprintln!("{}", error.to_envelope_string());
+    eprintln!("{}", console_error_envelope(error.to_envelope()));
     std::process::exit(error.code.exit_code());
 }
 
@@ -284,6 +294,91 @@ mod tests {
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["error"]["extended_error"], "WIN32_ERROR(1920)");
+    }
+
+    #[test]
+    fn policy_errors_keep_details_for_explicit_serialization_not_console_output() {
+        use crate::mxc_common::models::ScriptResponse;
+        use crate::mxc_common::mxc_error::{ApiFailure, MxcError};
+        let error = MxcError::policy_validation("Creation refused.")
+            .with_api_failure(
+                ApiFailure::new("CreateProcessSecurityEnvironment").with_native_code("0x800704EC"),
+            )
+            .with_remediation("Prepare a restricted request.")
+            .with_details(serde_json::json!({
+                "policyFailures": {"resource": "CLI_POLICY_RESOURCE_MARKER"}
+            }));
+        let response = ScriptResponse::rejected("Creation refused.").with_error(error.clone());
+        for line in [
+            super::backend_error_envelope_line(&response).unwrap(),
+            super::console_error_envelope(error.to_envelope()),
+        ] {
+            assert!(!line.contains("CLI_POLICY_RESOURCE_MARKER"), "{line}");
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert!(value["error"].get("details").is_none());
+            assert_eq!(value["error"]["code"], "policy_validation");
+            assert_eq!(
+                value["error"]["operation"],
+                "CreateProcessSecurityEnvironment"
+            );
+            assert_eq!(value["error"]["nativeCode"], "0x800704EC");
+            assert_eq!(
+                value["error"]["remediation"],
+                "Prepare a restricted request."
+            );
+        }
+        assert!(error
+            .to_envelope_string()
+            .contains("CLI_POLICY_RESOURCE_MARKER"));
+        assert!(response
+            .into_mxc_error()
+            .to_envelope_string()
+            .contains("CLI_POLICY_RESOURCE_MARKER"));
+    }
+
+    #[test]
+    fn policy_resources_do_not_reach_process_stderr() {
+        use crate::mxc_common::models::ScriptResponse;
+        use crate::mxc_common::mxc_error::MxcError;
+        const MODE: &str = "MXC_TEST_CONSOLE_POLICY_ERROR";
+        const TEST: &str =
+            "core_modules::mxc_common::script_runner::tests::policy_resources_do_not_reach_process_stderr";
+        if let Ok(mode) = std::env::var(MODE) {
+            let error = MxcError::policy_validation("Creation refused.").with_details(
+                serde_json::json!({"policyFailures": {"resource": "CLI_POLICY_RESOURCE_MARKER"}}),
+            );
+            if mode == "early" {
+                super::emit_mxc_error_exit(&error);
+            }
+            super::emit_backend_error_envelope(
+                &ScriptResponse::rejected("Creation refused.").with_error(error),
+            );
+            return;
+        }
+        for mode in ["backend", "early"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, mode);
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if mode == "early" { 1 } else { 0 })
+            );
+            for bytes in [&output.stdout, &output.stderr] {
+                assert!(!String::from_utf8_lossy(bytes).contains("CLI_POLICY_RESOURCE_MARKER"));
+            }
+            let text = String::from_utf8(output.stderr).unwrap();
+            let line = text.lines().find(|line| line.starts_with('{')).unwrap();
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["error"]["code"], "policy_validation");
+            assert_eq!(value["error"]["message"], "Creation refused.");
+        }
     }
 
     #[test]
