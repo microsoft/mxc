@@ -843,6 +843,23 @@ function Get-SandboxNetworkRecord {
     Get-ChildItem -Path $stores -Filter "$key.network.json" -Recurse -File -ErrorAction SilentlyContinue
 }
 
+function Get-SandboxAddress {
+    param([string]$SandboxId)
+
+    $r = Invoke-StateAware -Request @{
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{ commandLine = 'hostname -i'; timeout = 30000 }
+    }
+    if ($r.Stdout -match '\b(\d{1,3}(\.\d{1,3}){3})\b') { return $Matches[1] }
+    return $null
+}
+
+function Get-AddressSubnet {
+    param([string]$Ip)
+    ($Ip -split '\.')[0..2] -join '.'
+}
+
 # ---------------- Backend-availability probe ----------------
 
 # The shortened idle watchdog ($env:MXC_WSLC_DAEMON_IDLE_*) is only honored by a
@@ -1941,23 +1958,6 @@ nohup python3 /tmp/listen.py >/tmp/listener.log 2>&1 &
 sleep 1
 echo LISTENER_STARTED
 '@
-function Get-NwAddress {
-    param([string]$SandboxId)
-
-    $r = Invoke-StateAware -Request @{
-        phase = 'exec'
-        sandboxId = $SandboxId
-        process = @{ commandLine = 'hostname -i'; timeout = 30000 }
-    }
-    if ($r.Stdout -match '\b(\d{1,3}(\.\d{1,3}){3})\b') { return $Matches[1] }
-    return $null
-}
-
-function Get-NwSubnet {
-    param([string]$Ip)
-    ($Ip -split '\.')[0..2] -join '.'
-}
-
 function Start-NwListener {
     param([string]$SandboxId)
 
@@ -1967,7 +1967,7 @@ function Start-NwListener {
         process = @{ commandLine = $nwListenerScript; timeout = 30000 }
     }
     Assert-True ($r.Stdout -match 'LISTENER_STARTED') "$SandboxId started its listener (stdout: $($r.Stdout.Trim()))"
-    $ip = Get-NwAddress -SandboxId $SandboxId
+    $ip = Get-SandboxAddress -SandboxId $SandboxId
     Assert-True ($null -ne $ip) "$SandboxId reports its IPv4 address"
     return $ip
 }
@@ -2027,7 +2027,7 @@ try {
             $peerBoot = Get-SandboxBootId -SandboxId $script:nwPeerId -What 'the peer'
             Assert-True ($null -ne $listenerBoot -and $listenerBoot -ceq $peerBoot) `
                 "both sandboxes report the same VM boot ID (listener $listenerBoot, peer $peerBoot)"
-            Assert-True ((Get-NwSubnet $script:nwListenerIp) -ne (Get-NwSubnet $script:nwPeerIp)) `
+            Assert-True ((Get-AddressSubnet $script:nwListenerIp) -ne (Get-AddressSubnet $script:nwPeerIp)) `
                 "the sandboxes are on different /24s (listener $($script:nwListenerIp), peer $($script:nwPeerIp))"
         } | Out-Null
 
@@ -2076,7 +2076,6 @@ try {
         } | Out-Null
     }
 
-    # Subnets are allocated lowest first, so the next sandbox gets the freed /24.
     if ($nwPeerReady -and $script:nwListenerIp) {
         Run-StateAwareTest "N: deprovision deletes the network and frees its subnet" {
             $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:nwListenerId
@@ -2092,9 +2091,9 @@ try {
             Assert-True ($null -ne $script:nwReuseId) "a third bridged sandbox provisioned"
             if ($null -eq $script:nwReuseId) { return }
             $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:nwReuseId
-            $reuseIp = Get-NwAddress -SandboxId $script:nwReuseId
-            Assert-True ($reuseIp -and (Get-NwSubnet $reuseIp) -eq (Get-NwSubnet $script:nwListenerIp)) `
-                "the third sandbox reused the listener's /24 (got '$reuseIp', listener $($script:nwListenerIp))"
+            $reuseIp = Get-SandboxAddress -SandboxId $script:nwReuseId
+            Assert-True ($reuseIp -and (Get-AddressSubnet $reuseIp) -eq (Get-AddressSubnet $script:nwListenerIp)) `
+                "the third sandbox got the listener's freed /24, the lowest free one (got '$reuseIp', listener $($script:nwListenerIp))"
         } | Out-Null
     }
 } finally {
@@ -2887,6 +2886,120 @@ Run-StateAwareTest "L: isolated provision names the cold store when the only war
         Remove-Item -LiteralPath $root -Recurse -Force
     }
 } | Out-Null
+
+# ---------------- Lifecycle R: recovery after a killed daemon ----------------
+
+$rRoot = [IO.Path]::GetFullPath(
+    (Join-Path ([IO.Path]::GetTempPath()) ("mxc-wslc-recovery-" + [guid]::NewGuid().ToString('N'))))
+$rWslc = Join-Path $env:ProgramFiles 'WSL\wslc.exe'
+$rOldLocalAppData = $env:LOCALAPPDATA
+$rOldStateRoot = $env:MXC_WSLC_STATE_ROOT
+$script:rFirstId = $null
+$script:rSecondId = $null
+
+function Stop-RecoveryDaemon {
+    $ErrorActionPreference = 'Continue'
+    $record = Join-Path $env:MXC_WSLC_STATE_ROOT 'daemon.json'
+    if (-not (Test-Path $record)) { return }
+    $daemonPid = [int](Get-Content $record -Raw | ConvertFrom-Json).pid
+    $daemon = Get-Process -Id $daemonPid -ErrorAction SilentlyContinue
+    if ($null -eq $daemon -or $daemon.ProcessName -ne $DaemonProcName) { return }
+    $daemon.Kill()
+    $daemon.WaitForExit()
+
+    # A killed daemon's WSLC session keeps running and holds its image store.
+    $sessions = @(& $rWslc system session list 2>&1 | ForEach-Object {
+        if ("$_" -match '^\s*\d+\s+(\d+)\s+(mxc-wslc-daemon-\S+)\s*$' -and [int]$Matches[1] -eq $daemonPid) {
+            $Matches[2]
+        }
+    })
+    foreach ($session in $sessions) {
+        $null = & $rWslc --session $session system session terminate 2>&1
+        if ($LASTEXITCODE -eq 0) { $session }
+    }
+}
+
+$null = New-Item -ItemType Directory -Path $rRoot
+try {
+    $env:LOCALAPPDATA = $rRoot
+    $env:MXC_WSLC_STATE_ROOT = Join-Path $rRoot 'records'
+
+    $rLeftover = Run-StateAwareTest "R: a killed daemon leaves its sandbox's network recorded" {
+        Assert-True (Test-Path $rWslc) "wslc.exe, which ends a killed daemon's WSLC session, is at $rWslc"
+        if (-not (Test-Path $rWslc)) { return }
+        $script:rFirstId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_bridged.json'
+        Assert-True ($null -ne $script:rFirstId) "a bridged sandbox provisioned in a private image store"
+        if ($null -eq $script:rFirstId) { return }
+        $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:rFirstId
+        $ip = Get-SandboxAddress -SandboxId $script:rFirstId
+        Assert-True ((Get-AddressSubnet $ip) -eq '10.231.0') "the sandbox is on the first /24 (got '$ip')"
+
+        $ended = @(Stop-RecoveryDaemon)
+        Assert-True ($ended.Count -eq 1) `
+            "the daemon was killed and its WSLC session ended (ended: $($ended -join ', '))"
+        $count = @(Get-SandboxNetworkRecord $script:rFirstId).Count
+        Assert-True ($count -eq 1) "the killed daemon's network is still recorded (found $count)"
+    }
+
+    if ($rLeftover) {
+        Run-StateAwareTest "R: the next daemon session deletes the leftover network" {
+            $script:rSecondId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_bridged.json'
+            Assert-True ($null -ne $script:rSecondId) "a new daemon provisioned a bridged sandbox in the same store"
+            if ($null -eq $script:rSecondId) { return }
+            $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:rSecondId
+            $count = @(Get-SandboxNetworkRecord $script:rFirstId).Count
+            Assert-True ($count -eq 0) "the leftover network's record is gone (found $count)"
+            $ip = Get-SandboxAddress -SandboxId $script:rSecondId
+            Assert-True ((Get-AddressSubnet $ip) -eq '10.231.0') `
+                "the new sandbox got the deleted network's /24, the lowest free one (got '$ip')"
+        } | Out-Null
+    }
+
+    if ($script:rSecondId) {
+        Run-StateAwareTest "R: a proxied create-and-run deletes a killed daemon's leftover network" {
+            $ended = @(Stop-RecoveryDaemon)
+            Assert-True ($ended.Count -eq 1) `
+                "the daemon was killed and its WSLC session ended (ended: $($ended -join ', '))"
+            $count = @(Get-SandboxNetworkRecord $script:rSecondId).Count
+            Assert-True ($count -eq 1) "the killed daemon's network is still recorded (found $count)"
+
+            $config = Join-Path $rRoot 'proxied-run.json'
+            @{
+                version = '1.0.0'
+                containerId = 'wslc-recovery-proxied-run'
+                containment = 'wslc'
+                process = @{ commandLine = 'echo RECOVERY_PROXIED_RUN_OK' }
+                network = @{
+                    egress = @{ default = 'allow'; deny = @(@{ to = @(@{ cidr = '8.8.8.8/32' }) }) }
+                    ingress = @{ default = 'deny'; hostLoopback = 'deny' }
+                }
+                wslc = @{
+                    image = 'alpine:latest'
+                    storagePath = Join-Path $rRoot 'mxc\wslc-store-slots\slot-0'
+                }
+            } | ConvertTo-Json -Depth 8 | Set-Content -Path $config -Encoding utf8
+
+            $prevPref = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $output = & $WxcExec --debug --config $config 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+            $ErrorActionPreference = $prevPref
+
+            Assert-True ($exitCode -eq 0 -and $output -match 'RECOVERY_PROXIED_RUN_OK') `
+                "the proxied run in the daemon's image store succeeded (exit $exitCode)"
+            Assert-True ($output -match 'Removed sandbox networks left by an earlier daemon') `
+                "the proxied run reported deleting the leftover network"
+            $count = @(Get-SandboxNetworkRecord $script:rSecondId).Count
+            Assert-True ($count -eq 0) "the leftover network's record is gone (found $count)"
+            if ($exitCode -ne 0) { Write-Host $output -ForegroundColor Gray }
+        } | Out-Null
+    }
+} finally {
+    $null = Stop-RecoveryDaemon
+    $env:LOCALAPPDATA = $rOldLocalAppData
+    $env:MXC_WSLC_STATE_ROOT = $rOldStateRoot
+    Remove-Item -LiteralPath $rRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # ---------------- Lifecycle S: store isolation from create-and-run ----------------
 

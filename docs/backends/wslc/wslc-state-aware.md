@@ -833,6 +833,11 @@ process — only possible if the container stayed warm), filesystem volumes, bri
 proxy, per-sandbox network isolation, validation rejections, exec concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
 
+The recovery tests kill a private daemon while a bridged sandbox is running,
+and end its WSLC session with `wslc.exe`. They check that the next daemon
+session on that image store, and a proxied create-and-run in it, delete the
+leftover network and reuse its subnet.
+
 The session tests place two sandboxes in one session and compare their VM
 boot IDs. They also keep two identically sized sessions alive together and
 check that releasing one leaves the other's sandbox usable. The setup
