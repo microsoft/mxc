@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Parses tagged Seatbelt reports from `log stream --style ndjson` output and
-//! turns them into `captureDenials` results. Platform-agnostic so the parsing
-//! is unit-tested on every host.
+//! Parses tagged Seatbelt reports from `log stream` or `log show` ndjson
+//! output and turns them into `captureDenials` results. Platform-agnostic so
+//! the parsing is unit-tested on every host.
 
 use std::collections::HashSet;
 
@@ -67,7 +67,7 @@ struct NdjsonEvent {
     timestamp: Option<String>,
 }
 
-/// Classifies one `log stream` output line for the run tagged `tag`.
+/// Classifies one `log` ndjson output line for the run tagged `tag`.
 pub(crate) fn parse_stream_line(line: &str, tag: &str) -> StreamLine {
     let Ok(event) = serde_json::from_str::<NdjsonEvent>(line.trim_end()) else {
         return StreamLine::Ignored;

@@ -416,7 +416,7 @@ the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
 |---|---|---|
 | `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
 | `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
-| `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
+| `retainEtl` | `false` | Keeps the raw `log show` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
 
 MXC adds a per-run ID to the file name (`denials.json` becomes
 `denials.<pid>_<id>.json`). Names without an extension get `.json` first.
@@ -452,7 +452,7 @@ file.
 
 **Limits**
 
-MXC counts repeated denials as they arrive instead of storing each one, so a
+MXC counts repeated denials instead of storing each one, so a
 workload that hits the same denial many times doesn't push other denials out
 of the report. The report lists at most 10,000 different denials, and the
 verbose file at most 4,096 groups; extra groups are only counted. MXC skips
@@ -476,9 +476,14 @@ adds a warning; the report and verbose file are not affected.
   marked truncated. macOS limits each report to about 1 KB. The access is
   still blocked in `block` mode and allowed in `allow` mode.
 
-- MXC reads the reports with `log stream`. If it can't collect every report
-  before the workload exits, the verbose file sets `processedEventsTruncated`
-  to `true`. Accounts that can't run `log stream` haven't been tested.
+- MXC reads the reports with `log show` after the workload exits. This adds about a second to each run. Before the
+  workload starts, a short `log stream` confirms that reports are being
+  logged. If `log show` takes over 20 seconds, or its output still doesn't
+  cover the whole run after 5 seconds of retries, the report is
+  marked truncated and the verbose file sets `processedEventsTruncated` to
+  `true`. If `log show` fails, the capture
+  fails. Accounts that can't run `log stream` or `log show` haven't been
+  tested.
 
 ## Process environment
 

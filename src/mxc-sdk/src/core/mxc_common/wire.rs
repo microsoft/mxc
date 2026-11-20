@@ -434,7 +434,7 @@ pub struct SeatbeltCaptureDenials {
     /// Absolute path for the JSON denials report; a run id is inserted into
     /// the file stem. Its parent directory must exist.
     pub output_path: Option<String>,
-    /// Keep the raw `log stream` trace next to the report. Defaults to `false`.
+    /// Keep the raw `log show` trace next to the report. Defaults to `false`.
     pub retain_etl: Option<bool>,
 }
 

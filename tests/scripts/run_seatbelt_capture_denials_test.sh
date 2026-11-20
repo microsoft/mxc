@@ -42,7 +42,7 @@ trap cleanup_capture EXIT
 mkdir -p "$TESTDIR/ungranted" "$TESTDIR/denied" "$TESTDIR/out" "$TESTDIR/gate"
 echo "CAPTURE_SECRET_CONTENT" >"$TESTDIR/ungranted/secret.txt"
 echo "CAPTURE_DENIED_CONTENT" >"$TESTDIR/denied/secret.txt"
-for name in overlap_a overlap_b drain killed watchdog; do
+for name in overlap_a overlap_b; do
     echo "CAPTURE_SENTINEL_CONTENT" >"$TESTDIR/ungranted/$name.txt"
     echo "CAPTURE_SENTINEL_CONTENT" >"$TESTDIR/ungranted/$name-after.txt"
 done
@@ -96,38 +96,21 @@ open_gate() {
     for name in "$@"; do touch "$TESTDIR/gate/$name"; done
 }
 
-# Wait until background run MXC has a ready collector and its sentinel
-# workload NAME is running. Sets COLLECTOR to the `log stream` PID,
-# WATCHDOG to its parent shell's PID, and WORKLOAD to the workload shell's PID.
-COLLECTOR=""
-WATCHDOG=""
-WORKLOAD=""
-wait_for_collector() {
-    local label="$1" mxc="$2" name="$3" output="$4" shell
-    COLLECTOR=""
+# Wait until background run MXC's sentinel workload NAME is running, and
+# check that MXC's `log stream` readiness check has stopped by then.
+wait_for_workload() {
+    local label="$1" mxc="$2" name="$3" output="$4"
     for _ in $(seq 1 150); do
-        for shell in $(pgrep -P "$mxc" -f '/usr/bin/log stream'); do
-            COLLECTOR="$(pgrep -P "$shell" -f '/usr/bin/log stream')"
-            WATCHDOG="$shell"
-        done
-        WORKLOAD="$(pgrep -P "$mxc" -f "ungranted/$name")"
-        [ -n "$COLLECTOR" ] && [ -n "$WORKLOAD" ] && return
+        if pgrep -P "$mxc" -f "ungranted/$name" >/dev/null; then
+            ! pgrep -P "$mxc" -f '/usr/bin/log stream' >/dev/null ||
+                fail "$label (log stream is still running)" "$(cat "$output")"
+            pass "$label"
+            return
+        fi
         kill -0 "$mxc" 2>/dev/null || fail "$label (mxc-exec-mac exited early)" "$(cat "$output")"
         sleep 0.1
     done
-    fail "$label (no running collector and workload after 15s)" "$(cat "$output")"
-}
-
-# `log stream` can take a moment to see its closed pipe after a kill.
-expect_collector_gone() {
-    local label="$1" pid="$2"
-    for _ in $(seq 1 50); do
-        kill -0 "$pid" 2>/dev/null || { pass "$label"; return; }
-        sleep 0.1
-    done
-    ps -o pid,ppid,stat,command -p "$pid"
-    kill -KILL "$pid" 2>/dev/null || true
-    fail "$label (log stream $pid is still running)"
+    fail "$label (the workload did not start within 15s)" "$(cat "$output")"
 }
 
 # Assert the report lists RESOURCE with the given type and access.
@@ -182,7 +165,7 @@ read_pointer "block mode with deniedPaths writes a report"
 expect_listed "block mode lists the default-denied read" file "$SECRET" read
 expect_listed "block mode lists the explicitly denied read" file "$TESTDIR/denied/secret.txt" read
 
-# --- retainEtl keeps the raw log stream ---------------------------------------
+# --- retainEtl keeps the raw log output ---------------------------------------
 
 config="$(render seatbelt_capture_denials_block.json TESTDIR "$TESTDIR" OUTPUT "$TESTDIR/out/denials.json")"
 edit_config "$config" 'config["seatbelt"]["captureDenials"]["retainEtl"] = True'
@@ -348,9 +331,8 @@ done
 # --- repeated denials ---------------------------------------------------------
 
 # 11,000 denials of ~1 KB paths (10 files read 1,100 times each), then one new
-# denial. Repeats are counted as they arrive, so even more repeats than the
-# 10,000-denial limit may not push out the late denial or mark the report
-# truncated.
+# denial. Repeats are counted, so even more repeats than the 10,000-denial
+# limit may not push out the late denial or mark the report truncated.
 LONGDIR="$TESTDIR/ungranted/$(/usr/bin/python3 -c 'print("/".join(["d" * 200] * 4))')"
 mkdir -p "$LONGDIR"
 for name in f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 late; do echo x >"$LONGDIR/$name"; done
@@ -374,8 +356,8 @@ rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- different-denial limit ---------------------------------------------------
 
-# 15,000 different denials; the margin covers reports `log stream` drops under
-# load. The report keeps the first 10,000, and the run still finishes cleanly.
+# 15,000 different denials. The report keeps the first 10,000, and the run
+# still finishes cleanly.
 MANYDIR="$TESTDIR/ungranted/many"
 mkdir -p "$MANYDIR"
 /usr/bin/python3 - "$MANYDIR" <<'EOF' || fail "could not create the limit test files"
@@ -384,12 +366,8 @@ for i in range(15000):
     open(os.path.join(sys.argv[1], str(i)), "w").close()
 EOF
 chmod -R a+rX "$MANYDIR"
-# The workload waits for open_gate many, so this run's collector can be found.
-start_background "$(render seatbelt_capture_denials_unique_limit.json TESTDIR "$TESTDIR" \
-    MANYDIR "$MANYDIR" COUNT 15000 OUTPUT "$TESTDIR/out/limit.json")" "$TESTDIR/limit.out"
-wait_for_collector "the different-denial limit run starts" "$BG_PID" many "$TESTDIR/limit.out"
-open_gate many
-finish_background "$BG_PID" "$TESTDIR/limit.out"
+run_config "$(render seatbelt_capture_denials_unique_limit.json \
+    MANYDIR "$MANYDIR" COUNT 15000 OUTPUT "$TESTDIR/out/limit.json")"
 expect_ok "a run past the different-denial limit completes" "CAPTURE_UNIQUE_LOOP_DONE"
 read_pointer "a run past the different-denial limit writes a report"
 [ "$(pointer_field deniedResourcesTruncated)" = True ] ||
@@ -402,25 +380,22 @@ assert len(report["denials"]) == 10000, len(report["denials"])
 assert verbose["summary"]["actionableLimitReached"], verbose["summary"]
 EOF
 pass "the report stops at 10,000 different denials"
-expect_collector_gone "a run past the different-denial limit stops its log stream" "$COLLECTOR"
 rm -rf "$MANYDIR" "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- overlapping runs with the same outputPath ---------------------------------
 
-# Each run reads its after-gate file once both collectors are running, so
-# a collector not filtered to its own run would list the other run's reads.
+# Each run reads its after-gate file while the other run is running, so a
+# capture not filtered to its own run would list the other run's reads.
 render_sentinel overlap_a "$TESTDIR/out/overlap.json"
 CONFIG_A="$SENTINEL_CONFIG"
 render_sentinel overlap_b "$TESTDIR/out/overlap.json"
 CONFIG_B="$SENTINEL_CONFIG"
 start_background "$CONFIG_A" "$TESTDIR/overlap_a.out"
 PID_A="$BG_PID"
-wait_for_collector "overlapping run A starts" "$PID_A" overlap_a "$TESTDIR/overlap_a.out"
-COLLECTOR_A="$COLLECTOR"
+wait_for_workload "overlapping run A starts" "$PID_A" overlap_a "$TESTDIR/overlap_a.out"
 start_background "$CONFIG_B" "$TESTDIR/overlap_b.out"
 PID_B="$BG_PID"
-wait_for_collector "overlapping run B starts" "$PID_B" overlap_b "$TESTDIR/overlap_b.out"
-COLLECTOR_B="$COLLECTOR"
+wait_for_workload "overlapping run B starts" "$PID_B" overlap_b "$TESTDIR/overlap_b.out"
 open_gate overlap_a overlap_b
 
 finish_background "$PID_A" "$TESTDIR/overlap_a.out"
@@ -438,65 +413,6 @@ expect_listed "overlapping run B lists its own read" file "$TESTDIR/ungranted/ov
 ! grep -qF "ungranted/overlap_b" "$REPORT_A" || fail "run A's report lists run B's read" "$(cat "$REPORT_A")"
 ! grep -qF "ungranted/overlap_a" "$REPORT_B" || fail "run B's report lists run A's read" "$(cat "$REPORT_B")"
 pass "each overlapping report excludes the other run's read"
-expect_collector_gone "overlapping run A's log stream stopped" "$COLLECTOR_A"
-expect_collector_gone "overlapping run B's log stream stopped" "$COLLECTOR_B"
-
-# --- incomplete drain ----------------------------------------------------------
-
-# A stopped `log stream` never shows the end marker, so MXC cannot confirm
-# that it received every event.
-render_sentinel drain "$TESTDIR/out/drain.json"
-start_background "$SENTINEL_CONFIG" "$TESTDIR/drain.out"
-wait_for_collector "the drain run starts" "$BG_PID" drain "$TESTDIR/drain.out"
-kill -STOP "$COLLECTOR"
-open_gate drain
-finish_background "$BG_PID" "$TESTDIR/drain.out"
-expect_ok "a run whose log stream stalls still completes" "CAPTURE_SENTINEL_BLOCKED"
-expect_marker "the CLI warns that the report may be incomplete" \
-    '{"warning":{"message":"Seatbelt captureDenials could not confirm that all sandbox log events were received'
-read_pointer "a stalled log stream still produces a report"
-[ "$(pointer_field deniedResourcesTruncated)" = True ] ||
-    fail "an undrained report is not marked truncated" "$POINTER"
-pass "an undrained report is marked truncated"
-expect_collector_gone "the stalled log stream was stopped" "$COLLECTOR"
-
-# --- mxc-exec-mac killed mid-run -----------------------------------------------
-
-render_sentinel killed "$TESTDIR/out/killed.json"
-start_background "$SENTINEL_CONFIG" "$TESTDIR/killed.out"
-wait_for_collector "the run to kill starts" "$BG_PID" killed "$TESTDIR/killed.out"
-# The workload outlives a killed MXC; clean it up here.
-kill -KILL "$BG_PID"
-finish_background "$BG_PID" "$TESTDIR/killed.out"
-expect_collector_gone "killing mxc-exec-mac stops its log stream" "$COLLECTOR"
-kill_workload "$WORKLOAD"
-
-# --- collector's watchdog shell killed mid-run ---------------------------------
-
-# `log stream` keeps running without its parent shell. MXC must still stop it
-# rather than wait forever for its output to close.
-render_sentinel watchdog "$TESTDIR/out/watchdog.json"
-start_background "$SENTINEL_CONFIG" "$TESTDIR/watchdog.out"
-wait_for_collector "the watchdog run starts" "$BG_PID" watchdog "$TESTDIR/watchdog.out"
-kill -KILL "$WATCHDOG"
-open_gate watchdog
-for _ in $(seq 1 300); do
-    kill -0 "$BG_PID" 2>/dev/null || break
-    sleep 0.1
-done
-if kill -0 "$BG_PID" 2>/dev/null; then
-    kill -KILL "$COLLECTOR" 2>/dev/null
-    fail "mxc-exec-mac hung after its log stream lost its watchdog shell" "$(cat "$TESTDIR/watchdog.out")"
-fi
-finish_background "$BG_PID" "$TESTDIR/watchdog.out"
-expect_ok "a run whose watchdog shell was killed completes" "CAPTURE_SENTINEL_BLOCKED"
-! grep -qF "could not confirm that all sandbox log events" <<<"$OUT" ||
-    fail "a run whose watchdog shell was killed did not drain its log stream" "$OUT"
-read_pointer "a run whose watchdog shell was killed writes a report"
-[ "$(pointer_field deniedResourcesTruncated)" = False ] ||
-    fail "a run whose watchdog shell was killed is marked truncated" "$POINTER"
-expect_listed "the report lists the read made after the watchdog died" file "$TESTDIR/ungranted/watchdog-after.txt" read
-expect_collector_gone "the orphaned log stream was stopped" "$COLLECTOR"
 
 # --- UI denials under guiAccess ---------------------------------------------
 

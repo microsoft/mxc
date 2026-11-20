@@ -745,7 +745,7 @@ export interface SeatbeltCaptureDenials {
    */
   outputPath?: string;
   /**
-   * Whether to keep the run's raw `log stream` lines as `.seatbelt.log` next to the report. The trace can contain sensitive paths; callers are responsible for deleting it.
+   * Whether to keep the run's raw `log show` lines as `.seatbelt.log` next to the report. The trace can contain sensitive paths; callers are responsible for deleting it.
    */
   retainEtl?: boolean;
 }

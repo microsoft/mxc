@@ -286,9 +286,9 @@ fn spawn_exec(
     command.current_dir(cwd);
     command.env("PWD", cwd);
 
-    // Fail closed: never run a capture request without a live log stream.
-    if capture_plan.as_ref().is_some_and(|plan| plan.allow_mode) {
-        logger.warning_line(ALLOW_MODE_WARNING);
+    // Fail closed: never run a capture request unless reports reach the log.
+    if let Some(plan) = capture_plan.as_ref().filter(|plan| plan.allow_mode) {
+        logger.warning_line(&allow_mode_warning(&plan.output_path));
     }
     let capture = capture_plan
         .map(|plan| plan.start())
@@ -429,7 +429,7 @@ struct ActiveDenialCapture {
     trace_path: Option<PathBuf>,
 }
 
-/// Stops `log stream` and deletes the trace when the workload never ran.
+/// Discards the capture and deletes the trace when the workload never ran.
 fn discard_capture(
     capture: Option<ActiveDenialCapture>,
     mut response: ScriptResponse,
@@ -449,7 +449,7 @@ fn discard_capture(
 }
 
 impl ActiveDenialCapture {
-    /// Stops `log stream`. Returns the collected events and the trace path if
+    /// Reads the run's reports. Returns the collected events and the trace path if
     /// the trace was fully written; a partly written trace is removed.
     fn stop(self) -> (std::io::Result<CollectedEvents>, PathBuf, Option<PathBuf>) {
         let collected = self.collector.finish().map_err(|error| {
@@ -511,8 +511,13 @@ fn plan_denial_capture(
 
 const TRACE_SUFFIX: &str = "seatbelt.log";
 
-const ALLOW_MODE_WARNING: &str = "Seatbelt captureDenials mode 'allow' ran the workload without \
-     enforcing default-denied operations; denials.json lists what would have been blocked";
+fn allow_mode_warning(output_path: &Path) -> String {
+    format!(
+        "Seatbelt captureDenials mode 'allow' ran the workload without enforcing \
+         default-denied operations; the denials report {} lists what would have been blocked",
+        output_path.display()
+    )
+}
 
 /// A running Seatbelt-sandboxed process: the child plus, for the pipes path,
 /// its parent-side pipe ends. See [`SandboxProcess`] for the contract.
@@ -544,7 +549,7 @@ struct SeatbeltSandboxProcess {
     members_cleaned: bool,
     /// Reported through `warnings()`, so the exit code is kept.
     cleanup_failures: Vec<String>,
-    /// Live `captureDenials` log stream; consumed by `wait()`.
+    /// Pending `captureDenials` collection; consumed by `wait()`.
     capture: Option<ActiveDenialCapture>,
     /// A failed capture, replayed by later `wait()` calls.
     capture_error: Option<(std::io::ErrorKind, String)>,
@@ -553,7 +558,7 @@ struct SeatbeltSandboxProcess {
 }
 
 impl SeatbeltSandboxProcess {
-    /// Drains the capture stream after the child exits and writes denials.json.
+    /// Collects the run's reports after the child exits and writes the denials report.
     fn finish_capture(&mut self, exit_code: Option<i32>) -> std::io::Result<()> {
         if let Some((kind, message)) = &self.capture_error {
             return Err(std::io::Error::new(*kind, message.clone()));
@@ -618,12 +623,12 @@ impl SeatbeltSandboxProcess {
         trace_path: Option<&Path>,
         exit_code: Option<i32>,
     ) -> std::io::Result<()> {
-        if !collected.drained {
-            self.capture_warnings.push(
+        if !collected.drained() {
+            self.capture_warnings.push(format!(
                 "Seatbelt captureDenials could not confirm that all sandbox log events were \
-                 received; denials.json may be incomplete"
-                    .to_string(),
-            );
+                 received; the denials report {} may be incomplete",
+                output_path.display()
+            ));
         }
         if let (true, Some(path)) = (collected.trace_truncated, trace_path) {
             self.capture_warnings.push(format!(
@@ -1957,11 +1962,13 @@ os.close(fd)
         assert_eq!(process.wait().unwrap(), 3);
 
         assert_eq!(stdout, "visible");
-        assert!(logger.warnings().contains(&ALLOW_MODE_WARNING.to_string()));
         let pointer = process
             .output_metadata()
             .and_then(|metadata| metadata.capture_denials.as_ref())
             .expect("capture pointer");
+        assert!(logger
+            .warnings()
+            .contains(&allow_mode_warning(Path::new(&pointer.output_path))));
         let document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&pointer.output_path).unwrap()).unwrap();
         assert_eq!(document["summary"]["exitCode"], 3);
@@ -2020,7 +2027,7 @@ os.close(fd)
         use crate::seatbelt_common::denial_capture::test_tools;
 
         test_tools::set(test_tools::TestTools {
-            log: Some(vec![
+            stream: Some(vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 log.to_string(),
