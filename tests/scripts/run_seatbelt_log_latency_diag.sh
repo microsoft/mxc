@@ -24,14 +24,22 @@ def show(tag, window):
                 if '"eventMessage"' in l]
     return messages, time.monotonic() - started
 
-def scenario(name, workload_code):
+# open: stream runs through the workload. closed: stream stops before the
+# workload, like MXC. none: no stream at all.
+def scenario(name, workload_code, mode):
     tag = "mxcdiag-" + uuid.uuid4().hex[:12]
     directory = tempfile.mkdtemp(prefix="mxcdiag.", dir="/private/var/tmp")
-    stream = subprocess.Popen(
-        ["/usr/bin/log", "stream", "--style", "ndjson", "--predicate",
-         'sender == "Sandbox" AND eventMessage CONTAINS "%s"' % tag],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    time.sleep(2)
+    stream = None
+    if mode != "none":
+        stream = subprocess.Popen(
+            ["/usr/bin/log", "stream", "--style", "ndjson", "--predicate",
+             'sender == "Sandbox" AND eventMessage CONTAINS "%s"' % tag],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        time.sleep(2)
+        if mode == "closed":
+            stream.terminate()
+            stream.communicate()
+            stream = None
     run_started = time.monotonic()
     subprocess.run(["/usr/bin/sandbox-exec", "-p", profile(tag, directory),
                     "/usr/bin/python3", "-c", workload_code, directory],
@@ -43,23 +51,29 @@ def scenario(name, workload_code):
     seen_after = None
     polls = 0
     show_times = []
+    first = None
     while time.monotonic() - marker_at < POLL_LIMIT:
         messages, took = show(tag, "300s")
         polls += 1
         show_times.append(took)
+        if first is None:
+            first = len(messages)
         if any("marker-done" in m for m in messages):
             seen_after = time.monotonic() - marker_at
             break
         time.sleep(0.25)
     wide, _ = show(tag, "300s")
     narrow, _ = show(tag, "%ds" % (int(time.monotonic() - run_started) + 2))
-    time.sleep(1)
-    stream.terminate()
-    streamed = sum('"eventMessage"' in l for l in stream.communicate()[0].splitlines())
+    streamed = "-"
+    if stream is not None:
+        time.sleep(1)
+        stream.terminate()
+        streamed = sum('"eventMessage"' in l for l in stream.communicate()[0].splitlines())
     seen = "%.2fs" % seen_after if seen_after is not None else "NEVER within %ds" % POLL_LIMIT
-    print("%-22s marker in log show after %s (%d polls, show took max %.2fs); "
-          "reports: show(300s)=%d show(MXC window)=%d stream=%d"
-          % (name, seen, polls, max(show_times), len(wide), len(narrow), streamed), flush=True)
+    print("%-22s stream=%-6s marker after %s (%d polls, show max %.2fs); "
+          "first show=%d, show(300s)=%d, show(MXC window)=%d, stream=%s"
+          % (name, mode, seen, polls, max(show_times), first, len(wide), len(narrow), streamed),
+          flush=True)
     subprocess.run(["rm", "-rf", directory])
 
 single = "import sys; open(sys.argv[1] + '/one', 'w')"
@@ -67,10 +81,15 @@ repeats = ("import sys\nfor i in range(11000):\n    try: open('%s/f%d' % (sys.ar
            "    except OSError: pass")
 unique = ("import sys\nfor i in range(15000):\n    try: open('%s/u%d' % (sys.argv[1], i), 'w')\n"
           "    except OSError: pass")
-for i in range(5):
-    scenario("single denial #%d" % (i + 1), single)
-scenario("11k repeated denials", repeats)
-scenario("15k unique denials", unique)
-scenario("single after floods", single)
+MODES = ["open", "closed", "none"]
+for i in range(3):
+    for mode in MODES:
+        scenario("single denial #%d" % (i + 1), single, mode)
+for mode in MODES:
+    scenario("11k repeated denials", repeats, mode)
+for mode in MODES:
+    scenario("15k unique denials", unique, mode)
+for mode in MODES:
+    scenario("single after floods", single, mode)
 EOF
 exit 0
