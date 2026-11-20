@@ -68,6 +68,7 @@ run_test() {
     echo ""
 }
 
+run_test "Log latency diagnostic (quiet host)" "$SCRIPT_DIR/run_seatbelt_log_latency_diag.sh"
 run_test "Seatbelt Basic" "$SCRIPT_DIR/run_seatbelt_basic_test.sh"
 run_test "Seatbelt Process Lifetime" "$SCRIPT_DIR/run_seatbelt_process_lifetime_test.sh"
 run_test "Seatbelt Filesystem" "$SCRIPT_DIR/run_seatbelt_filesystem_test.sh"
@@ -82,6 +83,7 @@ run_test "Seatbelt UI" "$SCRIPT_DIR/run_seatbelt_ui_test.sh"
 run_test "Seatbelt guiAccess" "$SCRIPT_DIR/run_seatbelt_gui_access_test.sh"
 run_test "Seatbelt Options" "$SCRIPT_DIR/run_seatbelt_options_test.sh"
 run_test "Seatbelt captureDenials" "$SCRIPT_DIR/run_seatbelt_capture_denials_test.sh"
+run_test "Log latency diagnostic (after captureDenials)" "$SCRIPT_DIR/run_seatbelt_log_latency_diag.sh"
 run_test "Seatbelt Terminal Isolation" "$SCRIPT_DIR/run_seatbelt_tty_test.sh"
 run_test "Seatbelt Profile Output" "$SCRIPT_DIR/run_seatbelt_profile_test.sh"
 run_test "Seatbelt Examples" "$SCRIPT_DIR/run_seatbelt_examples_test.sh"
