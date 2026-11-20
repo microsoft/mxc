@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 #[cfg(target_os = "linux")]
-use nix::sys::signal::{SigSet, Signal};
+use nix::sys::signal::SigSet;
 
 #[cfg(target_os = "linux")]
 use crate::lxc_common::lxc_bindings::LxcContainer;
@@ -29,6 +29,8 @@ use crate::lxc_common::network_iptables::CreatedResources;
 use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 #[cfg(target_os = "linux")]
 use crate::mxc_common::logger::{Logger, Mode};
+#[cfg(target_os = "linux")]
+use crate::mxc_common::termination_signals;
 
 #[derive(Default)]
 struct ActiveSandbox {
@@ -109,15 +111,15 @@ fn clear_active() {
 /// `pthread_sigmask` changes only the calling thread's mask, and new threads
 /// inherit their creator's mask.  Call this before spawning any thread that
 /// should leave signal delivery to the watchdog.
+///
+/// Child processes inherit the mask as well; spawns undo it with
+/// [`termination_signals::unblock_in_child`].
 #[cfg(target_os = "linux")]
 pub fn install() -> Result<(), String> {
     if watchdog_installed() {
         return Ok(());
     }
-    let mut mask = SigSet::empty();
-    mask.add(Signal::SIGHUP);
-    mask.add(Signal::SIGTERM);
-    mask.add(Signal::SIGINT);
+    let mask = termination_signals::mask();
     mask.thread_block()
         .map_err(|e| format!("pthread_sigmask: {}", e))?;
 

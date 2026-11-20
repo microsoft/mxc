@@ -72,6 +72,11 @@ pub mod system_dir;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
+// Signal-mask handling for child processes, shared by the LXC and Bubblewrap
+// backends.
+#[cfg(target_os = "linux")]
+pub mod termination_signals;
+
 // Host-path resolution shared by Linux backends and Seatbelt.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod filesystem_symlink;

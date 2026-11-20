@@ -220,28 +220,6 @@ fn wait_for_drain(
     }
 }
 
-/// Unblock the signals `lxc-exec` holds for its sigwait watchdog, so the child
-/// does not inherit a mask that makes it ignore Ctrl-C and termination.
-#[cfg(target_os = "linux")]
-fn unblock_fatal_signals(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe work is permitted. `pthread_sigmask`, which nix's
-    // `thread_unblock` wraps, is async-signal-safe, and this closure allocates
-    // nothing and captures nothing.
-    unsafe {
-        command.pre_exec(|| {
-            let mut mask = nix::sys::signal::SigSet::empty();
-            mask.add(nix::sys::signal::Signal::SIGHUP);
-            mask.add(nix::sys::signal::Signal::SIGTERM);
-            mask.add(nix::sys::signal::Signal::SIGINT);
-            mask.thread_unblock().map_err(std::io::Error::from)?;
-            Ok(())
-        });
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
     FromContainerConfig,
@@ -549,11 +527,8 @@ impl LxcContainer {
         timeout: Option<std::time::Duration>,
         firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
-        use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
-
-        // This process blocks these for its cleanup watchdog; left blocked, the
-        // inner shell would ignore Ctrl-C.
-        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
+        use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
@@ -568,7 +543,8 @@ impl LxcContainer {
         }
 
         let options = PtyOptions {
-            unblock_signals: UNBLOCK,
+            // Left blocked, the inner shell would ignore Ctrl-C.
+            unblock_signals: TERMINATION_SIGNALS,
             timeout,
             ..PtyOptions::default()
         };
@@ -626,7 +602,7 @@ impl LxcContainer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        unblock_fatal_signals(&mut cmd);
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
@@ -698,9 +674,6 @@ impl LxcContainer {
 
     /// Launch a command in the container on pipes the caller owns, and hand
     /// back the handle without waiting for it.
-    ///
-    /// The child's signal mask is left alone: in a host application it belongs
-    /// to the application, not to `lxc-exec`'s watchdog.
     #[cfg(target_os = "linux")]
     pub fn attach_spawn(
         &self,
@@ -717,6 +690,7 @@ impl LxcContainer {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         cmd.spawn()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))
@@ -733,13 +707,11 @@ impl LxcContainer {
         firewall: ContainerFirewall,
         size: crate::mxc_pty::PtySize,
     ) -> Result<(std::process::Child, crate::mxc_pty::LivePty), String> {
-        use crate::mxc_pty::Signal;
-
-        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
 
         let mut cmd =
             self.attach_command(command, working_directory, env, force_clear_env, firewall);
-        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
+        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, TERMINATION_SIGNALS)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
             .spawn()

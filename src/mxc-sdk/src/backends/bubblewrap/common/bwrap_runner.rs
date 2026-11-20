@@ -32,6 +32,7 @@ use crate::mxc_common::sandbox_process::{
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
+use crate::mxc_common::termination_signals;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
@@ -700,6 +701,10 @@ impl BubblewrapScriptRunner {
         // 3. Spawn `bwrap`.
         let mut command = Command::new(&bwrap);
         command.args(&args);
+        // bwrap passes its signal mask on to the workload, so left as
+        // `lxc-exec`'s watchdog set it, the workload would ignore SIGTERM,
+        // SIGINT and SIGHUP in every stdio mode.
+        termination_signals::unblock_in_child(&mut command);
         let pty = match stdio {
             StdioMode::Pipes => {
                 command
