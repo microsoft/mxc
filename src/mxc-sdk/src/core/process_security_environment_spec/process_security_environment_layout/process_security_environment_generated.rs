@@ -29,6 +29,7 @@ impl<'a> ProcessSecurityEnvironment<'a> {
     pub const VT_FS_DENY: ::flatbuffers::VOffsetT = 16;
     pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 18;
     pub const VT_FS_ENUMERATE: ::flatbuffers::VOffsetT = 20;
+    pub const VT_REGISTRY_HKCU: ::flatbuffers::VOffsetT = 22;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -46,6 +47,9 @@ impl<'a> ProcessSecurityEnvironment<'a> {
     ) -> ::flatbuffers::WIPOffset<ProcessSecurityEnvironment<'bldr>> {
         let mut builder = ProcessSecurityEnvironmentBuilder::new(_fbb);
         builder.add_ui_restrictions(args.ui_restrictions);
+        if let Some(x) = args.registry_hkcu {
+            builder.add_registry_hkcu(x);
+        }
         if let Some(x) = args.fs_enumerate {
             builder.add_fs_enumerate(x);
         }
@@ -104,6 +108,9 @@ impl<'a> ProcessSecurityEnvironment<'a> {
                 .map(|s| alloc::string::ToString::to_string(s))
                 .collect()
         });
+        let registry_hkcu = self
+            .registry_hkcu()
+            .map(|x| x.iter().map(|t| t.unpack()).collect());
         ProcessSecurityEnvironmentT {
             version,
             capabilities,
@@ -114,6 +121,7 @@ impl<'a> ProcessSecurityEnvironment<'a> {
             fs_deny,
             network_policy,
             fs_enumerate,
+            registry_hkcu,
         }
     }
 
@@ -230,6 +238,19 @@ impl<'a> ProcessSecurityEnvironment<'a> {
             >>(ProcessSecurityEnvironment::VT_FS_ENUMERATE, None)
         }
     }
+    #[inline]
+    pub fn registry_hkcu(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RegistryKey<'a>>>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RegistryKey>>,
+            >>(ProcessSecurityEnvironment::VT_REGISTRY_HKCU, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for ProcessSecurityEnvironment<'_> {
@@ -268,6 +289,9 @@ impl ::flatbuffers::Verifiable for ProcessSecurityEnvironment<'_> {
             .visit_field::<::flatbuffers::ForwardsUOffset<
                 ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>,
             >>("fs_enumerate", Self::VT_FS_ENUMERATE, false)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RegistryKey>>,
+            >>("registry_hkcu", Self::VT_REGISTRY_HKCU, false)?
             .finish();
         Ok(())
     }
@@ -298,6 +322,11 @@ pub struct ProcessSecurityEnvironmentArgs<'a> {
             ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
         >,
     >,
+    pub registry_hkcu: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RegistryKey<'a>>>,
+        >,
+    >,
 }
 impl<'a> Default for ProcessSecurityEnvironmentArgs<'a> {
     #[inline]
@@ -312,6 +341,7 @@ impl<'a> Default for ProcessSecurityEnvironmentArgs<'a> {
             fs_deny: None,
             network_policy: None,
             fs_enumerate: None,
+            registry_hkcu: None,
         }
     }
 }
@@ -409,6 +439,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ProcessSecurityEnvironmentBui
         );
     }
     #[inline]
+    pub fn add_registry_hkcu(
+        &mut self,
+        registry_hkcu: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<RegistryKey<'b>>>,
+        >,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            ProcessSecurityEnvironment::VT_REGISTRY_HKCU,
+            registry_hkcu,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> ProcessSecurityEnvironmentBuilder<'a, 'b, A> {
@@ -442,6 +484,7 @@ impl ::core::fmt::Debug for ProcessSecurityEnvironment<'_> {
         ds.field("fs_deny", &self.fs_deny());
         ds.field("network_policy", &self.network_policy());
         ds.field("fs_enumerate", &self.fs_enumerate());
+        ds.field("registry_hkcu", &self.registry_hkcu());
         ds.finish()
     }
 }
@@ -457,6 +500,7 @@ pub struct ProcessSecurityEnvironmentT {
     pub fs_deny: Option<alloc::vec::Vec<alloc::string::String>>,
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
     pub fs_enumerate: Option<alloc::vec::Vec<alloc::string::String>>,
+    pub registry_hkcu: Option<alloc::vec::Vec<RegistryKeyT>>,
 }
 impl Default for ProcessSecurityEnvironmentT {
     fn default() -> Self {
@@ -470,6 +514,7 @@ impl Default for ProcessSecurityEnvironmentT {
             fs_deny: None,
             network_policy: None,
             fs_enumerate: None,
+            registry_hkcu: None,
         }
     }
 }
@@ -500,6 +545,10 @@ impl ProcessSecurityEnvironmentT {
             let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();
             _fbb.create_vector(&w)
         });
+        let registry_hkcu = self.registry_hkcu.as_ref().map(|x| {
+            let w: alloc::vec::Vec<_> = x.iter().map(|t| t.pack(_fbb)).collect();
+            _fbb.create_vector(&w)
+        });
         ProcessSecurityEnvironment::create(
             _fbb,
             &ProcessSecurityEnvironmentArgs {
@@ -512,6 +561,7 @@ impl ProcessSecurityEnvironmentT {
                 fs_deny,
                 network_policy,
                 fs_enumerate,
+                registry_hkcu,
             },
         )
     }

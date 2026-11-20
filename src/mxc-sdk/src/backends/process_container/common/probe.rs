@@ -225,9 +225,9 @@ fn format_fallback_error(e: &FallbackError) -> String {
         FallbackError::SystemRootUnresolved { reason } => {
             format!("Could not resolve Windows system directory: {reason}")
         }
-        FallbackError::EnumeratePathsUnsupported | FallbackError::IngressUnsupported => {
-            e.to_string()
-        }
+        FallbackError::EnumeratePathsUnsupported
+        | FallbackError::IngressUnsupported
+        | FallbackError::RegistryUnsupported => e.to_string(),
     }
 }
 

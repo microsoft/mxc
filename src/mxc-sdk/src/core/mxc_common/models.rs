@@ -647,6 +647,8 @@ pub struct ContainerPolicy {
     pub readonly_paths: Vec<String>,
     pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    /// Explicit HKCU policy; presence requires native registry enforcement.
+    pub registry_hkcu: Option<Vec<RegistryKeyPolicy>>,
     pub fallback: FallbackPolicy,
     /// Outbound CIDR, protocol, and port policy.
     pub network_egress: Option<NetworkEgressPolicy>,
@@ -698,6 +700,22 @@ pub struct ContainerPolicy {
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Access authorized for an HKCU key and its descendants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RegistryAccess {
+    Read,
+    ReadWrite,
+}
+
+/// Native ProcessContainer HKCU rule. Defaults are applied by the backend.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryKeyPolicy {
+    pub path: String,
+    pub access: Option<RegistryAccess>,
+    pub copy_on_write: Option<bool>,
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).

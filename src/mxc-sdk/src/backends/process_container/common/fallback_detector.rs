@@ -247,6 +247,12 @@ pub enum FallbackError {
          host-loopback ingress requires native ProcessContainer support"
     )]
     IngressUnsupported,
+
+    #[error(
+        "processContainer.registry requires native PSEC 1.2 registry brokering; \
+         no AppContainer fallback can enforce this policy"
+    )]
+    RegistryUnsupported,
 }
 
 /// Decide which isolation tier to use for a run after BaseContainer has made
@@ -286,6 +292,9 @@ pub(crate) fn choose_backend_tier(
 ) -> Result<TierDecision, FallbackError> {
     let policy = &request.policy;
     let base_container_decision = BaseContainerRunner::can_backend_service_request(request);
+    if policy.registry_hkcu.is_some() && !base_container_decision.can_service_request() {
+        return Err(FallbackError::RegistryUnsupported);
+    }
     let denied = !policy.denied_paths.is_empty();
     let enumerate = !policy.enumerate_paths.is_empty();
     let host_loopback = policy
@@ -313,6 +322,9 @@ pub(crate) fn choose_backend_tier(
     #[cfg(any(test, feature = "force-tier-testing"))]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
         if let Ok(tier) = forced.parse::<IsolationTier>() {
+            if policy.registry_hkcu.is_some() && tier != IsolationTier::BaseContainer {
+                return Err(FallbackError::RegistryUnsupported);
+            }
             return forced_decision(tier, policy, denied);
         }
     }
@@ -907,6 +919,29 @@ mod tests {
         let d = detect(&policy).expect("forced bfs should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(!d.needs_dacl_augmentation);
+    }
+
+    #[test]
+    fn registry_policy_cannot_fall_back_or_force_an_appcontainer_tier() {
+        let mut policy = empty_policy();
+        policy.registry_hkcu = Some(Vec::new());
+        {
+            let _g = BcUsableGuard::set(false);
+            assert!(matches!(
+                detect(&policy),
+                Err(FallbackError::RegistryUnsupported)
+            ));
+        }
+        for tier in [
+            IsolationTier::AppContainerBfs,
+            IsolationTier::AppContainerDacl,
+        ] {
+            let _g = ForceTierGuard::set_tier(tier);
+            assert!(matches!(
+                detect(&policy),
+                Err(FallbackError::RegistryUnsupported)
+            ));
+        }
     }
     #[test]
     fn denied_paths_disabled_blocks_t1() {

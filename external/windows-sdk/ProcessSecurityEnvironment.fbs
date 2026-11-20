@@ -39,7 +39,7 @@ struct SchemaVersion {
 }
 
 table ProcessSecurityEnvironment {
-    // Initial CPSE schema version is 1.0; the current schema version is 1.1.
+    // Initial CPSE schema version is 1.0; the current schema version is 1.2.
     version:SchemaVersion (required);
     capabilities:string;
     disallow_win32k_system_calls:bool = false;
@@ -51,6 +51,17 @@ table ProcessSecurityEnvironment {
 
     // Paths that may be queried or enumerated. [version(1.1)]
     fs_enumerate:[string];
+
+    // Explicit HKCU grants for unpackaged launches. [version(1.2)]
+    registry_hkcu:[RegistryKey];
+}
+
+enum RegistryAccess : byte { read, readWrite }
+
+table RegistryKey {
+    path:string (required);
+    access:RegistryAccess = read;
+    copy_on_write:bool = true;
 }
 
 table ProxyInfo {

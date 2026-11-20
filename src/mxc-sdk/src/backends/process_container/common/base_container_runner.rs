@@ -255,6 +255,7 @@ pub(crate) enum BaseContainerRequestDecision {
     DeniedPathsUnsupported,
     EnumeratePathsUnsupported,
     NativeCaptureUnavailable,
+    RegistryUnsupported,
 }
 
 impl BaseContainerRequestDecision {
@@ -410,6 +411,9 @@ impl BaseContainerRunner {
             version =
                 version.max(SecurityEnvironmentSupport::FileSystemEnumerate.required_version());
         }
+        if request.policy.registry_hkcu.is_some() {
+            version = version.max(SecurityEnvironmentSupport::RegistryHkcu.required_version());
+        }
 
         version
     }
@@ -449,6 +453,11 @@ impl BaseContainerRunner {
         }
         if !request.policy.denied_paths.is_empty() && !Self::supports_native_denied_paths() {
             return BaseContainerRequestDecision::DeniedPathsUnsupported;
+        }
+        if request.policy.registry_hkcu.is_some()
+            && !secenv::query_support(SecurityEnvironmentSupport::RegistryHkcu)
+        {
+            return BaseContainerRequestDecision::RegistryUnsupported;
         }
 
         BaseContainerRequestDecision::Serviceable

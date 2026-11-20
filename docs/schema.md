@@ -417,13 +417,13 @@ looking for a marker file that defines their project. With Windows BaseContainer
 When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible.
 Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
-### Registry policy authoring (development contract)
+### Registry access (development contract, prototype OS support)
 
-Schema `1.1.0-alpha` defines `processContainer.registry.HKCU` for authoring
-Windows ProcessContainer registry policy. **Execution is not supported yet.**
-Any request containing `processContainer.registry`, including an empty object
-or empty list, is rejected before execution rather than ignored. This section
-does not grant access, create hives, or configure the OS.
+Schema `1.1.0-alpha` defines `processContainer.registry.HKCU` for Windows
+ProcessContainer registry access. Execution requires the experimental PSEC 1.2
+registry capability and its matching BFS implementation. Stock Windows builds
+without that capability reject the request; MXC does not fall back to an
+AppContainer backend or change host registry ACLs to satisfy it.
 
 ```json
 {
@@ -433,8 +433,9 @@ does not grant access, create hives, or configure the OS.
     "processContainer": {
         "registry": {
             "HKCU": [
-                { "path": "Software\\Contoso\\PrivateSettings" },
-                { "path": "Software\\Contoso\\SharedSettings", "copyOnWrite": false }
+                { "path": "Software\\Contoso\\ReadOnlySettings", "access": "read" },
+                { "path": "Software\\Contoso\\PrivateSettings", "access": "readWrite" },
+                { "path": "Software\\Contoso\\SharedSettings", "access": "readWrite", "copyOnWrite": false }
             ]
         }
     }
@@ -446,14 +447,24 @@ does not grant access, create hives, or configure the OS.
 | Entry field | Type | Default | Meaning |
 |-------------|------|---------|---------|
 | `path` | non-empty string | required | Key path relative to the launching user's HKCU, without the `HKCU\` prefix. Identifies a key and its descendants, not an individual value. |
+| `access` | `"read"` or `"readWrite"` | `"read"` | Requested access. Read-only entries do not authorize mutation, regardless of `copyOnWrite`. |
 | `copyOnWrite` | boolean | `true` | Requests copy-on-write when omitted or `true`; `false` requests writes to the host key instead. |
 
-Omitted `copyOnWrite` remains omitted during parsing so the future backend can
-apply the copy-on-write default. Neither mode is enforced in this release;
-path authorization and write-destination validation require backend integration.
-Explicit `null`, unknown fields, and non-boolean `copyOnWrite` values are rejected.
+Parsing preserves omission of `access` and `copyOnWrite`; the native backend
+applies their defaults independently. PSEC creates a private registry container
+and binds its BFS policy to the environment before admitting the child.
+BFS brokers matched existing-key opens against the derived user authority;
+an entry does not override the user's own denied access. Private changes are
+discarded when the environment is destroyed; explicit host writes persist.
 
-This authoring contract is available through development-version MXC request
+The unpackaged prototype supports existing-key reads and value writes.
+Brokered key creation, transactions, registry links, existing-handle transfer,
+and packaged/Helium composition are not validated. Unlisted keys receive no
+additional grant; their baseline AppContainer access still applies. Paths must
+be relative, non-overlapping key paths. Empty entry lists, explicit `null`,
+unknown fields, and invalid access or copy-on-write values are rejected.
+
+This contract is available through development-version MXC request
 JSON and its generated types. Published schemas and the high-level V1 SDK
 contract do not accept this section.
 

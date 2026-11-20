@@ -1360,13 +1360,25 @@ fn normalize_common_request_ir(
     // the newer BaseContainer implementation (ui).
     let mut process_container_network = None;
     if let Some(ac) = cfg.process_container {
-        if ac.registry.is_some() {
-            return Err(WxcError::ConfigParse(
-                "processContainer.registry is defined for policy authoring only; \
-                 registry enforcement is not implemented. Remove the registry section \
-                 before execution."
-                    .to_string(),
-            ));
+        if let Some(registry) = ac.registry {
+            if !cfg!(target_os = "windows") || containment != ContainmentBackend::ProcessContainer {
+                return Err(WxcError::ConfigParse(
+                    "processContainer.registry requires the Windows ProcessContainer backend"
+                        .to_string(),
+                ));
+            }
+            policy.registry_hkcu = Some(
+                registry
+                    .hkcu
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|key| crate::mxc_common::models::RegistryKeyPolicy {
+                        path: key.path,
+                        access: key.access,
+                        copy_on_write: key.copy_on_write,
+                    })
+                    .collect(),
+            );
         }
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
@@ -2127,7 +2139,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_authoring_policy_cannot_be_silently_executed() {
+    fn registry_policy_preserves_presence_for_native_validation() {
         for registry in [
             r#"{}"#,
             r#"{"HKCU":[]}"#,
@@ -2143,15 +2155,14 @@ mod tests {
                     "processContainer":{{"registry":{registry}}}
                 }}"#
             );
-            let error = parse_exact_for_test(&json).unwrap_err();
-            assert!(matches!(error, ParseError::OneShot(_)));
-            assert!(
-                error
-                    .message()
-                    .contains("registry enforcement is not implemented"),
-                "{}",
-                error.message()
-            );
+            if cfg!(target_os = "windows") {
+                let MxcRequest::OneShot(request) = parse_exact_for_test(&json).unwrap() else {
+                    panic!("expected a one-shot request");
+                };
+                assert!(request.policy.registry_hkcu.is_some());
+            } else {
+                assert!(parse_exact_for_test(&json).is_err());
+            }
         }
     }
 

@@ -22,6 +22,96 @@ Set-StrictMode -Version Latest
 
 Initialize-WpcContext @PSBoundParameters
 
+function Phase-Registry {
+    Section 'Phase 11: native HKCU registry grants'
+    $fixture = 'Software\MxcRegistryValidation-' + [Guid]::NewGuid().ToString('N')
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $userRoot = [Microsoft.Win32.Registry]::Users.OpenSubKey($sid, $true)
+    if ($null -eq $userRoot) { throw 'The launching user hive is not loaded.' }
+    try {
+        $before = @{}
+        foreach ($suffix in @('', '\ReadOnly', '\Private', '\Shared', '\Unlisted')) {
+            $key = $userRoot.CreateSubKey($fixture + $suffix)
+            try {
+                $key.SetValue('Marker', 111, [Microsoft.Win32.RegistryValueKind]::DWord)
+                $before[$suffix] = $key.GetAccessControl().GetSecurityDescriptorSddlForm(
+                    [Security.AccessControl.AccessControlSections]::All)
+            } finally { $key.Dispose() }
+        }
+        $body = @(
+            ('reg.exe query "HKCU\{0}\ReadOnly" /v Marker | findstr /i /r /c:"Marker.*0x6f"' -f $fixture),
+            'if errorlevel 1 exit /b 91',
+            ('reg.exe add "HKCU\{0}\ReadOnly" /v Marker /t REG_DWORD /d 222 /f >nul 2>&1' -f $fixture),
+            'if not errorlevel 1 exit /b 92',
+            ('reg.exe query "HKCU\{0}\Private" /v Marker | findstr /i /r /c:"Marker.*0x6f"' -f $fixture),
+            'if errorlevel 1 exit /b 93',
+            ('reg.exe add "HKCU\{0}\Private" /v Marker /t REG_DWORD /d 222 /f >nul' -f $fixture),
+            'if errorlevel 1 exit /b 94',
+            ('reg.exe query "HKCU\{0}\Private" /v Marker | findstr /i /r /c:"Marker.*0xde"' -f $fixture),
+            'if errorlevel 1 exit /b 95',
+            ('reg.exe add "HKCU\{0}\Shared" /v Marker /t REG_DWORD /d 222 /f >nul' -f $fixture),
+            'if errorlevel 1 exit /b 96',
+            ('reg.exe query "HKCU\{0}\Shared" /v Marker | findstr /i /r /c:"Marker.*0xde"' -f $fixture),
+            'if errorlevel 1 exit /b 97',
+            ('reg.exe query "HKCU\{0}\Unlisted" /v Marker >nul 2>&1' -f $fixture),
+            'if not errorlevel 1 exit /b 98',
+            'echo MXCREGISTRYGOLDEN',
+            'exit /b 0'
+        )
+        $probeScript = Join-Path $ScratchRoot 'registry-golden.cmd'
+        @('@echo off') + $body | Set-Content -LiteralPath $probeScript -Encoding Ascii
+        $config = New-RawConfig -Name 'plumb-registry-golden' -Object ([ordered]@{
+            version = '1.1.0-alpha'
+            containment = 'processcontainer'
+            process = [ordered]@{
+                commandLine = New-ProbeCommand -Body "`"$probeScript`""
+                timeout = 30000
+            }
+            filesystem = [ordered]@{ readonlyPaths = @($env:SystemRoot, $probeScript) }
+            ui = [ordered]@{ disable = $false }
+            processContainer = [ordered]@{ registry = [ordered]@{ HKCU = @(
+                [ordered]@{ path = "$fixture\ReadOnly" },
+                [ordered]@{ path = "$fixture\Private"; access = 'readWrite' },
+                [ordered]@{ path = "$fixture\Shared"; access = 'readWrite'; copyOnWrite = $false }
+            ) } }
+        })
+        $probe = Invoke-Probe -Wxc $WxcDebug -ConfigPath $config -Phase 'P11' -Name 'registry support'
+        if ($null -eq $probe) { return }
+        $supported = ($probe.tier -eq 'base-container')
+        $log = Join-Path $ScratchRoot 'logs\plumb-registry-golden.log'
+        $result = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $config -LogPath $log -TimeoutSec 60
+        if (-not $supported) {
+            $diagnostic = "$($result.Stdout)`n$($result.Stderr)`n$(Read-Log $log)"
+            Record-Result -Phase 'P11' -Name 'unsupported registry policy refuses before execution' `
+                -Pass (($result.ExitCode -ne 0) -and (-not $result.TimedOut) -and `
+                    (-not (Test-WorkloadRan $result)) -and ($diagnostic -match 'registry.*PSEC')) `
+                -Detail "exit=$($result.ExitCode); stderr=$(Format-Snippet $result.Stderr)"
+            Record-Result -Phase 'P11' -Name 'native registry golden scenario' -Status 'skip' `
+                -Detail 'Requires the native PSEC 1.2 registry capability and matching BFS.'
+        } else {
+            Record-Result -Phase 'P11' -Name 'registry read, read-only denial, private/host writes and unlisted denial' `
+                -Pass (($result.ExitCode -eq 0) -and (-not $result.TimedOut) -and `
+                    (Test-WorkloadRan $result) -and ($result.Stdout -match 'MXCREGISTRYGOLDEN')) `
+                -Detail "exit=$($result.ExitCode); stdout=$(Format-Snippet $result.Stdout)"
+        }
+        foreach ($suffix in @('', '\ReadOnly', '\Private', '\Shared', '\Unlisted')) {
+            $key = $userRoot.OpenSubKey($fixture + $suffix)
+            try {
+                $expected = if ($supported -and $suffix -eq '\Shared') { 222 } else { 111 }
+                $actual = $key.GetValue('Marker')
+                $sameSecurity = $key.GetAccessControl().GetSecurityDescriptorSddlForm(
+                    [Security.AccessControl.AccessControlSections]::All) -eq $before[$suffix]
+                Record-Result -Phase 'P11' -Name "registry host value and unchanged security: $suffix" `
+                    -Pass (($actual -eq $expected) -and $sameSecurity) `
+                    -Detail "marker=$actual; expected=$expected; securityUnchanged=$sameSecurity"
+            } finally { $key.Dispose() }
+        }
+    } finally {
+        try { $userRoot.DeleteSubKeyTree($fixture, $false) }
+        finally { $userRoot.Dispose() }
+    }
+}
+
 
 # Phase 11 — process plumbing.
 #
@@ -34,31 +124,7 @@ function Phase-ProcessPlumbing {
     $rw = Join-Path $ScratchRoot 'rw'
     $ro = Join-Path $ScratchRoot 'ro'
 
-    foreach ($mode in @('default', 'true', 'false', 'empty')) {
-        $key = [ordered]@{ path = 'Software\Contoso\RegistryAuthoringProbe' }
-        if ($mode -ne 'default' -and $mode -ne 'empty') {
-            $key['copyOnWrite'] = ($mode -eq 'true')
-        }
-        $registry = if ($mode -eq 'empty') {
-            [ordered]@{ HKCU = @() }
-        } else {
-            [ordered]@{ HKCU = @($key) }
-        }
-        $config = New-RawConfig -Name "plumb-registry-$mode" -Object ([ordered]@{
-            version = '1.1.0-alpha'
-            containment = 'processcontainer'
-            process = [ordered]@{ commandLine = (New-ProbeCommand -Body 'exit 0') }
-            processContainer = [ordered]@{ registry = $registry }
-        })
-        $log = Join-Path $ScratchRoot "logs\plumb-registry-$mode.log"
-        $result = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $config -LogPath $log -TimeoutSec 30
-        $diagnostic = "$($result.Stderr)`n$(Read-Log $log)"
-        Record-Result -Phase 'P11' -Name "registry authoring ($mode) fails before execution" `
-            -Pass (($result.ExitCode -ne 0) -and (-not $result.TimedOut) -and `
-                (-not (Test-WorkloadRan $result)) -and `
-                ($diagnostic -match 'registry enforcement is not implemented')) `
-            -Detail "exit=$($result.ExitCode); stderr=$(Format-Snippet $result.Stderr)"
-    }
+    Phase-Registry
 
     # --- env delivery. process.env replaces the environment outright, so the
     # block must stay viable; values with spaces and an embedded `=` catch the

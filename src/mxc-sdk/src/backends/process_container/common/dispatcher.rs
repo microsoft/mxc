@@ -262,7 +262,8 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::Fallback(
                 error @ (FallbackError::EnumeratePathsUnsupported
-                | FallbackError::IngressUnsupported),
+                | FallbackError::IngressUnsupported
+                | FallbackError::RegistryUnsupported),
             ) => write!(f, "{error}"),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),

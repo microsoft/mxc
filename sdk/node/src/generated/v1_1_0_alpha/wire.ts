@@ -585,7 +585,7 @@ export interface ProcessContainer {
    */
   network?: ProcessContainerNetwork;
   /**
-   * Optional HKCU registry policy. Defined for authoring; execution is not yet supported.
+   * Optional HKCU registry policy. Requires native PSEC registry support.
    */
   registry?: ProcessContainerRegistry;
   /**
@@ -626,12 +626,18 @@ export interface ProcessContainerRegistry {
   HKCU?: ProcessContainerRegistryKey[];
 }
 
+export type ProcessContainerRegistryAccess = "read" | "readWrite";
+
 /**
  * Requested access to an HKCU key and its descendants.
  */
 export interface ProcessContainerRegistryKey {
   /**
-   * Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting; neither mode is implemented yet.
+   * Read-only (the default) or read/write access, independently of copy-on-write.
+   */
+  access?: ProcessContainerRegistryAccess;
+  /**
+   * Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting.
    */
   copyOnWrite?: boolean;
   /**

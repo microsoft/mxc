@@ -141,7 +141,7 @@ pub struct ProcessContainer {
     pub ui: Option<BaseProcessUi>,
     /// ProcessContainer-specific filesystem configuration.
     pub filesystem: Option<ProcessContainerFilesystem>,
-    /// Registry authoring policy, rejected before execution until supported.
+    /// Native ProcessContainer registry policy.
     pub registry: Option<ProcessContainerRegistry>,
     /// ProcessContainer-specific network configuration.
     pub network: Option<ProcessContainerNetwork>,
@@ -169,7 +169,8 @@ pub struct ProcessContainerRegistry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainerRegistryKey {
     pub path: String,
-    /// Preserve omission; the future backend default is copy-on-write.
+    pub access: Option<crate::mxc_common::models::RegistryAccess>,
+    /// Preserve omission; the native backend default is copy-on-write.
     pub copy_on_write: Option<bool>,
 }
 

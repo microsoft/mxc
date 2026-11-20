@@ -1097,7 +1097,7 @@
         },
         "registry": {
           "$ref": "#/definitions/ProcessContainerRegistry",
-          "description": "Optional HKCU registry policy. Defined for authoring; execution is not yet supported."
+          "description": "Optional HKCU registry policy. Requires native PSEC registry support."
         },
         "ui": {
           "$ref": "#/definitions/ProcessContainerUi",
@@ -1149,12 +1149,34 @@
       },
       "type": "object"
     },
+    "ProcessContainerRegistryAccess": {
+      "oneOf": [
+        {
+          "description": "Read",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "ReadWrite",
+          "enum": [
+            "readWrite"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ProcessContainerRegistryKey": {
       "additionalProperties": false,
       "description": "Requested access to an HKCU key and its descendants.",
       "properties": {
+        "access": {
+          "$ref": "#/definitions/ProcessContainerRegistryAccess",
+          "description": "Read-only (the default) or read/write access, independently of copy-on-write."
+        },
         "copyOnWrite": {
-          "description": "Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting; neither mode is implemented yet.",
+          "description": "Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting.",
           "type": "boolean"
         },
         "path": {

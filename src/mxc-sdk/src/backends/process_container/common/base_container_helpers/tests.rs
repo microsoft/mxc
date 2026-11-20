@@ -50,6 +50,51 @@ fn runtime_proxy_request(proxy: &TcpListener) -> ExecutionRequest {
 }
 
 #[test]
+fn registry_access_and_write_destination_are_encoded_independently() {
+    let config = json!({
+        "version": "1.1.0-alpha",
+        "containment": "processcontainer",
+        "process": { "commandLine": "cmd.exe /c echo registry" },
+        "processContainer": {
+            "registry": {
+                "HKCU": [
+                    { "path": "Software\\RegistryTest\\Default" },
+                    { "path": "Software\\RegistryTest\\Read", "access": "read", "copyOnWrite": false },
+                    { "path": "Software\\RegistryTest\\Private", "access": "readWrite" },
+                    { "path": "Software\\RegistryTest\\Host", "access": "readWrite", "copyOnWrite": false }
+                ]
+            }
+        }
+    });
+    let mut logger = Logger::new(Mode::Buffer);
+    let MxcRequest::OneShot(request) =
+        load_mxc_request_from_json(&config.to_string(), &mut logger).unwrap()
+    else {
+        panic!("expected a one-shot request");
+    };
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_2, false);
+    let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+    let rules = spec.registry_hkcu().expect("explicit registry policy");
+    assert_eq!(spec.version().minor(), 2);
+    assert_eq!(rules.len(), 4);
+    for (index, (path, access, copy_on_write)) in [
+        ("Default", psec_layout::RegistryAccess::read, true),
+        ("Read", psec_layout::RegistryAccess::read, false),
+        ("Private", psec_layout::RegistryAccess::readWrite, true),
+        ("Host", psec_layout::RegistryAccess::readWrite, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rule = rules.get(index);
+        assert_eq!(rule.path(), format!("Software\\RegistryTest\\{path}"));
+        assert_eq!(rule.access(), access);
+        assert_eq!(rule.copy_on_write(), copy_on_write);
+    }
+}
+
+#[test]
 fn runtime_proxy_uses_peer_and_capability_without_native_ingress() {
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);

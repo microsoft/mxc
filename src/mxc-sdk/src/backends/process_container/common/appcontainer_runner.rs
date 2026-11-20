@@ -1733,6 +1733,11 @@ impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
+        if request.policy.registry_hkcu.is_some() {
+            return Err(ScriptResponse::rejected(
+                &FallbackError::RegistryUnsupported.to_string(),
+            ));
+        }
         if !request.policy.enumerate_paths.is_empty() {
             return Err(ScriptResponse::rejected(
                 &FallbackError::EnumeratePathsUnsupported.to_string(),

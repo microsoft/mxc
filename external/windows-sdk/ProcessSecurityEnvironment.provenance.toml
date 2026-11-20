@@ -17,8 +17,10 @@
 repository = "Windows OS (internal Azure DevOps)"
 # The PSEC schema is a Windows OS containment contract. Record the source change
 # and the Windows build used for the MXC end-to-end validation.
-validated_windows_build = "10.0.26690.0"
-source_pull_request = 16528893
+validated_windows_build = "29713.1001"
+# Measured with prototype PSEC 1.2 and BFS replacements, not stock binaries.
+# This PR extends the earlier PSEC contract from PR 16528893.
+source_pull_request = 17628501
 # Azure DevOps PR 16307987 is the RELATED Learning Mode trace ABI change — it is
 # NOT the pull request that introduced or last modified this PSEC schema.
 # Recorded for traceability only; do not represent it as the schema's origin.
@@ -28,7 +30,7 @@ related_trace_abi_pull_request = 16307987
 # SHA-256 of external/windows-sdk/ProcessSecurityEnvironment.fbs, computed over
 # the LF-normalized (git-blob) content so it is checkout-independent regardless
 # of autocrlf. Verified by regenerate.ps1 and the CI drift gate.
-sha256 = "736cacef37a6c97a0cb97c7132da462a3b51811fca8f1e4076cac51085dfa516"
+sha256 = "f8d8dde0fbabb3823781b4c027bb0691a9c1084456004b1aa258622ea8006144"
 
 [tool]
 # Exact flatc version used to generate the committed bindings. Regeneration
@@ -38,7 +40,7 @@ sha256 = "736cacef37a6c97a0cb97c7132da462a3b51811fca8f1e4076cac51085dfa516"
 # (added in Rust 1.89).
 flatc_version = "25.12.19"
 flatc_release = "https://github.com/google/flatbuffers/releases/tag/v25.12.19"
-generated_date = "2026-09-14"
+generated_date = "2026-11-20"
 
 # Exact GitHub release assets for flatc 25.12.19. The CI drift gate downloads the
 # platform asset, verifies its SHA-256 against these values, unzips it, and

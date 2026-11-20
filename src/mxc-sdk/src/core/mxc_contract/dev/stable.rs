@@ -314,7 +314,7 @@ pub struct ProcessContainer {
     /// Optional ProcessContainer-specific filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<ProcessContainerFilesystem>,
-    /// Optional HKCU registry policy. Defined for authoring; execution is not yet supported.
+    /// Optional HKCU registry policy. Requires native PSEC registry support.
     #[serde(default)]
     pub registry: OptionalField<ProcessContainerRegistry>,
     /// Optional ProcessContainer-specific network settings.
@@ -349,10 +349,24 @@ pub struct ProcessContainerRegistry {
 pub struct ProcessContainerRegistryKey {
     /// Non-empty key path relative to HKCU, such as `Software\Contoso`.
     pub path: NonEmptyString,
+    /// Read-only (the default) or read/write access, independently of copy-on-write.
+    #[serde(default)]
+    pub access: OptionalField<ProcessContainerRegistryAccess>,
     /// Request copy-on-write (true, the default) or host writes (false).
-    /// Omission is preserved for backend defaulting; neither mode is implemented yet.
+    /// Omission is preserved for backend defaulting.
     #[serde(default)]
     pub copy_on_write: OptionalField<bool>,
+}
+
+string_enum! {
+    /// Access authorized for a registry key and its descendants.
+    #[derive(Debug)]
+    pub enum ProcessContainerRegistryAccess {
+        /// Read key values and enumerate subkeys.
+        Read => ["read"],
+        /// Read and modify registry data.
+        ReadWrite => ["readWrite"],
+    }
 }
 
 /// ProcessContainer-specific network settings.

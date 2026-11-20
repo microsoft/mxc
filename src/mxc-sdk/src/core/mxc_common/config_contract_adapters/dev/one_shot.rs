@@ -145,10 +145,19 @@ fn convert_process_container_registry(
                 .map(|key| {
                     let contract::ProcessContainerRegistryKey {
                         path,
+                        access,
                         copy_on_write,
                     } = key;
                     wire::ProcessContainerRegistryKey {
                         path: path.into_inner(),
+                        access: access.into_option().map(|access| match access {
+                            contract::ProcessContainerRegistryAccess::Read => {
+                                crate::mxc_common::models::RegistryAccess::Read
+                            }
+                            contract::ProcessContainerRegistryAccess::ReadWrite => {
+                                crate::mxc_common::models::RegistryAccess::ReadWrite
+                            }
+                        }),
                         copy_on_write: copy_on_write.into_option(),
                     }
                 })

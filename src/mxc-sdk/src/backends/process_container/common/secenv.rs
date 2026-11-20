@@ -64,6 +64,8 @@ pub enum SecurityEnvironmentSupport {
     FileSystemEnumerate = 0x0000_0000_0000_0004,
     /// The ingress policy table.
     NetworkIngress = 0x0000_0000_0000_0008,
+    /// Experimental PSEC 1.2 HKCU grants.
+    RegistryHkcu = 0x0000_0000_0000_0010,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -75,6 +77,7 @@ pub(crate) struct SecurityEnvironmentVersion {
 impl SecurityEnvironmentVersion {
     pub(crate) const V1_0: Self = Self { major: 1, minor: 0 };
     pub(crate) const V1_1: Self = Self { major: 1, minor: 1 };
+    pub(crate) const V1_2: Self = Self { major: 1, minor: 2 };
 }
 
 impl SecurityEnvironmentSupport {
@@ -82,6 +85,7 @@ impl SecurityEnvironmentSupport {
         match self {
             Self::FileSystemDeny => SecurityEnvironmentVersion::V1_0,
             Self::FileSystemEnumerate | Self::NetworkIngress => SecurityEnvironmentVersion::V1_1,
+            Self::RegistryHkcu => SecurityEnvironmentVersion::V1_2,
         }
     }
 }

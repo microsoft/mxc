@@ -3,6 +3,8 @@
 #![allow(unused_imports, non_snake_case, non_camel_case_types, clippy::all)]
 pub mod process_security_environment_layout {
     use super::*;
+    mod registry_access_generated;
+    pub use self::registry_access_generated::*;
     mod filter_action_generated;
     pub use self::filter_action_generated::*;
     mod ip_protocol_generated;
@@ -11,6 +13,8 @@ pub mod process_security_environment_layout {
     pub use self::schema_version_generated::*;
     mod process_security_environment_generated;
     pub use self::process_security_environment_generated::*;
+    mod registry_key_generated;
+    pub use self::registry_key_generated::*;
     mod proxy_info_generated;
     pub use self::proxy_info_generated::*;
     mod ip_subnet_generated;

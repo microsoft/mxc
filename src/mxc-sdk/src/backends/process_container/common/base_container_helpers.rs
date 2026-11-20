@@ -5,7 +5,7 @@
 
 use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPort,
-    NetworkProtocol, NetworkRule,
+    NetworkProtocol, NetworkRule, RegistryAccess,
 };
 use crate::process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
@@ -13,7 +13,7 @@ use crate::process_security_environment_spec::process_security_environment_layou
     FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT,
     NetworkPolicyT as PsecNetworkPolicy, PortRuleT as PsecPortRuleT,
     ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
-    SchemaVersionT,
+    RegistryAccess as PsecRegistryAccess, RegistryKeyT as PsecRegistryKeyT, SchemaVersionT,
 };
 
 use crate::process_container_common::network_policy_helpers::{
@@ -60,6 +60,19 @@ pub(super) fn build_psec_v1_security_environment_spec(
         fs_read_only: non_empty_paths(&request.policy.readonly_paths),
         fs_deny: non_empty_paths(&request.policy.denied_paths),
         fs_enumerate: non_empty_paths(&request.policy.enumerate_paths),
+        registry_hkcu: request.policy.registry_hkcu.as_ref().map(|rules| {
+            rules
+                .iter()
+                .map(|rule| PsecRegistryKeyT {
+                    path: rule.path.clone(),
+                    access: match rule.access.unwrap_or(RegistryAccess::Read) {
+                        RegistryAccess::Read => PsecRegistryAccess::read,
+                        RegistryAccess::ReadWrite => PsecRegistryAccess::readWrite,
+                    },
+                    copy_on_write: rule.copy_on_write.unwrap_or(true),
+                })
+                .collect()
+        }),
         network_policy: Some(Box::new(build_psec_v1_network_policy(&request.policy))),
     };
     let spec = spec.pack(&mut builder);
