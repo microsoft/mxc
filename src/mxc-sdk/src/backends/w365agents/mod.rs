@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Internal checkout/release implementation. Readiness and execution are deferred.
+//! Native W365 checkout, readiness, execution and terminal release.
 
+mod data_plane;
+mod exec;
 mod service;
 
 use crate::mxc_common::logger::Logger;
@@ -73,12 +75,6 @@ fn policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     Ok(())
 }
 
-pub(crate) fn deferred() -> MxcError {
-    MxcError::unsupported_phase(
-        "w365_agents Phase 2 supports checkout and terminal release only; start/readiness and exec require Phase 3",
-    )
-}
-
 impl StatefulSandboxBackend for Runner {
     const ID_PREFIX: &'static str = "w365";
     const BACKEND_KEY: &'static str = "w365_agents";
@@ -88,7 +84,7 @@ impl StatefulSandboxBackend for Runner {
     type StopConfig = ();
     type DeprovisionConfig = ();
     type ProvisionMetadata = CheckoutMetadata;
-    type StartMetadata = ();
+    type StartMetadata = data_plane::ReadyMetadata;
     type StopMetadata = ReleaseMetadata;
     type DeprovisionMetadata = ReleaseMetadata;
 
@@ -119,8 +115,7 @@ impl StatefulSandboxBackend for Runner {
         _: Option<&()>,
     ) -> Result<(), MxcError> {
         policy(request)?;
-        service::Identity::parse(id)?;
-        Err(deferred())
+        data_plane::client(&service::Identity::parse(id)?).map(|_| ())
     }
 
     fn start(
@@ -128,18 +123,21 @@ impl StatefulSandboxBackend for Runner {
         id: &str,
         request: &ExecutionRequest,
         config: Option<()>,
-    ) -> Result<StartResult<()>, MxcError> {
+    ) -> Result<StartResult<Self::StartMetadata>, MxcError> {
         self.validate_start(id, request, config.as_ref())?;
-        Err(deferred())
+        Ok(StartResult {
+            metadata: Some(data_plane::ready(&service::Identity::parse(id)?)?),
+        })
     }
 
     fn validate_exec(
         &self,
         id: &str,
         request: &ExecutionRequest,
-        config: Option<&()>,
+        _: Option<&()>,
     ) -> Result<(), MxcError> {
-        self.validate_start(id, request, config)
+        policy(request)?;
+        exec::validate(id, request)
     }
 
     fn exec(
@@ -147,10 +145,10 @@ impl StatefulSandboxBackend for Runner {
         id: &str,
         request: &ExecutionRequest,
         config: Option<()>,
-        _: ExecStdio,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
         self.validate_exec(id, request, config.as_ref())?;
-        Err(deferred())
+        exec::run(id, request, stdio)
     }
 
     fn validate_stop(

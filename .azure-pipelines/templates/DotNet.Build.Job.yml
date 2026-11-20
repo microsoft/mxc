@@ -25,7 +25,14 @@ jobs:
     name: Azure-Pipelines-1ESPT-ExDShared
     image: windows-2022
     os: windows
+  ${{ if eq(parameters.isOfficialBuild, true) }}:
+    templateContext:
+      sdl:
+        sbom:
+          continueOnError: false
   variables:
+    ${{ if eq(parameters.isOfficialBuild, true) }}:
+      ManifestGeneratorTaskFailOnTimeout: 'true'
     sdkProject: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj
     sdkOutput: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\bin\Release
     packageRoot: $(Build.SourcesDirectory)\out\dotnet-package
@@ -38,6 +45,12 @@ jobs:
 
   steps:
   - checkout: self
+
+  # SBOM generation scans Rust dependencies even when native binaries are prebuilt.
+  - ${{ if eq(parameters.isOfficialBuild, true) }}:
+    - template: Cargo.Setup.Private.yml@self
+  - ${{ else }}:
+    - template: Cargo.Setup.Public.yml@self
 
   - task: UseDotNet@2
     displayName: Use .NET SDK 10
@@ -311,6 +324,13 @@ jobs:
         if ($remainingPackages.Count -ne 0) {
           throw "Unstaged .nupkg files remain in the release artifact directory"
         }
+
+  - task: CopyFiles@2
+    displayName: Copy NuGet release selector
+    inputs:
+      sourceFolder: $(Build.SourcesDirectory)\.azure-pipelines\scripts
+      contents: select-dotnet-nuget-packages.ps1
+      targetFolder: $(packageOutput)
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: Publish NuGet release payload

@@ -382,11 +382,13 @@ fn exec_state_aware_with_capture_mode(
     match backend {
         crate::mxc_common::models::ContainmentBackend::W365Agents => {
             let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
-            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut crate::backend_modules::W365AgentsRunner,
                 bound,
             )?;
-            Err(crate::backend_modules::w365_deferred())
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
         }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {

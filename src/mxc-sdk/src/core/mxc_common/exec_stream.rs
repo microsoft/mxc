@@ -112,13 +112,41 @@ impl Drop for StdinWriter {
     }
 }
 
+/// Reserved native endpoints and their original Unix output flags.
+struct PreparedNativeStdio {
+    pipes: NativeStdio,
+    #[cfg(unix)]
+    read_flags: [Option<libc::c_int>; 2],
+}
+
+impl PreparedNativeStdio {
+    fn restore_read_flags(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            for (pipe, flags) in [&self.pipes.stdout, &self.pipes.stderr]
+                .into_iter()
+                .zip(self.read_flags)
+            {
+                if let (Some(pipe), Some(flags)) = (pipe, flags) {
+                    // SAFETY: the reserved endpoint is owned and has no active caller.
+                    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags) } < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// An [`ExecHandle`]'s streams, once classified.
 struct PreparedStreams {
     stdout: Option<ReadStream>,
     stderr: Option<ReadStream>,
     stdin: Option<Box<dyn Write + Send>>,
     stdin_closer: Option<StdinCloser>,
-    native_stdio: NativeStdio,
+    native_stdio: PreparedNativeStdio,
 }
 
 /// A streaming [`SandboxProcess`] backed by a state-aware [`ExecHandle`].
@@ -141,7 +169,7 @@ pub struct ExecSandboxProcess {
     /// or by `Drop`.
     terminator: Option<Box<dyn FnOnce() -> Result<(), MxcError> + Send>>,
     /// Owned duplicates reserved for a possible native stdio transfer.
-    native_stdio: Option<NativeStdio>,
+    native_stdio: Option<PreparedNativeStdio>,
     /// Whether the caller selected the individual-stream access mode.
     individual_stdio_taken: bool,
     /// The waiter's terminal result once joined, so repeat waits preserve both
@@ -318,10 +346,7 @@ impl ExecSandboxProcess {
         })
     }
 
-    /// Join the waiter thread, caching and returning its outcome.
-    ///
-    /// The outcome is cached rather than the exit code, because a timeout has
-    /// no code to cache and repeat calls must still be idempotent.
+    /// Join the waiter thread, caching and returning its terminal result.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
         if let Some(result) = &self.terminal {
             return terminal_to_io(result);
@@ -495,18 +520,21 @@ impl SandboxProcess for ExecSandboxProcess {
         let Some(source) = self.native_stdio.as_ref() else {
             return Ok(None);
         };
-        if (source.stdin.is_some() && self.stdin.is_none())
-            || (source.stdout.is_some() && self.stdout.is_none())
-            || (source.stderr.is_some() && self.stderr.is_none())
+        if (source.pipes.stdin.is_some() && self.stdin.is_none())
+            || (source.pipes.stdout.is_some() && self.stdout.is_none())
+            || (source.pipes.stderr.is_some() && self.stderr.is_none())
         {
             return Err(std::io::Error::other(
                 "native stdio must be taken before taking individual streams",
             ));
         }
 
-        if source.is_empty() {
+        if source.pipes.is_empty() {
             return Ok(None);
         }
+        // dup shares status flags: undo the cancellable wrappers' O_NONBLOCK
+        // before transferring pipes, once no wrapped reader can be taken.
+        source.restore_read_flags()?;
         let stdio = self
             .native_stdio
             .take()
@@ -517,7 +545,7 @@ impl SandboxProcess for ExecSandboxProcess {
         self.stdin_closer.take();
         self.stdout_canceller.take();
         self.stderr_canceller.take();
-        Ok(Some(stdio))
+        Ok(Some(stdio.pipes))
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -677,7 +705,7 @@ fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
 fn terminal_to_io(result: &Result<ExecOutcome, MxcError>) -> std::io::Result<i32> {
     match result {
         Ok(outcome) => outcome_to_io(*outcome),
-        Err(error) => Err(std::io::Error::other(error.message.clone())),
+        Err(error) => Err(super::mxc_error::into_io_error(error.clone())),
     }
 }
 
@@ -786,15 +814,41 @@ fn prepare_native_stdio(
     stdin: PipeHandle,
     stdout: PipeHandle,
     stderr: PipeHandle,
-) -> Result<NativeStdio, MxcError> {
+) -> Result<PreparedNativeStdio, MxcError> {
     let duplicate = |handle, stream| {
         duplicate_native_pipe(native_pipe_source(handle), stream)
             .map_err(|error| MxcError::backend_error(error.to_string()))
     };
-    Ok(NativeStdio {
+    let pipes = NativeStdio {
         stdin: duplicate(stdin, "stdin")?,
         stdout: duplicate(stdout, "stdout")?,
         stderr: duplicate(stderr, "stderr")?,
+    };
+    #[cfg(unix)]
+    let read_flags = {
+        // Duplicated descriptors share O_NONBLOCK. Save the original flags before
+        // wrapped reads change them, so native transfer can restore blocking I/O.
+        use std::os::fd::AsRawFd;
+        let mut flags = [None; 2];
+        for (slot, pipe) in flags.iter_mut().zip([&pipes.stdout, &pipes.stderr]) {
+            if let Some(pipe) = pipe {
+                // SAFETY: this endpoint is owned and the backend has not released it.
+                let value = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+                if value < 0 {
+                    return Err(MxcError::backend_error(format!(
+                        "failed to read the exec output pipe flags: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                *slot = Some(value);
+            }
+        }
+        flags
+    };
+    Ok(PreparedNativeStdio {
+        pipes,
+        #[cfg(unix)]
+        read_flags,
     })
 }
 
@@ -808,10 +862,8 @@ fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
 /// Note this does **not** leave the backend's original fd wholly untouched, as
 /// [`dup_fd_to_file`] alone would: `InterruptibleReader` sets `O_NONBLOCK`, and
 /// that is a property of the open file description, which every `dup` shares.
-/// The backend's fd therefore becomes non-blocking too. Harmless while no
-/// state-aware backend is non-Windows — all three are Windows — but a Unix one
-/// that later reads or re-hands its own fd would see `EAGAIN` where it expected
-/// a blocking read.
+/// The backend's fd therefore becomes non-blocking too. Native transfer restores
+/// the original flags after the caller selects it instead of wrapped reads.
 #[cfg(not(target_os = "windows"))]
 fn wrap_cancellable_read(handle: PipeHandle) -> Option<ReadStream> {
     let file = dup_fd_to_file(handle)?;
@@ -1619,6 +1671,101 @@ mod tests {
         drop(stdout_r);
     }
 
+    #[test]
+    fn waiter_errors_are_cached_with_all_structured_fields() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let expected = MxcError::backend_unavailable("could not query the process")
+            .with_details(serde_json::json!({"phase": "wait"}))
+            .with_api_failure(
+                crate::mxc_common::mxc_error::ApiFailure::new("WslcGetProcessExitCode")
+                    .with_native_code("0x80004005"),
+            )
+            .with_remediation("Retry the process wait.");
+        let waiter_error = expected.clone();
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(move || Err(waiter_error)),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        for error in [
+            process.wait().expect_err("the waiter fails"),
+            process.wait().expect_err("the cached waiter result fails"),
+            process
+                .try_wait()
+                .expect_err("polling replays the cached waiter result"),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(error.to_string(), expected.message);
+            assert_eq!(
+                crate::mxc_common::mxc_error::from_io_error(&error),
+                Some(expected.clone())
+            );
+        }
+
+        drop(stdout_r);
+    }
+
+    #[test]
+    fn a_cached_waiter_error_does_not_retire_the_terminator() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminated_by_kill = Arc::clone(&terminated);
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Err(MxcError::backend_error("wait failed"))),
+            terminator: Box::new(move || {
+                terminated_by_kill.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        process.wait().expect_err("the waiter fails");
+        process
+            .kill()
+            .expect("an unknown process outcome must remain killable");
+
+        assert!(terminated.load(std::sync::atomic::Ordering::SeqCst));
+        drop(stdout_r);
+    }
+
+    #[test]
+    fn a_waiter_panic_is_cached_as_a_structured_backend_error() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| panic!("forced waiter panic")),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        for error in [
+            process.wait().expect_err("the waiter panics"),
+            process.wait().expect_err("the cached panic fails"),
+        ] {
+            let structured = crate::mxc_common::mxc_error::from_io_error(&error)
+                .expect("structured waiter error");
+            assert_eq!(structured.code, MxcErrorCode::BackendError);
+            assert_eq!(structured.message, "exec waiter thread panicked");
+        }
+
+        drop(stdout_r);
+    }
+
     /// `wait` must **tear its discard down**, not walk away from it.
     ///
     /// This is the regression the cancellable drain exists for, and the other
@@ -1720,7 +1867,7 @@ mod tests {
 
     /// A prior `try_wait()` must not let `wait()` skip the drain.
     ///
-    /// `self.exit` records that the child finished; it says nothing about
+    /// A cached success records that the child finished; it says nothing about
     /// whether anything was drained. Returning early on it would silently
     /// break the contract for exactly the caller who polls before waiting.
     ///

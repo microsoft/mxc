@@ -196,6 +196,10 @@ wrong-nesting cases are rejected as `malformed_request`.
 top-level wire envelope (`commandLine`, `cwd`, `env`, `inheritDefaultEnv`,
 `timeout`).
 
+`commandLine` uses the same
+[command-line quoting rules](../../../../schema.md#isolationsession-command-line-quoting)
+as create-and-run execution.
+
 **Output.** Stdout is the agent process's live-streamed output; the dispatcher
 never emits a JSON envelope on stdout for a non-dry-run exec, so a failure's
 `{error}` envelope goes to stderr instead. The wxc-exec process exit code is the
@@ -447,7 +451,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
 | `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
-| `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
+| `ServiceUnavailable(...)` | `backend_unavailable` | Activation of the in-proc IsolationSession runtime API failed: for example, its runtime class is not registered (`REGDB_E_CLASSNOTREG`, `0x80040154`) or not available (`CLASS_E_CLASSNOTAVAILABLE`, `0x80040111`), or Windows denied the caller access (`E_ACCESSDENIED`, `0x80070005`). |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |
 

@@ -65,6 +65,9 @@ rather than switching to another I/O mode. `spawn_with_extended_options_json`
 with `SpawnStdio::Inherit` attaches the workload to the calling process's
 stdin, stdout, and stderr and supports ProcessContainer, Bubblewrap, and Seatbelt.
 
+Captured existing-container execution closes unused stdin automatically.
+With live execution, drop any stdin writer you take when the workload needs EOF.
+
 On WSLC, a process from `spawn_json`, `spawn_with_extended_options_json` with
 `SpawnStdio::Pipes`, or `spawn_in_container_json` has a writable stdin.
 Dropping it, or waiting without taking it, gives the process end-of-file;

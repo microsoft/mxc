@@ -12,6 +12,8 @@ for terminology.
 Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
+W365 Dev JSON execution uses the native runtime and output-drain deadline,
+without a second SDK timeout that interrupts service completion.
 
 ```bash
 npm install @microsoft/mxc-sdk
@@ -295,6 +297,11 @@ for complete signatures and types.
 Native errors are surfaced as `MxcError` with a typed error code and optional
 operation, native status, and remediation. Security and operational warnings
 are returned in `ExecutionResult.warnings` and `MxcProcess.warnings`.
+Failures that occur after a process starts but before MXC can confirm its
+terminal result retain those fields from `run`, `runInContainer`, and
+`MxcProcess.wait`; they are not converted into an exit result. Every caller
+awaiting the process receives the same rejection, and `dispose()` still
+performs process cleanup. `MxcPtyProcess` does not preserve these fields.
 Captured `stdout` and `stderr` are workload output; warnings and structured
 denial-capture metadata are not appended to those streams.
 Validation warnings are returned in `ValidationResult.warnings`.

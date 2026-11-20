@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ProcessContainer rejects filesystem policy paths that are not fully qualified
+  Windows paths, including relative denies that could leave files accessible
+  through broader grants. This applies to all supported contracts and SDK V1,
+  including dry runs. Policy paths are not resolved against `process.cwd`.
+  See [filesystem policy](../../docs/schema.md#filesystem-policy).
+
 - `MxcProcess.Kill`, `Dispose`, `Warnings`, and `OutputMetadata` return at once
   when a wait has already seen the process exit, or killed it at its timeout,
   and is finishing its cleanup, and cancelling `WaitAsync` returns at once

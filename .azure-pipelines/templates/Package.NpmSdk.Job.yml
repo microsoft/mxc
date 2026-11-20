@@ -31,9 +31,6 @@ jobs:
     outputDirectory: $(Build.SourcesDirectory)/out
     sdkDirectory: $(Build.SourcesDirectory)/sdk/node
     artifactBaseName: mxc-npm-sdk-package
-    # Cache npm package downloads across runs to avoid re-fetching every dependency
-    # tarball from the Azure Artifacts feed on each pipeline invocation.
-    npm_config_cache: $(Pipeline.Workspace)/.npm
 
   steps:
     - checkout: self
@@ -49,14 +46,6 @@ jobs:
       displayName: Use Node.js 24
       inputs:
         version: '24.x'
-
-    - task: Cache@2
-      displayName: Cache npm
-      inputs:
-        key: 'npm | "$(Agent.OS)" | sdk/node/package-lock.json'
-        restoreKeys: |
-          npm | "$(Agent.OS)"
-        path: $(npm_config_cache)
 
     # Download all artifacts dynamically
     - ${{ each target in parameters.targets }}:
@@ -141,6 +130,13 @@ jobs:
         sourceFolder: $(Build.SourcesDirectory)/sdk/node-nvx-runtime
         contents: '*.tgz'
         targetFolder: '$(outputDirectory)/packages/nvx'
+
+    - task: CopyFiles@2
+      displayName: Copy npm release selector
+      inputs:
+        sourceFolder: $(Build.SourcesDirectory)/.azure-pipelines/scripts
+        contents: select-npm-packages.ps1
+        targetFolder: '$(outputDirectory)/packages'
 
     - task: 1ES.PublishPipelineArtifact@1
       displayName: Upload SDK as pipeline artifact

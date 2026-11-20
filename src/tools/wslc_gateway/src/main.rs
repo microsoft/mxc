@@ -75,7 +75,13 @@ async fn run() -> Result<(), String> {
         Some(custom) => {
             let target = relay::Target::custom_proxy(custom);
             log!("custom proxy: {proxy_address} relays to {target}");
-            tasks.spawn(relay::fixed(listener, target, "custom proxy", net.clone()));
+            tasks.spawn(relay::fixed(
+                listener,
+                target,
+                "custom proxy",
+                Some(relay::IDLE_TIMEOUT),
+                net.clone(),
+            ));
         }
         None => {
             log!("filtering proxy on {proxy_address}");
@@ -95,7 +101,15 @@ async fn run() -> Result<(), String> {
             policy.egress_address,
             mapping.listen_port
         );
-        tasks.spawn(relay::fixed(listener, target, "port mapping", net.clone()));
+        // Clients are Windows loopback only, and long-lived quiet connections
+        // (database sessions, websockets) must not be cut.
+        tasks.spawn(relay::fixed(
+            listener,
+            target,
+            "port mapping",
+            None,
+            net.clone(),
+        ));
     }
 
     let dns = dns::Server::bind(policy.clone()).await?;

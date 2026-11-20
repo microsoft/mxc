@@ -278,7 +278,7 @@ The existing design budgets are 45000 ms for checkout and 30000 ms for release;
 there are no per-request timeout overrides or new renewal mechanism.
 Readiness and exec use separate data-plane service configuration.
 
-Service defaults are HTTPS port 443, checkout/release API `2.0`, readiness API
+Service defaults are HTTPS port 443, checkout API `3.0`, release API `2.0`, readiness API
 `1.0` and exec capability `microsoft.mxc-exec`. Additional
 protocol/port/capability overrides are outside the proposed initial scope.
 

@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# Validate and stage the selected NuGet packages for the release pipeline.
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -16,6 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+# Selection
 if ([string]::IsNullOrWhiteSpace($PackageSelection)) {
     throw 'Select at least one NuGet package to publish.'
 }
@@ -37,11 +40,13 @@ $packages = @(
         @{ Name = 'nvx'; Id = 'Microsoft.Mxc.Sdk.Nvx.Runtime'; Directory = (Join-Path $PayloadDirectory 'nvx') }
     }
 )
+
+# Validate all selected packages before staging any files.
 foreach ($package in $packages) {
     if (-not (Test-Path -LiteralPath $package.Directory -PathType Container)) {
         throw "Missing package directory: $($package.Directory)"
     }
-    $files = @(Get-ChildItem -LiteralPath $package.Directory -Filter "$($package.Id).*.nupkg" -File -ErrorAction Stop)
+    $files = @(Get-ChildItem -LiteralPath $package.Directory -Filter "$($package.Id).*.nupkg" -File)
     if ($files.Count -ne 1) {
         throw "Expected exactly one $($package.Id) package in $($package.Directory), found $($files.Count)"
     }
@@ -49,9 +54,15 @@ foreach ($package in $packages) {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($package.File.FullName)
     try {
         $nuspecs = @($archive.Entries | Where-Object { $_.FullName -match '^[^/\\]+\.nuspec$' })
-        if ($nuspecs.Count -ne 1) { throw "Expected exactly one root nuspec in $($package.File.Name)" }
+        if ($nuspecs.Count -ne 1) {
+            throw "Expected exactly one root nuspec in $($package.File.Name)"
+        }
         $reader = [System.IO.StreamReader]::new($nuspecs[0].Open())
-        try { [xml]$nuspec = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        try {
+            [xml]$nuspec = $reader.ReadToEnd()
+        } finally {
+            $reader.Dispose()
+        }
         $ids = @($nuspec.SelectNodes("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='id']"))
         $versions = @($nuspec.SelectNodes("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='version']"))
         if ($ids.Count -ne 1 -or $versions.Count -ne 1 -or $ids[0].InnerText -cne $package.Id) {
@@ -69,10 +80,12 @@ foreach ($package in $packages) {
 if ($packages.Count -eq 2 -and $packages[0].Version -cne $packages[1].Version) {
     throw 'SDK and NVX runtime package versions do not match.'
 }
+
+# Release staging
 foreach ($package in $packages) {
     $directory = Join-Path $ReleaseDirectory $package.Name
-    New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+    New-Item -ItemType Directory -Path $directory | Out-Null
     $releasePath = Join-Path $directory $package.File.Name
-    Copy-Item -LiteralPath $package.File.FullName -Destination $releasePath -ErrorAction Stop
+    Copy-Item -LiteralPath $package.File.FullName -Destination $releasePath
     Write-Host "##vso[task.setvariable variable=NuGetPackagePath_$($package.Name)]$releasePath"
 }

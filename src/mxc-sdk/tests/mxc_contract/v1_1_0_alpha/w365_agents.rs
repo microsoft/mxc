@@ -243,7 +243,7 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
     for experimental in [false, true] {
         for phase in PHASES {
             let mut value = request(phase);
-            if matches!(phase, "stop" | "deprovision") {
+            if phase != "provision" {
                 value["sandboxId"] = json!("w365:invalid");
             }
             let source = value.to_string();
@@ -258,8 +258,6 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
             };
             let expected = if !experimental {
                 mxc_sdk::v1::ErrorCode::BackendUnavailable
-            } else if matches!(phase, "start" | "exec") {
-                mxc_sdk::v1::ErrorCode::UnsupportedPhase
             } else if phase == "provision" {
                 // Missing settings must reach backend validation without service work.
                 mxc_sdk::v1::ErrorCode::PolicyValidation
@@ -270,7 +268,7 @@ fn w365_agents_dev_sdk_preserves_authorization_and_backend_validation() {
             if phase == "exec" {
                 let error = sdk::spawn_in_container_json(&source, options)
                     .err()
-                    .expect("piped spawn must also remain unavailable");
+                    .expect("piped spawn must enforce the same validation");
                 assert_eq!(error.code, expected);
             }
         }

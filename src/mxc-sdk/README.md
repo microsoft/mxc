@@ -54,6 +54,15 @@ Captured execution drains both streams concurrently. Output-read failures are
 returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
+`run` and the container lifecycle captured-run helpers preserve structured
+backend failures that occur while obtaining the terminal process result.
+For live processes, use `try_wait_detailed`, `wait_detailed`, or
+`wait_with_output_detailed` when the caller needs `ErrorCode`, `operation`,
+`native_code`, `remediation`, and backend `details`. The existing `try_wait`,
+`wait`, and `wait_with_output` methods keep their `std::io::Error` signatures
+and message-only rendering for compatibility. A terminal wait failure is
+replayed by later waits and does not disable kill or drop cleanup.
+
 Creation takes `RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or
 `SpawnExtendedOptions` after the request. `SpawnWithPtyOptions.size`
 carries initial dimensions and defaults to 24 rows by 80 columns.
@@ -219,13 +228,14 @@ For PowerShell startup failures, see
 
 ## Internal modules and executor binaries
 
-### Experimental W365 checkout and release
+### Experimental W365 lifecycle and execution
 
 Use the existing `v1::dev` JSON lifecycle APIs with `1.1.0-alpha` requests and
-`JsonOptions { experimental: true }` to provision, stop or deprovision a W365
-session. No backend Cargo feature is required. Start and exec remain unsupported.
+`JsonOptions { experimental: true }` to provision, await readiness, run or spawn
+commands, and stop or deprovision a W365 session. No backend Cargo feature is required.
+Execution reuses the caller-owned reservation; PTY and create-and-run remain unsupported.
 Failed Provision messages include a valid returned cleanup ID when available.
-See the [W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md#dev-sdk-checkout-and-release)
+See the [W365 guide](https://github.com/microsoft/mxc/blob/main/docs/backends/w365agents/w365agents-backend.md#dev-sdk-lifecycle-and-execution)
 for caller-environment configuration, request examples and explicit release.
 
 ### Experimental MicroVM support

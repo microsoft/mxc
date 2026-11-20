@@ -29,8 +29,9 @@ checks that its image ID and layer match its config, compiles the ID into
 
 ## Regenerating the images
 
-Regenerate both tars after changing any of the sources above, a dependency in
-`Cargo.lock` that the gateway uses, or `$gatewayToolchain` in the script.
+Regenerate both tars after changing any of the sources above, the workspace
+package version in `src/Cargo.toml`, a dependency in `Cargo.lock` that the gateway
+uses, or `$gatewayToolchain` in the script.
 Commit the tars in the same change. When the channel in
 `src/rust-toolchain.toml` changes, move `$gatewayToolchain` to a release on it.
 

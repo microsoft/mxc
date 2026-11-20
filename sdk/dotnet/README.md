@@ -11,6 +11,8 @@ that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/
 Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
+W365 Dev JSON execution uses the native runtime and output-drain deadline,
+without a second SDK timeout that interrupts service completion.
 
 ## Requirements
 
@@ -283,6 +285,12 @@ for complete signatures and types.
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
 `NativeCode`, and `Remediation` when available. Security and operational
 warnings are available on `ExecutionResult.Warnings` and `MxcProcess.Warnings`.
+Failures that occur after a process starts but before MXC can confirm its
+terminal result retain those fields from `MxcContainer.Run`,
+`MxcLifecycle.RunInContainer`, `MxcProcess.TryGetExitCode`, `Wait`, and
+`WaitAsync`; they are not converted into an exit code. Repeated waits report
+the same failure, while disposal still performs process cleanup.
+`MxcPtyProcess` does not preserve these fields.
 Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
 warnings become an empty array; malformed warnings fail explicitly. When

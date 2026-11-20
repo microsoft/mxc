@@ -60,6 +60,7 @@ getrandom.workspace = true
 libc.workspace = true
 libloading = { version = "0.8", optional = true }
 nix.workspace = true
+native-tls = "0.2"
 same-file.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
@@ -85,8 +86,6 @@ uuid.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
-rcgen = "0.14"
-native-tls = "0.2"
 filetime = "0.2"
 libloading = "0.8"
 quick-xml.workspace = true

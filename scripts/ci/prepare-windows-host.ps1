@@ -52,8 +52,9 @@ function Assert-RequiredFile {
         Exit-WithError "Missing binaries: $($missing -join ', ')"
     }
 
-    $leaves = $RelativePath | ForEach-Object { Split-Path $_ -Leaf }
-    Get-ChildItem $BinaryDirectory -Include $leaves -Recurse | Format-Table FullName, Length
+    # A recursive scan fails on bundled npm paths over MAX_PATH in Windows PowerShell.
+    $RelativePath | ForEach-Object { Get-Item -LiteralPath (Join-Path $BinaryDirectory $_) } |
+        Format-Table FullName, Length
 }
 
 # Read a Windows optional feature's state without throwing, so both the
