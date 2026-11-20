@@ -1,0 +1,14 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "processcontainer",
+  "process": { "commandLine": "echo" },
+  "processContainer": {
+    "registry": {
+      "HKCU": [
+        { "path": "Software\\Contoso\\Default" },
+        { "path": "Software\\Contoso\\Private", "copyOnWrite": true },
+        { "path": "Software\\Contoso\\Shared", "copyOnWrite": false }
+      ]
+    }
+  }
+}

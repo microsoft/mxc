@@ -141,6 +141,8 @@ pub struct ProcessContainer {
     pub ui: Option<BaseProcessUi>,
     /// ProcessContainer-specific filesystem configuration.
     pub filesystem: Option<ProcessContainerFilesystem>,
+    /// Registry authoring policy, rejected before execution until supported.
+    pub registry: Option<ProcessContainerRegistry>,
     /// ProcessContainer-specific network configuration.
     pub network: Option<ProcessContainerNetwork>,
 }
@@ -151,6 +153,24 @@ pub struct ProcessContainer {
 pub struct ProcessContainerFilesystem {
     /// Paths the process can query or enumerate without reading file contents.
     pub enumerate_paths: Option<Vec<String>>,
+}
+
+/// ProcessContainer registry authoring policy.
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessContainerRegistry {
+    /// Key access entries relative to the launching user's HKCU.
+    #[serde(rename = "HKCU")]
+    pub hkcu: Option<Vec<ProcessContainerRegistryKey>>,
+}
+
+/// Requested access to an HKCU key and its descendants.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerRegistryKey {
+    pub path: String,
+    /// Preserve omission; the future backend default is copy-on-write.
+    pub copy_on_write: Option<bool>,
 }
 
 /// ProcessContainer-specific network configuration.

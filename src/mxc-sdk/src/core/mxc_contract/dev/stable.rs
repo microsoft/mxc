@@ -314,6 +314,9 @@ pub struct ProcessContainer {
     /// Optional ProcessContainer-specific filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<ProcessContainerFilesystem>,
+    /// Optional HKCU registry policy. Defined for authoring; execution is not yet supported.
+    #[serde(default)]
+    pub registry: OptionalField<ProcessContainerRegistry>,
     /// Optional ProcessContainer-specific network settings.
     #[serde(default)]
     pub network: OptionalField<ProcessContainerNetwork>,
@@ -327,6 +330,29 @@ pub struct ProcessContainerFilesystem {
     /// Optional paths that may be queried or enumerated without granting file-content reads.
     #[serde(default)]
     pub enumerate_paths: OptionalField<Vec<String>>,
+}
+
+/// ProcessContainer registry policy, scoped to the launching user's HKCU.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ProcessContainerRegistry {
+    /// Optional HKCU key access entries.
+    #[serde(default, rename = "HKCU")]
+    pub hkcu: OptionalField<Vec<ProcessContainerRegistryKey>>,
+}
+
+/// Requested access to an HKCU key and its descendants.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerRegistryKey {
+    /// Non-empty key path relative to HKCU, such as `Software\Contoso`.
+    pub path: NonEmptyString,
+    /// Request copy-on-write (true, the default) or host writes (false).
+    /// Omission is preserved for backend defaulting; neither mode is implemented yet.
+    #[serde(default)]
+    pub copy_on_write: OptionalField<bool>,
 }
 
 /// ProcessContainer-specific network settings.

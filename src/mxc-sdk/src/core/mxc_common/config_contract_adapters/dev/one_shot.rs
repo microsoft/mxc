@@ -93,6 +93,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capture_denials,
         ui,
         filesystem,
+        registry,
         network,
     } = value;
     wire::ProcessContainer {
@@ -109,6 +110,9 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         filesystem: filesystem
             .into_option()
             .map(convert_process_container_filesystem),
+        registry: registry
+            .into_option()
+            .map(convert_process_container_registry),
         network: network.into_option().map(convert_process_container_network),
     }
 }
@@ -128,6 +132,28 @@ fn convert_process_container_network(
     let contract::ProcessContainerNetwork { allowed_proxy_peer } = value;
     wire::ProcessContainerNetwork {
         allowed_proxy_peer: allowed_proxy_peer.into_option(),
+    }
+}
+
+fn convert_process_container_registry(
+    value: contract::ProcessContainerRegistry,
+) -> wire::ProcessContainerRegistry {
+    let contract::ProcessContainerRegistry { hkcu } = value;
+    wire::ProcessContainerRegistry {
+        hkcu: hkcu.into_option().map(|keys| {
+            keys.into_iter()
+                .map(|key| {
+                    let contract::ProcessContainerRegistryKey {
+                        path,
+                        copy_on_write,
+                    } = key;
+                    wire::ProcessContainerRegistryKey {
+                        path: path.into_inner(),
+                        copy_on_write: copy_on_write.into_option(),
+                    }
+                })
+                .collect()
+        }),
     }
 }
 

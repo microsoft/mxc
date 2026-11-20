@@ -10,6 +10,38 @@ const MINIMAL_REQUEST_JSON: &str = r#"{
     }
 }"#;
 
+#[test]
+fn registry_policy_preserves_key_paths_and_copy_on_write_presence() {
+    let request = adapt(
+        r#"{
+            "version":"1.1.0-alpha",
+            "process":{"commandLine":"echo"},
+            "processContainer":{"registry":{"HKCU":[
+                {"path":"Software\\Contoso\\Default"},
+                {"path":"Software\\Contoso\\Private","copyOnWrite":true},
+                {"path":"Software\\Contoso\\Shared","copyOnWrite":false}
+            ]}}
+        }"#,
+    );
+    let keys = request
+        .process_container
+        .unwrap()
+        .registry
+        .unwrap()
+        .hkcu
+        .unwrap();
+    assert_eq!(
+        keys.iter()
+            .map(|key| (key.path.as_str(), key.copy_on_write))
+            .collect::<Vec<_>>(),
+        [
+            (r"Software\Contoso\Default", None),
+            (r"Software\Contoso\Private", Some(true)),
+            (r"Software\Contoso\Shared", Some(false)),
+        ]
+    );
+}
+
 const PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
     "version": "1.1.0-alpha",
     "containerId": "container-id",

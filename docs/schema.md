@@ -417,6 +417,46 @@ looking for a marker file that defines their project. With Windows BaseContainer
 When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible.
 Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
+### Registry policy authoring (development contract)
+
+Schema `1.1.0-alpha` defines `processContainer.registry.HKCU` for authoring
+Windows ProcessContainer registry policy. **Execution is not supported yet.**
+Any request containing `processContainer.registry`, including an empty object
+or empty list, is rejected before execution rather than ignored. This section
+does not grant access, create hives, or configure the OS.
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "containment": "processcontainer",
+    "process": { "commandLine": "my-tool.exe" },
+    "processContainer": {
+        "registry": {
+            "HKCU": [
+                { "path": "Software\\Contoso\\PrivateSettings" },
+                { "path": "Software\\Contoso\\SharedSettings", "copyOnWrite": false }
+            ]
+        }
+    }
+}
+```
+
+`HKCU` is an optional array of key access entries. No other hive is defined.
+
+| Entry field | Type | Default | Meaning |
+|-------------|------|---------|---------|
+| `path` | non-empty string | required | Key path relative to the launching user's HKCU, without the `HKCU\` prefix. Identifies a key and its descendants, not an individual value. |
+| `copyOnWrite` | boolean | `true` | Requests copy-on-write when omitted or `true`; `false` requests writes to the host key instead. |
+
+Omitted `copyOnWrite` remains omitted during parsing so the future backend can
+apply the copy-on-write default. Neither mode is enforced in this release;
+path authorization and write-destination validation require backend integration.
+Explicit `null`, unknown fields, and non-boolean `copyOnWrite` values are rejected.
+
+This authoring contract is available through development-version MXC request
+JSON and its generated types. Published schemas and the high-level V1 SDK
+contract do not accept this section.
+
 ### UI Policy
 
 The `ui` section is the cross-platform UI-restriction policy. Every field is

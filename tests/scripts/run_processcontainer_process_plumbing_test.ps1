@@ -34,6 +34,32 @@ function Phase-ProcessPlumbing {
     $rw = Join-Path $ScratchRoot 'rw'
     $ro = Join-Path $ScratchRoot 'ro'
 
+    foreach ($mode in @('default', 'true', 'false', 'empty')) {
+        $key = [ordered]@{ path = 'Software\Contoso\RegistryAuthoringProbe' }
+        if ($mode -ne 'default' -and $mode -ne 'empty') {
+            $key['copyOnWrite'] = ($mode -eq 'true')
+        }
+        $registry = if ($mode -eq 'empty') {
+            [ordered]@{ HKCU = @() }
+        } else {
+            [ordered]@{ HKCU = @($key) }
+        }
+        $config = New-RawConfig -Name "plumb-registry-$mode" -Object ([ordered]@{
+            version = '1.1.0-alpha'
+            containment = 'processcontainer'
+            process = [ordered]@{ commandLine = (New-ProbeCommand -Body 'exit 0') }
+            processContainer = [ordered]@{ registry = $registry }
+        })
+        $log = Join-Path $ScratchRoot "logs\plumb-registry-$mode.log"
+        $result = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $config -LogPath $log -TimeoutSec 30
+        $diagnostic = "$($result.Stderr)`n$(Read-Log $log)"
+        Record-Result -Phase 'P11' -Name "registry authoring ($mode) fails before execution" `
+            -Pass (($result.ExitCode -ne 0) -and (-not $result.TimedOut) -and `
+                (-not (Test-WorkloadRan $result)) -and `
+                ($diagnostic -match 'registry enforcement is not implemented')) `
+            -Detail "exit=$($result.ExitCode); stderr=$(Format-Snippet $result.Stderr)"
+    }
+
     # --- env delivery. process.env replaces the environment outright, so the
     # block must stay viable; values with spaces and an embedded `=` catch the
     # two classic parse bugs.
@@ -160,4 +186,3 @@ function Phase-ProcessPlumbing {
 
 Invoke-WpcPhase -Key 'ProcessPlumbing' -Body { Phase-ProcessPlumbing }
 Complete-WpcChild
-

@@ -585,6 +585,10 @@ export interface ProcessContainer {
    */
   network?: ProcessContainerNetwork;
   /**
+   * Optional HKCU registry policy. Defined for authoring; execution is not yet supported.
+   */
+  registry?: ProcessContainerRegistry;
+  /**
    * Optional ProcessContainer-specific user-interface policy.
    */
   ui?: ProcessContainerUi;
@@ -610,6 +614,30 @@ export interface ProcessContainerNetwork {
    * Optional loopback peer the contained process may reach in addition to the configured runtime proxy. Requires `runtimeConfig.networkProxy`.
    */
   allowedProxyPeer?: string;
+}
+
+/**
+ * ProcessContainer registry policy, scoped to the launching user's HKCU.
+ */
+export interface ProcessContainerRegistry {
+  /**
+   * Optional HKCU key access entries.
+   */
+  HKCU?: ProcessContainerRegistryKey[];
+}
+
+/**
+ * Requested access to an HKCU key and its descendants.
+ */
+export interface ProcessContainerRegistryKey {
+  /**
+   * Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting; neither mode is implemented yet.
+   */
+  copyOnWrite?: boolean;
+  /**
+   * Non-empty key path relative to HKCU, such as `Software\Contoso`.
+   */
+  path: NonEmptyString;
 }
 
 /**

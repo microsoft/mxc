@@ -1095,6 +1095,10 @@
           "$ref": "#/definitions/ProcessContainerNetwork",
           "description": "Optional ProcessContainer-specific network settings."
         },
+        "registry": {
+          "$ref": "#/definitions/ProcessContainerRegistry",
+          "description": "Optional HKCU registry policy. Defined for authoring; execution is not yet supported."
+        },
         "ui": {
           "$ref": "#/definitions/ProcessContainerUi",
           "description": "Optional ProcessContainer-specific user-interface policy."
@@ -1129,6 +1133,38 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "ProcessContainerRegistry": {
+      "additionalProperties": false,
+      "description": "ProcessContainer registry policy, scoped to the launching user's HKCU.",
+      "properties": {
+        "HKCU": {
+          "description": "Optional HKCU key access entries.",
+          "items": {
+            "$ref": "#/definitions/ProcessContainerRegistryKey"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainerRegistryKey": {
+      "additionalProperties": false,
+      "description": "Requested access to an HKCU key and its descendants.",
+      "properties": {
+        "copyOnWrite": {
+          "description": "Request copy-on-write (true, the default) or host writes (false). Omission is preserved for backend defaulting; neither mode is implemented yet.",
+          "type": "boolean"
+        },
+        "path": {
+          "$ref": "#/definitions/NonEmptyString",
+          "description": "Non-empty key path relative to HKCU, such as `Software\\Contoso`."
+        }
+      },
+      "required": [
+        "path"
+      ],
       "type": "object"
     },
     "ProcessContainerUi": {

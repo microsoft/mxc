@@ -106,6 +106,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
             .into_option()
             .map(convert_process_container_filesystem),
         network: network.into_option().map(convert_process_container_network),
+        registry: None,
     }
 }
 

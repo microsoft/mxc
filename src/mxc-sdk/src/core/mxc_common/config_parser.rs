@@ -1360,6 +1360,14 @@ fn normalize_common_request_ir(
     // the newer BaseContainer implementation (ui).
     let mut process_container_network = None;
     if let Some(ac) = cfg.process_container {
+        if ac.registry.is_some() {
+            return Err(WxcError::ConfigParse(
+                "processContainer.registry is defined for policy authoring only; \
+                 registry enforcement is not implemented. Remove the registry section \
+                 before execution."
+                    .to_string(),
+            ));
+        }
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
@@ -2115,6 +2123,35 @@ mod tests {
                 assert_eq!(request.script_code, "echo dev");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+        }
+    }
+
+    #[test]
+    fn registry_authoring_policy_cannot_be_silently_executed() {
+        for registry in [
+            r#"{}"#,
+            r#"{"HKCU":[]}"#,
+            r#"{"HKCU":[{"path":"Software\\Contoso"}]}"#,
+            r#"{"HKCU":[{"path":"Software\\Contoso","copyOnWrite":true}]}"#,
+            r#"{"HKCU":[{"path":"Software\\Contoso","copyOnWrite":false}]}"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version":"1.1.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{{"commandLine":"echo must-not-run"}},
+                    "processContainer":{{"registry":{registry}}}
+                }}"#
+            );
+            let error = parse_exact_for_test(&json).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)));
+            assert!(
+                error
+                    .message()
+                    .contains("registry enforcement is not implemented"),
+                "{}",
+                error.message()
+            );
         }
     }
 

@@ -27,6 +27,29 @@ fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn registry_authoring_policy_is_rejected_by_native_execution_entrypoints() {
+    let json = r#"{
+        "version":"1.1.0-alpha",
+        "containment":"processcontainer",
+        "process":{"commandLine":"echo must-not-run"},
+        "processContainer":{"registry":{"HKCU":[{"path":"Software\\Contoso"}]}}
+    }"#;
+    let spawn_error = match mxc_sdk::__ffi::spawn_container_json(json, false) {
+        Err(error) => error,
+        Ok(_) => panic!("registry policy must be rejected before spawning"),
+    };
+    let run_error = mxc_sdk::__ffi::run_json(json, false).unwrap_err();
+    for error in [spawn_error, run_error] {
+        assert!(
+            error
+                .to_string()
+                .contains("registry enforcement is not implemented"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn platform_support_reports_host() {
     let support = platform_support();
     // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
