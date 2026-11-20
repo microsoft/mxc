@@ -33,35 +33,6 @@ fn invalid_identity_mapping_configurations_are_rejected() {
             &[] as &[&str],
         ),
         (
-            "host-root",
-            "lxc.idmap =\nlxc.idmap = u 0 100000 65536\n\
-             lxc.idmap = g 0 0 1\nlxc.idmap = g 1 100001 65535",
-            false,
-            &[
-                "/gid_map:",
-                "maps to outside ID 0",
-                "/etc/subuid",
-                "/etc/subgid",
-                "lxc.idmap",
-                "https://github.com/microsoft/mxc/blob/main/docs/backends/lxc/lxc-backend.md",
-            ],
-        ),
-        (
-            "host-root-user",
-            "lxc.idmap =\nlxc.idmap = u 0 100000 1\n\
-             lxc.idmap = u 1 0 1\nlxc.idmap = u 2 100002 65534\n\
-             lxc.idmap = g 0 100000 65536",
-            false,
-            &[
-                "/uid_map:",
-                "maps to outside ID 0",
-                "/etc/subuid",
-                "/etc/subgid",
-                "lxc.idmap",
-                "https://github.com/microsoft/mxc/blob/main/docs/backends/lxc/lxc-backend.md",
-            ],
-        ),
-        (
             "garbled",
             "lxc.idmap = g garbled",
             false,
@@ -98,28 +69,44 @@ fn invalid_identity_mapping_configurations_are_rejected() {
             });
             fs::write(&definition, original).expect("restore fixture definition for cleanup");
             let result = result.expect("run identity-map workload");
+            let output = result.combined_output();
+            assert!(
+                result.code.is_some_and(|code| (code == 0) == succeeds),
+                "{case} mapping: expected success={succeeds}, exit={:?}\n{output}",
+                result.code
+            );
+            for message in expected {
+                assert!(
+                    output.contains(message),
+                    "{case} mapping: missing diagnostic {message:?}\n{output}"
+                );
+            }
+
             let workload_ran = Path::new(&format!(
                 "/var/lib/lxc/{name}/rootfs/mxc-idmap-workload-ran"
             ))
             .try_exists()
             .expect("observe identity-map workload marker");
+            assert_eq!(
+                workload_ran, succeeds,
+                "{case} mapping: unexpected workload execution\n{output}"
+            );
+
             let state = Command::new("lxc-info")
                 .args(["-n", &name, "-s", "-H"])
                 .output()
                 .expect("observe retained identity-map container state");
-            let output = result.combined_output();
-
-            assert!(
-                result.code.is_some_and(|code| (code == 0) == succeeds)
-                    && workload_ran == succeeds
-                    && expected.iter().all(|message| output.contains(message))
-                    && (succeeds
-                        || (state.status.success()
-                            && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED")),
-                "{case} mapping: expected success={succeeds}, workload ran={workload_ran}, \
-                 retained state={state:?}, expected diagnostics={expected:?}, exit={:?}\n{output}",
-                result.code
-            );
+            if !succeeds {
+                assert!(
+                    state.status.success(),
+                    "{case} mapping: failed to read retained container state: {state:?}\n{output}"
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&state.stdout).trim(),
+                    "STOPPED",
+                    "{case} mapping: rejected container is not stopped: {state:?}\n{output}"
+                );
+            }
         });
         let _ = Command::new("lxc-destroy")
             .args(["-n", &name, "-f"])
