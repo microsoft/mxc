@@ -27,7 +27,7 @@ fn invalid_identity_mapping_configurations_are_rejected() {
     for (case, mapping, succeeds, expected) in [
         (
             "shifted",
-            "lxc.idmap =\nlxc.idmap = u 0 100000 65536\n\
+            "lxc.idmap = u 0 100000 65536\n\
              lxc.idmap = g 0 100000 65536",
             true,
             &[] as &[&str],
@@ -63,8 +63,16 @@ fn invalid_identity_mapping_configurations_are_rejected() {
                 "lxc": { "distribution": "alpine", "release": "3.23" }
             });
             let result = std::panic::catch_unwind(|| {
-                fs::write(&definition, format!("{original}\n{mapping}\n"))
-                    .expect("configure identity mapping");
+                let config_without_mappings = original
+                    .lines()
+                    .filter(|line| line.split('=').next().map(str::trim) != Some("lxc.idmap"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                fs::write(
+                    &definition,
+                    format!("{config_without_mappings}\n{mapping}\n"),
+                )
+                .expect("configure identity mapping");
                 run_platform_config_value(case, &config, &[], None)
             });
             fs::write(&definition, original).expect("restore fixture definition for cleanup");

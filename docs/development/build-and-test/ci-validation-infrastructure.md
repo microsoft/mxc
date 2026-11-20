@@ -138,10 +138,9 @@ IsolationSession, and WSLC jobs at their bundle download.
 LXC jobs temporarily configure unprivileged UID/GID mappings and restore the
 original host configuration after testing, including when tests fail.
 
-The mapping E2E exercises valid shifted maps, a host-root GID map, a non-root
-UID mapped to host UID zero, and garbled native configuration.  Rejected cases
-must return an error without running the workload and retain a stopped
-container.
+The mapping E2E exercises valid shifted maps and garbled native configuration.
+Rejected cases must return an error without running the workload and retain a
+stopped container.
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
