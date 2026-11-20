@@ -14,6 +14,8 @@
     invocation per store, which opens one WSLC session against that store and
     invokes `WslcPullSessionImage` for each image. The pulled images persist in
     that storage path and become visible to subsequent runtime executions.
+    If a registry rate-limits a pull (`toomanyrequests`), the invocation is
+    retried up to 3 times, 60 seconds apart.
 
     The storage path you pass here MUST match the value used at run time
     (the `wslc.storagePath` field of the config, or the
@@ -148,10 +150,23 @@ if ($DebugLogs) {
     $wxcArgs += "--debug"
 }
 
+$rateLimitRetries = 3
+$rateLimitWaitSecs = 60
+$heartbeatSecs = 15
 $prevPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$output = & $WxcExec @wxcArgs 2>&1 | Out-String
-$exitCode = $LASTEXITCODE
+for ($attempt = 0; ; $attempt++) {
+    $output = & $WxcExec @wxcArgs 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -or $attempt -ge $rateLimitRetries -or $output -notmatch 'toomanyrequests') { break }
+    Write-Host "rate-limited by a registry; retry $($attempt + 1)/$rateLimitRetries in $rateLimitWaitSecs s" -ForegroundColor Yellow
+    for ($remaining = $rateLimitWaitSecs; $remaining -gt 0; $remaining -= $heartbeatSecs) {
+        $step = [Math]::Min($heartbeatSecs, $remaining)
+        Write-Host "    retrying in $remaining s" -ForegroundColor Gray
+        Start-Sleep -Seconds $step
+    }
+    Write-Host "  pulling $($Image.Count) image(s), retry $($attempt + 1)/$rateLimitRetries ... " -NoNewline
+}
 $ErrorActionPreference = $prevPref
 
 if ($exitCode -eq 0) {
