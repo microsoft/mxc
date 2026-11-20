@@ -133,6 +133,14 @@ IsolationSession, and WSLC jobs at their bundle download.
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
+LXC jobs temporarily configure unprivileged UID/GID mappings and restore the
+original host configuration after testing, including when tests fail.
+
+The mapping E2E exercises valid shifted maps, a host-root GID map, a non-root
+UID mapped to host UID zero, and garbled native configuration.  Rejected cases
+must return an error without running the workload and retain a stopped
+container.
+
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
 test step 45 min on Linux and 60 on Windows and macOS, so a hung backend fails
@@ -236,6 +244,11 @@ container provisioning. LXC mount cases run as root against an empty, stopped
 container in private storage and verify cleanup. The blocked-call hook is test-only. See
 [filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
 for local commands and watchdog behavior.
+
+LXC also runs prebuilt Rust regressions for startup cancellation, cleanup after
+failed startup, long-running workloads, existing static networking, and
+cancellation during address acquisition.  Each named regression must be
+discoverable, and missing prerequisites fail the job.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

@@ -15,6 +15,120 @@ fn ready() -> bool {
 }
 
 #[test]
+fn invalid_identity_mapping_configurations_are_rejected() {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    if !ready() {
+        return;
+    }
+
+    for (case, mapping, succeeds, expected) in [
+        (
+            "shifted",
+            "lxc.idmap =\nlxc.idmap = u 0 100000 65536\n\
+             lxc.idmap = g 0 100000 65536",
+            true,
+            &[] as &[&str],
+        ),
+        (
+            "host-root",
+            "lxc.idmap =\nlxc.idmap = u 0 100000 65536\n\
+             lxc.idmap = g 0 0 1\nlxc.idmap = g 1 100001 65535",
+            false,
+            &[
+                "/gid_map:",
+                "maps to outside ID 0",
+                "/etc/subuid",
+                "/etc/subgid",
+                "lxc.idmap",
+                "https://github.com/microsoft/mxc/blob/main/docs/backends/lxc/lxc-backend.md",
+            ],
+        ),
+        (
+            "host-root-user",
+            "lxc.idmap =\nlxc.idmap = u 0 100000 1\n\
+             lxc.idmap = u 1 0 1\nlxc.idmap = u 2 100002 65534\n\
+             lxc.idmap = g 0 100000 65536",
+            false,
+            &[
+                "/uid_map:",
+                "maps to outside ID 0",
+                "/etc/subuid",
+                "/etc/subgid",
+                "lxc.idmap",
+                "https://github.com/microsoft/mxc/blob/main/docs/backends/lxc/lxc-backend.md",
+            ],
+        ),
+        (
+            "garbled",
+            "lxc.idmap = g garbled",
+            false,
+            &[
+                "Failed to parse id mappings",
+                "Failed to parse config file",
+                "lxc.idmap = g garbled",
+            ],
+        ),
+    ] {
+        let name = format!("lxc-idmap-{case}-{}", std::process::id());
+        let outcome = std::panic::catch_unwind(|| {
+            Command::new("lxc-create")
+                .args([
+                    "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
+                    "amd64",
+                ])
+                .status()
+                .expect("create identity-map fixture");
+            let definition = format!("/var/lib/lxc/{name}/config");
+            let original = fs::read_to_string(&definition).expect("read identity-map fixture");
+            let config = json!({
+                "version": "0.9.0-alpha",
+                "containerId": name,
+                "containment": "lxc",
+                "process": { "commandLine": "touch /mxc-idmap-workload-ran" },
+                "lifecycle": { "destroyOnExit": false },
+                "lxc": { "distribution": "alpine", "release": "3.23" }
+            });
+            let result = std::panic::catch_unwind(|| {
+                fs::write(&definition, format!("{original}\n{mapping}\n"))
+                    .expect("configure identity mapping");
+                run_platform_config_value(case, &config, &[], None)
+            });
+            fs::write(&definition, original).expect("restore fixture definition for cleanup");
+            let result = result.expect("run identity-map workload");
+            let workload_ran = Path::new(&format!(
+                "/var/lib/lxc/{name}/rootfs/mxc-idmap-workload-ran"
+            ))
+            .try_exists()
+            .expect("observe identity-map workload marker");
+            let state = Command::new("lxc-info")
+                .args(["-n", &name, "-s", "-H"])
+                .output()
+                .expect("observe retained identity-map container state");
+            let output = result.combined_output();
+
+            assert!(
+                result.code.is_some_and(|code| (code == 0) == succeeds)
+                    && workload_ran == succeeds
+                    && expected.iter().all(|message| output.contains(message))
+                    && (succeeds
+                        || (state.status.success()
+                            && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED")),
+                "{case} mapping: expected success={succeeds}, workload ran={workload_ran}, \
+                 retained state={state:?}, expected diagnostics={expected:?}, exit={:?}\n{output}",
+                result.code
+            );
+        });
+        let _ = Command::new("lxc-destroy")
+            .args(["-n", &name, "-f"])
+            .output();
+        outcome.expect("identity-map fixture failed");
+    }
+}
+
+#[test]
 fn cancelling_startup_preserves_a_stopped_container() {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::{gettid, Pid};
@@ -59,7 +173,10 @@ fn cancelling_startup_preserves_a_stopped_container() {
             .expect("make hook executable");
         let definition = format!("/var/lib/lxc/{name}/config");
         let mut contents = fs::read_to_string(&definition).expect("read existing definition");
-        contents.push_str(&format!("\nlxc.hook.start-host = {}\n", hook.display()));
+        contents.push_str(&format!(
+            "\nlxc.tty.dir = lxc\nlxc.tty.max = 1\nlxc.hook.start-host = {}\n",
+            hook.display()
+        ));
         fs::write(&definition, contents).expect("install startup gate");
         let children = format!("/proc/self/task/{}/children", gettid());
         let canceller = std::thread::spawn(move || {

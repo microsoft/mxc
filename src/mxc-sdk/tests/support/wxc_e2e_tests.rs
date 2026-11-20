@@ -77,17 +77,15 @@ fn current_triple() -> &'static str {
     }
 }
 
-/// Search for a binary in the target directory, checking multiple locations.
-///
-/// Two profile directories may both contain the binary on a given dev host —
-/// the triple-prefixed `target/<triple>/<profile>/` from explicit-target
-/// builds, and the plain `target/<profile>/` that `cargo build` /
-/// `cargo test` write by default. Returning the *most recently modified*
-/// candidate keeps tests aligned with the build the user just ran, instead
-/// of latching onto a stale triple-prefixed copy from a previous session.
-/// Profile preference (debug-vs-release) only resolves ties when neither
-/// candidate has been built more recently than the other.
+/// Find a companion executable, falling back to the newest Cargo build.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Ok(executable) = std::env::current_exe() {
+        let candidate = executable.with_file_name(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     let src = src_dir();
     let (primary, fallback) = if is_release_mode() {
         ("release", "debug")

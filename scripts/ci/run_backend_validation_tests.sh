@@ -88,6 +88,23 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
+
+        # Each entry pairs a test executable with one exact regression name.
+        for regression in \
+            wxc_e2e_tests_e2e_lxc_network_capability:invalid_identity_mapping_configurations_are_rejected \
+            wxc_e2e_tests_e2e_lxc_network_capability:cancelling_startup_preserves_a_stopped_container \
+            wxc_e2e_tests_e2e_lxc_network_capability:failed_startup_waits_for_cleanup_after_one_minute \
+            wxc_e2e_tests_e2e_lxc_network_capability:successful_startup_does_not_time_out_the_workload \
+            wxc_e2e_tests_e2e_lxc_static_network:existing_containers_keep_their_static_network_configuration \
+            wxc_e2e_tests_e2e_lxc_static_network:ctrl_c_during_address_acquisition_removes_temporary_host_networking; do
+            executable="$release_directory/${regression%%:*}"
+            test_name="${regression#*:}"
+            test -f "$executable"
+            chmod +x "$executable"
+            "$executable" --list --exact "$test_name" | grep -Fx "$test_name: test"
+            MXC_LXC_TESTS_REQUIRE_EXECUTION=1 "$executable" --exact "$test_name"
+        done
+
         # A skip here means a prerequisite disappeared on a runner provisioned
         # to execute this suite, so turn it into a failure rather than a
         # vacuously green gate.

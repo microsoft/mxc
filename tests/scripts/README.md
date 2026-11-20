@@ -138,6 +138,7 @@ overrides are assigned only to child processes, never to the invoking shell.
 |--------|-------------|---------------------|
 | `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap`, Python 3 for terminal isolation |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
+| `run_lxc_host_network_rejection_test.sh` | Rejects `lxc.net.0.type = none` before startup | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts

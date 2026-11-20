@@ -26,6 +26,9 @@ ranges, or any mapping to outside ID 0.  Container root must map to a nonzero
 outside UID.  Validation failure prevents the workload from starting and
 triggers a container stop; a failed stop is reported.
 
+MXC rejects `lxc.net.0.type = none` before network setup or container startup,
+including values inherited through `lxc.include`.
+
 After one minute, `lxc-exec` requests startup cancellation and cleanup instead
 of forcing an exit.  Stop and destroy commands retain their 120-second limits;
 the startup timer does not interrupt cleanup.  A successfully started workload
@@ -70,6 +73,27 @@ for unprivileged LXC.  Everything else needs root.
 2. Let the container's root user reach its files under your home directory:
    `chmod o+x ~`.
 
+### Running as root
+
+Running `lxc-exec` through `sudo` does not bypass the mapping checks.
+Configure the host before creating the container:
+
+1. Use nonzero ranges assigned to `root` in `/etc/subuid` and `/etc/subgid`.
+   If needed, allocate unused ranges; for example, add `root:100000:65536` to
+   each file after checking availability.
+2. Replace existing `lxc.idmap` entries in `/etc/lxc/default.conf` with entries
+   matching those assignments:
+
+   ```ini
+   lxc.idmap =
+   lxc.idmap = u 0 100000 65536
+   lxc.idmap = g 0 100000 65536
+   ```
+
+   Substitute your assigned host ID starts and counts if they differ from
+   the example.
+3. Create a fresh container, or recreate one that uses unsafe mappings.
+   Preserve any needed data before recreating an existing container.
 
 ### Container networking
 

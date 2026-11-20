@@ -516,7 +516,10 @@ impl LxcContainer {
             })?;
             Self::validate_id_maps(std::path::Path::new(&format!("/proc/{pid}"))).map_err(|error| {
                 format!(
-                    "Container '{}': {error}.  MXC will not run the requested command.",
+                    "Container '{}': {error}.  MXC will not run the requested command.  \
+                     Assign unused nonzero host UID/GID ranges to the LXC launcher in /etc/subuid and /etc/subgid, \
+                     configure matching lxc.idmap entries, and recreate containers with unsafe mappings.  \
+                     See https://github.com/microsoft/mxc/blob/main/docs/backends/lxc/lxc-backend.md",
                     self.name
                 )
             })
@@ -543,6 +546,13 @@ impl LxcContainer {
         prepare: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         let start = || {
+            if self.config_value("lxc.net.0.type")? == "none" {
+                return Err(
+                    "LXC host networking (lxc.net.0.type=none) is not supported; \
+                     configure a separate network namespace."
+                        .into(),
+                );
+            }
             let prepared = prepare()?;
             let mut cmd = self.lxc_command("lxc-start");
             cmd.args(network.to_start_args(self.configured_interface_count()));

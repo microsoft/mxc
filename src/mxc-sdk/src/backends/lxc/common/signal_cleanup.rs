@@ -313,9 +313,9 @@ pub(crate) fn run_owned_startup(mut command: Command, readiness: Command) -> Res
         })
         .map_err(|error| format!("spawn LXC monitor reaper: {error}"))?;
 
-    // Foreground mode keeps the actual monitor owned; "none" avoids opening /dev/tty.
+    // Keep the startup monitor owned and create terminal devices without a console directory.
     command
-        .args(["-F", "-s", "lxc.console.path=none"])
+        .args(["-F", "-s", "lxc.console.path=none", "-s", "lxc.tty.dir="])
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
