@@ -117,7 +117,8 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 - **Limits:** each listener accepts at most 512 connections; more wait in the
   kernel's queue. At most 256 UDP DNS queries are in flight; more are dropped
   and retried by the client. Request headers are limited to 16 KB and 10s,
-  upstream connections to 30s, idle connections to 10 minutes, and DNS
+  upstream connections to 30s, idle connections (except port mappings) to 10
+  minutes, and DNS
   forwarding to 4s. Accept errors, including running out of descriptors, are
   retried rather than stopping the controller. The SDK has no per-container
   memory or CPU limit, only per session.

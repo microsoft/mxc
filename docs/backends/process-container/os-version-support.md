@@ -11,6 +11,10 @@ This is the reference for **Windows OS support of the `processcontainer` and `is
 | 26H2 | [26300.9550](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/09/kb5124010-windows-11-24h2-25h2-update) | [26300.9550](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/09/kb5124010-windows-11-24h2-25h2-update) |
 | 26H1 | [28000.2804](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/08/kb5120996-windows-11-26h1-update) | [28000.3086](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/09/kb5124006-windows-11-26h1-update) |
 
+Meeting the Session Isolation build does not guarantee that isolation sessions
+are available; see
+[IsolationSession availability](../isolation-session/availability.md).
+
 ## Learning Mode capture compatibility
 
 `processContainer.captureDenials` selects its capture provider by runtime

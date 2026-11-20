@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-port-mapping-bridged-reached",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "serve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\nserve 8086 1"
+  },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "wslc": {
+    "image": "alpine:latest",
+    "portMappings": [{ "windowsPort": 18086, "containerPort": 8086, "protocol": "tcp" }]
+  }
+}

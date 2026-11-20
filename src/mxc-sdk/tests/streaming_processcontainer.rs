@@ -16,6 +16,92 @@ use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
+fn processcontainer_relative_denied_path_rejected_before_run_and_spawn() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let secret = workspace.path().join("secret.txt");
+    std::fs::write(&secret, "DENIED_FILE_CONTROL").expect("write fixture");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("host read control"),
+        "DENIED_FILE_CONTROL"
+    );
+    for path in [
+        "secret.txt",
+        r".\secret.txt",
+        r"C:secret.txt",
+        r"\secret.txt",
+    ] {
+        let executed = workspace.path().join("executed.txt");
+        let request = ContainerRequest {
+            working_directory: Some(workspace.path().to_string_lossy().into_owned()),
+            filesystem: Some(FilesystemPolicy {
+                readwrite_paths: vec![workspace.path().to_string_lossy().into_owned()],
+                readonly_paths: vec![],
+                denied_paths: vec![path.into()],
+                clear_policy_on_exit: None,
+            }),
+            containment: Containment::ProcessContainer(ProcessContainerConfig::default()),
+            ..ContainerRequest::new(
+                "cmd.exe /d /c \"echo executed>executed.txt & type secret.txt\"",
+            )
+        };
+        let run_error = mxc_sdk::v1::run(request.clone(), Default::default())
+            .expect_err("relative deny must reject run");
+        let spawn_error = spawn(request, Default::default())
+            .err()
+            .expect("relative deny must reject spawn");
+        for error in [run_error, spawn_error] {
+            assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+            assert!(
+                error.message.contains(&format!(
+                    "filesystem.deniedPaths contains an invalid path \"{path}\""
+                )) && error.message.contains("fully qualified"),
+                "{error}"
+            );
+        }
+        assert!(!executed.exists(), "rejected request launched its workload");
+    }
+}
+
+#[test]
+fn processcontainer_overlapping_lists_report_invalid_path() {
+    use mxc_sdk::v1::dev::{self, JsonOptions};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let executed = workspace.path().join("executed.txt");
+    let request = serde_json::json!({
+        "version": "1.0.0",
+        "containment": "processcontainer",
+        "filesystem": {
+            "readonlyPaths": [workspace.path(), "secret.txt"],
+            "deniedPaths": [workspace.path()],
+        },
+        "process": {
+            "commandLine": "cmd.exe /d /c echo executed>executed.txt",
+            "cwd": workspace.path(),
+        },
+    })
+    .to_string();
+
+    let run_error =
+        dev::run_json(&request, JsonOptions::default()).expect_err("relative path must reject run");
+    let spawn_error = dev::spawn_json(&request, JsonOptions::default())
+        .err()
+        .expect("relative path must reject spawn");
+    for error in [run_error, spawn_error] {
+        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+        assert!(
+            error.message.contains(
+                "filesystem.readonlyPaths contains an invalid path \"secret.txt\": \
+                 expected a fully qualified Windows filesystem path"
+            ),
+            "{error}"
+        );
+        assert!(!error.message.contains("readonlyPaths["), "{error}");
+    }
+    assert!(!executed.exists(), "rejected request launched its workload");
+}
+
+#[test]
 #[ignore = "requires a PSEC-capable Windows host"]
 fn inherited_stdio_processcontainer_uses_caller_stdio() {
     inherited_stdio_contract::assert_uses_caller_stdio(

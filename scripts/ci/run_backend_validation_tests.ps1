@@ -323,6 +323,17 @@ function Invoke-NamedSuites {
     }
 }
 
+# Daemon discovery reuses any running daemon, including one another suite started.
+function Stop-WslcDaemons {
+    foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
+        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id) from an earlier suite."
+        Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+        if (-not $daemon.WaitForExit(30000)) {
+            throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
+        }
+    }
+}
+
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
     $rustTests = Join-Path $bundle 'inproc\mxc-sdk-wslc-streaming-tests.exe'
@@ -331,13 +342,17 @@ function Invoke-WslcSuites {
     }
     $nodeLifecycleTests = @(
         'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership',
-        'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior')
+        'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior',
+        'captured exec preserves structured post-admission wait failures',
+        'process wait preserves structured post-admission wait failures')
     $nodeCreateAndRunTests = @(
         'should forward every stdin byte to a spawned command',
         'should give a spawned command end-of-file when wait ends an untaken stdin',
         'should let output be read to the end before waiting once stdin is ended',
         'should give a command run to completion end-of-file on stdin',
-        'should reject an unsupported targetOs before starting a container')
+        'should reject an unsupported targetOs before starting a container',
+        'captured run preserves structured post-admission wait failures',
+        'spawned process wait preserves structured post-admission wait failures')
     $dotnetMethods = @(
         'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership',
         'SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput',
@@ -345,10 +360,14 @@ function Invoke-WslcSuites {
         'SpawnInContainer_WaitGivesEndOfFileToStdinNobodyTook',
         'SpawnInContainer_WaitAsyncGivesEndOfFileToStdinNobodyTook',
         'RunInContainer_GivesACommandThatReadsStdinEndOfFile',
+        'RunInContainer_PreservesStructuredPostAdmissionWaitFailure',
+        'SpawnInContainer_WaitPreservesStructuredPostAdmissionWaitFailure',
         'Spawn_ForwardsEveryByteAndClosingStdinEndsInput',
         'Spawn_WaitClosesAnUntakenStdin',
         'Spawn_ClosingStdinLetsOutputBeReadToTheEndBeforeWaiting',
-        'Run_GivesACommandThatReadsStdinEndOfFile')
+        'Run_GivesACommandThatReadsStdinEndOfFile',
+        'Run_PreservesStructuredPostAdmissionWaitFailure',
+        'Spawn_WaitPreservesStructuredPostAdmissionWaitFailure')
 
     # The SDK suites skip unless asked to run, and a skip is reported as a
     # failure below.
@@ -373,9 +392,15 @@ function Invoke-WslcSuites {
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests $nodeLifecycleTests }
+        'Node' = {
+            Stop-WslcDaemons
+            Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests $nodeLifecycleTests
+        }
         'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests $nodeCreateAndRunTests }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods $dotnetMethods }
+        'C#' = {
+            Stop-WslcDaemons
+            Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods $dotnetMethods
+        }
         'Rust' = {
             foreach ($case in 'streaming_wslc_spawn_forwards_stdin', 'streaming_wslc_run_reads_end_of_file', 'streaming_wslc_lifecycle_stdin') {
                 $run = Invoke-LoggedNative -FilePath $rustTests -LogName "wslc-rust-$case.log" `
