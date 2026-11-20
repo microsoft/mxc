@@ -41,6 +41,7 @@ use crate::mxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
     TeardownStatus,
 };
+use crate::mxc_common::config_deserialize::escape_diagnostic_text;
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::log_symbols::EMOJI_SECTION;
 use crate::mxc_common::logger::Logger;
@@ -248,9 +249,10 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
 /// Request-level BaseContainer eligibility. This is the authoritative decision
 /// consumed by dispatch and request probing; callers must not reconstruct
 /// eligibility from individual host capability probes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BaseContainerRequestDecision {
     Serviceable,
+    InvalidFilesystemPath { field: &'static str, path: String },
     Unavailable,
     PolicyIncompatible,
     DeniedPathsUnsupported,
@@ -259,27 +261,32 @@ pub(crate) enum BaseContainerRequestDecision {
 }
 
 impl BaseContainerRequestDecision {
-    pub(crate) fn can_service_request(self) -> bool {
-        self == Self::Serviceable
+    pub(crate) fn can_service_request(&self) -> bool {
+        matches!(self, Self::Serviceable)
     }
 
-    pub(crate) fn rejection_message(self) -> Option<&'static str> {
-        match self {
-            Self::Serviceable => None,
-            Self::Unavailable => Some("Windows ProcessContainer is unavailable: PSEC is not enabled"),
-            Self::PolicyIncompatible => Some(
+    pub(crate) fn rejection_message(&self) -> Option<String> {
+        let message = match self {
+            Self::Serviceable => return None,
+            Self::InvalidFilesystemPath { field, path } => {
+                return Some(format!(
+                    "{field} contains an invalid path \"{}\": \
+                     expected a fully qualified Windows filesystem path; \
+                     ProcessContainer does not resolve policy paths against process.cwd",
+                    escape_diagnostic_text(path)
+                ));
+            }
+            Self::Unavailable => "Windows ProcessContainer is unavailable: PSEC is not enabled",
+            Self::PolicyIncompatible =>
                 "Windows ProcessContainer cannot enforce the requested LPAC or legacy network.proxy policy",
-            ),
-            Self::DeniedPathsUnsupported => Some(
+            Self::DeniedPathsUnsupported =>
                 "Windows ProcessContainer requires native PSEC denied-path support for this request",
-            ),
-            Self::EnumeratePathsUnsupported => Some(
+            Self::EnumeratePathsUnsupported =>
                 "Windows ProcessContainer requires native PSEC enumeration-only access support for this request",
-            ),
-            Self::NativeCaptureUnavailable => Some(
+            Self::NativeCaptureUnavailable =>
                 "Windows ProcessContainer requires native Learning Mode capture support for this request",
-            ),
-        }
+        };
+        Some(message.to_owned())
     }
 
     /// The typed error for a request native PSEC cannot service.
@@ -287,7 +294,10 @@ impl BaseContainerRequestDecision {
     // EnumeratePathsUnsupported report policy_validation.
     // See docs/development/plans/sdk-v2-error-codes.md.
     pub(crate) fn rejection_error(self) -> Option<MxcError> {
-        self.rejection_message().map(MxcError::backend_unavailable)
+        self.rejection_message().map(|message| match self {
+            Self::InvalidFilesystemPath { .. } => MxcError::policy_validation(message),
+            _ => MxcError::backend_unavailable(message),
+        })
     }
 }
 
@@ -464,6 +474,9 @@ impl BaseContainerRunner {
     pub(crate) fn can_backend_service_request(
         request: &ExecutionRequest,
     ) -> BaseContainerRequestDecision {
+        if let Some(rejection) = Self::filesystem_path_rejection(request) {
+            return rejection;
+        }
         if !Self::is_base_container_api_present() {
             return BaseContainerRequestDecision::Unavailable;
         }
@@ -496,6 +509,30 @@ impl BaseContainerRunner {
         }
 
         BaseContainerRequestDecision::Serviceable
+    }
+
+    fn filesystem_path_rejection(
+        request: &ExecutionRequest,
+    ) -> Option<BaseContainerRequestDecision> {
+        for (field, paths) in [
+            ("filesystem.readwritePaths", &request.policy.readwrite_paths),
+            ("filesystem.readonlyPaths", &request.policy.readonly_paths),
+            ("filesystem.deniedPaths", &request.policy.denied_paths),
+            (
+                "processContainer.filesystem.enumeratePaths",
+                &request.policy.enumerate_paths,
+            ),
+        ] {
+            // PSEC policy paths have no working-directory base. In particular,
+            // a relative deny must not silently leave a broader grant in effect.
+            if let Some(path) = paths.iter().find(|path| !Path::new(path).is_absolute()) {
+                return Some(BaseContainerRequestDecision::InvalidFilesystemPath {
+                    field,
+                    path: path.clone(),
+                });
+            }
+        }
+        None
     }
 }
 
@@ -1157,6 +1194,11 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if let Some(message) =
+            Self::filesystem_path_rejection(request).and_then(|error| error.rejection_message())
+        {
+            return Err(ScriptResponse::rejected(&message));
+        }
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if has_conflicting_proxy_identity(&request.policy) {
@@ -3715,6 +3757,115 @@ mod tests {
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use crate::mxc_common::sandbox_process::SandboxBackend;
+
+    #[test]
+    fn relative_filesystem_paths_are_rejected_even_for_dry_run() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        for dry_run in [false, true] {
+            for field in [
+                "filesystem.readwritePaths",
+                "filesystem.readonlyPaths",
+                "filesystem.deniedPaths",
+                "processContainer.filesystem.enumeratePaths",
+            ] {
+                for path in [
+                    "secret.txt",
+                    r".\secret.txt",
+                    r"..\secret.txt",
+                    r"C:secret.txt",
+                    "C:",
+                    r"\secret.txt",
+                    "/secret.txt",
+                    r"\\server",
+                ] {
+                    let mut request = ExecutionRequest {
+                        dry_run,
+                        ..Default::default()
+                    };
+                    request.policy.readwrite_paths = vec![r"C:\workspace".into()];
+                    let paths = match field {
+                        "filesystem.readwritePaths" => &mut request.policy.readwrite_paths,
+                        "filesystem.readonlyPaths" => &mut request.policy.readonly_paths,
+                        "filesystem.deniedPaths" => &mut request.policy.denied_paths,
+                        _ => &mut request.policy.enumerate_paths,
+                    };
+                    paths.push(path.into());
+                    let error = runner.validate(&request).expect_err(&format!(
+                        "{field}={path:?} must fail before native policy creation"
+                    ));
+                    assert_eq!(error.failure_phase, FailurePhase::Rejected);
+                    assert!(
+                        error
+                            .error_message
+                            .contains(&format!("{field} contains an invalid path \"{path}\""))
+                            && error.error_message.contains("fully qualified"),
+                        "{}",
+                        error.error_message
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relative_filesystem_paths_are_rejected_by_runner_and_probe() {
+        let _guard =
+            crate::process_container_common::test_env::PolicyCapabilityGuard::set(true, true, true);
+        let mut request = ExecutionRequest::default();
+        request.policy.readwrite_paths = vec![r"C:\workspace".into()];
+        request.policy.denied_paths = vec!["secret.txt".into()];
+
+        assert!(!BaseContainerRunner::can_backend_service_request(&request).can_service_request());
+        let error = BaseContainerRunner::for_request(&request)
+            .err()
+            .expect("relative deny must prevent runner construction");
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert!(error
+            .message
+            .contains("filesystem.deniedPaths contains an invalid path \"secret.txt\""));
+        let probe = crate::process_container_common::probe::run_probe(&request);
+        assert_eq!(probe.tier, None);
+        assert_eq!(probe.error.as_deref(), Some(error.message.as_str()));
+        assert!(probe.probes.base_container_api_present);
+        assert!(probe.probes.base_container_supports_deny_paths);
+    }
+
+    #[test]
+    fn relative_filesystem_path_diagnostic_escapes_control_and_format_characters() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["secret\n\u{202e}.txt".into()];
+        let error = runner.validate(&request).expect_err("relative path");
+        assert!(
+            error.error_message.contains(
+                r#"filesystem.deniedPaths contains an invalid path "secret\n\u{202e}.txt""#
+            ),
+            "{}",
+            error.error_message
+        );
+        assert!(!error.error_message.contains(['\n', '\u{202e}']));
+    }
+
+    #[test]
+    fn fully_qualified_filesystem_paths_remain_valid() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
+        let paths = vec![
+            r"C:\workspace".into(),
+            r"C:\workspace\missing.txt".into(),
+            r"\\server\share\workspace".into(),
+            r"\\?\C:\workspace".into(),
+            r"\\?\UNC\server\share\workspace".into(),
+        ];
+        request.policy.readwrite_paths = paths.clone();
+        request.policy.readonly_paths = paths.clone();
+        request.policy.denied_paths = paths.clone();
+        request.policy.enumerate_paths = paths;
+        assert!(runner.validate(&request).is_ok());
+    }
 
     #[test]
     fn validate_runner_accepts_empty_policy() {

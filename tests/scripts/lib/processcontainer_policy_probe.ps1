@@ -38,6 +38,13 @@ function Read-Spec {
 Assert-Probe ([bool]$SecurityReady -eq [bool]$SecurityRelease) 'Security handshake requires ready and release paths'
 
 switch ($Mode) {
+    'denied-file' {
+        if ([int]$ProbeArguments[0]) {
+            Assert-Blocked { [IO.File]::ReadAllText('secret.txt') }
+        } else {
+            Assert-Probe ([IO.File]::ReadAllText('secret.txt') -ceq 'DENIED_FILE_CONTROL') 'Broad grant read control failed'
+        }
+    }
     'filesystem' {
         $allowed = Join-Path $Root 'rw\allowed.txt'
         [IO.File]::WriteAllText($allowed, 'allowed')
