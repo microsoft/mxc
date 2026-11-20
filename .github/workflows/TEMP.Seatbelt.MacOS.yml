@@ -1,0 +1,114 @@
+# TEMP: macOS-only Seatbelt validation for PR #1834. Remove before merge.
+name: TEMP Seatbelt macOS Validation
+
+on:
+  push:
+    branches:
+      - user/emichlin/capture-denials-generate-report-at-end
+  workflow_dispatch:
+
+concurrency:
+  group: temp-seatbelt-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build arm64
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: aarch64-apple-darwin
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target
+          key: aarch64-apple-darwin-v2
+          save-if: false
+
+      - name: Build
+        run: cargo build --locked --release --target aarch64-apple-darwin
+             -p mxc_darwin -p unix_test_proxy
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mxc-binaries-aarch64-apple-darwin
+          path: |
+            src/target/aarch64-apple-darwin/release/mxc-exec-mac
+            src/target/aarch64-apple-darwin/release/unix-test-proxy
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: ${{ matrix.os }}, seatbelt
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            runner: macos-15
+          - os: macos-26
+            runner: macos-26
+          - os: macos-27
+            runner: xcode-27
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mxc-binaries-aarch64-apple-darwin
+          path: artifacts/bin
+
+      - name: Prepare backend prerequisites
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-macos-host.sh seatbelt "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee "$RUNNER_TEMP/mxc-ci.log"
+
+      - name: Run backend tests
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
+          bash scripts/ci/run_backend_validation_tests.sh seatbelt "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-temp-${{ matrix.os }}-seatbelt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mxc-ci.log
+          if-no-files-found: ignore
+          retention-days: 7
