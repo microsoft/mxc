@@ -118,6 +118,13 @@ jobs:
           done
           touch "$backup_dir/complete"
 
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            if sudo test -L "$file"; then
+              sudo cp -aL "$file" "$backup_dir/config"
+              sudo mv -fT "$backup_dir/config" "$file"
+            fi
+          done
+
           for file in /etc/subuid /etc/subgid; do
             sudo touch "$file"
             if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
