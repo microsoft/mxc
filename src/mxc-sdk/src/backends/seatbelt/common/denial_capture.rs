@@ -49,6 +49,8 @@ pub(crate) struct CollectedEvents {
     lines_skipped: bool,
     ready: bool,
     done: bool,
+    /// `log show` was killed at its deadline and may have missed reports.
+    timed_out: bool,
     /// Why the trace file stopped being written, if it did.
     pub(crate) trace_error: Option<String>,
     /// The trace reached `MAX_TRACE_BYTES` and later lines were not written.
@@ -56,9 +58,10 @@ pub(crate) struct CollectedEvents {
 }
 
 impl CollectedEvents {
-    /// False when a marker was missing, so some reports may be too.
+    /// False when a marker was missing or `log show` timed out, so some
+    /// reports may be too.
     pub(crate) fn drained(&self) -> bool {
-        self.ready && self.done
+        self.ready && self.done && !self.timed_out
     }
 
     pub(crate) fn into_analysis(self) -> CaptureAnalysis {
@@ -116,7 +119,7 @@ impl DenialCollector {
                 None,
             )?;
             let status = wait_until(&mut log.child, Instant::now() + timeout(SHOW_TIMEOUT));
-            let (collected, stderr) = log.stop();
+            let (mut collected, stderr) = log.stop();
             match status {
                 Ok(Some(status)) if !status.success() => {
                     return Err(with_log_stderr(
@@ -124,8 +127,13 @@ impl DenialCollector {
                         &stderr,
                     ));
                 }
+                Ok(Some(_)) => {}
+                // A retry would likely be just as slow.
+                Ok(None) => {
+                    collected.timed_out = true;
+                    return Ok(collected);
+                }
                 Err(error) => return Err(format!("could not wait for '{LOG_TOOL} show': {error}")),
-                _ => {}
             }
             if collected.drained() || Instant::now() + RETRY >= retry_deadline {
                 return Ok(collected);
@@ -629,7 +637,11 @@ mod tests {
         assert!(error.contains("log: not permitted"), "{error}");
 
         let started = Instant::now();
-        let stalled = finish_with_show(tag, "cat ready.ndjson; exec /bin/sleep 60").unwrap();
+        let stalled = finish_with_show(
+            tag,
+            "cat ready.ndjson report.ndjson done.ndjson; exec /bin/sleep 60",
+        )
+        .unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!stalled.drained());
     }
