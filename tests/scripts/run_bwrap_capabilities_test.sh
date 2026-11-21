@@ -11,7 +11,9 @@ if [ ! -x "$LXC_EXEC" ]; then
     echo "FAIL: lxc-exec not found; build it or set LXC_EXEC." >&2
     exit 1
 fi
-for tool in bwrap python3 slirp4netns unshare nsenter ip iptables ip6tables iptables-restore ip6tables-restore; do
+tools=(bwrap python3 slirp4netns unshare nsenter ip iptables ip6tables iptables-restore ip6tables-restore)
+if [ "$(id -u)" -eq 0 ]; then tools+=(getent setpriv); fi
+for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "SKIPPED: $tool is required for the Bubblewrap capability tests."
         exit 77
@@ -24,12 +26,16 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
+import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 SYSCALLS = {"x86_64": (0xC000003E, 126, 157), "aarch64": (0xC00000B7, 91, 167)}
 if platform.machine() not in SYSCALLS:
@@ -45,11 +51,45 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import time
+from urllib.parse import urlsplit
 
 fixture = Path(sys.argv[1])
-expected_uid, port, blocked_port = map(int, sys.argv[2:5])
-mode, address = sys.argv[5:7]
-assert os.getuid() == expected_uid, "capability removal must not change the workload UID"
+expected_uid, expected_gid, port, blocked_port = map(int, sys.argv[2:6])
+mode, address = sys.argv[6:8]
+uid_base, gid_base = map(int, sys.argv[8:10])
+assert os.getresuid() == (expected_uid,) * 3, "unexpected workload UIDs"
+assert os.getresgid() == (expected_gid,) * 3, "unexpected workload GIDs"
+if uid_base:
+    assert os.getgroups() == [], "root caller's supplementary groups reached the workload"
+    for kind, base in (("uid", uid_base), ("gid", gid_base)):
+        mapping = [int(value) for value in Path(f"/proc/self/{kind}_map").read_text().split()]
+        assert mapping == [0, base, 65536], f"unexpected {kind} mapping: {mapping}"
+        assert base > 0, f"namespace {kind} 0 maps to host root"
+    for name in ("root-secret", "root-group-secret"):
+        try:
+            (fixture / name).read_bytes()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError(f"workload read root-only fixture {name}")
+    writable = fixture.parent / "writable"
+    (writable / mode).write_text("mapped owner")
+    (fixture.parent / "group-writable" / mode).write_text("mapped group")
+    try:
+        os.setuid(0)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("workload changed to namespace root")
+    if mode != "isolated":
+        namespaces = (os.readlink("/proc/self/ns/user"), os.readlink("/proc/self/ns/net"))
+        print("NAMESPACES", *namespaces, flush=True)
+        release = writable / f"{mode}.release"
+        deadline = time.monotonic() + 20
+        while not release.exists():
+            assert time.monotonic() < deadline, "the harness did not inspect the supervisor"
+            time.sleep(0.05)
 status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
 for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
     assert int(status[name].strip(), 16) == 0, f"{mode}: {name} retained {status[name].strip()}"
@@ -91,6 +131,9 @@ def connects(host, port, timeout):
         return False
 
 if mode != "isolated":
+    if mode == "proxy":
+        proxy_host = urlsplit(os.environ["HTTP_PROXY"]).hostname
+        assert socket.gethostbyname(proxy_host) == address, "proxy hostname pin was not applied"
     with socket.create_connection((address, port), timeout=5):
         pass
 
@@ -149,6 +192,110 @@ os.execv({shutil.which("bwrap")!r}, ["bwrap"] + sys.argv[1:])
 failed = []
 skipped = []
 passed = []
+root_caller = os.getuid() == 0
+uid_base = gid_base = 0
+
+
+def descendants(parent):
+    children = {}
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdecimal():
+            try:
+                ppid = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(entry.name))
+    found, pending = [], [parent]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child)
+    return found
+
+
+def separation_problem(executor, namespaces, mode):
+    caller = os.readlink("/proc/self/ns/user")
+    supervisors, workloads = [], []
+    for pid in descendants(executor):
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            userns = os.readlink(f"/proc/{pid}/ns/user")
+            netns = os.readlink(f"/proc/{pid}/ns/net")
+            status = dict(line.split(":", 1)
+                          for line in Path(f"/proc/{pid}/status").read_text().splitlines())
+        except OSError:
+            continue
+        if b"mxc-bwrap-proxy-supervisor" in argv:
+            supervisors.append((pid, userns, status["Uid"].split()))
+        elif [userns, netns] == namespaces:
+            workloads.append((pid, status["Uid"].split(), status["Gid"].split()))
+    if not supervisors:
+        return "no live network supervisor was found"
+    for pid, userns, uids in supervisors:
+        if userns != caller or uids != ["0"] * 4:
+            return f"supervisor {pid} runs as {uids} in {userns}, not as root in {caller}"
+    if namespaces[0] == caller:
+        return "the workload shares the caller's user namespace"
+    if not workloads:
+        return "no live workload process was found"
+    for pid, uids, gids in workloads:
+        if uids != [str(uid_base + 1000)] * 4 or gids != [str(gid_base + 1000)] * 4:
+            return f"workload process {pid} runs as host {uids}/{gids}"
+    print(f"PASS: {mode} supervisor stays root in the caller's user namespace {caller}; "
+          f"workload runs in {namespaces[0]} as host {uid_base + 1000}:{gid_base + 1000}",
+          flush=True)
+    return None
+
+
+def run_with_supervisor_check(command, mode, release):
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = b""
+    try:
+        namespaces = None
+        deadline = time.monotonic() + 30
+        while namespaces is None and time.monotonic() < deadline:
+            if select.select([child.stdout], [], [], 0.1)[0]:
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                output += chunk
+                match = re.search(rb"^NAMESPACES (\S+) (\S+)$", output, re.M)
+                namespaces = match and [value.decode() for value in match.groups()]
+            elif child.poll() is not None:
+                break
+        problem = separation_problem(child.pid, namespaces, mode) if namespaces else \
+            "the workload did not report its namespaces"
+        if problem:
+            return 1, f"{problem}\n{output.decode(errors='replace')}"
+        release.touch()
+        rest, _ = child.communicate(timeout=60)
+        return child.returncode, (output + rest).decode(errors="replace")
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
+
+
+if root_caller:
+    root_names = {entry.pw_name for entry in pwd.getpwall() if entry.pw_uid == 0} | {"0"}
+
+    def root_owner(owner):
+        return int(owner) == 0 if owner.isascii() and owner.isdecimal() else owner in root_names
+
+    for kind in ("uid", "gid"):
+        path = Path(f"/etc/sub{kind}")
+        ranges = [line.strip().split(":") for line in path.read_text().splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+        base = next((int(start) for owner, start, count in ranges
+                     if root_owner(owner) and int(count) >= 65536), None)
+        if base is None:
+            raise SystemExit(f"FAIL: root requires an administrator-reserved range in {path}")
+        if kind == "uid":
+            uid_base = base
+        else:
+            gid_base = base
+expected_uid = 1000 if root_caller else os.getuid()
+expected_gid = 1000 if root_caller else os.getgid()
 with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory, \
         socket.socket() as proxy_listener, socket.socket() as firewall_listener, \
         socket.socket() as blocked_listener:
@@ -156,6 +303,26 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
     fixture = root / "readonly"
     fixture.mkdir()
     (fixture / "sentinel").write_text("unchanged")
+    grants = {"readonlyPaths": [str(fixture)]}
+    if root_caller:
+        root.chmod(0o755)
+        fixture.chmod(0o755)
+        (fixture / "sentinel").chmod(0o644)
+        os.chown(fixture / "sentinel", uid_base + 1000, gid_base + 1000)
+        for name, mode in (("root-secret", 0o600), ("root-group-secret", 0o640)):
+            path = fixture / name
+            path.write_text("private fixture")
+            os.chown(path, 0, 0)
+            path.chmod(mode)
+        writable = root / "writable"
+        writable.mkdir()
+        os.chown(writable, uid_base + 1000, gid_base + 1000)
+        writable.chmod(0o700)
+        group_writable = root / "group-writable"
+        group_writable.mkdir()
+        os.chown(group_writable, 0, gid_base + 1000)
+        group_writable.chmod(0o770)
+        grants["readwritePaths"] = [str(writable), str(group_writable)]
     proxy_listener.bind(("127.0.0.1", 0))
     proxy_listener.listen(8)
     proxy_port = proxy_listener.getsockname()[1]
@@ -171,9 +338,9 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
     }
 
     # Bubblewrap stops a non-root launch itself; MXC must stop a root one.
-    refusal = "still held capabilities" if os.getuid() == 0 else "capset failed"
+    refusal = "still held capabilities" if root_caller else "capset failed"
 
-    def launch(mode, address, port, command, environment=None):
+    def launch(mode, address, port, command, environment=None, release=None, prefix=()):
         config = {
             "version": "1.0.0",
             "containerId": f"bwrap-capabilities-{mode}",
@@ -183,7 +350,7 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
                 "timeout": 30000,
                 "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
             },
-            "filesystem": {"readonlyPaths": [str(fixture)]},
+            "filesystem": grants,
         }
         if mode == "firewall":
             config["network"] = {
@@ -193,12 +360,15 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
             config["runtimeConfig"] = {"networkProxy": f"http://127.0.0.1:{port}"}
         config_path = root / f"{mode}.json"
         config_path.write_text(json.dumps(config))
+        arguments = [*prefix, sys.argv[1], "--experimental", str(config_path)]
+        if release:
+            return run_with_supervisor_check(arguments, mode, release)
         result = subprocess.run(
-            [sys.argv[1], "--experimental", str(config_path)],
-            capture_output=True, text=True, timeout=60, env=environment,
+            arguments, capture_output=True, text=True, timeout=60, env=environment,
         )
         return result.returncode, result.stdout + result.stderr
 
+    commands = {}
     for mode in ("isolated", "firewall", "proxy"):
         address, port = "10.0.2.2", proxy_port
         if mode == "firewall":
@@ -227,15 +397,22 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
                 pass
 
         command = (
-            f"python3 - {shlex.quote(str(fixture))} {os.getuid()} {port} {blocked_port} "
-            f"{mode} {address} <<'WORKLOAD'\n"
+            f"python3 - {shlex.quote(str(fixture))} {expected_uid} {expected_gid} "
+            f"{port} {blocked_port} {mode} {address} {uid_base} {gid_base} <<'WORKLOAD'\n"
             + workload + "\nWORKLOAD"
         )
-        returncode, output = launch(mode, address, port, command)
+        commands[mode] = command
+        release = writable / f"{mode}.release" if root_caller and mode != "isolated" else None
+        returncode, output = launch(mode, address, port, command, release=release)
         if returncode != 0 or f"CAPABILITIES_DROPPED_{mode}" not in output:
             print(f"FAIL: {mode}, caller UID {os.getuid()}\n{output}", flush=True)
             failed.append(mode)
         else:
+            if root_caller:
+                for path in (writable / mode, group_writable / mode):
+                    stat = path.stat()
+                    assert (stat.st_uid, stat.st_gid) == (uid_base + 1000, gid_base + 1000), \
+                        f"workload created {path} with an unshifted host owner"
             returncode, output = launch(
                 mode, address, port, "printf 'WORKLOAD_%s\\n' STARTED", blocked_drop_environment,
             )
@@ -247,6 +424,44 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
                 print(f"PASS: {mode}, caller UID {os.getuid()}", flush=True)
                 passed.append(mode)
         assert (fixture / "sentinel").read_text() == "unchanged", "host fixture changed"
+
+    if root_caller:
+        without_kill = ["setpriv", "--inh-caps=-kill", "--ambient-caps=-kill",
+                        "--bounding-set=-kill", "--"]
+        status = subprocess.run(without_kill + ["cat", "/proc/self/status"],
+                                capture_output=True, text=True, check=True).stdout
+        CAP_KILL = 1 << 5
+        assert not any(int(line.split()[1], 16) & CAP_KILL
+                       for line in status.splitlines() if line.startswith("Cap")), \
+            "setpriv did not remove CAP_KILL"
+        returncode, output = launch(
+            "isolated", "10.0.2.2", proxy_port, commands["isolated"], prefix=without_kill)
+        if returncode != 0 or "CAPABILITIES_DROPPED_isolated" not in output:
+            print(f"FAIL: isolated, root caller without CAP_KILL\n{output}", flush=True)
+            failed.append("isolated without CAP_KILL")
+        else:
+            print("PASS: isolated, root caller without CAP_KILL", flush=True)
+
+        for field, path in (
+            ("readonlyPaths", fixture / "root-secret"),
+            ("readonlyPaths", fixture / "root-group-secret"),
+            ("readwritePaths", fixture),
+        ):
+            config = {
+                "version": "1.0.0",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo WORKLOAD_STARTED"},
+                "filesystem": {field: [str(path)]},
+            }
+            config_path = root / "rejected.json"
+            config_path.write_text(json.dumps(config))
+            result = subprocess.run([sys.argv[1], str(config_path)],
+                                    capture_output=True, text=True, timeout=30)
+            output = result.stdout + result.stderr
+            if result.returncode == 0 or "mapped Bubblewrap UID" not in output \
+                    or "WORKLOAD_STARTED" in result.stdout.splitlines():
+                raise AssertionError(f"root-only grant was not rejected before execution:\n{output}")
+            print(f"PASS: rejected mapped-identity {field} grant to {path.name}", flush=True)
 
 if failed:
     sys.exit(1)

@@ -13,6 +13,7 @@ use mxc_sdk::mxc_common;
 #[allow(dead_code)]
 #[path = "../../src/core/mxc_common/config_deserialize.rs"]
 mod config_deserialize;
+#[allow(dead_code)]
 #[path = "../../src/core/mxc_common/filesystem_probe.rs"]
 mod filesystem_probe;
 #[path = "../../src/core/mxc_common/module_lifetime.rs"]

@@ -18,7 +18,7 @@ use std::fmt::Write as FmtWrite;
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,9 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, capability_check, lifetime_spawner, missing_denials, network_rules,
+    bwrap_version, capability_check,
+    identity::{RootIdentity, SandboxWatchdog},
+    lifetime_spawner, missing_denials, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::{self, ResolverFile},
@@ -151,6 +153,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // so it sees the already-tightened intents.
         crate::mxc_common::filesystem_access::check_delegation(&request.policy)
             .map_err(|error| error.into_response())?;
+        if let Some(identity) = launch.root_identity {
+            identity
+                .check_delegation(&request.policy)
+                .map_err(|error| error.into_response())?;
+        }
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
@@ -220,6 +227,7 @@ struct ValidatedLaunch {
     bwrap_version: bwrap_version::BwrapVersion,
     bwrap_is_setuid: bool,
     network_tools: Option<proxy_network::NetworkTools>,
+    root_identity: Option<RootIdentity>,
 }
 
 impl BubblewrapScriptRunner {
@@ -363,6 +371,8 @@ impl BubblewrapScriptRunner {
             // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
             ScriptResponse::error(&err.to_string())
         })?;
+        let root_identity =
+            RootIdentity::for_caller().map_err(|error| ScriptResponse::error(&error))?;
         let network_tools = if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
             // the caller actually asked for.
@@ -387,6 +397,7 @@ impl BubblewrapScriptRunner {
             bwrap_version: bwrap.version,
             bwrap_is_setuid: bwrap.is_setuid,
             network_tools,
+            root_identity,
         })
     }
 }
@@ -534,7 +545,12 @@ impl BubblewrapScriptRunner {
             bwrap_version,
             bwrap_is_setuid,
             network_tools,
+            root_identity,
         } = launch;
+        let workload_userns = root_identity
+            .map(RootIdentity::create_namespace)
+            .transpose()
+            .map_err(|error| ScriptResponse::failed(FailurePhase::LaunchFailed, &error))?;
         let checked_network_tools = || {
             network_tools.as_ref().ok_or_else(|| {
                 ScriptResponse::error(
@@ -554,7 +570,7 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
-        let resolver_file = ResolverFile::for_host(&request.policy, logger);
+        let resolver_file = ResolverFile::for_host(&request.policy, root_identity, logger);
         let mut mounts = bwrap_command::policy_mounts(&request.policy);
         let resolver_args = match &resolver_file {
             Some(resolver) => resolver
@@ -565,6 +581,13 @@ impl BubblewrapScriptRunner {
         let deny_mountpoints =
             missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
                 .map_err(|error| error.into_response())?;
+
+        // Bubblewrap mounts the overlay layers as the mapped identity.
+        if let (Some(identity), Some(storage)) = (root_identity, &deny_mountpoints) {
+            identity
+                .share_with_workload(storage.path())
+                .map_err(|error| FilesystemPolicyError::Host(error).into_response())?;
+        }
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -600,6 +623,8 @@ impl BubblewrapScriptRunner {
                     resolver,
                     logger,
                     request.script_timeout,
+                    workload_userns.as_ref(),
+                    root_identity,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -621,8 +646,12 @@ impl BubblewrapScriptRunner {
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
-                let resolver =
-                    proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger);
+                let resolver = proxy_network::ResolverPin::for_host(
+                    &request.policy,
+                    &mounts,
+                    root_identity,
+                    logger,
+                );
                 match proxy_network::ProxyNetworkNamespace::start(
                     checked_network_tools()?,
                     &plan,
@@ -631,6 +660,8 @@ impl BubblewrapScriptRunner {
                     resolver.as_ref(),
                     logger,
                     request.script_timeout,
+                    workload_userns.as_ref(),
+                    root_identity,
                 ) {
                     Ok(network) => {
                         warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
@@ -677,6 +708,18 @@ impl BubblewrapScriptRunner {
             ));
         }
 
+        if let Some(identity) = root_identity {
+            identity.configure_args(&mut args);
+            if proxy_network.is_none() {
+                let namespace = workload_userns.as_ref().ok_or_else(|| {
+                    ScriptResponse::failed(
+                        FailurePhase::LaunchFailed,
+                        "Bubblewrap: mapped workload user namespace is missing",
+                    )
+                })?;
+                args.splice(0..0, ["--userns".into(), namespace.as_raw_fd().to_string()]);
+            }
+        }
         if stdio == StdioMode::Inherit {
             args.insert(0, "--new-session".into());
         }
@@ -700,14 +743,21 @@ impl BubblewrapScriptRunner {
         // 3. Spawn `bwrap`.
         let mut command = Command::new(&bwrap);
         command.args(&args);
+        if let Some(identity) = root_identity {
+            identity.configure_command(&mut command);
+        }
+        let mut pipes = None;
         let pty = match stdio {
-            StdioMode::Pipes => {
-                command
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                None
-            }
+            StdioMode::Pipes => match attach_stdio_pipes(&mut command) {
+                Ok(parent_ends) => {
+                    pipes = Some(parent_ends);
+                    None
+                }
+                Err(error) => {
+                    stop_proxy_network(&mut proxy_network, logger);
+                    return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
+                }
+            },
             StdioMode::Inherit => {
                 // The child (bwrap) inherits the binary's stdio directly — a
                 // TTY when the binary has one.
@@ -757,6 +807,11 @@ impl BubblewrapScriptRunner {
         }
         startup.prepare_command(&mut command);
         let mut descriptors = vec![seccomp_filter.as_raw_fd()];
+        if proxy_network.is_none() {
+            if let Some(namespace) = &workload_userns {
+                descriptors.push(namespace.as_raw_fd());
+            }
+        }
         if let Some(fd) = resolver_file.as_ref().and_then(ResolverFile::snapshot_fd) {
             descriptors.push(fd);
         }
@@ -774,11 +829,17 @@ impl BubblewrapScriptRunner {
                 ));
             }
         };
+        if let Some((stdin, stdout, stderr)) = pipes {
+            child.stdin = Some(stdin);
+            child.stdout = Some(stdout);
+            child.stderr = Some(stderr);
+        }
 
         startup.child_spawned();
         if let Some(network) = proxy_network.as_mut() {
             network.userns_handed_off();
         }
+        let mut watchdog = None;
         let startup_result = startup
             .child_pid(&child)
             .map_err(|error| {
@@ -789,6 +850,11 @@ impl BubblewrapScriptRunner {
             })
             .and_then(|child_pid| {
                 capability_check::wait_for_capability_drop(child_pid, &child)?;
+                if let Some(identity) = root_identity {
+                    // Bubblewrap's parent-death signal cannot reach a sandbox running as
+                    // another host UID.
+                    watchdog = Some(identity.watch_sandbox(child_pid, child.id())?);
+                }
                 match proxy_network.as_mut() {
                     Some(network) => {
                         network.attach(child_pid, logger)?;
@@ -811,6 +877,7 @@ impl BubblewrapScriptRunner {
                     "; failed to reap Bubblewrap startup: {cleanup_error}"
                 ));
             }
+            drop(watchdog);
             drop(startup);
             let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
                 Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
@@ -841,6 +908,7 @@ impl BubblewrapScriptRunner {
                 (out_result, err_result) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    drop(watchdog);
                     stop_proxy_network(&mut proxy_network, logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::failed(
@@ -878,6 +946,7 @@ impl BubblewrapScriptRunner {
             group,
             proxy_network,
             monitor,
+            watchdog,
             timeout,
             started,
             timed_out: false,
@@ -907,6 +976,7 @@ struct BwrapChild {
     group: bool,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     monitor: Option<ProviderMonitor>,
+    watchdog: Option<SandboxWatchdog>,
     timeout: Option<Duration>,
     started: Instant,
     timed_out: bool,
@@ -923,6 +993,9 @@ impl BwrapChild {
         // disarming first is what keeps a normal teardown from reading as a
         // provider that died.
         self.monitor.take();
+
+        // Dropping the watchdog stops the sandbox before its network is torn down.
+        self.watchdog.take();
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
@@ -1246,8 +1319,6 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 BwrapOutcome::Timeout => {
                     // Tree-kill so descendants die too and release any stdout/stderr
                     // pipe write-ends (else the drain threads below could block).
-                    // `kill()` group-kills in Pipes mode; in Inherit mode it kills
-                    // bwrap, which `--die-with-parent` turns into a full teardown.
                     if let Err(error) = self.kill_for_timeout() {
                         let error =
                             format!("Bubblewrap: script timed out, and teardown failed: {error}");
@@ -1293,8 +1364,7 @@ impl Drop for BubblewrapSandboxProcess {
         // Kill and reap the child *before* removing network enforcement —
         // otherwise an abandoned-but-running sandbox would keep egressing after
         // its iptables/proxy rules were torn down, and the child would leak as
-        // a zombie. `kill()` group-kills in `Pipes` mode and relies on
-        // `--die-with-parent` otherwise, then we reap.
+        // a zombie.
         let _ = self.kill();
         let _ = self.inner.lock_child().wait();
         self.run_teardown();
@@ -1313,6 +1383,25 @@ fn stop_proxy_network(
     if let Some(mut network) = network.take() {
         network.stop(logger);
     }
+}
+
+// When the host has descriptor 0, 1 or 2 closed, `Stdio::piped()` can hand the
+// child that number with close-on-exec still set.
+fn attach_stdio_pipes(
+    command: &mut Command,
+) -> Result<(ChildStdin, ChildStdout, ChildStderr), String> {
+    let (stdin_reader, stdin_writer) = proxy_network::pipe_above_stdio()?;
+    let (stdout_reader, stdout_writer) = proxy_network::pipe_above_stdio()?;
+    let (stderr_reader, stderr_writer) = proxy_network::pipe_above_stdio()?;
+    command
+        .stdin(stdin_reader)
+        .stdout(stdout_writer)
+        .stderr(stderr_writer);
+    Ok((
+        stdin_writer.into(),
+        stdout_reader.into(),
+        stderr_reader.into(),
+    ))
 }
 
 /// Outcome of resolving and classifying `deniedPaths` in a single pass.
@@ -1652,6 +1741,7 @@ mod tests {
                     bwrap_version: bwrap_version::BwrapVersion::new(0, 11, 0),
                     bwrap_is_setuid: false,
                     network_tools: None,
+                    root_identity: None,
                 },
                 &mut Logger::new(Mode::Buffer),
                 StdioMode::Pipes,

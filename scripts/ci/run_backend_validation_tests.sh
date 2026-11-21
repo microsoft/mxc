@@ -59,9 +59,14 @@ case "$backend" in
         MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_bwrap_all_tests.sh"
 
         if ! sudo -n true 2>/dev/null; then
-            echo "Bubblewrap CI requires passwordless sudo for root capability" \
+            echo "Bubblewrap CI requires passwordless sudo for root identity, capability" \
                  "and inbound default-deny tests." >&2
             exit 2
+        fi
+        if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
+            bash "$test_script_root/run_bwrap_identity_rejection_test.sh"; then
+            echo "The Bubblewrap root identity rejection test failed or skipped." >&2
+            exit 1
         fi
         capability_log="$(mktemp)"
         if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
@@ -75,6 +80,24 @@ case "$backend" in
             exit 1
         fi
         rm -f "$capability_log"
+        for script in run_bwrap_dns_test.sh run_bwrap_resolver_isolation_test.sh \
+            run_bwrap_root_lifetime_test.sh; do
+            if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
+                bash "$test_script_root/$script"; then
+                echo "The Bubblewrap root test $script failed or skipped." >&2
+                exit 1
+            fi
+        done
+        for case in root_sdk_streaming_and_pty_use_mapped_identity \
+            root_backend_hostname_pin_uses_mapped_identity \
+            root_resolver_inputs_use_mapped_identity \
+            root_missing_denied_path_overlay_uses_mapped_identity \
+            root_account_lookups_stop_at_the_validation_deadline; do
+            identity_test="backend_modules::bubblewrap::common::identity::tests::$case"
+            "$binary_directory/mxc-filesystem-probe-tests" --list --ignored --exact "$identity_test" \
+                | grep -Fx "$identity_test: test"
+            sudo -n "$binary_directory/mxc-filesystem-probe-tests" --ignored --exact "$identity_test"
+        done
 
         # A skip here means a prerequisite is missing on the runner, not that
         # the assertion passed. Translate it into an explicit failure so the

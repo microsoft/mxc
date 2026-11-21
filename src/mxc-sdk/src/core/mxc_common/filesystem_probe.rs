@@ -48,13 +48,61 @@ impl FilesystemProbe {
         if result.is_err() {
             self.worker = None;
         }
-        result.map_err(|error| {
-            format!(
-                "Filesystem path '{}' could not be checked: {error}. \
-                 Refusing sandbox startup; check for an unreachable mount or blocked filesystem.",
-                escape_diagnostic_text(path)
-            )
-        })
+        result.map_err(|error| probe_failure(path, &error))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn run_batch<T: Send + 'static>(
+        &mut self,
+        paths: &[String],
+        is_last: fn(&T) -> bool,
+        probe: impl FnOnce(&dyn Fn(T) -> bool) + Send + 'static,
+    ) -> Result<Vec<T>, String> {
+        let Some(first) = paths.first() else {
+            return Ok(Vec::new());
+        };
+        let (sender, receiver) = mpsc::sync_channel(paths.len());
+        let report = move |item: T| {
+            let last = is_last(&item);
+            sender.try_send(item).is_ok() && !last
+        };
+        let mut deadline = Instant::now() + self.timeout;
+        let mut results = Vec::with_capacity(paths.len());
+        let mut failure = self
+            .submit(first, move |_| probe(&report), deadline)
+            .err()
+            .map(|error| (first, error));
+        for path in paths {
+            if failure.is_some() {
+                break;
+            }
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(item) => {
+                    let last = is_last(&item);
+                    results.push(item);
+                    if last {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    failure = Some((path, timeout_message(self.timeout)));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    failure = Some((
+                        path,
+                        "filesystem probe worker stopped without a result".into(),
+                    ));
+                }
+            }
+            deadline = Instant::now() + self.timeout;
+        }
+        match failure {
+            None => Ok(results),
+            Some((path, error)) => {
+                self.worker = None;
+                Err(probe_failure(path, &error))
+            }
+        }
     }
 
     fn submit<T: Send + 'static>(
@@ -148,6 +196,14 @@ fn wait_for_probe<T>(
 
 fn timeout_message(timeout: Duration) -> String {
     format!("filesystem probe timed out after {}ms", timeout.as_millis())
+}
+
+fn probe_failure(path: &str, error: &str) -> String {
+    format!(
+        "Filesystem path '{}' could not be checked: {error}. \
+         Refusing sandbox startup; check for an unreachable mount or blocked filesystem.",
+        escape_diagnostic_text(path)
+    )
 }
 
 #[cfg(test)]
@@ -310,6 +366,54 @@ mod tests {
         assert!(error.contains("timed out"), "{error}");
         assert!(error.contains(r"expired\npath"), "{error}");
         assert!(!error.contains('\n'), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_batch_result_gets_the_full_timeout() {
+        let mut probe = FilesystemProbe::for_test(Duration::from_millis(500));
+        let paths = ["first", "second", "third"].map(String::from);
+        let (release, wait) = mpsc::sync_channel::<()>(0);
+        let error = probe
+            .run_batch(
+                &paths,
+                |_: &u32| false,
+                move |report| {
+                    for item in [1, 2] {
+                        std::thread::sleep(Duration::from_millis(300));
+                        report(item);
+                    }
+                    let _ = wait.recv_timeout(WATCHDOG);
+                },
+            )
+            .unwrap_err();
+        drop(release);
+        assert!(error.contains("'third'"), "{error}");
+        assert!(error.contains("timed out after 500ms"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_last_batch_result_stops_the_probe() {
+        let mut probe = FilesystemProbe::for_test(Duration::from_secs(2));
+        let paths = ["first", "second", "third"].map(String::from);
+        let (sent, count) = mpsc::channel();
+        let results = probe
+            .run_batch(
+                &paths,
+                |item: &u32| *item == 2,
+                move |report| {
+                    for item in [1, 2, 3] {
+                        sent.send(item).unwrap();
+                        if !report(item) {
+                            break;
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(results, [1, 2]);
+        assert_eq!(count.iter().collect::<Vec<_>>(), [1, 2]);
     }
 
     #[test]

@@ -120,6 +120,16 @@ jobs:
             sudo apt-get install -y -qq lxc uidmap dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
+        # MXC uses root's first range, so reserve a free one before the LXC step
+        # appends its fixed range, which can overlap another account's.
+        - script: |
+            set -euo pipefail
+            sudo -n env TF_BUILD="$TF_BUILD" \
+              python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+              --backup-directory "$(Agent.TempDirectory)/mxc-bwrap-root-ids"
+          workingDirectory: $(Build.SourcesDirectory)
+          displayName: Reserve Bubblewrap root IDs on the disposable CI host
+
         - script: |
             set -euo pipefail
             backup_dir="$(Agent.TempDirectory)/mxc-lxc-$(Build.BuildId)-$(System.JobAttempt)"
@@ -179,6 +189,15 @@ jobs:
             fi
           condition: always()
           displayName: Restore LXC configuration
+
+        - script: |
+            set -euo pipefail
+            sudo -n env TF_BUILD="$TF_BUILD" \
+              python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+              --backup-directory "$(Agent.TempDirectory)/mxc-bwrap-root-ids"
+          workingDirectory: $(Build.SourcesDirectory)
+          condition: always()
+          displayName: Restore Bubblewrap root ID configuration
 
       - ${{ if eq(target.os, 'windows') }}:
         - script: npm test
