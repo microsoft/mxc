@@ -835,12 +835,13 @@ function Provision-Sandbox {
 }
 
 function Get-SandboxNetworkRecord {
-    param([string]$SandboxId)
+    param([string]$SandboxId, [switch]$Proxy)
     $hash = [System.Security.Cryptography.SHA256]::HashData(
         [System.Text.Encoding]::UTF8.GetBytes($SandboxId))
     $key = -join ($hash[0..7] | ForEach-Object { $_.ToString('x2') })
+    $suffix = if ($Proxy) { '.json' } else { '.network.json' }
     $stores = Join-Path $env:LOCALAPPDATA 'Microsoft\MXC\wslc\stores'
-    Get-ChildItem -Path $stores -Filter "$key.network.json" -Recurse -File -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $stores -Filter "$key$suffix" -Recurse -File -ErrorAction SilentlyContinue
 }
 
 function Get-SandboxAddress {
@@ -1250,7 +1251,7 @@ try {
                 }
             }
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Assert-True ($r.Stdout.Contains('FOO=[bar] HTTP_PROXY=[http://127.0.0.1:8888] NO_PROXY=[]')) `
+            Assert-True ($r.Stdout.Contains('FOO=[bar] HTTP_PROXY=[http://127.0.0.1:8888] NO_PROXY=[host.wslc.internal]')) `
                 "proxy replaced the caller's proxy variables ($($r.Stdout.Trim()))"
         } | Out-Null
 
@@ -1465,52 +1466,44 @@ Run-StateAwareTest "D: provision (deniedPaths nested under mount rejected)" {
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
-Run-StateAwareTest "D: provision (host filtering rejected)" {
-    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_hosts.json'
+Run-StateAwareTest "D: provision (egress allow entry without ports rejected)" {
+    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_no_ports.json'
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'an entry without ports allows every protocol') `
+        "error.message explains the built-in proxy carries TCP only (got '$msg')"
 } | Out-Null
 
-# NONE can enforce only all-deny; BRIDGED can truthfully advertise only
-# all-allow. No partially restricted posture may silently become bridged.
-foreach ($egress in @('deny', 'allow')) {
-    foreach ($ingress in @('deny', 'allow')) {
-        foreach ($hostLoopback in @('deny', 'allow')) {
-            if ($egress -eq $ingress -and $ingress -eq $hostLoopback) { continue }
-            Run-StateAwareTest "D: provision (mixed posture $egress/$ingress/$hostLoopback rejected)" {
-                $req = @{
-                    phase = 'provision'
-                    containment = 'wslc'
-                    network = @{
-                        egress = @{ default = $egress }
-                        ingress = @{ default = $ingress; hostLoopback = $hostLoopback }
-                    }
-                    wslc = @{ provision = @{ image = 'alpine:latest' } }
+# Lifecycle P runs these postures behind the built-in proxy.
+Run-StateAwareTest "D: dry-run provision accepts every mixed posture" {
+    $postures = @(@{ egress = @{ default = 'allow' } })
+    foreach ($egress in @('deny', 'allow')) {
+        foreach ($ingress in @('deny', 'allow')) {
+            foreach ($hostLoopback in @('deny', 'allow')) {
+                if ($egress -eq $ingress -and $ingress -eq $hostLoopback) { continue }
+                $postures += @{
+                    egress = @{ default = $egress }
+                    ingress = @{ default = $ingress; hostLoopback = $hostLoopback }
                 }
-                $r = Invoke-StateAware -Request $req -DryRun
-                Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-                $envObj = Parse-Envelope -Stdout $r.Stdout
-                $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-                Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
-            } | Out-Null
+            }
         }
     }
-}
-
-Run-StateAwareTest "D: provision (bridged with omitted ingress deny defaults rejected)" {
-    $req = @{
-        phase = 'provision'
-        containment = 'wslc'
-        network = @{ egress = @{ default = 'allow' } }
-        wslc = @{ provision = @{ image = 'alpine:latest' } }
+    foreach ($network in $postures) {
+        $label = ($network | ConvertTo-Json -Compress -Depth 4)
+        $r = Invoke-StateAware -Request @{
+            phase = 'provision'
+            containment = 'wslc'
+            network = $network
+            wslc = @{ provision = @{ image = 'alpine:latest' } }
+        } -DryRun
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $accepted = $r.ExitCode -eq 0 -and (Envelope-Arm $envObj) -eq 'result'
+        if (-not $accepted) { Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray }
+        Assert-True $accepted "$label is accepted"
     }
-    $r = Invoke-StateAware -Request $req -DryRun
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
 Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
@@ -1522,26 +1515,6 @@ Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
     $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
     Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
         "error.message identifies the closed runtimeConfig path (got '$msg')"
-} | Out-Null
-
-Run-StateAwareTest "D: provision (bridged runtime proxy rejected; set per exec)" {
-    $r = Invoke-StateAware -Request @{
-        version = '1.1.0-alpha'
-        phase = 'provision'
-        containment = 'wslc'
-        network = @{
-            egress = @{ default = 'allow' }
-            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
-        }
-        runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' }
-        wslc = @{ provision = @{ image = 'alpine:latest' } }
-    } -DryRun
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg -match 'set it on the exec phase') "error.message points to exec (got '$msg')"
 } | Out-Null
 
 # No legacy member remains legal on either exact v0.9 network-bearing
@@ -2106,6 +2079,273 @@ try {
             try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $id } catch { }
         }
     }
+}
+
+# ---------------- Lifecycle P: sandboxes behind the built-in proxy ----------------
+
+# A Windows 127.0.0.1 server that answers every connection with an HTTP 200.
+$pHostPort = Get-FreeTcpPort
+$pHostServer = Start-Job -ArgumentList $pHostPort -ScriptBlock {
+    param($Port)
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+    $listener.Start()
+    $reply = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+    $buffer = [byte[]]::new(4096)
+    while ($true) {
+        $client = $listener.AcceptTcpClient()
+        try {
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 2000
+            try { $null = $stream.Read($buffer, 0, $buffer.Length) } catch {}
+            $stream.Write($reply, 0, $reply.Length)
+            $client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        } catch {
+        } finally {
+            $client.Dispose()
+        }
+    }
+}
+
+# Each probe prints NAME=<HTTP status or verdict>; `p` asks the built-in proxy
+# for a CONNECT tunnel.
+$pProbeHelpers = @'
+hp=${HTTPS_PROXY#http://}
+p() { printf 'CONNECT %s HTTP/1.1\r\n\r\n' "$1" | nc -w 10 "${hp%:*}" "${hp##*:}" | head -n1 | cut -d' ' -f2; }
+h() { printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 10 "$1" "$2" | head -n1 | cut -d' ' -f2; }
+d() { nc -z -w 3 "$1" "$2" && echo REACHED || echo BLOCKED; }
+'@
+
+function Invoke-PProbes {
+    param([string]$SandboxId, [string[]]$Probes, [hashtable]$Request = @{})
+
+    $req = @{
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{ commandLine = ($pProbeHelpers + "`n" + ($Probes -join "`n")); timeout = 60000 }
+    }
+    foreach ($key in $Request.Keys) { $req[$key] = $Request[$key] }
+    $r = Invoke-StateAware -Request $req
+    $values = @{}
+    foreach ($line in ($r.Stdout -split '\r?\n')) {
+        if ($line -match '^([A-Z_]+)=(.*)$') { $values[$Matches[1]] = $Matches[2].Trim() }
+    }
+    if ($r.ExitCode -ne 0) {
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+    }
+    Assert-True ($r.ExitCode -eq 0) "$SandboxId ran its probes (exit $($r.ExitCode))"
+    $values
+}
+
+function Assert-PProbes {
+    param([hashtable]$Actual, [System.Collections.IDictionary]$Expected)
+    foreach ($probe in $Expected.GetEnumerator()) {
+        $value = $Actual[$probe.Key]
+        Assert-True ("$value" -match "^$($probe.Value)$") "$($probe.Key) is '$($probe.Value)' (got '$value')"
+    }
+}
+
+function New-PSandbox {
+    param([hashtable]$Network, [string]$Image = 'alpine:latest', [hashtable]$Provision = @{}, [string]$Proxy)
+
+    $provisionConfig = @{ image = $Image }
+    foreach ($key in $Provision.Keys) { $provisionConfig[$key] = $Provision[$key] }
+    $req = @{
+        version = '1.1.0-alpha'
+        phase = 'provision'
+        containment = 'wslc'
+        network = $Network
+        wslc = @{ provision = $provisionConfig }
+    }
+    if ($Proxy) { $req.runtimeConfig = @{ networkProxy = $Proxy } }
+    $envObj = Assert-ResultEnvelope (Invoke-StateAware -Request $req) "provision"
+    if (-not $envObj) { return $null }
+    $id = [string]$envObj.result.sandboxId
+    $script:pIds += $id
+    $null = Assert-ResultEnvelope (Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $id) "start"
+    $id
+}
+
+$script:pIds = @()
+$script:pFilteredId = $null
+$script:pFilteredIp = $null
+$pMappedPort = Get-FreeTcpPort
+try {
+    $pFilteredReady = Run-StateAwareTest "P: an allow-list sandbox with host loopback and a port mapping starts" {
+        $script:pFilteredId = New-PSandbox -Image 'python:3.12-alpine' -Network @{
+            egress = @{
+                default = 'deny'
+                allow = @(@{ to = @(@{ cidr = '1.1.1.1/32' }); ports = @(@{ port = 443; protocol = 'tcp' }) })
+            }
+            ingress = @{ default = 'deny'; hostLoopback = 'allow' }
+        } -Provision @{
+            portMappings = @(@{ windowsPort = $pMappedPort; containerPort = 8080; protocol = 'tcp' })
+        }
+        if ($script:pFilteredId -and -not $script:PreExistingDaemon) {
+            $count = @(Get-SandboxNetworkRecord $script:pFilteredId -Proxy).Count
+            Assert-True ($count -eq 1) "the built-in proxy is recorded (found $count)"
+        }
+    }
+
+    if ($pFilteredReady) {
+        Run-StateAwareTest "P: egress passes only the allowed CIDR and port" {
+            $values = Invoke-PProbes $script:pFilteredId @(
+                'echo PROXY_ENV=$HTTPS_PROXY'
+                'echo ALLOWED=$(p 1.1.1.1:443)'
+                'echo WRONG_PORT=$(p 1.1.1.1:80)'
+                'echo DENIED=$(p 8.8.8.8:443)'
+                'echo DIRECT=$(d 1.1.1.1 443)'
+            )
+            Assert-PProbes $values ([ordered]@{
+                PROXY_ENV = 'http://10\.231\.\d+\.254:3128'; ALLOWED = '200'; WRONG_PORT = '403'
+                DENIED = '403'; DIRECT = 'BLOCKED'
+            })
+        } | Out-Null
+
+        Run-StateAwareTest "P: the workload reaches Windows loopback as host.wslc.internal" {
+            $values = Invoke-PProbes $script:pFilteredId @(
+                "echo HOST_DIRECT=`$(h host.wslc.internal $pHostPort)"
+                "echo HOST_VIA_PROXY=`$(p host.wslc.internal:$pHostPort)"
+                "echo LOOPBACK=`$(p 127.0.0.1:$pHostPort)"
+            )
+            Assert-PProbes $values ([ordered]@{ HOST_DIRECT = '200'; HOST_VIA_PROXY = '200'; LOOPBACK = '403' })
+        } | Out-Null
+
+        Run-StateAwareTest "P: the mapped port reaches the workload through the proxy ($pMappedPort -> 8080)" {
+            $script:pFilteredIp = Start-NwListener -SandboxId $script:pFilteredId
+            $response = Get-TcpResponse -Port $pMappedPort
+            Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
+                "host read the listener's sentinel through the forward (got '$response')"
+        } | Out-Null
+    }
+
+    Run-StateAwareTest "P: a deny-list sibling gets its own filter and no host loopback" {
+        $id = New-PSandbox -Network @{
+            egress = @{
+                default = 'allow'
+                deny = @(@{ to = @(@{ cidr = '1.1.1.1/32' }) })
+            }
+            ingress = @{ default = 'deny'; hostLoopback = 'deny' }
+        }
+        if (-not $id) { return }
+        $probes = @(
+            'echo DENIED=$(p 1.1.1.1:443)'
+            'echo ALLOWED=$(p 1.0.0.1:443)'
+            'nslookup host.wslc.internal >/dev/null 2>&1 && echo HOST_DNS=RESOLVED || echo HOST_DNS=REFUSED'
+            "echo HOST_VIA_PROXY=`$(p host.wslc.internal:$pHostPort)"
+            'echo DIRECT=$(d 1.0.0.1 443)'
+        )
+        if ($script:pFilteredIp) {
+            $probes += "echo SIBLING_VIA_PROXY=`$(p $($script:pFilteredIp):8080)"
+            $probes += "echo SIBLING_DIRECT=`$(d $($script:pFilteredIp) 8080)"
+        }
+        $values = Invoke-PProbes $id $probes
+        $expected = [ordered]@{
+            DENIED = '403'; ALLOWED = '200'; HOST_DNS = 'REFUSED'; HOST_VIA_PROXY = '403'; DIRECT = 'BLOCKED'
+        }
+        if ($script:pFilteredIp) {
+            $expected.SIBLING_VIA_PROXY = '403'
+            $expected.SIBLING_DIRECT = 'BLOCKED'
+        }
+        Assert-PProbes $values $expected
+    } | Out-Null
+
+    Run-StateAwareTest "P: an allow/allow/deny sandbox goes through the proxy without host loopback" {
+        $id = New-PSandbox -Network @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'deny' }
+        }
+        if (-not $id) { return }
+        if (-not $script:PreExistingDaemon) {
+            $count = @(Get-SandboxNetworkRecord $id -Proxy).Count
+            Assert-True ($count -eq 1) "the built-in proxy is recorded (found $count)"
+        }
+        $values = Invoke-PProbes $id @(
+            'echo ALLOWED=$(p 1.1.1.1:443)'
+            "echo LOOPBACK=`$(p 127.0.0.1:$pHostPort)"
+            'nslookup host.wslc.internal >/dev/null 2>&1 && echo HOST_DNS=RESOLVED || echo HOST_DNS=REFUSED'
+            "echo HOST_VIA_PROXY=`$(p host.wslc.internal:$pHostPort)"
+            'echo DIRECT=$(d 1.1.1.1 443)'
+        )
+        Assert-PProbes $values ([ordered]@{
+            ALLOWED = '200'; LOOPBACK = '403'; HOST_DNS = 'REFUSED'; HOST_VIA_PROXY = '403'; DIRECT = 'BLOCKED'
+        })
+    } | Out-Null
+
+    # Cloudflare's port 8080 answers an absolute-form request like a proxy.
+    Run-StateAwareTest "P: a provisioned custom proxy is the only way out" {
+        $proxy = 'http://one.one.one.one:8080'
+        $id = New-PSandbox -Proxy $proxy -Network @{ egress = @{ default = 'deny' } }
+        if (-not $id) { return }
+        $values = Invoke-PProbes $id @(
+            'echo PROXY_ENV=$HTTP_PROXY'
+            'echo VIA_PROXY=$(printf ''GET http://one.one.one.one/cdn-cgi/trace HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n'' | nc -w 10 one.one.one.one 8080 | head -n1 | cut -d'' '' -f2)'
+            'echo DIRECT=$(d 1.1.1.1 80)'
+        ) -Request @{ runtimeConfig = @{ networkProxy = $proxy } }
+        Assert-PProbes $values ([ordered]@{
+            PROXY_ENV = [regex]::Escape($proxy); VIA_PROXY = '[1-5]\d\d'; DIRECT = 'BLOCKED'
+        })
+
+        $r = Invoke-StateAware -Request @{
+            phase = 'exec'
+            sandboxId = $id
+            runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' }
+            process = @{ commandLine = 'echo OTHER_PROXY_MUST_NOT_RUN'; timeout = 30000 }
+        }
+        Assert-True ($r.ExitCode -ne 0 -and -not $r.Stdout.Contains('OTHER_PROXY_MUST_NOT_RUN')) `
+            "an exec naming another proxy is refused (exit $($r.ExitCode))"
+        Assert-True (($r.Stdout + $r.Stderr) -match 'must match the proxy set at provision') `
+            "the refusal names the provisioned proxy rule"
+    } | Out-Null
+
+    Run-StateAwareTest "P: a bridged sandbox keeps its provisioned proxy and reaches Windows loopback" {
+        $id = New-PSandbox -Image 'python:3.12-alpine' -Proxy 'http://proxy.example:8080' -Network @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+        if (-not $id) { return }
+        if (-not $script:PreExistingDaemon) {
+            $count = @(Get-SandboxNetworkRecord $id -Proxy).Count
+            Assert-True ($count -eq 0) "no built-in proxy is recorded (found $count)"
+        }
+        $values = Invoke-PProbes $id @(
+            'echo PROXY_ENV=$HTTP_PROXY'
+            'echo NO_PROXY=$NO_PROXY'
+            "echo HOST_DIRECT=`$(h host.wslc.internal $pHostPort)"
+            "python3 -c `"import urllib.request as u; print('HOST_CLIENT=' + str(u.urlopen('http://host.wslc.internal:$pHostPort/', timeout=10).status))`" 2>/dev/null || echo HOST_CLIENT=ERROR"
+        )
+        Assert-PProbes $values ([ordered]@{
+            PROXY_ENV = 'http://proxy\.example:8080'; NO_PROXY = 'host\.wslc\.internal'; HOST_DIRECT = '200'; HOST_CLIENT = '200'
+        })
+    } | Out-Null
+
+    if ($pFilteredReady) {
+        Run-StateAwareTest "P: deprovision removes the built-in proxy and frees its port" {
+            $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:pFilteredId
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:pFilteredId
+            if (-not (Assert-ResultEnvelope $r "deprovision")) { return }
+            $script:pIds = @($script:pIds | Where-Object { $_ -ne $script:pFilteredId })
+            if (-not $script:PreExistingDaemon) {
+                $count = @(Get-SandboxNetworkRecord $script:pFilteredId -Proxy).Count
+                Assert-True ($count -eq 0) "the built-in proxy's record is gone (found $count)"
+            }
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+                $connected = try { $client.ConnectAsync('127.0.0.1', $pMappedPort).Wait(3000) } catch { $false }
+            } finally {
+                $client.Dispose()
+            }
+            Assert-True (-not $connected) "nothing listens on Windows 127.0.0.1:$pMappedPort any more"
+        } | Out-Null
+    }
+} finally {
+    foreach ($id in $script:pIds) {
+        Write-Host "[cleanup] deprovision of $id" -ForegroundColor DarkGray
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $id } catch { }
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $id } catch { }
+    }
+    $pHostServer | Stop-Job
+    $pHostServer | Remove-Job
 }
 
 # ---------------- Lifecycle J: exec concurrency ----------------
@@ -2896,6 +3136,7 @@ $rOldLocalAppData = $env:LOCALAPPDATA
 $rOldStateRoot = $env:MXC_WSLC_STATE_ROOT
 $script:rFirstId = $null
 $script:rSecondId = $null
+$script:rProxiedId = $null
 
 function Stop-RecoveryDaemon {
     $ErrorActionPreference = 'Continue'
@@ -2952,16 +3193,23 @@ try {
             $ip = Get-SandboxAddress -SandboxId $script:rSecondId
             Assert-True ((Get-AddressSubnet $ip) -eq '10.231.0') `
                 "the new sandbox got the deleted network's /24, the lowest free one (got '$ip')"
+
+            $script:rProxiedId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_proxied.json'
+            Assert-True ($null -ne $script:rProxiedId) "the same daemon provisioned a proxied sandbox"
         } | Out-Null
     }
 
     if ($script:rSecondId) {
-        Run-StateAwareTest "R: a proxied create-and-run deletes a killed daemon's leftover network" {
+        Run-StateAwareTest "R: a proxied create-and-run deletes a killed daemon's leftover networks" {
             $ended = @(Stop-RecoveryDaemon)
             Assert-True ($ended.Count -eq 1) `
                 "the daemon was killed and its WSLC session ended (ended: $($ended -join ', '))"
             $count = @(Get-SandboxNetworkRecord $script:rSecondId).Count
             Assert-True ($count -eq 1) "the killed daemon's network is still recorded (found $count)"
+            if ($script:rProxiedId) {
+                $count = @(Get-SandboxNetworkRecord $script:rProxiedId -Proxy).Count
+                Assert-True ($count -eq 1) "the killed daemon's built-in proxy is still recorded (found $count)"
+            }
 
             $config = Join-Path $rRoot 'proxied-run.json'
             @{
@@ -2991,6 +3239,12 @@ try {
                 "the proxied run reported deleting the leftover network"
             $count = @(Get-SandboxNetworkRecord $script:rSecondId).Count
             Assert-True ($count -eq 0) "the leftover network's record is gone (found $count)"
+            if ($script:rProxiedId) {
+                Assert-True ($output -match 'Removed the built-in proxy left by an earlier run') `
+                    "the proxied run reported deleting the leftover built-in proxy"
+                $count = @(Get-SandboxNetworkRecord $script:rProxiedId -Proxy).Count
+                Assert-True ($count -eq 0) "the leftover built-in proxy's record is gone (found $count)"
+            }
             if ($exitCode -ne 0) { Write-Host $output -ForegroundColor Gray }
         } | Out-Null
     }

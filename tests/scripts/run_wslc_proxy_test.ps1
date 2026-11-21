@@ -117,11 +117,12 @@ if ($pass -and (($childLine -cnotmatch 'FTP_PROXY=\[http://127\.0\.0\.1:8888\]')
     $reason = "runner did not inject/scrub the FTP proxy family (expected http://127.0.0.1:8888)"
 }
 
-# NO_PROXY / no_proxy must be neutralized to empty so an image-baked or
-# caller-supplied exemption (e.g. NO_PROXY=*) cannot disable the proxy.
-if ($pass -and (($childLine -notmatch 'NO_PROXY=\[\]') -or ($childLine -notmatch 'no_proxy=\[\]'))) {
+# NO_PROXY / no_proxy must be neutralized so an image-baked or caller-supplied
+# exemption (e.g. NO_PROXY=*) cannot disable the proxy. Only host loopback
+# (WSL 3.0.5 or later) stays exempt.
+if ($pass -and (($childLine -notmatch 'NO_PROXY=\[(host\.wslc\.internal)?\]') -or ($childLine -notmatch 'no_proxy=\[(host\.wslc\.internal)?\]'))) {
     $pass = $false
-    $reason = "runner did not neutralize NO_PROXY/no_proxy to empty"
+    $reason = "runner did not neutralize NO_PROXY/no_proxy"
 }
 
 # The cooperating client must have routed through the marker proxy.

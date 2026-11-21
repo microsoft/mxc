@@ -280,13 +280,14 @@ These are rejected before the workload is created:
   - `provision-session` and the implicit session: enable host loopback on WSL
     3.0.5 or later, like every session MXC creates. Containers with any
     `hostLoopback` value can share a session.
-  - `provision`: creates the networks, controller and workload. Network
-    posture is fixed here.
-  - `start`: starts the controller and waits up to 20s for it to report
-    ready, then starts the workload. If the controller reports a failure,
-    exits or times out, MXC stops it and returns its error. On WSL 3.0.5,
-    starting a stopped container returns `E_ILLEGAL_METHOD_CALL` although it
-    starts, so MXC accepts that error only when the container is then running.
+  - `provision`: creates the networks, then starts the controller and waits up
+    to 20s for it to report ready, then creates the workload. If the
+    controller reports a failure, exits or times out, MXC deletes what it
+    created and returns its error. Network posture is fixed here. Starting the
+    controller with the workload instead is a later change.
+  - `start`: starts the workload. On WSL 3.0.5, starting a stopped container
+    returns `E_ILLEGAL_METHOD_CALL` although it starts, so MXC accepts that
+    error only when the container is then running.
   - `exec` in a proxied container: the daemon keeps the workload's proxy URL
     from `provision` and sets the proxy variables on every exec with
     `apply_cooperative_proxy_env`. This also applies when the exec replaces
@@ -300,9 +301,10 @@ These are rejected before the workload is created:
     injecting, the daemon checks the URL it will inject, whether from the
     exec or from `provision`. A replaced environment with a
     credential-bearing proxy URL is rejected.
-  - `exec` in a `NONE` or `BRIDGED` container: unchanged; `networkProxy` is
-    set per exec, as today.
-  - `stop`: stops the workload, then the controller.
+  - `exec` in a `NONE` or `BRIDGED` container: a `BRIDGED` container keeps
+    a `networkProxy` given at `provision` and injects it on every exec, with
+    the same match rule; otherwise `networkProxy` is set per exec, as today.
+  - `stop`: stops the workload. The controller runs until `deprovision`.
   - `deprovision`: deletes the workload, then the controller, then the
     networks.
 
@@ -621,13 +623,10 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **One container operation at a time per session:** on WSL 3.0.5, creating
   and starting containers with volumes concurrently in one session sometimes
   fails with `E_UNEXPECTED`, and every proxied workload has a `resolv.conf`
-  volume. Create-and-run has its own session. In the daemon:
-  - The session-boot thread sweeps leftovers and loads the controller image.
-  - Proxied `provision` and `start` run on a helper thread, which reports
-    back to the worker as pulls do, so the readiness wait (up to 20s) doesn't
-    block other sessions.
-  - Other container operations in that session wait for the helper, like
-    provisions parked behind a pull. Other sessions aren't affected.
+  volume. Create-and-run has its own session. In the daemon, the worker
+  thread creates the controller during `provision`, so other sessions'
+  operations wait for its image import and readiness (up to 20s). Moving
+  this to a helper thread, as pulls are, is a later change.
 
 - **Delete order:** workload, then controller, then networks. Deleting a
   network fails while containers are attached.
@@ -642,9 +641,8 @@ probes used direct TCP connections, ignoring the proxy variables.
 
 - **Daemon:** `ContainerEntry` tracks the controller and networks.
   Deprovision, exec quarantine and `Worker::shutdown` share one cleanup that
-  deletes them with the workload and keeps the entry until all are deleted.
-  Before allocating subnets, the daemon retries cleanup of recorded proxies
-  that no live entry owns.
+  deletes them after the workload. A resource it can't delete stays recorded,
+  and the next session on that store deletes it when it boots.
 
 - **Leftovers:** a crash leaves the workload, controller and networks in the
   store. A store admits one live session, so when MXC opens a session on a
@@ -692,7 +690,7 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | Everything denied, with a port mapping | Windows `127.0.0.1:<port>` reaches the workload; workload egress and DNS refused | Proposed config |
 | `hostLoopback: allow` / `deny` | Windows loopback services reached, including on the controller's DNS and proxy ports; UDP to `host.wslc.internal` gets no answer / name and relay address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
-| `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle C |
+| `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (measured on WSL 3.0.5, ARM64) | New `wslc_network_bridged_host_loopback.json`; extend `run_wslc_state_aware_tests.ps1` lifecycle P |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
 | `networkProxy` plus `hostLoopback: allow`, proxied and `BRIDGED` | HTTP to a Windows loopback service through `host.wslc.internal` bypasses the proxy and succeeds; other HTTP goes through the proxy | Extend `run_wslc_proxy_test.ps1` |
 | Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Rejected; no container created. `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |

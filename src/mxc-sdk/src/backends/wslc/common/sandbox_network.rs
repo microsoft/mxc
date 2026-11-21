@@ -139,23 +139,11 @@ impl SandboxNetwork {
     }
 }
 
-/// Call once a session has opened the store, before it creates any sandbox network.
+/// Delete every sandbox network recorded for the store.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers, `session` must be live, and COM
 /// must be initialized on the calling thread.
-pub unsafe fn sweep_leftovers(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    store_path: &str,
-    logger: &mut Logger,
-) -> Result<(), String> {
-    let records = StoreRecords::open(store_path)?;
-    remove_leftovers(sdk, session, &records, logger)
-}
-
-/// # Safety
-/// As for [`sweep_leftovers`].
 pub(crate) unsafe fn remove_leftovers(
     sdk: &WslcSdk,
     session: WslcSession,

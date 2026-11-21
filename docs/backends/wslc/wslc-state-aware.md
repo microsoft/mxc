@@ -49,9 +49,9 @@ waits for the run, because deleting the container would free a handle the run is
 [Known limitations](#known-limitations).
 
 One daemon holds several sessions — several utility VMs — and places sandboxes
-in them. Sandboxes that name no session share one VM, but each bridged sandbox
-gets a network of its own. See [Sessions](#sessions) and
-[Bridged networking](#bridged-networking).
+in them. Sandboxes that name no session share one VM, but each networked
+sandbox gets networks of its own. See [Sessions](#sessions),
+[Bridged networking](#bridged-networking), and [Built-in proxy](#built-in-proxy).
 
 ## Components
 
@@ -97,9 +97,9 @@ using the same entry shape as the create-and-run `wslc.portMappings` list:
 }
 ```
 
-Port mappings require bridged networking. A request that leaves `network` out,
-or sets it to the all-`deny` isolated posture, is rejected at provision: the
-container has no networking for a forward to reach.
+A sandbox with port mappings and any posture other than bridged runs behind
+the [built-in proxy](#built-in-proxy), including one that leaves `network` out
+or denies everything. The mapping is then its only inbound path.
 
 The field requires development contract `1.1.0-alpha`. Requests declaring
 `0.9.0-alpha` cannot include it and must select `1.1.0-alpha` explicitly.
@@ -116,9 +116,11 @@ rejected identically. Zero ports and non-TCP protocols are rejected when the
 version-specific JSON request is deserialized.
 
 The forward listens on `127.0.0.1` only, so a mapped port reaches the container
-from the host itself and not from other machines. WSLC installs it when the
-container starts rather than at provision, so a `windowsPort` that another
-process already holds on loopback fails the `start` phase, not `provision`.
+from the host itself and not from other machines. For a bridged sandbox, WSLC
+installs it when the container starts, so a `windowsPort` that another process
+already holds on loopback fails the `start` phase. Behind the built-in proxy,
+the proxy container holds the port from `provision` to `deprovision`, so the
+conflict fails `provision`.
 
 ### Bridged networking
 
@@ -126,8 +128,9 @@ Sandboxes in one session share its utility VM, but each bridged sandbox's
 container joins a NAT network of its own rather than the runtime's shared
 `bridge` network. A sandbox can't connect to another sandbox's container
 address, though it can still reach another sandbox's mapped ports through the
-VM (see the last item below). Each sandbox keeps outbound access and DNS, and
-its [port mappings](#port-mappings) work from Windows as before. Isolated
+VM (see the last item below). Each sandbox keeps outbound access and DNS,
+reaches TCP services on Windows `127.0.0.1` at `host.wslc.internal`, and its
+[port mappings](#port-mappings) work from Windows as before. Isolated
 sandboxes have no network at all.
 
 - **Names and subnets.** The network is named `mxc-wslc-net-<key>`, where
@@ -162,6 +165,44 @@ sandboxes have no network at all.
   ports that aren't mapped stay unreachable. Sandboxes in other sessions can't
   reach the VM port, so to keep a mapped service away from other sandboxes,
   provision it in a session of its own; see [Sessions](#sessions).
+
+### Built-in proxy
+
+A sandbox that is neither isolated nor bridged (see the
+[mode table](#supported-and-rejected-policy-fields)) runs behind the
+[built-in proxy](wsl-container-getting-started.md#built-in-proxy), which
+filters TCP by CIDR and port. For example, egress allow rules, port mappings
+on an all-deny sandbox, or `runtimeConfig.networkProxy` each select it.
+Filtering, host loopback, the custom proxy, and port mappings behave as they do
+for create-and-run execution.
+
+- **Lifetime.** `provision` creates the proxy's networks and starts the proxy
+  container, then creates the workload on the internal network. `stop` stops
+  only the workload; `deprovision` deletes the workload, the proxy container,
+  and the networks.
+
+- **Names and subnets.** Resources are named `mxc-wslc-gw-<key>-<role>`, with
+  `<key>` derived from the sandbox ID. Each proxied sandbox takes two free
+  `/24`s from `10.231.0.0/16`, shared with bridged sandboxes, so a session
+  holds at most 128 proxied sandboxes. The proxy is at `.254` on the internal
+  network.
+
+- **Proxy variables on exec.** Every exec gets the workload's proxy
+  variables, including execs that replace the environment. An exec
+  `runtimeConfig.networkProxy` must match the provisioned one, or be omitted.
+
+- **Host loopback.** Every daemon session enables WSL host loopback, which
+  needs WSL 3.0.5 or later. On older runtimes, `hostLoopback: "allow"` and a
+  custom proxy on Windows loopback fail with `backend_unavailable`.
+
+- **Cleanup.** The daemon records the proxy in
+  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.json`
+  before creating it. A proxy it can't delete stays recorded, and the next
+  session on that image store deletes it when it boots, logging
+  `Removed the built-in proxy left by an earlier run`.
+
+- **Proxy container exits.** The workload loses network access. MXC doesn't
+  restart it; deprovision the sandbox.
 
 ## Sessions
 
@@ -392,12 +433,12 @@ The session a sandbox joins is not a routing value, so it stays in the request b
 
 | Phase | Daemon action (WSLc SDK) |
 |-------|--------------------------|
-| provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe and delete the [sandbox networks](#bridged-networking) recorded for its store. Returns the minted `sessionId`. |
-| provision | Load SDK, ensure the session (on first use when none was named, boot the implicit session as `provision-session` boots one), resolve/import image, `WslcCreateSessionNetwork` for a bridged sandbox's own network, then `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
+| provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing and host loopback on a thread of its own, then validate the session with a store probe and delete the [sandbox networks](#bridged-networking) and [proxies](#built-in-proxy) recorded for its store. Returns the minted `sessionId`. |
+| provision | Load SDK, ensure the session (on first use when none was named, boot the implicit session as `provision-session` boots one), resolve/import image, then create the sandbox's networking: `WslcCreateSessionNetwork` for a bridged sandbox's own network, or the [built-in proxy](#built-in-proxy)'s networks and running proxy container. Then `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
 | exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is forwarded when the caller supplies it (see [exec stdin](#exec-stdin)). A timeout or caller cancellation SIGKILLs the **process**, not the container; a process that reads forwarded stdin, which includes every SDK streaming exec, is not signalled, and its container is quarantined instead. |
 | stop | `WslcStopContainer`. |
-| deprovision | `WslcDeleteContainer`, then `WslcDeleteSessionNetwork` for a bridged sandbox. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
+| deprovision | `WslcDeleteContainer`, then delete the sandbox's proxy container and `WslcDeleteSessionNetwork` for its networks. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
 | deprovision-session | Refuse while anything is still in the session, else terminate the VM and return its store slot. |
 
 A dry run of either session phase validates the request and stops there: no ID
@@ -681,33 +722,28 @@ continues to protect the container when it cannot prove termination.
 
 ## Supported and rejected policy fields
 
-Container lifecycle networking is **all-or-nothing**: isolated or bridged (see
-[Network configuration](wsl-container-getting-started.md#network-configuration)).
-There is no per-host filtering or independent ingress/host-loopback
-restriction primitive. Create-and-run execution filters egress with the
-[built-in proxy](wsl-container-getting-started.md#built-in-proxy) instead.
-Proxy configuration supplies environment variables, not
-a firewall. Schema `0.9.0-alpha` supports two combinations:
+The network posture picks one of three modes at provision (see
+[Network configuration](wsl-container-getting-started.md#network-configuration)):
 
-| Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |
-| --- | --- | --- | --- |
-| Isolated | `deny` | `deny` | `deny` |
-| Bridged, unrestricted | `allow` | `allow` | `allow` |
+| Mode | Posture |
+| --- | --- |
+| Isolated | `egress`, `ingress`, and `hostLoopback` defaults all `deny` (or omitted), with no egress allow rules, port mappings, or `runtimeConfig.networkProxy` |
+| Bridged | All three defaults `allow`, without egress rules |
+| [Built-in proxy](#built-in-proxy) | Anything else |
 
-Omitted directional values default to deny, so an egress-only allow request is
-rejected rather than claiming its implicit ingress/loopback denies are enforced.
-Mixed postures and per-host rules are rejected. Allowing ingress/host-loopback
-does not create host port forwarding or promise reachability across NAT; it
-acknowledges that WSLC cannot independently restrict those directions.
+Bridged sandboxes aren't filtered. With the built-in proxy, egress rules and
+the custom proxy follow the create-and-run
+[filtering rules](wsl-container-getting-started.md#filtering), and
+`ingress.default: "allow"` has no effect and logs a warning.
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|
 | `readwritePaths` / `readonlyPaths` | honored → container volumes | rejected | rejected |
 | `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
-| Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
-| `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
+| Directional `network` posture | honored → isolated, bridged, or built-in proxy | rejected | rejected; inherit provision posture |
+| `network.egress.allow` / `deny` rules | honored by the built-in proxy (TCP, IPv4 CIDR and port) | rejected | rejected |
 | Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
-| `runtimeConfig.networkProxy` | structurally rejected in published contracts; rejected by WSLc in `1.1.0-alpha` | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| `runtimeConfig.networkProxy` | structurally rejected in published contracts; in `1.1.0-alpha`, relayed by the built-in proxy, or injected on every exec when bridged | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars; must match a provisioned proxy |
 | `ui` | rejected | rejected | rejected |
 | `process.env` / `process.inheritDefaultEnv` | n/a | n/a | honored → see [Environment](wsl-container-getting-started.md#environment) |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
@@ -730,11 +766,12 @@ Filesystem policy is fixed at `provision` and immutable afterwards.
 
 The directional network posture is fixed at `provision`. Post-provision
 phases reject supplied posture by presence, even when values equal defaults.
-Only exec can supply a cooperative proxy through top-level `runtimeConfig`;
-its request omits `network` so proxy-only execution inherits the existing
-posture. Proxy URLs must address a listener reachable from the guest; a host
-loopback listener is not made guest-reachable by spelling its host address
-`localhost`.
+An exec request omits `network` and inherits the provisioned posture. Its
+`runtimeConfig.networkProxy` may be omitted, which uses the provisioned proxy
+if there is one. A bridged or isolated sandbox without a provisioned proxy
+accepts any exec proxy. Proxy URLs must address a listener reachable from the
+guest; a host loopback listener is not made guest-reachable by spelling its
+host address `localhost`.
 
 The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
 published contracts is not a v0.9 compatibility fallback. The new v0.9
@@ -790,9 +827,9 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **12** as of each bridged sandbox getting
-its own network, so a client never places a bridged sandbox through an older
-daemon that would put it on a network shared with other sandboxes.
+old one first. `PROTOCOL_VERSION` is **13** as of the daemon running sandboxes
+behind the built-in proxy, so a client never sends a filtered posture to an
+older daemon that can't enforce it.
 
 ## Daemon idle-timeout env overrides
 
@@ -830,13 +867,16 @@ it can observe idle-teardown within seconds.
 host that can reach a registry or already has the images cached in daemon store slots 0–2, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
-proxy, per-sandbox network isolation, validation rejections, exec concurrency, and idle teardown. Fixtures live in
+proxy, per-sandbox network isolation, sandboxes behind the built-in proxy (CIDR and port filtering,
+host loopback, port mappings, a provisioned custom proxy, and cleanup), validation rejections, exec
+concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
 
-The recovery tests kill a private daemon while a bridged sandbox is running,
-and end its WSLC session with `wslc.exe`. They check that the next daemon
-session on that image store, and a proxied create-and-run in it, delete the
-leftover network and reuse its subnet.
+The recovery tests kill a private daemon while a bridged sandbox is running
+and a proxied sandbox is provisioned, and end its WSLC session with
+`wslc.exe`. They check that the next daemon session on that image store, and
+a proxied create-and-run in it, delete the leftover network and proxy and
+reuse the subnet.
 
 The session tests place two sandboxes in one session and compare their VM
 boot IDs. They also keep two identically sized sessions alive together and
@@ -907,6 +947,13 @@ configuration rather than routing. Exercise these fixtures **through the harness
   [the section above](#a-sandboxs-policy-identity-does-not-cover-its-sessions-sizing).
 
 - **Mapped ports are reachable from other containers in the session.** Each
-  bridged sandbox has its own network, but WSLC publishes mapped ports on every
-  address of the session VM. Give a mapped service that other sandboxes must
-  not reach a session of its own. See [Bridged networking](#bridged-networking).
+  sandbox has its own networks, but WSLC publishes mapped ports on every
+  address of the session VM, and a proxied sandbox whose egress allows VM
+  addresses reaches them through its proxy. Give a mapped service that other
+  sandboxes must not reach a session of its own. See
+  [Bridged networking](#bridged-networking).
+
+- **Host loopback covers every Windows loopback port.** A bridged sandbox, or a
+  proxied one with `hostLoopback: "allow"`, reaches every TCP service on
+  Windows `127.0.0.1`, including other sandboxes' mapped ports. There is no
+  per-port restriction yet.
