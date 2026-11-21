@@ -232,6 +232,11 @@ tests from the SDK bundle. The .NET and Node suites skip unless
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+Before the Node lifecycle and .NET suites, the dispatcher stops every
+`wslcsession.exe` on the host, including WSLC sessions MXC did not start, so a
+session left by an earlier suite cannot hold its store. CI passes
+`-AllowMachineMutation` to allow this; without it, both suites are skipped.
+
 The IsolationSession command-line suite also checks that piped and file stdin
 reach the workload when stdout is a console. A workload reads one line and
 returns a distinct exit code only if the line matches.

@@ -95,7 +95,8 @@ jobs:
             -Backend '${{ matrix.backend }}' `
             -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
             -Architecture '${{ matrix.architecture }}' `
-            -TempDirectory (Join-Path $env:RUNNER_TEMP 'mxc-test-temp') *>&1 |
+            -TempDirectory (Join-Path $env:RUNNER_TEMP 'mxc-test-temp') `
+            -AllowMachineMutation *>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
