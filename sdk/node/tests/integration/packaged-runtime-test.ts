@@ -203,8 +203,10 @@ export function verifyPackagedRuntime(options: PackagedRuntimeTestOptions): void
         }
       }
       const native = koffi.load(path.resolve('node_modules/@microsoft/mxc-sdk/bin/x64/mxc_ffi.dll'));
+      // Reserve every native field, even when this smoke test does not inspect it.
       const detailType = koffi.struct('NvxPackageSmokeError', {
         message: 'void *', operation: 'void *', nativeCode: 'void *', remediation: 'void *',
+        detailsJson: 'void *',
       });
       const register = native.func('mxc_register_runtime_directory', 'int32_t',
         ['const char *', 'const char *', koffi.out(koffi.pointer(detailType))]);

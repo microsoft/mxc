@@ -179,8 +179,8 @@ Bubblewrap creates a namespace-isolated process by:
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
 4. Setting up minimal `/dev`, `/proc`, and `/tmp`
 5. Installing a seccomp filter that permits `socket()` and `socketpair()` only
-   for Unix-domain, IPv4, IPv6, and netlink address families, and disables
-   io_uring
+   for Unix-domain, IPv4, IPv6, and netlink address families, disables
+   io_uring, and blocks creation of new user namespaces
 6. Clearing the environment and applying only requested variables
 7. Dropping all workload capabilities with `--cap-drop ALL`, including for root callers
 8. Executing the command via `sh -c`
@@ -209,14 +209,26 @@ a dedicated thread that lives as long as the process, so a sandbox started from
 a pooled or short-lived thread (for example a Tokio `spawn_blocking` worker)
 survives that thread and dies only with the embedding process.
 
-The address-family filter is always active. Attempts to create VSOCK, packet,
+The seccomp filter is always active. Attempts to create VSOCK, packet,
 or other unlisted socket families fail with `EPERM`. Because io_uring can
 create sockets from submission-queue entries that seccomp cannot inspect, the
 filter also makes `io_uring_setup`, `io_uring_enter`, and `io_uring_register`
 fail with `ENOSYS`; runtimes that probe for io_uring fall back to their
-non-io_uring paths. Other system calls are not restricted by this filter.
-Filter construction, writing, or descriptor inheritance failures abort the
-launch instead of running without the filter.
+non-io_uring paths. Filter construction, writing, or descriptor inheritance
+failures abort the launch instead of running without the filter.
+
+The filter also stops the workload from creating user namespaces. A new user
+namespace gives its creator full capabilities inside it, which exposes kernel
+interfaces that are otherwise unavailable to the workload. `unshare` and
+`clone` calls that request `CLONE_NEWUSER` fail with `EPERM`, so commands such
+as `unshare -Ur` fail. `clone3` passes its flags through a pointer that seccomp
+cannot inspect, so every `clone3` call fails with `ENOSYS`; glibc then falls
+back to `clone`, so threads and child processes still start. Programs that
+call `clone3` directly must make the same fallback. Tools that create their
+own user namespace, such as a nested `bwrap`, rootless Podman, or Chromium's
+sandbox, do not work inside the sandbox; configure them not to create one
+(for example, Chromium's `--no-sandbox`). No request option re-enables user
+namespaces. Other system calls are not restricted by this filter.
 
 On x86-64 hosts, native and x32 workloads retain their normal syscall ABI, and
 i386 workloads using the direct `socket` and `socketpair` syscalls receive the
@@ -224,7 +236,7 @@ same family filtering. The legacy i386 `socketcall` interface passes the socket
 arguments through a pointer that seccomp cannot inspect, so its socket-creation
 and socket-pair subcalls fail with `EPERM`; its other subcalls remain available.
 On AArch64 hosts, native and AArch32 direct socket syscalls receive the same
-family filtering.
+family filtering. User-namespace creation is blocked on each of these ABIs.
 
 MXC supplies one generated program through the legacy `--seccomp FD` option.
 Bubblewrap rejects combining that option with `--add-seccomp-fd`, so any future
@@ -1183,6 +1195,9 @@ These failures carry the `backend_error` code and exit `-1`.
   IPv6 destinations remain unreachable until slirp supports IPv6 here.
   `runtimeConfig.networkProxy` restricts direct egress to the configured
   loopback proxy endpoint; hostname policy belongs to that external proxy.
+- **No nested user namespaces** — workloads cannot create user namespaces, so
+  nested sandboxes and rootless container tools do not run inside Bubblewrap
+  (see [How It Works](#how-it-works)).
 - **No container lifecycle operations**: Bubblewrap's `ScriptRunner`
   supports create-and-run execution, not `StatefulSandboxBackend` lifecycle calls.
 - **Provider-loss detection is exit-based** — in the private-namespace modes a

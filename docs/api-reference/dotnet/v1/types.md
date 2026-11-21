@@ -584,6 +584,7 @@ public sealed class MxcException : Exception
     public string? Operation { get; }
     public string? NativeCode { get; }
     public string? Remediation { get; }
+    public System.Text.Json.JsonElement? Details { get; }
 
     public MxcException(ErrorCode code, string message)
     : this(code, message, null, null, null);
@@ -591,6 +592,12 @@ public sealed class MxcException : Exception
     public override string ToString();
 }
 ```
+
+`Details` preserves optional backend data independently of native memory and
+the original JSON document. Backend details remain available through the
+`JsonElement`; the exception message does not include them.
+`Details` may contain sensitive backend values, including resource paths.
+Filter or omit it before logging or serializing an exception.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle`

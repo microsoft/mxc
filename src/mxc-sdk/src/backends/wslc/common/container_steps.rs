@@ -33,7 +33,7 @@
 //! move that happens *before* any `&raw` is taken), after which callers keep it
 //! as a stationary local.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr, CString};
 use std::fmt::Write;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,7 @@ use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::policy_mapping::VolumeMount;
 use crate::wslc_common::process_env::{self, EnvScope};
 use crate::wslc_common::sdk_init;
+use crate::wslc_common::session_resources;
 use crate::wslc_common::wslc_bindings::*;
 
 // ---------------------------------------------------------------------------
@@ -695,24 +696,31 @@ pub(crate) fn sdk_port_mappings(mappings: &[PortMapping]) -> Vec<WslcContainerPo
         .collect()
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum DaemonNetworking<'a> {
+    Isolated,
+    Network(&'a CStr),
+}
+
 /// A fully-populated `WslcContainerSettings` together with every heap buffer its
-/// pointers reference (image name, volume paths, port mappings). The init
-/// process is intentionally NOT set here — that is caller-specific (the one-shot
-/// path bakes the script as init; the daemon uses a keepalive init) and is
-/// applied by the caller before `WslcCreateContainer`.
+/// pointers reference (image name, volume paths, port mappings, networks). The
+/// init process is intentionally NOT set here — that is caller-specific (the
+/// one-shot path bakes the script as init; the daemon uses a keepalive init) and
+/// is applied by the caller before `WslcCreateContainer`.
 pub struct ContainerSettings {
     raw: WslcContainerSettings,
     _image_cstr: Vec<u8>,
     _wide_paths: Vec<(Vec<u16>, Vec<u8>)>,
     _volumes: Vec<WslcContainerVolume>,
     _port_mappings: Vec<WslcContainerPortMapping>,
+    _network_name: Option<CString>,
+    _networks: Vec<WslcContainerNetwork>,
 }
 
 impl ContainerSettings {
     /// Build container settings for `image` with the given volume `mounts`,
-    /// `port_mappings`, networking `net_mode`, and container `flags`. The caller
-    /// computes `net_mode`/`flags`/`mounts` from policy (identical to the
-    /// one-shot path) and applies the init process afterward.
+    /// `port_mappings`, `networking`, and container `flags`. The caller
+    /// computes them from policy and applies the init process afterward.
     ///
     /// # Safety
     /// `sdk` must hold valid, currently-loaded function pointers.
@@ -721,7 +729,7 @@ impl ContainerSettings {
         image: &str,
         mounts: &[VolumeMount],
         port_mappings: &[PortMapping],
-        net_mode: WslcContainerNetworkingMode,
+        networking: DaemonNetworking,
         flags: WslcContainerFlags,
         logger: &mut Logger,
     ) -> Result<Self, WslcStepError> {
@@ -794,15 +802,36 @@ impl ContainerSettings {
             );
         }
 
-        let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut raw, net_mode);
-        if hr != S_OK {
-            return Err(sdk_step_error(
-                "WslcSetContainerSettingsNetworkingMode",
-                hr,
-                "",
-            ));
+        let mut network_name = None;
+        let mut networks = Vec::new();
+        match networking {
+            DaemonNetworking::Isolated => {
+                let mode = WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE;
+                let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut raw, mode);
+                if hr != S_OK {
+                    return Err(sdk_step_error(
+                        "WslcSetContainerSettingsNetworkingMode",
+                        hr,
+                        "",
+                    ));
+                }
+                let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", mode);
+            }
+            DaemonNetworking::Network(name) => {
+                let name = name.to_owned();
+                networks.push(session_resources::network(&name, ptr::null()));
+                let hr = sdk.WslcSetContainerSettingsNetworks(
+                    &mut raw,
+                    networks.as_ptr(),
+                    networks.len() as u32,
+                );
+                if hr != S_OK {
+                    return Err(sdk_step_error("WslcSetContainerSettingsNetworks", hr, ""));
+                }
+                let _ = writeln!(logger, "[WSLC] Network: {}", name.to_string_lossy());
+                network_name = Some(name);
+            }
         }
-        let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
         let hr = sdk.WslcSetContainerSettingsFlags(&mut raw, flags);
         if hr != S_OK {
@@ -815,6 +844,8 @@ impl ContainerSettings {
             _wide_paths: wide_paths,
             _volumes: volumes,
             _port_mappings: port_vec,
+            _network_name: network_name,
+            _networks: networks,
         })
     }
 
@@ -1162,7 +1193,7 @@ pub unsafe fn create_daemon_container(
     image: &str,
     mounts: &[VolumeMount],
     port_mappings: &[PortMapping],
-    net_mode: WslcContainerNetworkingMode,
+    networking: DaemonNetworking,
     gpu: bool,
     keepalive: &mut ProcessSettings,
     logger: &mut Logger,
@@ -1172,7 +1203,7 @@ pub unsafe fn create_daemon_container(
         image,
         mounts,
         port_mappings,
-        net_mode,
+        networking,
         container_flags(gpu),
         logger,
     )?;

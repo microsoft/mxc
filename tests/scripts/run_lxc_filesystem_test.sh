@@ -18,7 +18,13 @@ fi
 # Create test directories
 READONLY_DIR=$(mktemp -d)
 READWRITE_DIR=$(mktemp -d)
+trap 'rm -rf "$READONLY_DIR" "$READWRITE_DIR"' EXIT
 echo "test content" > "$READONLY_DIR/test.txt"
+
+# Give mapped container users access to the host fixtures.
+chmod 755 "$READONLY_DIR"
+chmod 644 "$READONLY_DIR/test.txt"
+chmod 777 "$READWRITE_DIR"
 
 echo "Running LXC filesystem test..."
 echo "Readonly dir: $READONLY_DIR"
@@ -33,13 +39,14 @@ echo "$CONFIG" | "$LXC_EXEC" --config /dev/stdin
 
 # Check nested restrictions and reject parent segments through the executor.
 POLICY_DIR=$(mktemp -d /tmp/mxc-lxc-policy-paths.XXXXXX)
-trap 'rm -rf -- "$POLICY_DIR"' EXIT
+trap 'rm -rf -- "$READONLY_DIR" "$READWRITE_DIR" "$POLICY_DIR"' EXIT
 mkdir -p "$POLICY_DIR/work/secret" "$POLICY_DIR/work/a" "$POLICY_DIR/work/b"
 CANARY="$POLICY_DIR/work/secret/canary.txt"
 echo HOST_ORIGINAL > "$CANARY"
 
 VISIBLE="$POLICY_DIR/work/a/visible.txt"
 echo VISIBLE_ORIGINAL > "$VISIBLE"
+chmod -R a+rwX "$POLICY_DIR"
 
 run_policy() {
     local filesystem="$1"
@@ -107,6 +114,4 @@ for field in readwritePaths readonlyPaths deniedPaths; do
 done
 echo "PASS: parent segments rejected; canonical nested policies preserved."
 
-# Cleanup
-rm -rf "$READONLY_DIR" "$READWRITE_DIR"
 echo "LXC filesystem test complete."

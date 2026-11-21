@@ -9,6 +9,7 @@ import {
   createStateAwareStreamingDriverAsync,
   createInheritedStdioDriverFromJson,
   createStreamingDriver,
+  createStreamingDriverFromJson,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
@@ -17,7 +18,11 @@ import {
   type NodeStreamDependencies,
   type NativeStreamFactory,
 } from '../../src/bindings/native-stdio.js';
-import type { AbiErrorDetail } from '../../src/bindings/native-error.js';
+import {
+  createAbiErrorDetail,
+  type AbiErrorDetail,
+} from '../../src/bindings/native-error.js';
+import { PolicyFailureVersions } from '../../src/v1/dev/policy-failures.js';
 import { MxcError } from '../../src/v1/errors.js';
 
 class FakeNative implements StreamingNativeFacade {
@@ -28,6 +33,7 @@ class FakeNative implements StreamingNativeFacade {
   spawnStatus = 0;
   spawnRequest: string | undefined;
   spawnExperimental: number | undefined;
+  spawnError: Partial<AbiErrorDetail> | undefined;
   spawnCount = 0;
   deferSpawn = false;
   spawnFailure: Error | undefined;
@@ -41,11 +47,12 @@ class FakeNative implements StreamingNativeFacade {
   waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
+  readonly freedErrors: AbiErrorDetail[] = [];
   tryWaitStatus = 0;
   waitStatus = 0;
   readonly tryWaitDetails: AbiErrorDetail[] = [];
   readonly waitDetails: AbiErrorDetail[] = [];
-  readonly freedErrors = new Set<AbiErrorDetail>();
+  private readonly freedErrorIdentities = new Set<AbiErrorDetail>();
   warningsStatus = 0;
   outputMetadataStatus = 0;
   deferWait = false;
@@ -80,11 +87,12 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnRequest = request;
     this.spawnExperimental = experimental;
+    Object.assign(error, this.spawnError);
     this.spawnCount += 1;
     if (this.spawnFailure !== undefined) {
       const failure = this.spawnFailure;
@@ -114,7 +122,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnWithInheritedStdioCount += 1;
@@ -125,7 +133,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareRequest = request;
@@ -137,7 +145,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareForRunCount += 1;
@@ -148,7 +156,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareCapture = true;
@@ -260,9 +268,11 @@ class FakeNative implements StreamingNativeFacade {
   }
 
   freeError(error: AbiErrorDetail): void {
-    assert.strictEqual(this.freedErrors.has(error), false, 'error detail freed twice');
-    this.freedErrors.add(error);
+    assert.strictEqual(this.freedErrorIdentities.has(error), false, 'error detail freed twice');
+    this.freedErrorIdentities.add(error);
     this.freeErrorCount += 1;
+    this.freedErrors.push({ ...error });
+    Object.assign(error, createAbiErrorDetail());
   }
 
   freeString(value: unknown): void {
@@ -270,11 +280,13 @@ class FakeNative implements StreamingNativeFacade {
   }
 
   private fillWaitError(error: AbiErrorDetail, status: number): void {
+    assert.deepStrictEqual(error, createAbiErrorDetail());
     if (status === 0) return;
     error.message = Buffer.from('test process wait failed\0');
     error.operation = Buffer.from('TestSandbox.Wait\0');
     error.nativeCode = Buffer.from('0x80004005\0');
     error.remediation = Buffer.from('Retry the test process wait.\0');
+    error.detailsJson = Buffer.from('{"phase":"wait"}\0');
   }
 }
 
@@ -309,6 +321,32 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('preserves structured creation errors and frees their JSON only with the out-error', async () => {
+    const request = ' { "version":"1.1.0-alpha","process":{"commandLine":"echo"} } ';
+    for (const json of [
+      `{"policyFailures":{"formatVersion":${PolicyFailureVersions.Format},"results":[]},"backendDetail":"retained"}`,
+      '{',
+    ]) {
+      const native = new FakeNative();
+      native.spawnStatus = 11;
+      native.spawnError = { detailsJson: Buffer.from(json + '\0') };
+      await assert.rejects(
+        createStreamingDriverFromJson(request, native, new FakeStreams(), true),
+        json === '{'
+          ? { code: 'backend_error', message: 'native runtime returned malformed error details' }
+          : { code: 'policy_validation', details: { ffiStatus: 11, ...JSON.parse(json) } },
+      );
+      assert.strictEqual(native.spawnRequest, request);
+      assert.strictEqual(native.spawnExperimental, 1);
+      assert.strictEqual(native.spawnCount, 1);
+      assert.strictEqual(native.spawnWithInheritedStdioCount, 0);
+      assert.strictEqual(native.freeErrorCount, 1);
+      assert.strictEqual(native.freeCount, 0);
+      assert.deepStrictEqual(native.freedStrings, []);
+      assert.strictEqual(native.freedErrors[0].detailsJson, native.spawnError.detailsJson);
+    }
+  });
+
   it('awaits native state-aware spawn without using synchronous dispatch', async () => {
     const native = new FakeNative();
     native.deferSpawn = true;
@@ -549,6 +587,7 @@ describe('native streaming binding ownership', () => {
         assert.strictEqual(error.operation, 'TestSandbox.Wait');
         assert.strictEqual(error.nativeCode, '0x80004005');
         assert.strictEqual(error.remediation, 'Retry the test process wait.');
+        assert.deepStrictEqual(error.details, { phase: 'wait', ffiStatus: 4 });
         return true;
       },
     );
@@ -575,6 +614,7 @@ describe('native streaming binding ownership', () => {
         assert.strictEqual(error.operation, 'TestSandbox.Wait');
         assert.strictEqual(error.nativeCode, '0x80004005');
         assert.strictEqual(error.remediation, 'Retry the test process wait.');
+        assert.deepStrictEqual(error.details, { phase: 'wait', ffiStatus: 4 });
         return true;
       },
     );

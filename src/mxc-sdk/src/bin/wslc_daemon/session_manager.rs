@@ -55,7 +55,7 @@ use mxc_sdk::mxc_common::models::ScriptResponse;
 use mxc_sdk::mxc_common::mxc_error::ApiFailure;
 use mxc_sdk::mxc_common::proxy_env::apply_cooperative_proxy_env;
 use mxc_sdk::wslc_common::container_steps::{
-    self, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
+    self, DaemonNetworking, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
 };
 use mxc_sdk::wslc_common::daemon_protocol::{
     DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode,
@@ -66,9 +66,10 @@ use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy;
 use mxc_sdk::wslc_common::policy_mapping;
 use mxc_sdk::wslc_common::process_env::EnvScope;
+use mxc_sdk::wslc_common::sandbox_network::{self, SandboxNetwork};
 use mxc_sdk::wslc_common::store_slots::{StoreSlotLease, StoreSlotPool};
 use mxc_sdk::wslc_common::wslc_bindings::{
-    WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
+    WslcContainer, WslcContainerGuard, WslcSdk, WslcSessionGuard,
 };
 
 /// Prefix of the name each session's WSL2 utility VM is created under.
@@ -1021,6 +1022,8 @@ struct ContainerEntry {
 
     /// The cooperative proxy URL set at provision, applied to every exec.
     network_proxy: Option<String>,
+
+    network: Option<SandboxNetwork>,
 }
 
 /// A provision waiting on its image to arrive from a registry.
@@ -1101,6 +1104,25 @@ type RunStarter = fn(
     Option<StdinSource>,
     &mpsc::UnboundedSender<WorkerCommand>,
 ) -> Result<(), WorkerError>;
+
+/// Injected so a worker with no SDK loaded can still be tested.
+type NetworkDeleter = fn(&mut Worker, &str, SandboxNetwork);
+
+/// A network that can't be deleted stays recorded for the store's next session.
+fn delete_network_on_sdk(state: &mut Worker, session_ref: &str, network: SandboxNetwork) {
+    let (Some(sdk), Some(entry)) = (state.sdk.as_ref(), state.sessions.get(session_ref)) else {
+        return;
+    };
+
+    // SAFETY: `sdk` is valid, and the session stays registered until nothing
+    // holds it.
+    let deleted = unsafe { network.delete(sdk, entry.session.as_raw(), &mut state.logger) };
+    if let Err(e) = deleted {
+        state.logger.log_line(&format!(
+            "could not delete a sandbox network in session {session_ref}: {e}"
+        ));
+    }
+}
 
 /// Hand a claimed run to its own MTA thread using the SDK this worker loaded.
 fn start_run_on_sdk(
@@ -1241,7 +1263,27 @@ fn start_session_boot(
                             &*job.sdk, &job.name, &job.store, job.sizing, &mut log,
                         )
                     }
-                    .map(BootedSession)
+                    .map(|session| {
+                        // SAFETY: as above, and `session` is live.
+                        let swept = unsafe {
+                            sandbox_network::sweep_leftovers(
+                                &*job.sdk,
+                                session.as_raw(),
+                                &job.store,
+                                &mut log,
+                            )
+                        };
+
+                        // A leftover network holds only a subnet, which
+                        // allocation skips, so the session is still usable.
+                        if let Err(e) = swept {
+                            log.log_line(&format!(
+                                "could not remove the sandbox networks left in {}: {e}",
+                                job.store
+                            ));
+                        }
+                        BootedSession(session)
+                    })
                     .map_err(|failure| BootFailure {
                         error: sr_err(failure.response),
                         store_may_be_held: failure.store_may_be_held,
@@ -1454,6 +1496,7 @@ struct SessionEntry {
 struct Worker {
     logger: Logger,
     start_run: RunStarter,
+    delete_network: NetworkDeleter,
     pending: HashMap<u64, PendingProvision>,
     exec_in_flight: HashMap<String, InFlightExec>,
 
@@ -1496,6 +1539,7 @@ impl Worker {
         Self {
             logger: Logger::new(Mode::Console),
             start_run: start_run_on_sdk,
+            delete_network: delete_network_on_sdk,
             pending: HashMap::new(),
             exec_in_flight: HashMap::new(),
             execs_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -2377,6 +2421,11 @@ impl Worker {
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.sessions[session_ref].session.as_raw();
         let gpu = self.sessions[session_ref].sizing.gpu;
+        let store = self.sessions[session_ref]
+            .store
+            .path()
+            .to_string_lossy()
+            .into_owned();
 
         let mounts: Vec<policy_mapping::VolumeMount> = config
             .volumes
@@ -2387,44 +2436,68 @@ impl Worker {
                 read_only: v.read_only,
             })
             .collect();
-        let net_mode = match config.network {
-            NetworkMode::None => WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE,
-            NetworkMode::Bridged => {
-                WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
-            }
-        };
         let port_mappings = to_model_port_mappings(&config.port_mappings);
+        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
+
+        let network = match config.network {
+            NetworkMode::None => None,
+
+            // SAFETY: `sdk`/`session` are valid.
+            NetworkMode::Bridged => Some(
+                unsafe {
+                    SandboxNetwork::create(sdk, session, &store, &sandbox_id, &mut self.logger)
+                }
+                .map_err(sr_err)?,
+            ),
+        };
+        let networking = network
+            .as_ref()
+            .map_or(DaemonNetworking::Isolated, |network| {
+                DaemonNetworking::Network(network.name())
+            });
 
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
-        let container = unsafe {
+        let created = unsafe {
             // Merge keeps the keepalive out of `env -i`, so a container whose
             // execs never replace an environment does not need `/usr/bin/env`
             // in its image.
-            let mut keepalive = ProcessSettings::build_detached(
+            ProcessSettings::build_detached(
                 sdk,
                 container_steps::KEEPALIVE_SCRIPT,
                 &[],
                 EnvScope::Merge,
                 "",
             )
-            .map_err(sr_err)?;
-
-            container_steps::create_daemon_container(
-                sdk,
-                session,
-                &config.image,
-                &mounts,
-                &port_mappings,
-                net_mode,
-                gpu,
-                &mut keepalive,
-                &mut self.logger,
-            )
-            .map_err(sr_err)?
+            .and_then(|mut keepalive| {
+                container_steps::create_daemon_container(
+                    sdk,
+                    session,
+                    &config.image,
+                    &mounts,
+                    &port_mappings,
+                    networking,
+                    gpu,
+                    &mut keepalive,
+                    &mut self.logger,
+                )
+            })
+        };
+        let container = match created {
+            Ok(container) => container,
+            Err(mut e) => {
+                if let Some(network) = &network {
+                    // SAFETY: `sdk`/`session` are valid.
+                    let deleted = unsafe { network.delete(sdk, session, &mut self.logger) };
+                    if let Err(cleanup) = deleted {
+                        e.error_message =
+                            format!("{}; cleanup also failed: {cleanup}", e.error_message);
+                    }
+                }
+                return Err(sr_err(e));
+            }
         };
 
-        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
         self.touch_session(session_ref);
         self.containers.insert(
             sandbox_id.clone(),
@@ -2436,6 +2509,7 @@ impl Worker {
                 session_ref: session_ref.to_string(),
                 exec_slot: None,
                 network_proxy: config.network_proxy.clone(),
+                network,
             },
         );
         Ok(sandbox_id)
@@ -2688,7 +2762,11 @@ impl Worker {
                 // Deleting the container ends anything still running inside it,
                 // so this exec stops counting against capacity.
                 drop(slot);
-                self.containers.remove(sandbox_id);
+                if let Some(entry) = self.containers.remove(sandbox_id) {
+                    if let Some(network) = entry.network {
+                        self.delete_network(&entry.session_ref, network);
+                    }
+                }
                 let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
                      the container was quarantined and deleted"
@@ -2778,11 +2856,22 @@ impl Worker {
 
         // Delete succeeded (or no SDK loaded): drop the handle now. Keeping the
         // entry on failure above leaves it retryable.
-        self.containers.remove(&config.sandbox_id);
+        let entry = self
+            .containers
+            .remove(&config.sandbox_id)
+            .expect("checked above");
+        if let Some(network) = entry.network {
+            self.delete_network(&entry.session_ref, network);
+        }
 
         // The session and SDK stay loaded so a subsequent provision reuses the
         // already-booted WSL2 VM.
         Ok(())
+    }
+
+    fn delete_network(&mut self, session_ref: &str, network: SandboxNetwork) {
+        let delete = self.delete_network;
+        delete(self, session_ref, network);
     }
 
     /// Give up the SDK handles rather than release them, when an off-worker
@@ -2975,10 +3064,12 @@ impl Worker {
             return;
         }
 
-        if let Some(sdk) = self.sdk.as_ref() {
-            for (_, entry) in self.containers.drain() {
+        if self.sdk.is_some() {
+            for (_, entry) in std::mem::take(&mut self.containers) {
+                let sdk = self.sdk.as_ref().expect("checked above");
+
                 // SAFETY: `sdk` is valid and `entry.container` is a live handle.
-                unsafe {
+                let deleted = unsafe {
                     if entry.started {
                         let _ = container_steps::stop_daemon_container(
                             sdk,
@@ -2986,11 +3077,14 @@ impl Worker {
                             &mut self.logger,
                         );
                     }
-                    let _ = container_steps::delete_daemon_container(
+                    container_steps::delete_daemon_container(
                         sdk,
                         entry.container.as_raw(),
                         &mut self.logger,
-                    );
+                    )
+                };
+                if let (Ok(()), Some(network)) = (deleted, entry.network) {
+                    self.delete_network(&entry.session_ref, network);
                 }
                 // entry (WslcContainerGuard) drops here, releasing the handle.
             }
@@ -3389,6 +3483,7 @@ mod tests {
             session_ref: TEST_SESSION.to_string(),
             exec_slot: None,
             network_proxy: None,
+            network: None,
         }
     }
 
@@ -5711,6 +5806,7 @@ mod tests {
             session_ref: TEST_SESSION.to_string(),
             exec_slot: None,
             network_proxy: None,
+            network: None,
         }
     }
 
@@ -6432,6 +6528,77 @@ mod tests {
         );
         assert_eq!(err.api_failure(), Some(&exit_event_failure()));
         assert!(!worker.containers.contains_key("wslc:busy"));
+    }
+
+    thread_local! {
+        static DELETED_NETWORKS: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_deleted_network(_: &mut Worker, session_ref: &str, network: SandboxNetwork) {
+        DELETED_NETWORKS.with(|deleted| {
+            deleted.borrow_mut().push(format!(
+                "{session_ref} {}",
+                network.name().to_string_lossy()
+            ))
+        });
+    }
+
+    fn deleted_networks() -> Vec<String> {
+        DELETED_NETWORKS.with(|deleted| deleted.borrow().clone())
+    }
+
+    fn worker_with_bridged_sandbox(sandbox_id: &str) -> (Worker, String) {
+        DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().clear());
+        let mut worker = Worker::new();
+        worker.delete_network = record_deleted_network;
+        let network = SandboxNetwork::named(sandbox_id, r"C:\store");
+        let expected_deletion = format!("{TEST_SESSION} {}", network.name().to_string_lossy());
+        worker.containers.insert(
+            sandbox_id.to_string(),
+            ContainerEntry {
+                network: Some(network),
+                ..started_entry()
+            },
+        );
+        (worker, expected_deletion)
+    }
+
+    #[test]
+    fn deprovisioning_a_bridged_sandbox_deletes_its_network() {
+        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
+        worker
+            .deprovision(DeprovisionConfig {
+                sandbox_id: "wslc:bridged".to_string(),
+            })
+            .unwrap();
+        assert_eq!(deleted_networks(), [expected_deletion]);
+    }
+
+    #[test]
+    fn a_quarantine_deletes_the_network_only_once_its_container_is_gone() {
+        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
+        let _ = worker.finish_quarantine(
+            "wslc:bridged",
+            "the exit event was unavailable",
+            None,
+            None,
+            Some(Err(delete_failure())),
+        );
+        assert!(
+            deleted_networks().is_empty(),
+            "a container that may still run keeps its network"
+        );
+        assert!(worker.containers["wslc:bridged"].network.is_some());
+
+        let _ = worker.finish_quarantine(
+            "wslc:bridged",
+            "the exit event was unavailable",
+            None,
+            None,
+            Some(Ok(())),
+        );
+        assert_eq!(deleted_networks(), [expected_deletion]);
     }
 
     fn kill_failure() -> ApiFailure {

@@ -4,7 +4,7 @@
   "containerId": "wslc-network-egress-cold-store",
   "containment": "wslc",
   "process": {
-    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho ALLOWED=$(p 1.1.1.1:443)\necho DENIED=$(p 8.8.8.8:443)"
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\npa() { for i in 1 2 3; do s=$(p \"$1\"); [ \"$s\" = 502 ] || break; sleep 2; done; echo \"$s\"; }\necho ALLOWED=$(pa 1.1.1.1:443)\necho DENIED=$(p 8.8.8.8:443)"
   },
   "network": {
     "egress": {

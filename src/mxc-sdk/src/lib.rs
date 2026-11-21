@@ -555,6 +555,11 @@ mod lifecycle_thread_context {
 pub mod __ffi {
     use super::*;
     use crate::sandbox::WaitResult;
+    /// Decode bounded preparation input, rather than a terminal stored report.
+    pub fn decode_policy_failures_json(json: &str) -> Result<v1::dev::PolicyFailures, Error> {
+        v1::dev::PolicyFailures::parse(json)
+            .map_err(|message| Error::new(ErrorCode::MalformedRequest, message))
+    }
 
     /// Whether this build contains the Windows x64 MicroVM runtime adapter.
     #[doc(hidden)]

@@ -523,7 +523,7 @@ no separate `--setup-wslc` step is required.
 
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
-| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. |
+| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on a NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. With container lifecycle operations, each sandbox has a network of its own, so sandboxes in one session can't connect to each other's container addresses, though mapped ports stay reachable inside the session; see [Bridged networking](wslc-state-aware.md#bridged-networking). |
 | Isolated | All three defaults omitted or `deny`, without egress allow rules, port mappings, or `runtimeConfig.networkProxy` | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
 | Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
 | Built-in proxy | Any other combination, container lifecycle operations | Rejected |
@@ -567,7 +567,7 @@ as follows:
   link-local, multicast, and `10.231.0.0/16` are always denied.
 
 - Most HTTP clients use the proxy automatically through `HTTPS_PROXY` and
-  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use 
+  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use
   the proxy with `CONNECT`.
 
 - The proxy forwards DNS when
@@ -665,12 +665,14 @@ nothing else. Your proxy decides where traffic goes.
   orphaned `mxc-wslc-gw-*-resolv.conf` file stays in `%TEMP%`.
 
 - MXC records the containers and networks it creates in
-  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store>\<key>.json` and
-  deletes only those. Before starting, it deletes every proxy recorded for
-  the store. If the store still has a `mxc-wslc-gw-*` network that no record
-  lists, or a container with this proxy's names, MXC can't prove it created
-  it, so the run fails; delete it by hand or set a different
-  `wslc.storagePath`.
+  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.json`
+  (under `%TEMP%` when `LOCALAPPDATA` isn't set) and deletes only those.
+  Before starting, it deletes every proxy recorded for the store, and every
+  [lifecycle sandbox network](wslc-state-aware.md#bridged-networking) a
+  daemon left recorded there. If the store still has a `mxc-wslc-gw-*`
+  network that no record lists, or a container with this proxy's names, MXC
+  can't prove it created it, so the run fails; delete it by hand or set a
+  different `wslc.storagePath`.
 
 - If cleanup fails, the error names the containers, networks, and record file
   to delete by hand.
@@ -808,8 +810,8 @@ than `"FOO=bar"`) is dropped, as it is on every other backend.
 > which hands it to the SDK's environment setter and keeps it off the command
 > line, or supply it to the workload through a mounted file.
 
-`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an 
-exception to every row: its variables are injected, and any caller-supplied 
+`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an
+exception to every row: its variables are injected, and any caller-supplied
 proxy variable is scrubbed, whatever `process.env` asks for. Egress policy is enforced cooperatively through those
 variables, so a verbatim environment cannot be used to opt out of it. Because
 MXC injects the proxy URL itself, a replacing row cannot choose to keep it off

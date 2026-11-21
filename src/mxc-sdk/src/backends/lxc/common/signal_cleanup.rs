@@ -4,21 +4,34 @@
 //! Process-level cleanup for fatal signals.
 //!
 //! SIGHUP, SIGTERM, and SIGINT can interrupt the runner before normal cleanup
-//! runs.  The watchdog waits for them through `sigwait`, destroys the active
+//! runs.  The watchdog waits for them through `sigwait`, cleans up the active
 //! container, and exits with the signal-style status code.
 //!
 //! Only the executor binary installs it: one slot cannot describe the several
 //! sandboxes a library host can hold, and a library may not exit its caller's
 //! process.  There each sandbox handle tears itself down instead.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
+use std::{
+    process::{Child, Command, Output, Stdio},
+    sync::{atomic::AtomicU64, mpsc, Arc},
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "linux")]
-use nix::sys::signal::{SigSet, Signal};
+use nix::{
+    sys::{
+        signal::{kill, killpg, SigSet, Signal},
+        wait::{waitid, Id, WaitPidFlag, WaitStatus},
+    },
+    unistd::{getpid, Pid},
+};
 
 #[cfg(target_os = "linux")]
 use crate::lxc_common::lxc_bindings::LxcContainer;
@@ -35,10 +48,55 @@ struct ActiveSandbox {
     name: Option<String>,
     created: CreatedResources,
     netns_pid: Option<u32>,
+
+    #[cfg(target_os = "linux")]
+    starting_container: Option<LxcContainer>,
+
+    #[cfg(target_os = "linux")]
+    startup_monitor: Option<Child>,
+
+    #[cfg(target_os = "linux")]
+    startup_tool: Option<StartupTool>,
+
+    #[cfg(target_os = "linux")]
+    monitor_reaper: Option<mpsc::Sender<Child>>,
 }
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
 static WATCHDOG_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+static STARTUP_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "linux")]
+static STARTUP_CANCELLED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+static STARTUP_TIMED_OUT: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+static DEADLINE_EPOCH: OnceLock<Instant> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static STARTUP_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "linux")]
+pub(super) const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[cfg(target_os = "linux")]
+pub(super) const CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(target_os = "linux")]
+struct StartupTool {
+    child: Child,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+struct StartupDeadline;
+
+#[cfg(target_os = "linux")]
+impl Drop for StartupDeadline {
+    fn drop(&mut self) {
+        STARTUP_DEADLINE_MS.store(0, Ordering::Release);
+    }
+}
 
 fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
     ACTIVE_CONTAINER
@@ -54,12 +112,547 @@ thread_local! {
     static WATCHDOG_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-fn watchdog_installed() -> bool {
+pub(crate) fn watchdog_installed() -> bool {
     #[cfg(test)]
     if let Some(overridden) = WATCHDOG_OVERRIDE.with(std::cell::Cell::get) {
         return overridden;
     }
     WATCHDOG_INSTALLED.load(Ordering::Acquire)
+}
+
+pub fn exit_after_signal_cleanup(exit_code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+
+    #[cfg(target_os = "linux")]
+    if watchdog_installed() {
+        let active = lock_slot();
+        if STARTUP_CANCELLED.load(Ordering::Acquire) {
+            drop(active);
+            loop {
+                thread::park();
+            }
+        }
+        std::process::exit(exit_code);
+    }
+    std::process::exit(exit_code)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn check_startup_cancellation() -> Result<(), String> {
+    if watchdog_installed() && STARTUP_CANCELLED.load(Ordering::Acquire) {
+        Err("LXC startup was cancelled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_fatal_diagnostic(message: &str) {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Reopen stderr with independent file-status flags instead of changing the original handle.
+    if let Ok(mut stderr) = OpenOptions::new()
+        .append(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+        .open("/proc/self/fd/2")
+    {
+        let _ = stderr.write(format!("{message}\n").as_bytes());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn elapsed_millis() -> u64 {
+    DEADLINE_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn startup_time_remaining() -> Option<Duration> {
+    if !watchdog_installed() || STARTUP_CANCELLED.load(Ordering::Acquire) {
+        return None;
+    }
+    let deadline = STARTUP_DEADLINE_MS.load(Ordering::Acquire);
+    (deadline != 0).then(|| Duration::from_millis(deadline.saturating_sub(elapsed_millis())))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_startup_timeout() {
+    if startup_time_remaining().is_some() {
+        STARTUP_TIMED_OUT.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cancel_timed_out_startup(running: Arc<AtomicBool>) {
+    while running.load(Ordering::Acquire) {
+        let now = elapsed_millis();
+        let startup = STARTUP_DEADLINE_MS.load(Ordering::Acquire);
+        if startup != 0 && now >= startup {
+            if let Some(active) = ACTIVE_CONTAINER.get() {
+                if let Ok(_slot) = active.try_lock() {
+                    if STARTUP_DEADLINE_MS.load(Ordering::Acquire) == startup
+                        && !STARTUP_CANCELLED.load(Ordering::Acquire)
+                    {
+                        STARTUP_TIMED_OUT.store(true, Ordering::Release);
+                        STARTUP_CANCELLED.store(true, Ordering::Release);
+                        let _ = kill(getpid(), Signal::SIGTERM);
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_startup_output(file: std::fs::File) -> Vec<u8> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::FileExt;
+
+    let length = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or(0);
+    let mut output = vec![0; length];
+    let mut offset = 0;
+    while offset < length {
+        match file.read_at(&mut output[offset..], offset as u64) {
+            Ok(0) => break,
+            Ok(count) => offset += count,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    output.truncate(offset);
+    output
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    use crate::lxc_common::lxc_bindings::unblock_fatal_signals;
+    use std::os::unix::process::CommandExt;
+
+    let tool = command.get_program().to_string_lossy().into_owned();
+    if !watchdog_installed() {
+        return command
+            .output()
+            .map_err(|error| format!("Failed to run {tool}: {error}"));
+    }
+
+    let stdout = tempfile::tempfile().map_err(|error| error.to_string())?;
+    let stderr = tempfile::tempfile().map_err(|error| error.to_string())?;
+    command
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone().map_err(|error| error.to_string())?)
+        .stderr(stderr.try_clone().map_err(|error| error.to_string())?);
+    unblock_fatal_signals(&mut command);
+    let deadline = Instant::now() + timeout.min(startup_time_remaining().unwrap_or(timeout));
+    {
+        let mut slot = lock_slot();
+        check_startup_cancellation()?;
+        let child = command
+            .spawn()
+            .map_err(|error| format!("Failed to run {tool}: {error}"))?;
+        slot.startup_tool = Some(StartupTool {
+            child,
+            stdout,
+            stderr,
+        });
+    }
+    loop {
+        {
+            let mut slot = lock_slot();
+            check_startup_cancellation()?;
+            let child = slot
+                .startup_tool
+                .as_mut()
+                .ok_or("LXC startup tool was cancelled")?;
+            if let Some(status) = child
+                .child
+                .try_wait()
+                .map_err(|error| format!("Failed to wait for {tool}: {error}"))?
+            {
+                let completed = slot
+                    .startup_tool
+                    .take()
+                    .ok_or("LXC startup tool was cancelled")?;
+                drop(slot);
+                return Ok(Output {
+                    status,
+                    stdout: read_startup_output(completed.stdout),
+                    stderr: read_startup_output(completed.stderr),
+                });
+            }
+            if let Some(monitor) = &slot.startup_monitor {
+                if matches!(
+                    waitid(
+                        Id::Pid(Pid::from_raw(monitor.id() as i32)),
+                        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                    ),
+                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+                ) {
+                    return Err("lxc-start exited before startup finished".into());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            record_startup_timeout();
+            return Err(format!(
+                "{tool} did not finish within {}s",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn run_owned_startup(mut command: Command, readiness: Command) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    let stderr = tempfile::tempfile().map_err(|error| error.to_string())?;
+    let (reaper, monitor) = mpsc::channel::<Child>();
+    thread::Builder::new()
+        .name("lxc-monitor-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = monitor.recv() {
+                let _ = child.wait();
+            }
+        })
+        .map_err(|error| format!("spawn LXC monitor reaper: {error}"))?;
+
+    // Keep the startup monitor owned and create terminal devices without a console directory.
+    command
+        .args(["-F", "-s", "lxc.console.path=none", "-s", "lxc.tty.dir="])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr.try_clone().map_err(|error| error.to_string())?);
+    {
+        let mut slot = lock_slot();
+        check_startup_cancellation()?;
+        slot.startup_monitor = Some(
+            command
+                .spawn()
+                .map_err(|error| format!("Failed to run lxc-start: {error}"))?,
+        );
+        slot.monitor_reaper = Some(reaper);
+    }
+
+    let result = run_startup_tool(readiness, Duration::from_secs(45)).and_then(|output| {
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "lxc-wait failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    });
+    result.map_err(|error| {
+        format!(
+            "{error}; lxc-start: {}",
+            String::from_utf8_lossy(&read_startup_output(stderr))
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn stopped_monitor_children(monitor: Pid, deadline: Instant) -> Result<Vec<Pid>, String> {
+    use std::fs;
+
+    let children_path = format!("/proc/{monitor}/task/{monitor}/children");
+    match fs::read_to_string(&children_path) {
+        Ok(children) => {
+            return children
+                .split_whitespace()
+                .map(|child| {
+                    child
+                        .parse::<i32>()
+                        .map(Pid::from_raw)
+                        .map_err(|error| format!("{children_path}: {error}"))
+                })
+                .collect();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{children_path}: {error}")),
+    }
+    let status_path = format!("/proc/{monitor}/status");
+    let status =
+        fs::read_to_string(&status_path).map_err(|error| format!("{status_path}: {error}"))?;
+    let field = |text: &str, name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<i32>().ok())
+    };
+    if field(&status, "Pid:") != Some(monitor.as_raw())
+        || field(&status, "PPid:") != Some(getpid().as_raw())
+    {
+        return Err("Cannot compare startup child PIDs across PID namespaces".into());
+    }
+    let mounts = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("Cannot inspect /proc mount options: {error}"))?;
+    let proc_options = mounts.lines().find_map(|line| {
+        let (mount, filesystem) = line.split_once(" - ")?;
+        let mut filesystem = filesystem.split_whitespace();
+        if mount.split_whitespace().nth(4)? != "/proc" || filesystem.next()? != "proc" {
+            return None;
+        }
+        filesystem.nth(1)
+    });
+    let options = proc_options.ok_or("Cannot identify the /proc mount")?;
+    if options
+        .split(',')
+        .filter_map(|option| option.strip_prefix("hidepid="))
+        .any(|value| value != "0" && value != "off")
+    {
+        return Err("Cannot enumerate startup children through restricted /proc".into());
+    }
+    let mut children = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|error| error.to_string())? {
+        if Instant::now() >= deadline {
+            return Err("Startup child enumeration exceeded its cleanup deadline".into());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let status = match fs::read_to_string(entry.path().join("status")) {
+            Ok(status) => status,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(nix::libc::ESRCH) =>
+            {
+                continue
+            }
+            Err(error) => return Err(format!("Cannot inspect /proc/{pid}/status: {error}")),
+        };
+        let parent =
+            field(&status, "PPid:").ok_or_else(|| format!("Cannot parse /proc/{pid}/status"))?;
+        if parent == monitor.as_raw() {
+            children.push(Pid::from_raw(pid));
+        }
+    }
+    Ok(children)
+}
+
+#[cfg(target_os = "linux")]
+fn reap_before(child: &mut Child, deadline: Instant) -> Result<(), String> {
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Startup process {} could not be reaped before its cleanup deadline",
+                child.id()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn interrupt_startup_tool(mut tool: StartupTool) -> Result<(), String> {
+    use nix::errno::Errno;
+
+    let pid = Pid::from_raw(tool.child.id() as i32);
+    let deadline = Instant::now() + CLEANUP_COMMAND_TIMEOUT;
+
+    // WNOWAIT reserves the group leader's PID until the final signal.
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    let graceful = match killpg(pid, Signal::SIGTERM) {
+        Ok(()) | Err(Errno::ESRCH) => loop {
+            match waitid(Id::Pid(pid), flags) {
+                Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => break Ok(()),
+                Err(Errno::EINTR) => continue,
+                Err(error) => break Err(format!("Cannot observe startup command {pid}: {error}")),
+                _ if Instant::now() >= deadline => {
+                    break Err(format!(
+                        "Startup command {pid} did not finish cleanup within {}s",
+                        CLEANUP_COMMAND_TIMEOUT.as_secs()
+                    ));
+                }
+                _ => thread::sleep(Duration::from_millis(10)),
+            }
+        },
+        Err(error) => Err(format!("Cannot interrupt startup command {pid}: {error}")),
+    };
+    let killed = match killpg(pid, Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(format!("Cannot kill startup command group {pid}: {error}")),
+    };
+    let reaped = reap_before(&mut tool.child, Instant::now() + Duration::from_secs(5));
+    let stderr = read_startup_output(tool.stderr);
+    if !stderr.is_empty() {
+        write_fatal_diagnostic(String::from_utf8_lossy(&stderr).trim());
+    }
+    graceful.and(killed).and(reaped)
+}
+
+#[cfg(target_os = "linux")]
+fn interrupt_startup_monitor(monitor: Option<Child>) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    if let Some(mut monitor) = monitor {
+        let pid = Pid::from_raw(monitor.id() as i32);
+        let flags = WaitPidFlag::WEXITED
+            | WaitPidFlag::WSTOPPED
+            | WaitPidFlag::WNOHANG
+            | WaitPidFlag::WNOWAIT;
+
+        // WNOWAIT reserves the PID and process group until every signal has been sent.
+        let state = waitid(Id::Pid(pid), flags).map_err(|error| error.to_string())?;
+        if matches!(state, WaitStatus::StillAlive | WaitStatus::Stopped(..)) {
+            let _ = kill(pid, Signal::SIGSTOP);
+            loop {
+                match waitid(Id::Pid(pid), flags) {
+                    Ok(WaitStatus::Stopped(..)) => {
+                        match stopped_monitor_children(pid, deadline) {
+                            Ok(children) => {
+                                for child in children {
+                                    if let Err(error) = kill(child, Signal::SIGKILL) {
+                                        write_fatal_diagnostic(&format!(
+                                            "Cannot kill startup child {child}: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(error) => write_fatal_diagnostic(&format!(
+                                "{error}; a container with a custom parent-death signal may require manual cleanup"
+                            )),
+                        }
+                        break;
+                    }
+                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => break,
+                    Err(error) => {
+                        return Err(format!("Cannot observe startup monitor {pid}: {error}"))
+                    }
+                    _ if Instant::now() >= deadline => {
+                        write_fatal_diagnostic(&format!(
+                            "Startup monitor {pid} did not stop before its cleanup deadline"
+                        ));
+                        break;
+                    }
+                    _ => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        }
+        let _ = killpg(pid, Signal::SIGKILL);
+        reap_before(&mut monitor, deadline)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn interrupt_startup_commands(
+    monitor: Option<Child>,
+    tool: Option<StartupTool>,
+) -> Result<(), String> {
+    let tool = tool.map(interrupt_startup_tool).transpose();
+    let monitor = interrupt_startup_monitor(monitor);
+    match (tool, monitor) {
+        (Err(tool), Err(monitor)) => Err(format!("{tool}; {monitor}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(_), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn with_container_startup<T>(
+    container: &LxcContainer,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if !watchdog_installed() {
+        return start();
+    }
+
+    let startup = STARTUP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let deadline = StartupDeadline;
+    STARTUP_DEADLINE_MS.store(
+        elapsed_millis() + STARTUP_TIMEOUT.as_millis() as u64,
+        Ordering::Release,
+    );
+
+    {
+        let mut slot = lock_slot();
+        check_startup_cancellation()?;
+        slot.starting_container = Some(LxcContainer::new(
+            container.name(),
+            Some(container.lxc_path()),
+        ));
+    }
+
+    let mut result = start();
+    let mut slot = lock_slot();
+    if check_startup_cancellation().is_ok() {
+        if result.is_ok() {
+            if let Some(monitor) = slot.startup_monitor.take() {
+                match slot.monitor_reaper.take() {
+                    Some(reaper) => {
+                        if let Err(error) = reaper.send(monitor) {
+                            slot.startup_monitor = Some(error.0);
+                            result = Err(
+                                "LXC monitor reaper disconnected before startup handoff".into()
+                            );
+                        }
+                    }
+                    None => {
+                        slot.startup_monitor = Some(monitor);
+                        result = Err("LXC startup has no monitor reaper".into());
+                    }
+                }
+            }
+        }
+        if result.is_ok() {
+            slot.starting_container = None;
+            drop(deadline);
+            return result;
+        }
+        let monitor = slot.startup_monitor.take();
+        let tool = slot.startup_tool.take();
+        slot.monitor_reaper = None;
+        drop(slot);
+        let interrupted = interrupt_startup_commands(monitor, tool);
+        slot = lock_slot();
+        if interrupted.is_ok() {
+            slot.starting_container = None;
+        } else if let Err(error) = interrupted {
+            result = Err(format!("{}; {error}", result.err().unwrap_or_default()));
+        }
+        if check_startup_cancellation().is_ok() {
+            drop(deadline);
+            return result;
+        }
+    }
+
+    if let Err(error) = &result {
+        write_fatal_diagnostic(error);
+    }
+
+    drop(slot);
+    drop(startup);
+    loop {
+        thread::park();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn with_container_startup<T>(
+    _container: &crate::lxc_common::lxc_bindings::LxcContainer,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    start()
 }
 
 /// Registers the container the watchdog destroys.
@@ -121,6 +714,16 @@ pub fn install() -> Result<(), String> {
     mask.thread_block()
         .map_err(|e| format!("pthread_sigmask: {}", e))?;
 
+    let running = Arc::new(AtomicBool::new(true));
+    let guard_running = Arc::clone(&running);
+    DEADLINE_EPOCH.get_or_init(Instant::now);
+    if let Err(error) = thread::Builder::new()
+        .name("lxc-startup-deadline".into())
+        .spawn(move || cancel_timed_out_startup(guard_running))
+    {
+        let _ = mask.thread_unblock();
+        return Err(format!("spawn lxc-startup-deadline thread: {error}"));
+    }
     match thread::Builder::new()
         .name("lxc-signal-cleanup".into())
         .spawn(move || run_watchdog(mask))
@@ -130,6 +733,7 @@ pub fn install() -> Result<(), String> {
             Ok(())
         }
         Err(err) => {
+            running.store(false, Ordering::Release);
             let _ = mask.thread_unblock();
             Err(format!("spawn lxc-signal-cleanup thread: {err}"))
         }
@@ -146,6 +750,29 @@ pub fn install() -> Result<(), String> {
 fn run_watchdog(mask: SigSet) -> ! {
     loop {
         let Ok(sig) = mask.wait() else { continue };
+        let exit_code = if STARTUP_TIMED_OUT.load(Ordering::Acquire) {
+            124
+        } else {
+            128 + sig as i32
+        };
+        let (monitor, tool) = {
+            let mut slot = lock_slot();
+            STARTUP_CANCELLED.store(true, Ordering::Release);
+            slot.monitor_reaper = None;
+            (slot.startup_monitor.take(), slot.startup_tool.take())
+        };
+        let owned_monitor = monitor.is_some();
+        if let Err(error) = interrupt_startup_commands(monitor, tool) {
+            write_fatal_diagnostic(&error);
+        } else if owned_monitor {
+            lock_slot().starting_container = None;
+        }
+        if STARTUP_TIMED_OUT.load(Ordering::Acquire) {
+            write_fatal_diagnostic("LXC startup timed out.  Cleaning up before exit.");
+        }
+        let _startup = STARTUP_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
             let mut buf_logger = Logger::new(Mode::Buffer);
@@ -158,11 +785,25 @@ fn run_watchdog(mask: SigSet) -> ! {
                 );
                 IngressManager::force_cleanup(&name, pid, &mut buf_logger);
             }
-            let _ = LxcContainer::new(&name, None).destroy();
+            if let Err(error) =
+                LxcContainer::new(&name, None).destroy_with_reporter(write_fatal_diagnostic)
+            {
+                write_fatal_diagnostic(&error);
+            }
+        } else if let Some(container) = active.starting_container {
+            if let Err(error) = container.stop() {
+                write_fatal_diagnostic(&error);
+            }
         }
-        std::process::exit(128 + sig as i32);
+
+        // Terminate without flushing another thread's buffered output.
+        unsafe { nix::libc::_exit(exit_code) }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "signal_cleanup_timeout_spec.rs"]
+mod timeout_spec;
 
 #[cfg(test)]
 mod tests {

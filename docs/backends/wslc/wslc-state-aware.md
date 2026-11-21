@@ -49,7 +49,9 @@ waits for the run, because deleting the container would free a handle the run is
 [Known limitations](#known-limitations).
 
 One daemon holds several sessions — several utility VMs — and places sandboxes
-in them, so one caller's VM is not another caller's. See [Sessions](#sessions).
+in them. Sandboxes that name no session share one VM, but each bridged sandbox
+gets a network of its own. See [Sessions](#sessions) and
+[Bridged networking](#bridged-networking).
 
 ## Components
 
@@ -117,6 +119,49 @@ The forward listens on `127.0.0.1` only, so a mapped port reaches the container
 from the host itself and not from other machines. WSLC installs it when the
 container starts rather than at provision, so a `windowsPort` that another
 process already holds on loopback fails the `start` phase, not `provision`.
+
+### Bridged networking
+
+Sandboxes in one session share its utility VM, but each bridged sandbox's
+container joins a NAT network of its own rather than the runtime's shared
+`bridge` network. A sandbox can't connect to another sandbox's container
+address, though it can still reach another sandbox's mapped ports through the
+VM (see the last item below). Each sandbox keeps outbound access and DNS, and
+its [port mappings](#port-mappings) work from Windows as before. Isolated
+sandboxes have no network at all.
+
+- **Names and subnets.** The network is named `mxc-wslc-net-<key>`, where
+  `<key>` is 16 hex digits derived from the sandbox ID. Its subnet is the
+  lowest `/24` in `10.231.0.0/16` that no other network in the session uses,
+  so a session holds up to 256 bridged sandboxes. A provision past that fails
+  with `backend_error`; deprovision a bridged sandbox in the session, or name
+  another session.
+
+- **Unreachable addresses.** The session VM routes its sandbox networks'
+  subnets to itself, so a sandbox can't reach a host outside the VM whose
+  address is in one of them. Those subnets change as sandboxes come and go,
+  so keep services that sandboxes use out of `10.231.0.0/16`.
+
+- **Cleanup.** `deprovision`, an exec quarantine, and daemon shutdown delete
+  the network after the container. Before creating a network, the daemon
+  records it in
+  `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.network.json`,
+  or under `%TEMP%` when `LOCALAPPDATA` isn't set. A network it can't delete
+  stays recorded. The next daemon session that opens that image store deletes
+  every recorded network when it boots, as does a create-and-run run that
+  starts the [built-in proxy](wsl-container-getting-started.md#built-in-proxy)
+  in that store.
+
+- **WSL version.** Creating the network needs WSL 3.0.5 or later. On an older
+  runtime, a bridged provision fails with `backend_unavailable`.
+
+- **Mapped ports are reachable inside the session.** WSLC publishes each mapped
+  container port on every address of the session VM, on a VM port it chooses,
+  separate from `windowsPort`. Another container in the session can connect to
+  that VM port through a VM address and reach the mapped container. Container
+  ports that aren't mapped stay unreachable. Sandboxes in other sessions can't
+  reach the VM port, so to keep a mapped service away from other sandboxes,
+  provision it in a session of its own; see [Sessions](#sessions).
 
 ## Sessions
 
@@ -347,12 +392,12 @@ The session a sandbox joins is not a routing value, so it stays in the request b
 
 | Phase | Daemon action (WSLc SDK) |
 |-------|--------------------------|
-| provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe. Returns the minted `sessionId`. |
-| provision | Load SDK, ensure the session (`WslcCreateSession` on first use when none was named), resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
+| provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe and delete the [sandbox networks](#bridged-networking) recorded for its store. Returns the minted `sessionId`. |
+| provision | Load SDK, ensure the session (on first use when none was named, boot the implicit session as `provision-session` boots one), resolve/import image, `WslcCreateSessionNetwork` for a bridged sandbox's own network, then `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
 | exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is forwarded when the caller supplies it (see [exec stdin](#exec-stdin)). A timeout or caller cancellation SIGKILLs the **process**, not the container; a process that reads forwarded stdin, which includes every SDK streaming exec, is not signalled, and its container is quarantined instead. |
 | stop | `WslcStopContainer`. |
-| deprovision | `WslcDeleteContainer`. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
+| deprovision | `WslcDeleteContainer`, then `WslcDeleteSessionNetwork` for a bridged sandbox. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
 | deprovision-session | Refuse while anything is still in the session, else terminate the VM and return its store slot. |
 
 A dry run of either session phase validates the request and stops there: no ID
@@ -745,9 +790,9 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **11** as of the addition of
-`network_proxy` to `provision` and `exec`, which moved applying the cooperative
-proxy from the client to the daemon.
+old one first. `PROTOCOL_VERSION` is **12** as of each bridged sandbox getting
+its own network, so a client never places a bridged sandbox through an older
+daemon that would put it on a network shared with other sandboxes.
 
 ## Daemon idle-timeout env overrides
 
@@ -785,8 +830,13 @@ it can observe idle-teardown within seconds.
 host that can reach a registry or already has the images cached in daemon store slots 0–2, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
-proxy, validation rejections, exec concurrency, and idle teardown. Fixtures live in
+proxy, per-sandbox network isolation, validation rejections, exec concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
+
+The recovery tests kill a private daemon while a bridged sandbox is running,
+and end its WSLC session with `wslc.exe`. They check that the next daemon
+session on that image store, and a proxied create-and-run in it, delete the
+leftover network and reuse its subnet.
 
 The session tests place two sandboxes in one session and compare their VM
 boot IDs. They also keep two identically sized sessions alive together and
@@ -855,3 +905,8 @@ configuration rather than routing. Exercise these fixtures **through the harness
 
 - **A sandbox's policy identity does not cover its session's sizing.** See
   [the section above](#a-sandboxs-policy-identity-does-not-cover-its-sessions-sizing).
+
+- **Mapped ports are reachable from other containers in the session.** Each
+  bridged sandbox has its own network, but WSLC publishes mapped ports on every
+  address of the session VM. Give a mapped service that other sandboxes must
+  not reach a session of its own. See [Bridged networking](#bridged-networking).
