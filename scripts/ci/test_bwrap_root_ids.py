@@ -70,8 +70,8 @@ class RootIdFixtures(unittest.TestCase):
             )
             with mock.patch.object(ids, "require_root_file"):
                 ids.configure(etc, backup, ({"root"}, {0, 1000}, {0, 300000}))
-            self.assertEqual((etc / "subuid").read_text(), original.decode() + "\n0:165536:65536\n")
-            self.assertEqual((etc / "subgid").read_text(), "0:300001:65536\n")
+            self.assertEqual((etc / "subuid").read_text(), original.decode() + "\nroot:165536:65536\n")
+            self.assertEqual((etc / "subgid").read_text(), "root:300001:65536\n")
             ids.restore(etc, backup)
             self.assertEqual((etc / "subuid").read_bytes(), original)
             self.assertEqual((etc / "subuid").stat().st_mode & 0o777, 0o640)
