@@ -9,8 +9,19 @@ fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
-) -> Result<Option<tempfile::TempDir>, FilesystemPolicyError> {
-    super::prepare(mounts, baseline_links, version, false)
+) -> Result<DenyPreparation, FilesystemPolicyError> {
+    super::prepare(mounts, baseline_links, &Default::default(), version, false)
+}
+
+fn prepare_with_files(
+    mounts: &mut Vec<PolicyMount>,
+    baseline_links: &[BaselineLink],
+    files: &[&str],
+    version: BwrapVersion,
+) -> Result<DenyPreparation, FilesystemPolicyError> {
+    let files: std::collections::HashSet<String> =
+        files.iter().map(|path| (*path).to_string()).collect();
+    super::prepare(mounts, baseline_links, &files, version, false)
 }
 
 fn mount(path: &Path, intent: FsIntent) -> PolicyMount {
@@ -35,9 +46,7 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&root.join("nested/secret"), FsIntent::Denied),
     ];
-    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
-        .unwrap()
-        .unwrap();
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
     let overlay = mounts[0].readonly_overlay.as_ref().unwrap();
     assert!(Path::new(overlay).join(".env.local").is_dir());
     assert!(Path::new(overlay).join("nested/secret").is_dir());
@@ -54,8 +63,9 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
         .unwrap()
         .readonly_overlay
         .is_none());
-    drop(storage);
-    assert!(!Path::new(overlay).exists());
+    let overlay = overlay.clone();
+    drop(preparation);
+    assert!(!Path::new(&overlay).exists());
 }
 
 #[test]
@@ -70,10 +80,177 @@ fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() 
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&root.join("tools/missing"), FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .unwrap()
-        .is_none());
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(preparation._storage.is_none());
     assert!(mounts.iter().all(|mount| mount.readonly_overlay.is_none()));
+    // The grant is bound from the host as it is, so Bubblewrap leaves the mount
+    // point it needs for `tools/missing` in the caller's own directory.
+    assert_eq!(
+        preparation.created_levels.len(),
+        1,
+        "a missing target under a writable grant still needs its mount point taken back"
+    );
+    // This run creates the mount point itself, which is what makes it ours: an
+    // object that merely happens to sit at the same path is not.
+    assert_eq!(
+        preparation.created_levels.len(),
+        1,
+        "only the missing level is this run's"
+    );
+    assert_eq!(preparation.created_levels[0].0, root.join("tools/missing"));
+    assert!(root.join("tools/missing").is_dir());
+}
+
+#[test]
+fn an_empty_directory_the_caller_already_had_is_not_a_placeholder() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let grant = root.join("tools");
+    std::fs::create_dir_all(grant.join("sub")).unwrap();
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("sub/nested"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert_eq!(
+        preparation.created_levels.len(),
+        1,
+        "only the missing level is Bubblewrap's to take back"
+    );
+    assert_eq!(
+        preparation.created_levels.len(),
+        1,
+        "cleanup must stop at the directory that was already there"
+    );
+    assert_eq!(preparation.created_levels[0].0, grant.join("sub/nested"));
+
+    // The preparation already created it, standing in for what bwrap reuses.
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        !grant.join("sub/nested").exists(),
+        "the placeholder Bubblewrap made is still on the host"
+    );
+    assert!(
+        grant.join("sub").is_dir(),
+        "cleanup removed an empty directory the caller already had"
+    );
+}
+
+fn id_of(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    (metadata.dev(), metadata.ino())
+}
+
+#[test]
+fn only_the_objects_this_run_created_are_removed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("missing/deep"), FsIntent::Denied),
+        mount(&grant.join("planted.json"), FsIntent::Denied),
+    ];
+    let preparation = prepare_with_files(
+        &mut mounts,
+        &[],
+        &[grant.join("planted.json").to_str().unwrap()],
+        BwrapVersion::new(0, 5, 0),
+    )
+    .unwrap();
+    assert!(grant.join("missing/deep").is_dir());
+    assert!(grant.join("planted.json").is_file());
+
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        !grant.join("missing").exists(),
+        "placeholder left on the host"
+    );
+    assert!(
+        !grant.join("planted.json").exists(),
+        "empty placeholder file left on the host"
+    );
+}
+
+#[test]
+fn caller_content_written_into_a_placeholder_stops_the_removal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("missing/deep"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    // The workload wrote into the mount point while the sandbox ran.
+    std::fs::write(grant.join("missing/deep/written-by-workload"), "data").unwrap();
+
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        grant.join("missing/deep/written-by-workload").exists(),
+        "a directory the workload wrote into is not a placeholder"
+    );
+    assert!(
+        grant.join("missing").is_dir(),
+        "nothing above a kept object may be removed"
+    );
+}
+
+#[test]
+fn an_object_the_caller_replaced_is_left_alone() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("missing"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    // The caller replaced the placeholder with its own empty directory. Moving a
+    // fresh one into place guarantees a different inode; remove-and-recreate can
+    // reuse the one that was just freed.
+    let elsewhere = grant.join("theirs");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::remove_dir(grant.join("missing")).unwrap();
+    std::fs::rename(&elsewhere, grant.join("missing")).unwrap();
+    let replacement = id_of(&grant.join("missing"));
+    assert_ne!(replacement, preparation.created_levels[0].1);
+
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        grant.join("missing").is_dir(),
+        "a directory the caller put there is not this run's to remove"
+    );
+    assert_eq!(id_of(&grant.join("missing")), replacement);
+}
+
+#[test]
+fn a_preexisting_denied_path_is_never_a_mount_point() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("tools")).unwrap();
+    std::fs::write(root.join("tools/config.json"), "keep me").unwrap();
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("tools"), FsIntent::ReadWrite),
+        mount(&root.join("tools/config.json"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
+    assert!(
+        preparation.created_levels.is_empty(),
+        "an existing denied path is masked in place and needs no cleanup"
+    );
+    remove_levels(&preparation.created_levels);
+    assert_eq!(
+        std::fs::read_to_string(root.join("tools/config.json")).unwrap(),
+        "keep me"
+    );
 }
 
 #[test]
@@ -110,7 +287,14 @@ fn setuid_bwrap_is_rejected_only_when_an_overlay_is_needed() {
         mount(root, FsIntent::ReadOnly),
         mount(&root.join("missing"), FsIntent::Denied),
     ];
-    let error = super::prepare(&mut missing, &[], BwrapVersion::new(0, 11, 0), true).unwrap_err();
+    let error = super::prepare(
+        &mut missing,
+        &[],
+        &Default::default(),
+        BwrapVersion::new(0, 11, 0),
+        true,
+    )
+    .unwrap_err();
     assert!(error.message().contains("non-setuid bwrap"));
 
     std::fs::write(root.join("existing"), "secret").unwrap();
@@ -118,11 +302,16 @@ fn setuid_bwrap_is_rejected_only_when_an_overlay_is_needed() {
         mount(root, FsIntent::ReadOnly),
         mount(&root.join("existing"), FsIntent::Denied),
     ];
-    assert!(
-        super::prepare(&mut existing, &[], BwrapVersion::new(0, 5, 0), true)
-            .unwrap()
-            .is_none()
-    );
+    assert!(super::prepare(
+        &mut existing,
+        &[],
+        &Default::default(),
+        BwrapVersion::new(0, 5, 0),
+        true
+    )
+    .unwrap()
+    ._storage
+    .is_none());
 }
 
 #[test]
@@ -170,9 +359,8 @@ fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
         mount(Path::new("/"), FsIntent::ReadWrite),
         mount(Path::new(&target), FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .unwrap()
-        .is_none());
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(preparation._storage.is_none());
 }
 
 #[test]
@@ -190,9 +378,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         ..Default::default()
     };
     let mut mounts = bwrap_command::policy_mounts(&request.policy);
-    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
-        .unwrap()
-        .unwrap();
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
     let args = bwrap_command::build_args_classified_with_mode(
         &request,
         None,
@@ -232,7 +418,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
             ]),
         "the host source must be the top layer so shared directories keep host metadata: {args:?}"
     );
-    let hidden = std::fs::canonicalize(storage.path()).unwrap();
+    let hidden = std::fs::canonicalize(preparation._storage.as_ref().unwrap().path()).unwrap();
     let hidden = hidden.to_str().unwrap();
     assert!(args
         .windows(2)
@@ -240,4 +426,262 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
     assert!(args
         .windows(2)
         .any(|args| args[0] == "--remount-ro" && args[1] == hidden));
+}
+
+#[test]
+fn a_denied_parent_is_not_a_host_grant_to_clean_under() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("data")).unwrap();
+    // `/data/hidden` is denied and missing on the host, so bwrap masks it with a
+    // tmpfs. `/data/hidden/new` is then created inside that tmpfs, never on the
+    // host. Recording the host path for it would make cleanup delete whatever
+    // the caller creates there while the sandbox runs.
+    let mut mounts = vec![
+        mount(root, FsIntent::ReadOnly),
+        mount(&root.join("data"), FsIntent::ReadWrite),
+        mount(&root.join("data/hidden"), FsIntent::Denied),
+        mount(&root.join("data/hidden/new"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap();
+    // `data/hidden` itself still needs its mount point taken back: bwrap makes it
+    // in the caller's `data` directory before masking it with a tmpfs.
+    assert_eq!(
+        preparation.created_levels.len(),
+        1,
+        "{:?}",
+        preparation.created_levels
+    );
+    assert_eq!(preparation.created_levels[0].0, root.join("data/hidden"));
+    // `data/hidden/new` is created inside that tmpfs, so nothing of it reaches
+    // the host. Recording it would delete whatever the caller creates at that
+    // path while the sandbox is running.
+    assert!(
+        preparation
+            .created_levels
+            .iter()
+            .all(|(path, _)| *path != root.join("data/hidden/new")),
+        "a path inside a denied parent never reaches the host: {:?}",
+        preparation.created_levels
+    );
+}
+
+fn prepared(levels: Vec<(PathBuf, (u64, u64))>) -> DenyPreparation {
+    DenyPreparation {
+        _storage: None,
+        created_levels: levels,
+        armed: true,
+    }
+}
+
+/// Create `grant/missing` and return what a preparation would have recorded.
+fn created_placeholder(grant: &Path) -> Vec<(PathBuf, (u64, u64))> {
+    let path = grant.join("missing");
+    std::fs::create_dir_all(&path).unwrap();
+    let id = id_of(&path);
+    vec![(path, id)]
+}
+
+#[test]
+fn an_abandoned_preparation_takes_its_placeholders_back() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+
+    // A startup path that gives up before the sandbox owns the cleanup.
+    drop(prepared(levels));
+
+    assert!(
+        !path.exists(),
+        "a startup failure after the masks were created left the mount point on the host"
+    );
+}
+
+#[test]
+fn a_disarmed_preparation_leaves_cleanup_to_the_sandbox() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+
+    let mut handed_over = prepared(levels);
+    handed_over.disarm();
+    drop(handed_over);
+    assert!(
+        path.exists(),
+        "dropping a disarmed preparation must not touch the host"
+    );
+
+    // The sandbox removes them itself once it has stopped. A disarmed
+    // preparation must still be able to do that: handing the cleanup over
+    // changes who calls it, not whether it works.
+    let mut owned = prepared(created_placeholder(&grant));
+    owned.remove_placeholders();
+    assert!(!path.exists());
+    // Idempotent: a second call after teardown is a no-op.
+    owned.remove_placeholders();
+}
+
+#[test]
+fn a_handed_off_preparation_still_cleans_up_in_the_background() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+
+    prepared(levels).remove_placeholders_in_background();
+
+    // The cleanup runs on its own thread, so wait for the effect rather than
+    // assuming it finished before the call returned.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        !path.exists(),
+        "handing the cleanup off left the mount point on the host"
+    );
+}
+
+#[test]
+fn sibling_denials_share_an_ancestor_that_is_removed_once() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&grant.join("missing/a"), FsIntent::Denied),
+        mount(&grant.join("missing/b"), FsIntent::Denied),
+    ];
+    let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    assert!(grant.join("missing/a").is_dir());
+    assert!(grant.join("missing/b").is_dir());
+
+    remove_levels(&preparation.created_levels);
+
+    assert!(
+        !grant.join("missing").exists(),
+        "the ancestor the siblings shared is still on the host"
+    );
+}
+
+#[test]
+fn a_level_another_process_created_is_not_recorded() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    // Stand in for a competing creation: the deepest level already exists, so
+    // this run's create fails with AlreadyExists and must not claim it.
+    std::fs::create_dir_all(grant.join("missing/deep")).unwrap();
+    let theirs = id_of(&grant.join("missing/deep"));
+
+    let created = create_mount_point(&grant.join("missing/deep"), false);
+
+    assert!(
+        created.is_empty(),
+        "a level another process made is not this run's: {created:?}"
+    );
+    assert_eq!(id_of(&grant.join("missing/deep")), theirs);
+}
+
+#[test]
+fn a_preparation_that_fails_later_takes_its_creations_back() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+
+    // A preparation that gives up partway: the guard still holds what it made.
+    let mut pending = PendingCreations::default();
+    pending.record(levels);
+    drop(pending);
+
+    assert!(
+        !path.exists(),
+        "a failed preparation left the mount point it already created on the host"
+    );
+}
+
+#[test]
+fn a_failed_preparation_releases_a_shared_ancestor_too() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    // Built by hand so the preparation's own drop cannot clean them first: the
+    // list is in creation order, exactly what a preparation that failed partway
+    // would hold.
+    let shared = grant.join("missing");
+    std::fs::create_dir_all(shared.join("a")).unwrap();
+    std::fs::create_dir_all(shared.join("b")).unwrap();
+    // The order the real preparation produces: each entry carries its own
+    // levels deepest-first, and the shared ancestor appears with whichever
+    // entry created it.
+    let levels = vec![
+        (shared.join("a"), id_of(&shared.join("a"))),
+        (shared.clone(), id_of(&shared)),
+        (shared.join("b"), id_of(&shared.join("b"))),
+    ];
+
+    let mut pending = PendingCreations::default();
+    pending.record(levels);
+    drop(pending);
+
+    assert!(
+        !shared.exists(),
+        "a failed preparation left the ancestor its siblings shared on the host"
+    );
+}
+
+#[test]
+fn a_creation_guard_cleans_up_whatever_it_still_owns() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+
+    // What the creation job holds while it runs. A result that never reaches
+    // the caller — a probe timeout drops it — takes the guard's drop with it.
+    let mut owned = PendingCreations::default();
+    owned.record(create_mount_point(&target, false));
+    assert!(target.is_dir());
+    drop(owned);
+
+    assert!(
+        !target.exists(),
+        "a creation guard that never handed its levels back left them on the host"
+    );
+}
+
+#[test]
+fn dbg_probe_timing() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    let mut probe = FilesystemProbe::for_test(std::time::Duration::from_millis(1));
+    let t = target.clone();
+    let started = std::time::Instant::now();
+    let outcome = probe.run("job", move |_| {
+        eprintln!("DBG job start");
+        let r = create_mount_point(&t, false);
+        eprintln!("DBG created {:?} exists={}", r, t2_exists(&t));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        eprintln!("DBG job end");
+        r
+    });
+    eprintln!(
+        "DBG outcome_err={} elapsed={:?}",
+        outcome.is_err(),
+        started.elapsed()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    eprintln!("DBG final exists={}", target.exists());
+}
+fn t2_exists(p: &Path) -> bool {
+    p.exists()
 }

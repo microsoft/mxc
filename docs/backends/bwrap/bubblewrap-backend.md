@@ -408,6 +408,16 @@ closed if it cannot be read or parsed. If the read-only source contains a
 nested host mount, startup also fails before the workload starts rather than
 exposing the directory underneath that mount.
 
+**A missing denied path under a writable grant leaves nothing behind.** A
+read-write grant is bound from the host as it is, so bwrap creates the mount
+point its deny mask needs inside the caller's own directory and never removes
+it: a denied file that did not exist would otherwise come back as an empty
+directory, and a denied file masked with `/dev/null` as an empty file. The
+executor removes those placeholders when the sandbox exits. It removes only
+paths bwrap created — a directory the workload wrote into, a file with content,
+and any ancestor that already existed when the policy was prepared are kept —
+so a denied path that already existed is masked in place and never touched.
+
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
 when **any** component of that path — the leaf itself *or* an ancestor directory

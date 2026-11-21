@@ -69,17 +69,252 @@ fn baseline_mounts(
     Ok(mounts)
 }
 
+/// What a policy needs before Bubblewrap can enforce its deny masks.
+#[derive(Debug)]
+pub(crate) struct DenyPreparation {
+    /// Private storage backing the read-only overlays, held so the overlays
+    /// stay mounted for as long as the sandbox runs.
+    pub(crate) _storage: Option<TempDir>,
+
+    /// Every level this run created on the host for a denied entry that did not
+    /// exist yet beneath a read-write grant.
+    created_levels: Vec<(PathBuf, ObjectId)>,
+
+    /// Cleared once the sandbox owns the cleanup. Until then, dropping this
+    /// removes the mount points, so a startup path that gives up after bwrap
+    /// already created its masks does not leave them behind.
+    armed: bool,
+}
+
+impl DenyPreparation {
+    /// Hand the cleanup to whoever now owns the sandbox. That owner calls
+    /// [`Self::remove_placeholders`] once the sandbox has stopped; until it
+    /// does, dropping this no longer removes anything.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove the mount points on a thread of their own, leaving the caller
+    /// free. Teardown walks filesystems the caller granted, and exit polling
+    /// promises not to block, so the work is handed off rather than done here.
+    pub(crate) fn remove_placeholders_in_background(mut self) {
+        if self.created_levels.is_empty() {
+            return;
+        }
+        self.armed = false;
+        // Shared rather than moved: a thread that never starts must still be
+        // able to clean up here, and taking the list first would empty it.
+        let levels = std::sync::Arc::new(std::mem::take(&mut self.created_levels));
+        let handed = std::sync::Arc::clone(&levels);
+        let spawned = std::thread::Builder::new()
+            .name("bwrap-deny-cleanup".to_string())
+            .spawn(move || remove_levels(&handed));
+        if spawned.is_err() {
+            // No thread to hand it to: do it here, since leaving the mount
+            // points on the host is the outcome this exists to prevent.
+            remove_levels(&levels);
+        }
+    }
+
+    /// Remove the mount points now. Safe to call more than once, and callable
+    /// after [`Self::disarm`]: handing the cleanup over changes who calls this,
+    /// not whether it may run.
+    pub(crate) fn remove_placeholders(&mut self) {
+        if self.created_levels.is_empty() {
+            return;
+        }
+        remove_levels(&self.created_levels);
+        self.created_levels.clear();
+    }
+}
+
+impl Drop for DenyPreparation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.remove_placeholders();
+        }
+    }
+}
+
+/// Identity of a host object: its device and inode.
+///
+/// A caller that replaces this run's placeholder is normally caught here,
+/// because a different object carries a different inode. The exception is a
+/// filesystem that hands the freed inode straight back to the replacement. The
+/// change time cannot close that gap: a directory's change time moves whenever
+/// an entry is added to it, so this run's own multi-level placeholder would
+/// stop matching itself.
+type ObjectId = (u64, u64);
+
+/// Create the mount point for a missing denied entry and record what it made.
+///
+/// Bubblewrap reuses an existing mount point rather than making one, so creating
+/// it here is what establishes ownership. Every level this run adds is recorded
+/// with its identity; cleanup removes only those exact objects.
+fn create_mount_point(target: &Path, is_file: bool) -> Vec<(PathBuf, ObjectId)> {
+    let mut created = Vec::new();
+    let mut current = target;
+    // Collect the missing levels first so they can be created top-down.
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing.push(current),
+            Err(_) => break,
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    let deepest = missing.first().copied();
+    for directory in missing.into_iter().rev() {
+        // The leaf is a file when the deny mask binds /dev/null over it; every
+        // level above it is always a directory.
+        let make = || {
+            if is_file && Some(directory) == deepest {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory)
+                    .map(|_| ())
+            } else {
+                std::fs::create_dir(directory)
+            }
+        };
+        match make() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Someone else made it between the scan above and this call.
+                // That object is theirs, so nothing below it is ours either.
+                break;
+            }
+            Err(_) => break,
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(directory) else {
+            break;
+        };
+        use std::os::unix::fs::MetadataExt;
+        created.push((directory.to_path_buf(), (metadata.dev(), metadata.ino())));
+    }
+    // Deepest first, which is the order cleanup needs.
+    created.reverse();
+    created
+}
+
+/// Remove the mount points this run created for missing denied entries.
+///
+/// Each recorded level is removed only while it is still the same device and
+/// inode this run created and still empty. A caller that replaced it, or created
+/// its own object there while the sandbox ran, is left alone: the identity no
+/// longer matches, whatever the path looks like.
+///
+/// Runs on the same bounded worker startup uses. Teardown walks filesystems the
+/// caller granted, and one that stops answering would otherwise hold the handle
+/// and a timed-out sandbox's return open indefinitely; a probe that does not
+/// answer within its deadline leaves the objects in place instead.
+pub(crate) fn remove_levels(created_levels: &[(PathBuf, ObjectId)]) {
+    // Siblings share ancestors: `grant/missing/a` and `grant/missing/b` both
+    // create `grant/missing`. Removing one entry at a time would leave the
+    // shared ancestor behind, because it is not empty until the last sibling is
+    // gone. Deepest first, so a level is reached again after the siblings that
+    // kept it non-empty have already been removed.
+    let mut levels: Vec<(PathBuf, ObjectId)> = created_levels.to_vec();
+    levels.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+
+    let mut probe = FilesystemProbe::default();
+    for (path, created) in levels {
+        let display = path.display().to_string();
+        // A level that is no longer ours, or that still holds an entry we kept,
+        // is left alone. Neither stops the others: another entry may have the
+        // same ancestor and reach it again.
+        let _ = probe.run(&display, move |_| remove_level(&path, created));
+    }
+}
+
+/// Created levels that are removed unless a successful preparation takes them
+/// over. A preparation that fails partway has already made some of them, and
+/// nothing else would take them back.
+#[derive(Default)]
+struct PendingCreations {
+    levels: Vec<(PathBuf, ObjectId)>,
+    taken: bool,
+}
+
+impl PendingCreations {
+    fn record(&mut self, created: Vec<(PathBuf, ObjectId)>) {
+        self.levels.extend(created);
+    }
+
+    /// Take over a guard the creation job handed back. Its levels become this
+    /// preparation's, so a later failure still removes them.
+    fn adopt(&mut self, handed_back: PendingCreations) {
+        self.levels.extend(handed_back.release());
+    }
+
+    /// Give up ownership without removing anything.
+    fn release(mut self) -> Vec<(PathBuf, ObjectId)> {
+        self.taken = true;
+        std::mem::take(&mut self.levels)
+    }
+
+    fn take(&mut self) -> Vec<(PathBuf, ObjectId)> {
+        self.taken = true;
+        std::mem::take(&mut self.levels)
+    }
+}
+
+impl Drop for PendingCreations {
+    fn drop(&mut self) {
+        if self.taken || self.levels.is_empty() {
+            return;
+        }
+        // The preparation failed. Remove what it already created, on this
+        // thread: the caller is unwinding and nothing else will look again.
+        // The same walk as a successful teardown, so siblings that share an
+        // ancestor still release it.
+        let levels = std::mem::take(&mut self.levels);
+        remove_levels(&levels);
+    }
+}
+
+/// Remove one level if it is still the object this run created and still empty.
+fn remove_level(path: &Path, created: ObjectId) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    use std::os::unix::fs::MetadataExt;
+    if (metadata.dev(), metadata.ino()) != created {
+        return false;
+    }
+    if metadata.is_dir() {
+        std::fs::remove_dir(path).is_ok()
+    } else if metadata.is_file() && metadata.len() == 0 {
+        std::fs::remove_file(path).is_ok()
+    } else {
+        false
+    }
+}
+
 /// Keep missing deny mountpoints off the host and out of read-only binds.
-/// The returned directory must outlive the sandbox's overlay mounts.
+///
+/// A read-only parent can be overlaid privately, so nothing is created on the
+/// host. A read-write parent is bound from the host as it is, which leaves the
+/// mount point Bubblewrap needs in that same directory; those entries are
+/// reported in [`DenyPreparation::created_levels`] for the sandbox to remove.
 pub(crate) fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
+    denied_files: &std::collections::HashSet<String>,
     version: BwrapVersion,
     bwrap_is_setuid: bool,
-) -> Result<Option<TempDir>, FilesystemPolicyError> {
+) -> Result<DenyPreparation, FilesystemPolicyError> {
     let mut probe = FilesystemProbe::default();
     let baseline = baseline_mounts(BASELINE_RO_BIND_PATHS, baseline_links, &mut probe)?;
     let mut overlays = BTreeMap::<(String, String), Vec<PathBuf>>::new();
+    // Armed for the whole preparation: an error return below has already made
+    // some of these, and nothing else would take them back.
+    let mut pending = PendingCreations::default();
     for (index, denied) in mounts.iter().enumerate() {
         if denied.intent != FsIntent::Denied {
             continue;
@@ -88,7 +323,10 @@ pub(crate) fn prepare(
         let parent = baseline.iter().chain(&mounts[..index]).rfind(|mount| {
             target != Path::new(&mount.destination) && target.starts_with(&mount.destination)
         });
-        let Some(parent) = parent.filter(|parent| parent.intent == FsIntent::ReadOnly) else {
+        // A denied parent is masked with its own tmpfs, so a denied entry below
+        // it is created inside that tmpfs and never reaches the host. A denied
+        // parent has no host directory to prepare against either.
+        let Some(parent) = parent.filter(|parent| parent.intent != FsIntent::Denied) else {
             continue;
         };
         let relative = target.strip_prefix(&parent.destination).map_err(|error| {
@@ -98,7 +336,7 @@ pub(crate) fn prepare(
             ))
         })?;
         let host_target = Path::new(&parent.source).join(relative);
-        match inspect_path(&mut probe, host_target).map_err(FilesystemPolicyError::Host)? {
+        match inspect_path(&mut probe, host_target.clone()).map_err(FilesystemPolicyError::Host)? {
             Ok(()) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -108,10 +346,35 @@ pub(crate) fn prepare(
                 )))
             }
         }
-        overlays
-            .entry((parent.source.clone(), parent.destination.clone()))
-            .or_default()
-            .push(relative.to_path_buf());
+        if parent.intent == FsIntent::ReadOnly {
+            overlays
+                .entry((parent.source.clone(), parent.destination.clone()))
+                .or_default()
+                .push(relative.to_path_buf());
+        } else {
+            // Bubblewrap reuses a mount point that already exists, so creating it
+            // here is what makes it this run's to remove. Without it, nothing
+            // distinguishes its placeholder from an object the caller creates at
+            // the same path while the sandbox runs.
+            let is_file = denied_files.contains(&denied.source);
+            let display = host_target.display().to_string();
+            // The guard travels with the result: a creation that outlives the
+            // probe deadline still owns what it made, because the dropped result
+            // takes the guard's drop with it. Only a successful hand-off below
+            // releases that ownership to this thread.
+            let created_levels = probe
+                .run(&display, move |_| {
+                    let mut owned = PendingCreations::default();
+                    owned.record(create_mount_point(&host_target, is_file));
+                    owned
+                })
+                .map_err(|error| FilesystemPolicyError::Host(format!("Bubblewrap: {error}")))?;
+            // Nothing to create means bwrap will make the mount point itself,
+            // and this run has no way to tell it from an object the caller puts
+            // there later. Leaving it is worse than trying to remove it, so the
+            // entry is not recorded and nothing is removed afterwards.
+            pending.adopt(created_levels);
+        }
     }
     let first_overlay = overlays
         .iter()
@@ -122,7 +385,11 @@ pub(crate) fn prepare(
                 .map(|path| (destination.clone(), path.clone()))
         });
     let Some((first_destination, first_path)) = first_overlay else {
-        return Ok(None);
+        return Ok(DenyPreparation {
+            _storage: None,
+            created_levels: pending.take(),
+            armed: true,
+        });
     };
 
     #[cfg(target_os = "linux")]
@@ -226,7 +493,11 @@ pub(crate) fn prepare(
         readonly_overlay: None,
     });
     mounts.sort_by_key(|mount| Path::new(&mount.destination).components().count());
-    Ok(Some(directory))
+    Ok(DenyPreparation {
+        _storage: Some(directory),
+        created_levels: pending.take(),
+        armed: true,
+    })
 }
 
 #[cfg(target_os = "linux")]

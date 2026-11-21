@@ -562,9 +562,16 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
-        let deny_mountpoints =
-            missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
-                .map_err(|error| error.into_response())?;
+        // Armed until the sandbox takes the cleanup over, so every startup path
+        // that gives up after bwrap created its masks still removes them.
+        let mut deny_preparation = missing_denials::prepare(
+            &mut mounts,
+            baseline_links,
+            denied_files,
+            bwrap_version,
+            bwrap_is_setuid,
+        )
+        .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -867,6 +874,8 @@ impl BubblewrapScriptRunner {
             .and_then(|network| network.take_liveness_watch())
             .map(|watch| ProviderMonitor::watch(watch, Arc::clone(&child), group));
 
+        deny_preparation.disarm();
+
         Ok(BwrapChild {
             child,
             stdin,
@@ -882,7 +891,7 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
-            _deny_mountpoints: deny_mountpoints,
+            deny_mountpoints: Some(deny_preparation),
         })
     }
 }
@@ -890,7 +899,10 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
-    _deny_mountpoints: Option<tempfile::TempDir>,
+    /// Private deny-mountpoint storage, held for the sandbox's lifetime, and the
+    /// host mount points to take back once it exits. `None` once the cleanup has
+    /// been handed off.
+    deny_mountpoints: Option<missing_denials::DenyPreparation>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -926,6 +938,12 @@ impl BwrapChild {
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
+        // Bubblewrap made these on the host as mount points for denied entries
+        // that did not exist yet. It never removes them, so a denied path would
+        // otherwise outlive the sandbox as a directory or an empty file.
+        if let Some(mut preparation) = self.deny_mountpoints.take() {
+            preparation.remove_placeholders();
+        }
     }
 }
 
@@ -942,6 +960,14 @@ impl BubblewrapSandboxProcess {
         Self {
             inner: child,
             teardown_done: false,
+        }
+    }
+
+    /// Give the deny-mountpoint cleanup its own thread, if it has not already
+    /// been handed off. Safe to call from every exit path.
+    fn hand_off_deny_cleanup(&mut self) {
+        if let Some(preparation) = self.inner.deny_mountpoints.take() {
+            preparation.remove_placeholders_in_background();
         }
     }
 
@@ -1133,7 +1159,15 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 "Bubblewrap: script timed out",
             ));
         }
-        if let Some(status) = self.inner.lock_child().try_wait()? {
+        let exited = self.inner.lock_child().try_wait()?;
+        if let Some(status) = exited {
+            // The sandbox is gone, so the mount points this run made for denied
+            // paths that did not exist are no longer in use. A caller that keeps
+            // this handle alive would otherwise still find a directory where it
+            // expects to create a file. Polling is documented as non-blocking,
+            // so teardown runs on its own thread.
+            self.run_teardown();
+            self.hand_off_deny_cleanup();
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -1150,6 +1184,11 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 return Err(std::io::Error::other(error));
             }
             self.inner.timed_out = true;
+            // The child is reaped, so its mount points are free to remove. Later
+            // polls return early from the `timed_out` branch above, so this is
+            // the only place a caller that keeps the handle alive would get them
+            // back.
+            self.hand_off_deny_cleanup();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Bubblewrap: script timed out",
