@@ -371,6 +371,12 @@ jobs:
             fi
           done
 
+      - name: Test Bubblewrap user-namespace denial (end-to-end)
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: bash tests/scripts/run_bwrap_user_namespace_test.sh
+
       - name: Upload binaries
         if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
