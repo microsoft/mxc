@@ -24,7 +24,8 @@
 //! - WSLc ([`apply_cooperative_proxy_env`]) *merges* over the image's baked-in
 //!   `ENV`, so an image `NO_PROXY=*` could survive. To neutralize it, WSLc
 //!   sets `NO_PROXY`/`no_proxy` ([`PROXY_NEUTRALIZE_KEYS`]) to the *empty*
-//!   string rather than omitting them.
+//!   string rather than omitting them, or to its host loopback name when the
+//!   session reaches Windows loopback.
 //! - LXC ([`apply_proxy_env`]) pairs these cooperative vars with its iptables
 //!   policy. It forces `--clear-env`, so like Bubblewrap it inherits nothing,
 //!   and when a proxy is configured it reuses [`apply_cooperative_proxy_env`],

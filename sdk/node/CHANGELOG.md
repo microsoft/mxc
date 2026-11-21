@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   need WSL 3.0.5. See
   [bridged networking](../../docs/backends/wslc/wslc-state-aware.md#bridged-networking).
 
+- WSLC container lifecycle sandboxes accept the network policies create-and-run
+  execution filters with the built-in proxy: mixed `egress`, `ingress`, and
+  `hostLoopback` defaults, TCP egress CIDR and port rules, and port mappings on
+  an otherwise isolated sandbox. Provisioning one creates the proxy, and
+  deprovisioning deletes it. Bridged containers, in create-and-run execution and
+  container lifecycle operations, now reach TCP services on Windows `127.0.0.1`
+  at `host.wslc.internal` on WSL 3.0.5 or later. See
+  [built-in proxy](../../docs/backends/wslc/wslc-state-aware.md#built-in-proxy).
+
 - Reading a process's `warnings` or output metadata no longer corrupts the
   native heap and crashes Node when the native side returns a value.
 

@@ -55,7 +55,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 ///
 /// Changing this strands whatever a running daemon is holding, since the SDK
 /// offers no way to re-attach to a live session from another process.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Largest payload one [`StreamFrame::Stdin`] may carry.
 pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;
@@ -92,19 +92,7 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// Container network mode. Mirrors exactly what the one-shot WSLc runner
-/// supports — no host-filtering / egress allow-deny (the SDK grants no
-/// `CAP_NET_ADMIN` and cannot give VM-level enforcement without breaking other
-/// security promises, so there is no iptables path).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkMode {
-    /// Isolated: no container networking.
-    #[default]
-    None,
-    /// Bridged (NAT) networking.
-    Bridged,
-}
+pub use crate::wslc_common::policy::NetworkMode;
 
 /// A host → container TCP forward applied to one sandbox's container.
 ///
