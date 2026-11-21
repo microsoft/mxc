@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using Microsoft.Mxc.Sdk.V1;
 
@@ -33,12 +35,45 @@ internal static unsafe class NativeError
         MxcErrorDetail detail,
         string fallbackMessage)
     {
+        var detailsJson = ToStringOrNull(detail.details_json_utf8);
+        JsonElement? details = null;
+        if (detailsJson is not null)
+        {
+            var cause = TryParseDetails(detailsJson, out var parsed);
+            if (cause is not null)
+            {
+                var diagnostic = new JsonObject { ["ffiStatus"] = status, ["cause"] = cause };
+                return new MxcException(
+                    ErrorCode.BackendError,
+                    "native runtime returned malformed error details",
+                    null,
+                    null,
+                    null,
+                    MxcJson.Deserialize<JsonElement>(diagnostic.ToJsonString()));
+            }
+            details = parsed;
+        }
         return new MxcException(
             (ErrorCode)status,
             ToStringOrNull(detail.message_utf8) ?? fallbackMessage,
             ToStringOrNull(detail.operation_utf8),
             ToStringOrNull(detail.native_code_utf8),
-            ToStringOrNull(detail.remediation_utf8));
+            ToStringOrNull(detail.remediation_utf8),
+            details);
+    }
+
+    private static string? TryParseDetails(string detailsJson, out JsonElement details)
+    {
+        try
+        {
+            details = MxcJson.Deserialize<JsonElement>(detailsJson);
+        }
+        catch (JsonException ex)
+        {
+            details = default;
+            return ex.Message;
+        }
+        return details.ValueKind == JsonValueKind.Object ? null : "expected a JSON object";
     }
 
     /// <summary>

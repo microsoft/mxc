@@ -50,10 +50,10 @@ fi
 
 # This test deliberately leaves a container behind between its two runs.
 cleanup() {
-    lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
+"$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
 
 RUN_OUTPUT=""
 

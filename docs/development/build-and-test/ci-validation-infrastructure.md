@@ -101,7 +101,7 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, native Bubblewrap filesystem-policy and denied-path masking suites, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
@@ -136,6 +136,14 @@ IsolationSession, and WSLC jobs at their bundle download.
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
+LXC jobs temporarily configure unprivileged UID/GID mappings and restore the
+original host configuration after testing, including when tests fail.
+
+The mapping E2E exercises valid shifted maps, an identity GID map, a non-root
+container UID mapped to host UID 0, and garbled native configuration.
+Rejected cases must return an error without running the workload and retain a
+stopped container.
+
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
 test step 45 min on Linux and 60 on Windows and macOS, so a hung backend fails
@@ -168,11 +176,11 @@ Current platforms:
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
 |-------------|--------|----------|------------|--------------------------|------------|
 | `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
-| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isosesh-arm64` | same as above | same as above |
+| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc | — |
@@ -192,10 +200,23 @@ script and then to the dispatcher, which has one `switch`/`case` per id. The
 `process` case requires `wxc-exec --probe` to report an enabled native PSEC
 contract, then runs a filesystem smoke test, public SDK streaming tests, and
 the native network and policy suites against the downloaded artifacts.
+The SDK suite requires the Dev policy-preparation test to be discovered
+and executed. It checks preparation without workload writes, explicit caller
+acceptance, strict creation with read-only enforcement, an unrelated writable
+control, and changed-request reuse with the original inferred working directory.
+The test supplies its own observations; injected native outcomes in the backend
+tests cover refusal capture and native-attempt counts.
 The network and policy suites delegate their focused loopback and enumeration
 checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement
 and fixture security on supported and unsupported hosts.
+
+The policy suite checks a readable file beneath a broad directory grant, an
+absolute deny that blocks that file, and rejection of relative paths in every
+ProcessContainer filesystem policy list before workload execution. Rejection
+cases vary whether `process.cwd` is supplied and use a separate launcher
+directory. An overlapping-list case checks that the diagnostic identifies the
+invalid path after normalization removes duplicate entries.
 
 The policy suite also runs the native CLI contract boundary cases, including
 the six network-policy rejection shapes and a launched valid control for each
@@ -220,6 +241,11 @@ tests from the SDK bundle. The .NET and Node suites skip unless
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+Before the Node lifecycle and .NET suites, the dispatcher stops every
+`wslcsession.exe` on the host, including WSLC sessions MXC did not start, so a
+session left by an earlier suite cannot hold its store. CI passes
+`-AllowMachineMutation` to allow this; without it, both suites are skipped.
+
 The IsolationSession command-line suite also checks that piped and file stdin
 reach the workload when stdout is a console. A workload reads one line and
 returns a distinct exit code only if the line matches.
@@ -239,6 +265,11 @@ container provisioning. LXC mount cases run as root against an empty, stopped
 container in private storage and verify cleanup. The blocked-call hook is test-only. See
 [filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
 for local commands and watchdog behavior.
+
+LXC also runs prebuilt Rust regressions for startup cancellation, cleanup after
+failed startup, long-running workloads, existing static networking, and
+cancellation during address acquisition.  Each named regression must be
+discoverable, and missing prerequisites fail the job.
 
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
@@ -275,8 +306,11 @@ UID. Each case is repeated without `CAP_KILL` in the caller's capability sets.
 The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts. The
 Linux SDK integration jobs in GitHub Actions and Azure Pipelines also use it,
 because they run the Node SDK suite, including its Bubblewrap tests, as root.
-It reuses valid root allocations or selects free 65,536-ID blocks from the
-host's `SUB_UID_MIN/MAX` and `SUB_GID_MIN/MAX` pools in `/etc/login.defs`,
+Those jobs also give LXC a fixed `root:100000:65536` range, which can overlap
+another account's. Because MXC uses root's first range, they reserve the
+Bubblewrap range before configuring LXC and restore it after restoring LXC.
+The helper reuses valid root allocations or selects free 65,536-ID blocks from
+the host's `SUB_UID_MIN/MAX` and `SUB_GID_MIN/MAX` pools in `/etc/login.defs`,
 excluding existing allocations, account UIDs, primary GIDs, and group GIDs.
 An unsafe existing root allocation or exhausted pool fails setup.
 The helper backs up both files before writing either one. Each of these jobs
@@ -491,15 +525,44 @@ test bundle. The bundle contains native test executables, self-contained .NET
 tests, and the Node SDK with its Node 24.21.0 runtime; validation hosts do not
 compile or restore SDK dependencies.
 
-The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
-enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
-Node public `run`, `spawn`, and tool-discovery filesystem integration cases.
+The dispatcher explicitly runs the ignored Rust bidirectional-stdio and
+V1.Dev creation/preparation tests. The preparation case
+`dev_json_processcontainer_policy_feedback_restricts_current_request`
+must pass and emit `MXC_POLICY_PREPARATION_STRICT_CREATE_OK:<version>` for
+`0.9.0-alpha`, `1.0.0` and `1.1.0-alpha`. `--show-output` exposes those captured
+success markers without changing the named-test pass gate. Missing markers,
+empty selections and skipped required cases fail validation. The bundle
+builder requires discovery of the same case and runs
+`scripts/ci/test-policy-preparation-test-results.ps1` to check the result gate
+offline; this check invokes no backend or workload.
+
+The same case checks equivalent writable/read-only spellings, suppressed
+authored grants and enumeration/deny overlap. Native deny and enumeration
+cases must enforce the restricted policy when the public capability probe
+advertises support; otherwise preparation must reject them before any workload
+writes. The original read-only scenarios remain required on every PSEC host.
+
+The dispatcher enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET
+`MxcProcessTests` and `DevEntryPointTests` and runs the Node public `run`,
+`spawn`, and tool-discovery filesystem integration cases.
+The .NET prepared-filesystem scenario creates an owner-only workspace beneath
+a parent with inheritable AppContainer write access, so ambient grants cannot
+bypass its read-only assertions during strict `run` and `spawn`.
+The managed preparation tests verify owned candidate requests without
+launching and lossless storage of native results. They launch no workload, so
+they do not depend on this host opt-in and also run on every OS in the .NET SDK
+job. Bundle discovery requires the native preparation fact and both native
+storage theory rows. Scheduled validation rejects skipped `MxcProcessTests`
+and requires the preparation fact and each storage theory's
+`nativePreparation: True` row to pass; a pure-storage `False` row cannot satisfy
+the native execution gate. Unrelated architecture-dependent skips in
+`DevEntryPointTests` do not fail this gate.
 The tool-discovery case uses a private fixture alongside the packaged Node
 tests rather than under the host temporary directory. It uses a fake
 `pwsh.exe`, applies the discovered policy through public `run`, and checks that
 tool files are readable while a sibling private sentinel remains denied. It
-also checks host readability and denial without a grant. The .NET suite checks stdin,
-stdout, stderr, large output, cancellation, kill, and timeout behavior.
+also checks host readability and denial without a grant. The .NET suite checks
+stdin, stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
 required cases fail the job even when the runner exits successfully.
 

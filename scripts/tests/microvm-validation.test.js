@@ -500,10 +500,15 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   const artifactSuite = join(result.outputDirectory, result.triplet, "nvx-e2e-tests.exe");
   writeFileSync(artifactSuite, validationSuite);
   writeFileSync(join(x64, "nvx-e2e-tests.exe"), validationSuite);
-  const probeSuites = ["x64", "arm64"].flatMap((arch) =>
-    ["mxc-filesystem-probe-tests", "mxc-filesystem-probe-tests.exe"].map((name) => ({ arch, name }))
+  const validationSuites = ["x64", "arm64"].flatMap((arch) =>
+    [
+      "mxc-filesystem-probe-tests",
+      "mxc-filesystem-probe-tests.exe",
+      "wxc_e2e_tests_e2e_lxc_network_capability",
+      "wxc_e2e_tests_e2e_lxc_static_network",
+    ].map((name) => ({ arch, name }))
   );
-  for (const { arch, name } of probeSuites) {
+  for (const { arch, name } of validationSuites) {
     const directory = join(binaryRoot, arch);
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, name), validationSuite);
@@ -541,7 +546,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   assert.deepEqual(fileDigests(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes")), expected);
   assert.deepEqual(readFileSync(artifactSuite), validationSuite);
   assert.deepEqual(readFileSync(join(x64, "nvx-e2e-tests.exe")), validationSuite);
-  for (const { arch, name } of probeSuites) {
+  for (const { arch, name } of validationSuites) {
     assert.deepEqual(readFileSync(join(binaryRoot, arch, name)), validationSuite);
   }
 
@@ -557,7 +562,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   assert.equal(unfiltered.status, 0, unfiltered.stdout + unfiltered.stderr);
   const unfilteredFiles = JSON.parse(unfiltered.stdout)[0].files.map(({ path }) => path);
   assert.ok(unfilteredFiles.includes("bin/x64/nvx-e2e-tests.exe"));
-  for (const { arch, name } of probeSuites) {
+  for (const { arch, name } of validationSuites) {
     assert.ok(unfilteredFiles.includes(`bin/${arch}/${name}`));
   }
   assert.deepEqual(unfilteredFiles.filter((path) => path.includes("aci-edge-sandboxes")), []);

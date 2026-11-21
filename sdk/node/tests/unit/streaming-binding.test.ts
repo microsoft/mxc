@@ -9,6 +9,7 @@ import {
   createStateAwareStreamingDriverAsync,
   createInheritedStdioDriverFromJson,
   createStreamingDriver,
+  createStreamingDriverFromJson,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
@@ -17,6 +18,12 @@ import {
   type NodeStreamDependencies,
   type NativeStreamFactory,
 } from '../../src/bindings/native-stdio.js';
+import {
+  createAbiErrorDetail,
+  type AbiErrorDetail,
+} from '../../src/bindings/native-error.js';
+import { PolicyFailureVersions } from '../../src/v1/dev/policy-failures.js';
+import { MxcError } from '../../src/v1/errors.js';
 
 class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
@@ -26,6 +33,7 @@ class FakeNative implements StreamingNativeFacade {
   spawnStatus = 0;
   spawnRequest: string | undefined;
   spawnExperimental: number | undefined;
+  spawnError: Partial<AbiErrorDetail> | undefined;
   spawnCount = 0;
   deferSpawn = false;
   spawnFailure: Error | undefined;
@@ -39,6 +47,12 @@ class FakeNative implements StreamingNativeFacade {
   waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
+  readonly freedErrors: AbiErrorDetail[] = [];
+  tryWaitStatus = 0;
+  waitStatus = 0;
+  readonly tryWaitDetails: AbiErrorDetail[] = [];
+  readonly waitDetails: AbiErrorDetail[] = [];
+  private readonly freedErrorIdentities = new Set<AbiErrorDetail>();
   warningsStatus = 0;
   outputMetadataStatus = 0;
   deferWait = false;
@@ -46,6 +60,7 @@ class FakeNative implements StreamingNativeFacade {
     | {
       exit: number[];
       timedOut: number[];
+      error: AbiErrorDetail;
       completion: (error: Error | null, status: number) => void;
     }
     | undefined;
@@ -72,11 +87,12 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnRequest = request;
     this.spawnExperimental = experimental;
+    Object.assign(error, this.spawnError);
     this.spawnCount += 1;
     if (this.spawnFailure !== undefined) {
       const failure = this.spawnFailure;
@@ -106,7 +122,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnWithInheritedStdioCount += 1;
@@ -117,7 +133,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareRequest = request;
@@ -129,7 +145,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareForRunCount += 1;
@@ -140,7 +156,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareCapture = true;
@@ -186,28 +202,34 @@ class FakeNative implements StreamingNativeFacade {
     exit: number[],
     running: number[],
     timedOut: number[],
+    error: AbiErrorDetail,
   ): number {
+    this.tryWaitDetails.push(error);
     exit[0] = 0;
     running[0] = 1;
     timedOut[0] = 0;
-    return 0;
+    this.fillWaitError(error, this.tryWaitStatus);
+    return this.tryWaitStatus;
   }
 
   wait(
     _handle: unknown,
     exit: number[],
     timedOut: number[],
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.waitCount += 1;
+    this.waitDetails.push(error);
+    this.fillWaitError(error, this.waitStatus);
     if (this.deferWait) {
-      this.pendingWait = { exit, timedOut, completion };
+      this.pendingWait = { exit, timedOut, error, completion };
       return;
     }
     queueMicrotask(() => {
       exit[0] = 0;
       timedOut[0] = 0;
-      completion(null, 0);
+      completion(null, this.waitStatus);
     });
   }
 
@@ -217,7 +239,7 @@ class FakeNative implements StreamingNativeFacade {
     this.pendingWait = undefined;
     pending!.exit[0] = exitCode;
     pending!.timedOut[0] = timedOut ? 1 : 0;
-    pending!.completion(null, 0);
+    pending!.completion(null, this.waitStatus);
   }
 
   kill(): number {
@@ -245,12 +267,26 @@ class FakeNative implements StreamingNativeFacade {
     queueMicrotask(() => completion(null));
   }
 
-  freeError(): void {
+  freeError(error: AbiErrorDetail): void {
+    assert.strictEqual(this.freedErrorIdentities.has(error), false, 'error detail freed twice');
+    this.freedErrorIdentities.add(error);
     this.freeErrorCount += 1;
+    this.freedErrors.push({ ...error });
+    Object.assign(error, createAbiErrorDetail());
   }
 
   freeString(value: unknown): void {
     this.freedStrings.push(value);
+  }
+
+  private fillWaitError(error: AbiErrorDetail, status: number): void {
+    assert.deepStrictEqual(error, createAbiErrorDetail());
+    if (status === 0) return;
+    error.message = Buffer.from('test process wait failed\0');
+    error.operation = Buffer.from('TestSandbox.Wait\0');
+    error.nativeCode = Buffer.from('0x80004005\0');
+    error.remediation = Buffer.from('Retry the test process wait.\0');
+    error.detailsJson = Buffer.from('{"phase":"wait"}\0');
   }
 }
 
@@ -285,6 +321,32 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('preserves structured creation errors and frees their JSON only with the out-error', async () => {
+    const request = ' { "version":"1.1.0-alpha","process":{"commandLine":"echo"} } ';
+    for (const json of [
+      `{"policyFailures":{"formatVersion":${PolicyFailureVersions.Format},"results":[]},"backendDetail":"retained"}`,
+      '{',
+    ]) {
+      const native = new FakeNative();
+      native.spawnStatus = 11;
+      native.spawnError = { detailsJson: Buffer.from(json + '\0') };
+      await assert.rejects(
+        createStreamingDriverFromJson(request, native, new FakeStreams(), true),
+        json === '{'
+          ? { code: 'backend_error', message: 'native runtime returned malformed error details' }
+          : { code: 'policy_validation', details: { ffiStatus: 11, ...JSON.parse(json) } },
+      );
+      assert.strictEqual(native.spawnRequest, request);
+      assert.strictEqual(native.spawnExperimental, 1);
+      assert.strictEqual(native.spawnCount, 1);
+      assert.strictEqual(native.spawnWithInheritedStdioCount, 0);
+      assert.strictEqual(native.freeErrorCount, 1);
+      assert.strictEqual(native.freeCount, 0);
+      assert.deepStrictEqual(native.freedStrings, []);
+      assert.strictEqual(native.freedErrors[0].detailsJson, native.spawnError.detailsJson);
+    }
+  });
+
   it('awaits native state-aware spawn without using synchronous dispatch', async () => {
     const native = new FakeNative();
     native.deferSpawn = true;
@@ -502,8 +564,82 @@ describe('native streaming binding ownership', () => {
     native.completeWait(31, true);
 
     assert.deepStrictEqual(await wait, { exitCode: 31, timedOut: true });
+    assert.strictEqual(native.freeErrorCount, 1);
     await driver.free();
     assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('decodes and frees a structured polling failure', async () => {
+    const native = new FakeNative();
+    native.tryWaitStatus = 4;
+    const driver = await createStreamingDriver(
+      {} as never,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.throws(
+      () => driver.poll(),
+      (error: unknown) => {
+        assert.ok(error instanceof MxcError);
+        assert.strictEqual(error.code, 'backend_unavailable');
+        assert.strictEqual(error.message, 'test process wait failed');
+        assert.strictEqual(error.operation, 'TestSandbox.Wait');
+        assert.strictEqual(error.nativeCode, '0x80004005');
+        assert.strictEqual(error.remediation, 'Retry the test process wait.');
+        assert.deepStrictEqual(error.details, { phase: 'wait', ffiStatus: 4 });
+        return true;
+      },
+    );
+    assert.strictEqual(native.tryWaitDetails.length, 1);
+    assert.strictEqual(native.freeErrorCount, 1);
+    await driver.free();
+  });
+
+  it('decodes and frees a structured blocking-wait failure', async () => {
+    const native = new FakeNative();
+    native.waitStatus = 4;
+    const driver = await createStreamingDriver(
+      {} as never,
+      native,
+      new FakeStreams(),
+    );
+
+    await assert.rejects(
+      driver.wait(),
+      (error: unknown) => {
+        assert.ok(error instanceof MxcError);
+        assert.strictEqual(error.code, 'backend_unavailable');
+        assert.strictEqual(error.message, 'test process wait failed');
+        assert.strictEqual(error.operation, 'TestSandbox.Wait');
+        assert.strictEqual(error.nativeCode, '0x80004005');
+        assert.strictEqual(error.remediation, 'Retry the test process wait.');
+        assert.deepStrictEqual(error.details, { phase: 'wait', ffiStatus: 4 });
+        return true;
+      },
+    );
+    assert.strictEqual(native.waitDetails.length, 1);
+    assert.strictEqual(native.freeErrorCount, 1);
+    await driver.free();
+  });
+
+  it('uses and frees a fresh error detail for each wait operation', async () => {
+    const native = new FakeNative();
+    const driver = await createStreamingDriver(
+      {} as never,
+      native,
+      new FakeStreams(),
+    );
+
+    driver.poll();
+    driver.poll();
+    await driver.wait();
+
+    assert.strictEqual(native.tryWaitDetails.length, 2);
+    assert.notStrictEqual(native.tryWaitDetails[0], native.tryWaitDetails[1]);
+    assert.notStrictEqual(native.tryWaitDetails[1], native.waitDetails[0]);
+    assert.strictEqual(native.freeErrorCount, 3);
+    await driver.free();
   });
 
   it('treats platform-specific missing endpoint sentinels as absent', async () => {

@@ -25,7 +25,7 @@ pub const HOST_LOOPBACK_NAME: &str = "host.wslc.internal";
 pub const GATEWAY_SUBNETS: Cidr = Cidr::new(Ipv4Addr::new(10, 231, 0, 0), 16);
 
 /// Never reachable through the filtering proxy, whatever the rules say.
-const ALWAYS_DENIED: [Cidr; 6] = [
+pub const ALWAYS_DENIED: [Cidr; 6] = [
     Cidr::new(Ipv4Addr::new(0, 0, 0, 0), 8),
     GATEWAY_SUBNETS,
     Cidr::new(Ipv4Addr::new(127, 0, 0, 0), 8),

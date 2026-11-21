@@ -23,7 +23,8 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership. `spawnWithExtendedOptions` takes extensible options; its default
+ownership; there is no separate attached-console launch API.
+`spawnWithExtendedOptions` takes extensible options; its default
 `stdio: 'pipes'` behaves like `spawn`. `stdio: 'inherit'` instead attaches the
 workload to whatever this Node.js process's standard streams already are, such
 as a console, pseudo-console, or pipes set up by the parent; it supports
@@ -90,6 +91,9 @@ backends are detected independently; the host is unsupported when none are avail
 MicroVM is reported when available, but execution requires the development
 JSON API; typed V1 requests cannot select it. Availability is advisory.
 Windows native backend availability is refreshed on each call.
+
+For what IsolationSession availability depends on, see
+[IsolationSession availability](https://github.com/microsoft/mxc/blob/main/docs/backends/isolation-session/availability.md).
 
 ```typescript
 export function getPlatformSupport(): PlatformSupport;

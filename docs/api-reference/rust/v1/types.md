@@ -206,7 +206,9 @@ impl From<MxcError> for Error {
 sets `details` to `None`. Conversions to and from the internal error preserve
 structured details, including their JSON value type. Use
 `error.details.as_deref()` to borrow the value. `Display` omits details and
-`Debug` redacts them; do not log sensitive values.
+`Debug` redacts only `details`; other fields, such as the message, remain
+visible, so do not log sensitive values. A Windows ProcessContainer
+creation refusal can carry structured policy failures in `details`.
 
 
 ## `mxc_sdk::v1::ErrorCode`
@@ -328,13 +330,22 @@ impl MxcProcess {
   pub fn stdout_closer(&self) -> Option<StreamCloser>;
   pub fn stderr_closer(&self) -> Option<StreamCloser>;
   pub fn try_wait(&mut self) -> std::io::Result<Option<i32>>;
+  pub fn try_wait_detailed(&mut self) -> Result<Option<WaitResult>, Error>;
   pub fn id(&self) -> u32;
   pub fn kill(&mut self) -> std::io::Result<()>;
   pub fn kill_for_timeout(&mut self) -> std::io::Result<()>;
   pub fn wait(&mut self) -> std::io::Result<WaitResult>;
+  pub fn wait_detailed(&mut self) -> Result<WaitResult, Error>;
   pub fn wait_with_output(mut self) -> std::io::Result<ExecutionResult>;
+  pub fn wait_with_output_detailed(self) -> Result<ExecutionResult, Error>;
 }
 ```
+
+
+The detailed wait methods preserve structured backend failures that occur
+after process admission. The existing methods retain their `std::io::Error`
+contracts and render the same message text. A cached terminal failure is
+replayed on later waits and does not prove that the process exited.
 
 
 ## `mxc_sdk::v1::MxcPtyProcess`

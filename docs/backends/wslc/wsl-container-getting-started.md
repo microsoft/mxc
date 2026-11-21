@@ -415,6 +415,13 @@ TCP only — the WSLC SDK runtime returns `E_NOTIMPL` for UDP, so a `"udp"`
 protocol is rejected. Two entries claiming the same `windowsPort` are also
 rejected.
 
+With the [built-in proxy](#built-in-proxy), including a policy that denies
+everything else, the mapping is set on the proxy container, which relays it to
+the workload's `containerPort`. Each mapping is reachable only on Windows
+`127.0.0.1`, regardless of `network.ingress`, and the workload sees the proxy
+container's address as the source. Each mapping accepts at most 512 open
+connections; more wait until one closes.
+
 The separate `provision` operation takes the same list under
 `wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
 
@@ -517,7 +524,7 @@ no separate `--setup-wslc` step is required.
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
 | Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on WSLC's NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. |
-| Isolated | All three defaults omitted or `deny`, without egress allow rules | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
+| Isolated | All three defaults omitted or `deny`, without egress allow rules, port mappings, or `runtimeConfig.networkProxy` | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
 | Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
 | Built-in proxy | Any other combination, container lifecycle operations | Rejected |
 
@@ -547,7 +554,8 @@ as follows:
 - It joins only the internal network.
 - `NET_RAW` is dropped, so the workload can't send raw frames to the proxy container.
 - `HTTP_PROXY`/`HTTPS_PROXY` (and the lower-case forms) point at
-  `http://10.231.1.254:3128`, `NO_PROXY` is empty
+  `http://10.231.1.254:3128`, or at the [custom proxy](#custom-proxy);
+  `NO_PROXY` is empty, or `host.wslc.internal` with [host loopback](#host-loopback)
 - `/etc/resolv.conf` is a read-only mount of a host temporary file naming
   `10.231.1.254`.
 - Node is told to use the proxy: `NODE_USE_ENV_PROXY` is `1` (can be overwritten with `env`)
@@ -559,7 +567,7 @@ as follows:
   link-local, multicast, and `10.231.0.0/16` are always denied.
 
 - Most HTTP clients use the proxy automatically through `HTTPS_PROXY` and
-  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use 
+  `HTTP_PROXY`. Clients that ignore those variables need to be configured to use
   the proxy with `CONNECT`.
 
 - The proxy forwards DNS when
@@ -576,13 +584,13 @@ as follows:
 - Rejected with the proxy: `allow` entries for any protocol except `tcp`
   (including entries without `ports`, which cover every protocol; use
   `"ports": [{ "protocol": "tcp" }]` for every TCP port), IPv6
-  CIDRs, targets inside `10.231.0.0/16`, `wslc.portMappings`,
-  `hostLoopback: "allow"`, and `runtimeConfig.networkProxy`. `deny` entries
+  CIDRs, and targets inside `10.231.0.0/16`. `deny` entries
   for `udp` or `icmp` have no effect, because only TCP leaves through the
   proxy, and log a warning.
 
-- Nothing can connect in to the workload, so `network.ingress.default:
-  "allow"` has no effect and logs a warning.
+- The workload accepts connections only through [port mappings](#port-mappings),
+  which listen on Windows `127.0.0.1`, not a LAN address. So
+  `network.ingress.default: "allow"` has no effect and logs a warning.
 
 - The proxy image ships as `mxc-wslc-gateway.tar` beside the MXC binaries and
   is imported into the image store on first use. If the tar is missing or
@@ -591,6 +599,58 @@ as follows:
 
 - Denied requests and refused lookups appear in the run log as
   `[WSLC][gateway]` lines.
+
+#### Host loopback
+
+With `network.ingress.hostLoopback: "allow"`, the workload reaches TCP
+services on Windows `127.0.0.1` at `host.wslc.internal`, on any port.
+
+- `host.wslc.internal` resolves to `10.231.1.3`, which the proxy container
+  relays to Windows. Requests through the proxy reach it too. Egress rules
+  don't apply to it.
+
+- Only Windows `127.0.0.1` is reachable, not other `127.0.0.0/8` addresses or `::1`.
+
+- The proxy container is granted `NET_ADMIN` to add the relay address. If the
+  `AllowWSLContainerPrivileged` policy forbids it, the run is rejected.
+
+- With `hostLoopback: "deny"`, the proxy refuses lookups and requests for
+  `host.wslc.internal`.
+
+- Not available with bridged networking or container lifecycle operations.
+
+#### Custom proxy
+
+With `runtimeConfig.networkProxy`, `network.egress.default: "deny"`, and no
+egress rules, the built-in proxy relays the workload to your proxy and
+nothing else. Your proxy decides where traffic goes.
+
+- The workload reaches your proxy at `10.231.1.254`, on your proxy's port.
+
+- A hostname URL is passed to the workload unchanged. MXC resolves the
+  hostname on Windows when the run starts, and the built-in proxy answers
+  lookups for it with `10.231.1.254`. This is how to use an `https://` proxy:
+  its certificate still matches the name.
+
+- An IP address is replaced with `10.231.1.254` in the workload's proxy
+  variables. For example, `http://192.0.2.10:8080` becomes
+  `http://10.231.1.254:8080/`. Credentials are kept.
+
+- A proxy on Windows loopback must use `http://127.0.0.1` or
+  `http://localhost`. The built-in proxy relays to it through
+  `host.wslc.internal`; the workload still can't reach `host.wslc.internal`
+  unless [host loopback](#host-loopback) is allowed.
+
+- Other DNS lookups are refused; your proxy resolves the hostnames it's sent.
+  [Port mappings](#port-mappings) work as usual.
+
+- Rejected: egress rules, `network.egress.default: "allow"` without bridged
+  networking, `https://` with an IP address or `localhost`, IPv6 addresses,
+  addresses inside `10.231.0.0/16`, link-local, multicast, broadcast, or
+  reserved addresses, port 53, hostnames with no IPv4 address on Windows or
+  that resolve to a rejected address, and other loopback addresses
+  (`127.0.0.2`, `0.0.0.0`). If Windows can't resolve the hostname, the run
+  fails as `backend_unavailable`.
 
 #### Cleanup
 
@@ -620,39 +680,33 @@ as follows:
 
 ### External network proxy (cooperative, unprivileged)
 
-WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `runtimeConfig.networkProxy`
-routes a container's egress through a proxy you provide. WSLC cannot apply an
-`iptables` drop-floor — the container has no `CAP_NET_ADMIN` and MXC has no
-VM-level enforcement hook — so
-enforcement is *cooperative*, applied by handing the workload proxy environment
-variables that well-behaved clients honor.
+With [bridged](#network-configuration) networking, `runtimeConfig.networkProxy`
+is cooperative: MXC gives the workload proxy settings, and clients that honor
+them use your proxy. With any other policy, it goes through the built-in proxy
+instead; see [Custom proxy](#custom-proxy).
 
-**How it works**
+- MXC sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy` and `https_proxy` to the
+  URL, and `NO_PROXY`/`no_proxy` to empty so an image's `ENV NO_PROXY` can't
+  bypass it. Caller-supplied values for these keys are dropped.
 
-1. When `runtimeConfig.networkProxy` is set, MXC translates it into the
-   `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` environment
-   variables inside the container (via `WslcSetProcessSettingsEnvVariables`).
-   Any caller-supplied values for these keys — including `NO_PROXY` /
-   `no_proxy` — are **stripped** from the *initial* process environment first.
-   Because WSLC merges the process environment onto the image's baked-in
-   `ENV`, MXC also sets `NO_PROXY` / `no_proxy` to the **empty string**,
-   so an image-baked exemption (e.g. `ENV NO_PROXY=*`) cannot silently disable
-   the proxy. This sanitizes the process's *starting* environment only; see the
-   cooperative-model caveat below.
-2. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.) honor
-   the env vars and their traffic flows through the proxy.
+- Nothing is enforced. Clients that ignore the variables (raw sockets, some
+  static binaries) connect directly, and the workload can change its own
+  environment. To enforce the proxy, deny egress so the built-in proxy relays
+  to it.
 
-**The runtime field contains a URL string.** A WSLC container runs in its own
-network namespace (a separate WSL system VM). Its own `127.0.0.1` loopback is
-valid for a proxy running inside that container, as in the test fixture below;
-a proxy on the host's or WSL distro's loopback is **not reachable**. An external
-proxy must have an address routable from the container:
+- The URL must be reachable from the container. `127.0.0.1` is the
+  container's own loopback, and Windows loopback isn't reachable. For a proxy
+  on Windows loopback, use a [custom proxy](#custom-proxy).
+
+- Container lifecycle operations set the proxy on `exec`, not at provision.
+
+This create-and-run example uses a proxy at `proxy.example:8080`:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "containment": "wslc",
-  "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
+  "process": { "commandLine": "wget -qO- http://example.com && echo OK" },
   "network": {
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
@@ -661,12 +715,6 @@ proxy must have an address routable from the container:
   "wslc": { "image": "alpine:latest" }
 }
 ```
-
-The removed `network.proxy` object and its `localhost`/`builtinTestServer`
-forms are rejected by schema `0.9.0-alpha`. Create-and-run proxy use requires the unrestricted
-bridged posture shown above; a proxy cannot make isolated networking reach an
-external listener. Execution in an existing container (`exec`) instead supplies only `runtimeConfig` and
-inherits its provisioned network posture.
 
 ### Filtering for container lifecycle operations
 
@@ -692,19 +740,6 @@ Use the directional all-allow or all-deny posture above. Inbound reachability
 requires explicit host-to-container forwards through `wslc.portMappings`
 (create-and-run execution) or `wslc.provision.portMappings` (container lifecycle operations);
 `ingress.default: "allow"` alone does not create them.
-
-**Caveats**
-
-- **Cooperative model, not enforcement.** Only clients that honor the proxy
-  env vars are routed through the proxy. Tools that bypass them (raw sockets,
-  custom HTTP clients, statically-linked binaries that ignore the env) are
-  **not** contained. WSLC cannot provide a hard network floor — the container
-  has no `CAP_NET_ADMIN` and MXC has no VM-level enforcement hook. For strict
-  network isolation in v0.9, use the deny/deny/deny posture instead.
-- **Consumer-provided proxy.** MXC does not start a proxy for WSLC; you supply
-  a reachable URL via `runtimeConfig.networkProxy`. Host filtering is the
-  proxy's responsibility; directional rules cannot be combined to create a
-  firewall WSLC does not have.
 
 ### Filesystem mounts
 
@@ -773,8 +808,8 @@ than `"FOO=bar"`) is dropped, as it is on every other backend.
 > which hands it to the SDK's environment setter and keeps it off the command
 > line, or supply it to the workload through a mounted file.
 
-`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an 
-exception to every row: its variables are injected, and any caller-supplied 
+`runtimeConfig.networkProxy` and the [built-in proxy](#built-in-proxy) are an
+exception to every row: its variables are injected, and any caller-supplied
 proxy variable is scrubbed, whatever `process.env` asks for. Egress policy is enforced cooperatively through those
 variables, so a verbatim environment cannot be used to opt out of it. Because
 MXC injects the proxy URL itself, a replacing row cannot choose to keep it off

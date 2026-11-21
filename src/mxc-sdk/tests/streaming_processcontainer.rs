@@ -16,6 +16,92 @@ use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
+fn processcontainer_relative_denied_path_rejected_before_run_and_spawn() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let secret = workspace.path().join("secret.txt");
+    std::fs::write(&secret, "DENIED_FILE_CONTROL").expect("write fixture");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("host read control"),
+        "DENIED_FILE_CONTROL"
+    );
+    for path in [
+        "secret.txt",
+        r".\secret.txt",
+        r"C:secret.txt",
+        r"\secret.txt",
+    ] {
+        let executed = workspace.path().join("executed.txt");
+        let request = ContainerRequest {
+            working_directory: Some(workspace.path().to_string_lossy().into_owned()),
+            filesystem: Some(FilesystemPolicy {
+                readwrite_paths: vec![workspace.path().to_string_lossy().into_owned()],
+                readonly_paths: vec![],
+                denied_paths: vec![path.into()],
+                clear_policy_on_exit: None,
+            }),
+            containment: Containment::ProcessContainer(ProcessContainerConfig::default()),
+            ..ContainerRequest::new(
+                "cmd.exe /d /c \"echo executed>executed.txt & type secret.txt\"",
+            )
+        };
+        let run_error = mxc_sdk::v1::run(request.clone(), Default::default())
+            .expect_err("relative deny must reject run");
+        let spawn_error = spawn(request, Default::default())
+            .err()
+            .expect("relative deny must reject spawn");
+        for error in [run_error, spawn_error] {
+            assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+            assert!(
+                error.message.contains(&format!(
+                    "filesystem.deniedPaths contains an invalid path \"{path}\""
+                )) && error.message.contains("fully qualified"),
+                "{error}"
+            );
+        }
+        assert!(!executed.exists(), "rejected request launched its workload");
+    }
+}
+
+#[test]
+fn processcontainer_overlapping_lists_report_invalid_path() {
+    use mxc_sdk::v1::dev::{self, JsonOptions};
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let executed = workspace.path().join("executed.txt");
+    let request = serde_json::json!({
+        "version": "1.0.0",
+        "containment": "processcontainer",
+        "filesystem": {
+            "readonlyPaths": [workspace.path(), "secret.txt"],
+            "deniedPaths": [workspace.path()],
+        },
+        "process": {
+            "commandLine": "cmd.exe /d /c echo executed>executed.txt",
+            "cwd": workspace.path(),
+        },
+    })
+    .to_string();
+
+    let run_error =
+        dev::run_json(&request, JsonOptions::default()).expect_err("relative path must reject run");
+    let spawn_error = dev::spawn_json(&request, JsonOptions::default())
+        .err()
+        .expect("relative path must reject spawn");
+    for error in [run_error, spawn_error] {
+        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+        assert!(
+            error.message.contains(
+                "filesystem.readonlyPaths contains an invalid path \"secret.txt\": \
+                 expected a fully qualified Windows filesystem path"
+            ),
+            "{error}"
+        );
+        assert!(!error.message.contains("readonlyPaths["), "{error}");
+    }
+    assert!(!executed.exists(), "rejected request launched its workload");
+}
+
+#[test]
 #[ignore = "requires a PSEC-capable Windows host"]
 fn inherited_stdio_processcontainer_uses_caller_stdio() {
     inherited_stdio_contract::assert_uses_caller_stdio(
@@ -73,6 +159,259 @@ fn dev_json_processcontainer_capture_and_pipes() {
         stdout.read_to_string(&mut text).expect("read output");
         assert!(text.contains("DEV_PIPE:ping-pong"), "{text}");
         assert_eq!(process.wait().expect("wait"), WaitResult::Exited(9));
+    }
+}
+
+#[test]
+#[ignore = "requires a PSEC-capable Windows host"]
+fn dev_json_processcontainer_policy_feedback_restricts_current_request() {
+    use mxc_sdk::v1::dev::{
+        self, JsonOptions, PolicyChangeOperation, PolicyFailureDetail as D,
+        PolicyFailureResult as R, PolicyFailures, PreparedPolicyRequest,
+    };
+
+    let directory = tempfile::tempdir().expect("policy preparation workspace");
+    // An inherited temp-directory grant to app packages would bypass the reduced policy.
+    mxc_sdk::mxc_common::filesystem_security::set_owner_only_dacl(directory.path(), true)
+        .expect("protect policy preparation workspace");
+    let temporary_root = directory.path().to_str().expect("UTF-8 temporary path");
+    let canonical_root =
+        match mxc_sdk::mxc_common::filesystem_canonical::canonicalize_path(temporary_root) {
+            mxc_sdk::mxc_common::filesystem_canonical::PathCanonical::Canonical(path) => {
+                std::path::PathBuf::from(path)
+            }
+            result => panic!("temporary workspace path was not canonical: {result:?}"),
+        };
+    let restricted = canonical_root.join("restricted");
+    let unrelated = canonical_root.join("unrelated");
+    std::fs::create_dir(&restricted).unwrap();
+    std::fs::create_dir(&unrelated).unwrap();
+    let target = restricted.join("target.txt");
+    let control = unrelated.join("control.txt");
+    std::fs::write(&target, b"seed").unwrap();
+    std::fs::write(&control, b"seed").unwrap();
+    std::fs::write(restricted.join("relative.txt"), b"ORIGINAL_CWD").unwrap();
+    std::fs::write(unrelated.join("relative.txt"), b"WRONG_CWD").unwrap();
+    let resource = restricted.to_string_lossy().into_owned();
+    let failures = PolicyFailures::from_json(
+        &serde_json::json!({
+            "formatVersion": PolicyFailures::FORMAT_VERSION,
+            "results": [{
+                "version": R::VERSION,
+                "minimumReaderVersion": R::MINIMUM_READER_VERSION,
+                "outcome": R::OUTCOME_BLOCKED,
+                "details": [{
+                    "failureClass": D::CLASS_FILESYSTEM,
+                    "failureReason": D::REASON_ACCESS_EXCEEDS_CEILING,
+                    "requiredAction": D::ACTION_RESTRICT_FILESYSTEM_ACCESS,
+                    "resourceKind": D::RESOURCE_KIND_PATH, "valueKind": D::VALUE_KIND_ACCESS,
+                    "flags": D::FLAG_HAS_ACTIONABLE_DETAILS | D::FLAG_RESOURCE_COMPLETE,
+                    "requestedValue": D::ACCESS_READ_WRITE.to_string(),
+                    "requiredValue": D::ACCESS_READ_ONLY.to_string(), "resource": resource,
+                }],
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let failures = PolicyFailures::default().merged_with(&failures).unwrap();
+    let failures = PolicyFailures::from_json(&failures.to_json().unwrap()).unwrap();
+    assert_eq!(failures.merged_with(&failures).unwrap(), failures);
+    let accepts = |prepared: &PreparedPolicyRequest| {
+        prepared.changes.len() == 3
+            && prepared
+                .changes
+                .iter()
+                .all(|change| match change.path.as_str() {
+                    "/filesystem/readwritePaths" => {
+                        change.operation == PolicyChangeOperation::Replace
+                            && change.before == serde_json::json!([restricted, unrelated])
+                            && change.after == serde_json::json!([unrelated])
+                    }
+                    "/filesystem/readonlyPaths" => {
+                        change.operation == PolicyChangeOperation::Add
+                            && change.before.is_null()
+                            && change.after == serde_json::json!([restricted])
+                    }
+                    "/process/cwd" => {
+                        change.operation == PolicyChangeOperation::Add
+                            && change.before.is_null()
+                            && change.after == serde_json::json!(restricted)
+                    }
+                    _ => false,
+                })
+    };
+    for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+        std::fs::write(&target, b"seed").unwrap();
+        std::fs::write(&control, b"seed").unwrap();
+        let request = serde_json::json!({
+            "version": version, "containerId": "policy-preparation-public-test",
+            "containment": "processcontainer",
+            "process": {
+                "commandLine": format!(
+                    "cmd.exe /d /c echo CHANGED>>\"{}\" & echo CONTROL>>\"{}\"",
+                    target.display(), control.display(),
+                ),
+                "timeout": 30000,
+            },
+            "filesystem": { "readwritePaths": [restricted, unrelated] },
+        })
+        .to_string();
+        let options = JsonOptions {
+            experimental: false,
+        };
+        let baseline = dev::run_json(&request, options).expect("strict writable control");
+        assert_eq!(baseline.outcome, WaitResult::Exited(0));
+        assert!(std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("CHANGED"));
+        std::fs::write(&target, b"seed").unwrap();
+        std::fs::write(&control, b"seed").unwrap();
+
+        // Observations are supplied, so the result does not depend on host policy.
+        let prepared = dev::prepare_policy_json(&request, &failures, Default::default())
+            .expect("prepare a candidate without executing");
+        assert_eq!(std::fs::read(&target).unwrap(), b"seed");
+        assert_eq!(std::fs::read(&control).unwrap(), b"seed");
+        let prepared = PreparedPolicyRequest::from_json(&prepared.to_json().unwrap()).unwrap();
+        assert!(
+            accepts(&prepared),
+            "caller rejects changes outside this explicit policy"
+        );
+        let candidate: serde_json::Value = serde_json::from_str(&prepared.request_json).unwrap();
+        assert_eq!(candidate["version"], version);
+        assert_eq!(candidate["containerId"], "policy-preparation-public-test");
+        let output =
+            dev::run_json(&prepared.request_json, options).expect("strict accepted creation");
+        assert_eq!(output.outcome, WaitResult::Exited(0));
+        assert_eq!(std::fs::read(&target).unwrap(), b"seed");
+        assert!(std::fs::read_to_string(&control)
+            .unwrap()
+            .contains("CONTROL"));
+        assert!(output
+            .warnings
+            .iter()
+            .all(|warning| { !warning.contains("configuration updated due to IT policy") }));
+
+        let mut changed_request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        changed_request["process"]["commandLine"] = format!(
+            "cmd.exe /d /c type relative.txt & echo FRESH>>\"{}\"",
+            control.display(),
+        )
+        .into();
+        let before_control = std::fs::read(&control).unwrap();
+        let prepared =
+            dev::prepare_policy_json(&changed_request.to_string(), &failures, Default::default())
+                .expect("prepare retained observations against the fresh request");
+        assert_eq!(std::fs::read(&control).unwrap(), before_control);
+        assert!(
+            accepts(&prepared),
+            "caller checks the fresh report before accepting"
+        );
+        let changed =
+            dev::run_json(&prepared.request_json, options).expect("strict fresh candidate");
+        assert_eq!(changed.outcome, WaitResult::Exited(0));
+        let stdout = String::from_utf8_lossy(&changed.stdout);
+        assert!(stdout.contains("ORIGINAL_CWD"), "{stdout}");
+        assert!(!stdout.contains("WRONG_CWD"), "{stdout}");
+        assert!(std::fs::read_to_string(&control).unwrap().contains("FRESH"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"seed");
+        println!("MXC_POLICY_PREPARATION_STRICT_CREATE_OK:{version}");
+    }
+    let denied_directory = restricted.join("denied");
+    std::fs::create_dir(&denied_directory).unwrap();
+    let denied_target = denied_directory.join("target.txt");
+    let enumerated = canonical_root.join("enumerated");
+    std::fs::create_dir(&enumerated).unwrap();
+    let capabilities = mxc_sdk::v1::probe(None)
+        .expect("native filesystem capabilities")
+        .probes;
+    for (scenario, writable, readonly, enumeration, ceiling_path, maximum, write_target) in [
+        (
+            "equivalent-case",
+            resource.clone(),
+            Some(resource.to_ascii_uppercase()),
+            None,
+            resource.clone(),
+            D::ACCESS_READ_ONLY,
+            target.clone(),
+        ),
+        (
+            "suppressed-trailing-grant",
+            format!("{resource}\\"),
+            Some(format!("{resource}\\")),
+            None,
+            resource.clone(),
+            D::ACCESS_NONE,
+            target.clone(),
+        ),
+        (
+            "enumeration-deny",
+            resource.clone(),
+            None,
+            Some(denied_directory.clone()),
+            denied_directory.to_string_lossy().into_owned(),
+            D::ACCESS_NONE,
+            denied_target.clone(),
+        ),
+    ] {
+        let supported = (maximum != D::ACCESS_NONE
+            || capabilities.base_container_supports_deny_paths)
+            && (enumeration.is_none() || capabilities.base_container_supports_enumerate_paths);
+        std::fs::write(&write_target, b"seed").unwrap();
+        std::fs::write(&control, b"seed").unwrap();
+        let mut request = serde_json::json!({
+            "version": "1.1.0-alpha", "containment": "processcontainer",
+            "process": {
+                "commandLine": format!(
+                    "cmd.exe /d /c echo CHANGED>>\"{}\" & echo CONTROL>>\"{}\" & exit /b 0",
+                    write_target.display(), control.display(),
+                ),
+                "cwd": unrelated, "timeout": 30000,
+            },
+            "filesystem": { "readwritePaths": [writable, unrelated] },
+        });
+        if let Some(readonly) = readonly {
+            request["filesystem"]["readonlyPaths"] = serde_json::json!([readonly]);
+        }
+        if let Some(enumeration) = enumeration {
+            request["processContainer"] = serde_json::json!({
+                "filesystem": { "enumeratePaths": [enumeration, enumerated] },
+            });
+        }
+        let mut observations: serde_json::Value =
+            serde_json::from_str(&failures.to_json().unwrap()).unwrap();
+        observations["results"][0]["details"][0]["resource"] = ceiling_path.into();
+        observations["results"][0]["details"][0]["requiredValue"] = maximum.to_string().into();
+        let observations = PolicyFailures::from_json(&observations.to_string()).unwrap();
+        let prepared =
+            dev::prepare_policy_json(&request.to_string(), &observations, Default::default());
+        assert_eq!(std::fs::read(&write_target).unwrap(), b"seed");
+        assert_eq!(std::fs::read(&control).unwrap(), b"seed");
+        if !supported {
+            assert_eq!(
+                prepared.unwrap_err().code,
+                mxc_sdk::v1::ErrorCode::BackendUnavailable
+            );
+            println!("MXC_POLICY_PREPARATION_FILESYSTEM_UNSUPPORTED_OK:{scenario}");
+            continue;
+        }
+        let prepared = prepared.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+        assert!(!prepared.changes.is_empty());
+        let output = dev::run_json(&prepared.request_json, JsonOptions::default())
+            .unwrap_or_else(|error| panic!("{scenario}: strict creation failed: {error}"));
+        assert_eq!(std::fs::read(&write_target).unwrap(), b"seed", "{scenario}");
+        assert!(std::fs::read_to_string(&control)
+            .unwrap()
+            .contains("CONTROL"));
+        assert_eq!(
+            output.outcome,
+            WaitResult::Exited(0),
+            "{scenario}: stdout={:?}, stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        println!("MXC_POLICY_PREPARATION_FILESYSTEM_OK:{scenario}");
     }
 }
 

@@ -295,8 +295,17 @@ for complete signatures and types.
 ## Errors, warnings, and telemetry
 
 Native errors are surfaced as `MxcError` with a typed error code and optional
-operation, native status, and remediation. Security and operational warnings
-are returned in `ExecutionResult.warnings` and `MxcProcess.warnings`.
+operation, native status, remediation, and backend-specific `details`.
+Native status decoding retains those details alongside `details.ffiStatus`.
+`details` can contain policy resource paths; `JSON.stringify(error)` includes
+it even though console inspection omits it, so filter `details` before logging.
+Security and operational warnings are returned in `ExecutionResult.warnings`
+and `MxcProcess.warnings`.
+Failures that occur after a process starts but before MXC can confirm its
+terminal result retain those fields from `run`, `runInContainer`, and
+`MxcProcess.wait`; they are not converted into an exit result. Every caller
+awaiting the process receives the same rejection, and `dispose()` still
+performs process cleanup. `MxcPtyProcess` does not preserve these fields.
 Captured `stdout` and `stderr` are workload output; warnings and structured
 denial-capture metadata are not appended to those streams.
 Validation warnings are returned in `ValidationResult.warnings`.

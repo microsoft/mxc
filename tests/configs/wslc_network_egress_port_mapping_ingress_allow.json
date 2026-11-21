@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-port-mapping-ingress-allow",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\nserve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho PROXY=$(p 1.1.1.1:443)\nnslookup example.com >/dev/null 2>&1 && echo DNS=RESOLVED || echo DNS=REFUSED\nserve 8084 1\nserve 8084 2"
+  },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "allow", "hostLoopback": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest",
+    "portMappings": [{ "windowsPort": 18084, "containerPort": 8084, "protocol": "tcp" }, { "windowsPort": 18085, "containerPort": 8084, "protocol": "tcp" }]
+  }
+}

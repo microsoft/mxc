@@ -141,6 +141,7 @@ overrides are assigned only to child processes, never to the invoking shell.
 | `run_bwrap_identity_rejection_test.sh` | Rejection of missing, malformed, unsafe, overlapping, and account-conflicting root allocations against fixed private account databases and a launching baseline, and of failed or truncated `getent` results through a `PATH` shim | Root, `lxc-exec`, Python 3, Bubblewrap, util-linux, `getent`; does not modify host allocation files |
 | `run_bwrap_root_lifetime_test.sh` | No root workload process, including one left in the background, outlives a normal exit, a process timeout, or `SIGTERM`/`SIGKILL` of `lxc-exec`, in isolated and firewall modes, with and without `CAP_KILL` | Root, reserved subordinate allocations, `lxc-exec`, Python 3, `setpriv`, Bubblewrap network prerequisites |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
+| `run_lxc_host_network_rejection_test.sh` | Rejects `lxc.net.0.type = none` before startup | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
@@ -193,6 +194,10 @@ capabilities or listeners fail the job rather than silently skipping cases.
 scripts\ci\run_backend_validation_tests.ps1 -Backend process `
     -BinaryDirectory <dir> -Architecture x64
 ```
+
+For `wslc`, the Node lifecycle and .NET suites run only with
+`-AllowMachineMutation`, because their cleanup stops every `wslcsession.exe` on
+the host, including WSLC sessions MXC did not start. CI passes it.
 
 ```bash
 scripts/ci/run_backend_validation_tests.sh bubblewrap <binary-directory>

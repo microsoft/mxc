@@ -6,7 +6,7 @@
 pub mod audit;
 pub mod cmdline;
 mod common_request_ir;
-mod config_deserialize;
+pub(crate) mod config_deserialize;
 pub mod config_parser;
 pub mod default_env;
 pub mod encoding;
@@ -28,7 +28,9 @@ pub(crate) mod module_lifetime;
 pub mod mxc_error;
 pub mod network_blocks;
 pub(crate) mod network_parser;
+pub(crate) mod policy_failures;
 pub mod policy_identity;
+pub(crate) mod policy_preparation;
 pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;
 pub mod sandbox_process;
