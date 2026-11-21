@@ -202,6 +202,8 @@ pub use core_modules::mxc_telemetry;
 pub use core_modules::process_security_environment_spec;
 
 mod configs;
+#[cfg(target_os = "windows")]
+mod context;
 mod dev;
 mod options;
 mod policy;
@@ -226,6 +228,12 @@ use sandbox::{ExecutionResult, MxcProcess};
 /// schema version.
 ///
 pub mod v1 {
+    /// Advisory restrictions for agent startup. Currently supports ProcessContainer.
+    #[cfg(target_os = "windows")]
+    pub mod context {
+        pub use crate::context::*;
+    }
+
     /// Caller-authored exact-JSON execution and lifecycle operations.
     pub mod dev {
         pub use crate::dev::*;

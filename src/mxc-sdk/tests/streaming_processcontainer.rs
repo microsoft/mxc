@@ -16,6 +16,85 @@ use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
+#[ignore = "local context POC requires a PSEC-capable Windows host"]
+fn startup_context_matches_native_filesystem_policy() {
+    use mxc_sdk::v1::context::{describe_request, format_context};
+    use mxc_sdk::v1::policy::UiPolicy;
+
+    let fixture = tempfile::tempdir().expect("fixture");
+    let work = fixture.path().join("work");
+    let shared = fixture.path().join("shared");
+    let private = work.join("private");
+    for path in [&work, &shared, &private] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let input = shared.join("input.txt");
+    let secret = private.join("canary.txt");
+    std::fs::write(&input, "shared-input").unwrap();
+    std::fs::write(&secret, "synthetic-private-canary").unwrap();
+    let quote = |path: &std::path::Path| path.to_str().unwrap().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         if ([IO.File]::ReadAllText('{}') -ne 'shared-input') {{ throw 'read' }}; \
+         [IO.File]::WriteAllText('{}','report'); \
+         $blocked=$false; try {{ [IO.File]::ReadAllText('{}') | Out-Null }} \
+         catch [UnauthorizedAccessException] {{ $blocked=$true }}; \
+         if (!$blocked) {{ throw 'private read was not denied' }}; \
+         $blocked=$false; try {{ [IO.File]::WriteAllText('{}','changed') }} \
+         catch [UnauthorizedAccessException] {{ $blocked=$true }}; \
+         if (!$blocked) {{ throw 'readonly write was not denied' }}; \
+         Write-Output 'CONTEXT_POLICY_OK'",
+        quote(&input),
+        quote(&work.join("report.txt")),
+        quote(&secret),
+        quote(&input),
+    );
+    let request = ContainerRequest {
+        containment: Containment::ProcessContainer(ProcessContainerConfig::default()),
+        working_directory: Some(work.to_str().unwrap().to_string()),
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![work.to_str().unwrap().to_string()],
+            readonly_paths: vec![shared.to_str().unwrap().to_string()],
+            denied_paths: vec![private.to_str().unwrap().to_string()],
+            ..Default::default()
+        }),
+        ui: Some(UiPolicy {
+            disable: false,
+            ..Default::default()
+        }),
+        timeout_ms: Some(30_000),
+        ..ContainerRequest::new(format!(
+            "powershell.exe -NoProfile -NonInteractive -Command \"{script}\""
+        ))
+    };
+    let description = describe_request(&request).expect("context");
+    assert_eq!(
+        description.filesystem.denied_paths,
+        request.filesystem.as_ref().unwrap().denied_paths
+    );
+    let text = format_context(&description, Default::default()).expect("format");
+    assert!(!text.contains("synthetic-private-canary"));
+    let output = mxc_sdk::v1::run(request, Default::default()).expect("native PSEC run");
+    assert_eq!(
+        output.outcome,
+        WaitResult::Exited(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("CONTEXT_POLICY_OK"));
+    assert_eq!(std::fs::read_to_string(input).unwrap(), "shared-input");
+    assert_eq!(
+        std::fs::read_to_string(secret).unwrap(),
+        "synthetic-private-canary"
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.join("report.txt")).unwrap(),
+        "report"
+    );
+}
+
+#[test]
 #[ignore = "requires a PSEC-capable Windows host"]
 fn inherited_stdio_processcontainer_uses_caller_stdio() {
     inherited_stdio_contract::assert_uses_caller_stdio(

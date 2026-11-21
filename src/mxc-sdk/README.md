@@ -79,6 +79,51 @@ directional policy. For existing-container execution, `ExecutionRequest.network`
 is a runtime-only `ProcessNetworkPolicy`; it cannot change provision-time
 policy.
 
+## Local startup-context experiment (Windows only)
+
+This checkout includes an unpublished proof of concept in
+`mxc_sdk::v1::context`. `describe_request(&request)` describes a ProcessContainer
+request without launching it or inspecting filesystem access.
+`describe_policy(&containment, filesystem, network)` supports hosts that have not
+selected a command yet; process settings remain unknown.
+`format_context(&context, options)` produces escaped agent-facing text, either
+filesystem-only or including network and process settings. A configured byte
+limit returns an error rather than dropping restrictions.
+
+The host inserts this information before the agent's first sandbox tool call.
+It is advisory policy, not an exhaustive list of accessible files: Windows ACLs,
+path existence, runtime availability and command-specific grants still matter.
+Commands, environment values and proxy URLs are excluded, but paths themselves
+may be sensitive. This local experiment does not change policy or introduce
+support for other backends or SDKs.
+
+The capture-enabled local Codex experiment records native denials in block mode
+for every context arm. Token-only runs without capture cannot establish denial
+reduction. `scripts\validate-codex-denial-capture.js <codex.exe> <new-directory>`
+runs synthetic allowed and denied operations without a model, verifies unchanged
+canaries, and checks that native documents contain ungranted reads and attempts
+to write read-only files. The experiment measures `native-actionable-denials`
+from `captureDenials`, not every blocked filesystem operation. Attempts against
+explicit `filesystem.deniedPaths` are outside the required capture coverage:
+calibration verifies they remain blocked but does not require corresponding
+events. Their presence in capture is recorded as an observation, not a pass/fail
+condition. No additional elevated tracing is required.
+
+Exit code 2 means calibration failed for the measured operations or enforcement:
+it is not sufficient to check that an output file exists.
+
+`scripts\measure-codex-context.js` exports native read/write denial occurrences,
+unique read resources and repeated reads across launches alongside token usage.
+Repeated-root counts apply only to the fixture's named roots. Counts come from
+native documents and their verbose occurrence summaries, never shell error
+text. Missing, failed, truncated, reused or uncalibrated capture is reported as
+unknown and excluded from denial comparisons, not replaced with zero.
+Calibration must match the metric scope, Codex executable and normalized policy
+fingerprints. Reports identify the scope separately from token accounting.
+Raw artifacts stay in the isolated host `CODEX_HOME`; exported evidence replaces
+resource paths with anonymous identifiers and fixture-root labels. ETLs are not
+retained, and allow/audit mode is never enabled.
+
 ## Lifecycle API
 
 Typed lifecycle operations are available under `v1`. `ProvisionRequest`

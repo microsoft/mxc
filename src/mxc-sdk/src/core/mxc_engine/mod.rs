@@ -32,6 +32,8 @@
 mod backend_registry;
 mod dispatch;
 mod error;
+#[cfg(target_os = "windows")]
+pub(crate) mod execution_context;
 mod experimental;
 mod platform;
 mod probe;

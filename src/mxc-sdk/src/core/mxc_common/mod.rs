@@ -12,6 +12,8 @@ pub mod default_env;
 pub mod encoding;
 pub mod error;
 pub mod exec_stream;
+#[cfg(target_os = "windows")]
+pub(crate) mod execution_context;
 pub mod filesystem_access;
 pub mod filesystem_canonical;
 pub mod filesystem_object;

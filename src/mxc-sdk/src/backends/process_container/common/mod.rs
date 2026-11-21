@@ -8,6 +8,8 @@
 //! without feature gates, while cross-platform consumers of
 //! `mxc_common` are unaffected by Windows backend code.
 
+pub(crate) mod execution_context;
+
 #[cfg(target_os = "windows")]
 mod base_container_helpers;
 #[cfg(target_os = "windows")]
