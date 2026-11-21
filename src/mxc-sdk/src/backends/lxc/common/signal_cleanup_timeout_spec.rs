@@ -313,3 +313,105 @@ done
         );
     }
 }
+
+#[test]
+fn startup_command_preserves_complete_stdout() {
+    const FIXTURE_ENV: &str = "MXC_STARTUP_COMMAND_OUTPUT_TEST_DIRECTORY";
+    const CONTAINER_NAME: &str = "startup-command-output";
+
+    if let Some(directory) = std::env::var_os(FIXTURE_ENV) {
+        let directory = PathBuf::from(directory);
+        install().expect("install cleanup in the isolated executor");
+        let container = LxcContainer::new(
+            CONTAINER_NAME,
+            Some(directory.to_str().expect("UTF-8 container directory")),
+        );
+        let expected = "0123456789abcdef".repeat(2048);
+        let mut stdout = Vec::new();
+        with_container_startup(&container, || {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "printf '%s' \"$1\"", "startup-stdout", &expected])
+                .process_group(0);
+            stdout = run_startup_tool(command, Duration::from_secs(10))?.stdout;
+            Ok(())
+        })
+        .expect("complete startup command");
+
+        assert_eq!(
+            stdout,
+            expected.as_bytes(),
+            "a normally completed startup command must return its complete 32 KiB stdout"
+        );
+        return;
+    }
+
+    let fixture = tempfile::tempdir_in(".").expect("create isolated stdout fixture");
+    let directory = fixture
+        .path()
+        .canonicalize()
+        .expect("absolute fixture path");
+    let tools = directory.join("bin");
+    fs::create_dir(&tools).expect("create fake cleanup tool directory");
+    fs::create_dir(directory.join(CONTAINER_NAME)).expect("create fake container directory");
+    fs::write(directory.join(CONTAINER_NAME).join("config"), "")
+        .expect("write fake container configuration");
+    for name in ["lxc-stop", "lxc-destroy"] {
+        let path = tools.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake cleanup tool");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .expect("make fake cleanup tool executable");
+    }
+
+    let log_path = directory.join("executor.log");
+    let log = fs::File::create(&log_path).expect("create executor log");
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("fully qualified libtest name");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(FIXTURE_ENV, &directory)
+        .env("PATH", &tools)
+        .stdout(log.try_clone().expect("clone executor log"))
+        .stderr(log)
+        .process_group(0);
+
+    let mut original_mask = SigSet::empty();
+    pthread_sigmask(
+        SigmaskHow::SIG_BLOCK,
+        Some(&SigSet::all()),
+        Some(&mut original_mask),
+    )
+    .expect("block signals while spawning the isolated executor");
+    let started = Instant::now();
+    let child = command.spawn();
+    pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&original_mask), None)
+        .expect("restore the parent test thread's signal mask");
+    let mut child = child.expect("spawn isolated executor");
+    let process_group = Pid::from_raw(child.id() as i32);
+    let exit_poll_flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+
+    while matches!(
+        waitid(Id::Pid(process_group), exit_poll_flags)
+            .expect("observe isolated executor exit without reaping"),
+        WaitStatus::StillAlive
+    ) {
+        if started.elapsed() >= Duration::from_secs(30) {
+            let _ = killpg(process_group, Signal::SIGKILL);
+            child.wait().expect("reap hung executor");
+            panic!(
+                "startup command did not return its stdout within 30 seconds:\n{}",
+                fs::read_to_string(&log_path).expect("read executor log")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = killpg(process_group, Signal::SIGKILL);
+    let status = child.wait().expect("reap isolated executor");
+
+    assert!(
+        status.success(),
+        "startup command did not preserve its complete stdout:\n{}",
+        fs::read_to_string(log_path).expect("read executor log")
+    );
+}

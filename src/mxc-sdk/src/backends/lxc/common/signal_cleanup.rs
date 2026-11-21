@@ -208,13 +208,26 @@ fn cancel_timed_out_startup(running: Arc<AtomicBool>) {
 }
 
 #[cfg(target_os = "linux")]
-fn read_startup_output(mut file: std::fs::File) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
+fn read_startup_output(file: std::fs::File) -> Vec<u8> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::FileExt;
 
-    let mut output = Vec::new();
-    if file.seek(SeekFrom::Start(0)).is_ok() {
-        let _ = file.take(16 * 1024).read_to_end(&mut output);
+    let length = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or(0);
+    let mut output = vec![0; length];
+    let mut offset = 0;
+    while offset < length {
+        match file.read_at(&mut output[offset..], offset as u64) {
+            Ok(0) => break,
+            Ok(count) => offset += count,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
     }
+    output.truncate(offset);
     output
 }
 

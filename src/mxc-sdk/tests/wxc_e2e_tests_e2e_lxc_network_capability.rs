@@ -9,6 +9,12 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
 
+const LXC_ARCH: &str = if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "amd64"
+};
+
 /// Whether the LXC capability prerequisites are present.
 fn ready() -> bool {
     has_platform_exec() && has_lxc_host()
@@ -65,7 +71,7 @@ fn invalid_identity_mapping_configurations_are_rejected() {
             Command::new("lxc-create")
                 .args([
                     "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
-                    "amd64",
+                    LXC_ARCH,
                 ])
                 .status()
                 .expect("create identity-map fixture");
@@ -162,7 +168,7 @@ fn cancelling_startup_preserves_a_stopped_container() {
     let outcome = std::panic::catch_unwind(|| {
         let created = Command::new("lxc-create")
             .args([
-                "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", "amd64",
+                "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", LXC_ARCH,
             ])
             .output()
             .expect("create existing container");
@@ -257,6 +263,105 @@ fn cancelling_startup_preserves_a_stopped_container() {
 }
 
 #[test]
+fn cancelling_a_stalled_configuration_query_preserves_a_stopped_container() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::Duration;
+    use wxc_e2e_tests::run_platform_config_value_within_duration;
+
+    if !ready() {
+        return;
+    }
+
+    let fixture = tempfile::tempdir_in(".").expect("create configuration query fixture");
+    let directory = fixture.path().canonicalize().expect("query fixture path");
+    let name = format!("lxc-cancel-config-query-{}", std::process::id());
+    let entered = directory.join("entered");
+    let outcome = std::panic::catch_unwind(|| {
+        let created = Command::new("lxc-create")
+            .args([
+                "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", LXC_ARCH,
+            ])
+            .output()
+            .expect("create existing container");
+        if !created.status.success() {
+            panic!("container fixture creation failed: {created:?}");
+        }
+        let info = directory.join("lxc-info");
+        let original_path = std::env::var("PATH").expect("host command path");
+        fs::write(
+            &info,
+            format!(
+                r#"#!/bin/sh
+PATH='{original_path}'
+original_lxc_info=$(command -v lxc-info) || exit 127
+for argument in "$@"; do
+    if [ "$argument" = "-c" ] && [ ! -e '{entered}' ]; then
+        printf '%s\n' "$$" > '{entered}'
+        kill -TERM "$PPID"
+        exec sleep 20
+    fi
+done
+exec "$original_lxc_info" "$@"
+"#,
+                entered = entered.display()
+            ),
+        )
+        .expect("write delayed configuration query tool");
+        fs::set_permissions(&info, fs::Permissions::from_mode(0o700))
+            .expect("make configuration query tool executable");
+        let path = format!("{}:{original_path}", directory.display());
+        let config = json!({
+            "version": "0.9.0-alpha",
+            "containerId": name,
+            "containment": "lxc",
+            "process": { "commandLine": "echo WORKLOAD_RAN" },
+            "lifecycle": { "destroyOnExit": false },
+            "lxc": { "distribution": "alpine", "release": "3.23" },
+            "network": { "egress": { "default": "allow" } }
+        });
+        let result = run_platform_config_value_within_duration(
+            "cancel stalled LXC configuration query",
+            &config,
+            &[("PATH", &path)],
+            None,
+            Duration::from_secs(40),
+        );
+        let query_pid = fs::read_to_string(&entered).expect("configuration query was reached");
+        let query_reaped = !std::path::Path::new(&format!("/proc/{}", query_pid.trim()))
+            .try_exists()
+            .expect("observe configuration query after cancellation");
+        let state = Command::new("/usr/bin/timeout")
+            .args(["--kill-after=1", "5", "lxc-info", "-n", &name, "-sH"])
+            .output()
+            .expect("read container state after configuration query cancellation");
+        (result, state, query_reaped)
+    });
+    let _ = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=1", "5", "lxc-stop", "-n", &name, "-k"])
+        .output();
+    let _ = Command::new("/usr/bin/timeout")
+        .args(["--kill-after=1", "5", "lxc-destroy", "-n", &name, "-f"])
+        .output();
+    let (result, state, query_reaped) = outcome.expect("configuration query fixture failed");
+
+    assert!(
+        query_reaped
+            && result.as_ref().is_some_and(|result| {
+                result.code.is_some_and(|code| code != 0)
+                    && result.wall_time_ms < 10_000
+                    && !result.combined_output().contains("WORKLOAD_RAN")
+            })
+            && state.status.success()
+            && String::from_utf8_lossy(&state.stdout).trim() == "STOPPED",
+        "cancelling a stalled configuration query must promptly reap it and preserve a stopped \
+         container without running the workload; query_reaped={query_reaped}, state={state:?}, \
+         executor={result:?}"
+    );
+}
+
+#[test]
 fn failed_startup_waits_for_cleanup_after_one_minute() {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::fs;
@@ -283,7 +388,7 @@ fn failed_startup_waits_for_cleanup_after_one_minute() {
             let created = Command::new("lxc-create")
                 .args([
                     "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
-                    "amd64",
+                    LXC_ARCH,
                 ])
                 .output()
                 .expect("create existing container");

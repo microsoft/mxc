@@ -149,6 +149,7 @@ impl LxcContainer {
             )
             .ok()?
         } else {
+            crate::lxc_common::signal_cleanup::check_startup_cancellation().ok()?;
             command.output().ok()?
         };
         #[cfg(not(target_os = "linux"))]
@@ -183,9 +184,19 @@ impl LxcContainer {
     pub(crate) fn config_value(&self, key: &str) -> Result<String, String> {
         let mut cmd = self.lxc_command("lxc-info");
         cmd.args(["-H", "-c", key]);
-        let output = cmd
-            .output()
-            .map_err(|error| format!("Failed to read LXC config {key}: {error}"))?;
+        #[cfg(target_os = "linux")]
+        let output = if crate::lxc_common::signal_cleanup::startup_time_remaining().is_some() {
+            crate::lxc_common::signal_cleanup::run_startup_tool(
+                cmd,
+                crate::lxc_common::signal_cleanup::STARTUP_TIMEOUT,
+            )
+        } else {
+            crate::lxc_common::signal_cleanup::check_startup_cancellation()
+                .and_then(|()| cmd.output().map_err(|error| error.to_string()))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let output = cmd.output().map_err(|error| error.to_string());
+        let output = output.map_err(|error| format!("Failed to read LXC config {key}: {error}"))?;
         if !output.status.success() {
             return Err(format!(
                 "Failed to read LXC config {key}: {}",
