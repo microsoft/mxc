@@ -40,6 +40,7 @@ use crate::wslc_common::policy;
 use crate::wslc_common::policy_mapping;
 use crate::wslc_common::process_env;
 use crate::wslc_common::sdk_init;
+use crate::wslc_common::session_resources;
 use crate::wslc_common::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_common::wslc_bindings::*;
 use crate::wslc_gateway_policy as gateway;
@@ -2099,7 +2100,7 @@ impl StartedContainer {
         if hr != RPC_E_DISCONNECTED && hr != WSLC_E_CONTAINER_NOT_FOUND {
             return Err(failed);
         }
-        match egress_gateway::open_container(
+        match session_resources::open_container(
             self.sdk,
             self.session_guard.as_raw(),
             &self.container_id,
