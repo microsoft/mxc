@@ -7,13 +7,7 @@
 mod wxc_e2e_tests;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
-
-const LXC_ARCH: &str = if cfg!(target_arch = "aarch64") {
-    "arm64"
-} else {
-    "amd64"
-};
+use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value, LXC_ARCH};
 
 /// Whether the LXC capability prerequisites are present.
 fn ready() -> bool {

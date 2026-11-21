@@ -8,7 +8,7 @@ mod wxc_e2e_tests;
 use serde_json::json;
 use std::fs;
 use std::process::Command;
-use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
+use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value, LXC_ARCH};
 
 #[test]
 fn existing_containers_keep_their_static_network_configuration() {
@@ -23,7 +23,7 @@ fn existing_containers_keep_their_static_network_configuration() {
             let created = Command::new("lxc-create")
                 .args([
                     "-n", &name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
-                    "amd64",
+                    LXC_ARCH,
                 ])
                 .output()
                 .expect("create existing static-network container");
@@ -223,7 +223,7 @@ fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
         let created = Command::new("/usr/bin/timeout")
             .args(["--kill-after=1", "120", "lxc-create"])
             .args([
-                "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", "amd64",
+                "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a", LXC_ARCH,
             ])
             .output()
             .expect("create addressless container");

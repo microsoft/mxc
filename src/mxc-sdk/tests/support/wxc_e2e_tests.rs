@@ -17,6 +17,12 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 
+pub const LXC_ARCH: &str = if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "amd64"
+};
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
