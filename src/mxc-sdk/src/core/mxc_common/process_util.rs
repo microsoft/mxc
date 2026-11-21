@@ -208,6 +208,12 @@ impl InterruptiblePipeReader {
         PipeReadCanceller(Arc::downgrade(&self.0))
     }
 
+    /// Whether cancellation has been requested for this reader.
+    #[cfg(feature = "isolation_session")]
+    pub(crate) fn was_cancelled(&self) -> bool {
+        self.0.lock().cancelled
+    }
+
     pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
         self.0.handle.try_clone_owned_handle()
     }
