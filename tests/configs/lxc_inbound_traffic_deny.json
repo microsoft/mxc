@@ -4,7 +4,7 @@
   "containerId": "CLI-LXC-Inbound-Traffic",
   "containment": "lxc",
   "process": {
-    "commandLine": "echo MXC_INBOUND_PROBE_READY; sleep 25"
+    "commandLine": "sleep 300"
   },
   "lifecycle": {
     "destroyOnExit": true

@@ -41,7 +41,7 @@ while True:
     client.close()
 PY
 PROXY_PID=$!
-trap 'kill "$PROXY_PID" 2>/dev/null; rm -f "$READY" "$CONFIG"; lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true' EXIT
+trap 'kill "$PROXY_PID" 2>/dev/null; rm -f "$READY" "$CONFIG"; "$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true' EXIT
 
 for _ in $(seq 50); do
     [ -e "$READY" ] && break
@@ -50,7 +50,7 @@ for _ in $(seq 50); do
 done
 [ -e "$READY" ] || { echo "FAIL: the stand-in proxy did not start."; exit 1; }
 
-lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
+"$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
 
 set +e
 output=$("$LXC_EXEC" "$CONFIG" 2>&1)

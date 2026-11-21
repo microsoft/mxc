@@ -114,14 +114,14 @@ for config in "$DENY_CONFIG" "$ALLOW_CONFIG"; do
 done
 
 cleanup() {
-    lxc-destroy -n "$CTRL_CONTAINER" -f >/dev/null 2>&1 || true
-    lxc-destroy -n "$REUSE_CONTAINER" -f >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "$CTRL_CONTAINER" >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "$REUSE_CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 # Remove any container left by an earlier failed run.
-lxc-destroy -n "$CTRL_CONTAINER" -f >/dev/null 2>&1 || true
-lxc-destroy -n "$REUSE_CONTAINER" -f >/dev/null 2>&1 || true
+"$LXC_EXEC" --delete --containername "$CTRL_CONTAINER" >/dev/null 2>&1 || true
+"$LXC_EXEC" --delete --containername "$REUSE_CONTAINER" >/dev/null 2>&1 || true
 
 CASE_OUTPUT=""
 

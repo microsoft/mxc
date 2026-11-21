@@ -144,8 +144,7 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
 
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
-const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
-    "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
+const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str = "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
      and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
      build does not support that policy, and enumeration-only access cannot fall back to \
      AppContainer enforcement";
@@ -396,7 +395,7 @@ impl BaseContainerRunner {
         *PRESENT.get_or_init(|| is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET))
     }
 
-    /// Whether native capture has both PSEC and a complete Learning Mode ABI.
+    /// Whether PSEC and Learning Mode support the selected native capture sources.
     pub fn is_native_capture_available() -> bool {
         #[cfg(test)]
         if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
@@ -404,7 +403,7 @@ impl BaseContainerRunner {
         }
 
         Self::native_capture_available_with(Self::is_base_container_api_present(), || {
-            LearningModeApi::load().is_ok()
+            LearningModeApi::load().is_ok_and(|api| api.supports_trace_sources())
         })
     }
 
@@ -798,19 +797,19 @@ impl BaseContainerRunner {
                 h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
                     Ok(h) => h,
                     Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")))
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")));
                     }
                 };
                 h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
                     Ok(h) => h,
                     Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")))
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")));
                     }
                 };
                 h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
                     Ok(h) => h,
                     Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")))
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")));
                     }
                 };
 
@@ -4054,8 +4053,12 @@ mod tests {
             let mut request = ExecutionRequest::default();
             match decision {
                 DeniedPathsUnsupported => request.policy.denied_paths.push(r"C:\denied".into()),
-                EnumeratePathsUnsupported => request.policy.enumerate_paths.push(r"C:\enumerate".into()),
-                NativeCaptureUnavailable => request.policy.capture_denials = Some(Default::default()),
+                EnumeratePathsUnsupported => {
+                    request.policy.enumerate_paths.push(r"C:\enumerate".into())
+                }
+                NativeCaptureUnavailable => {
+                    request.policy.capture_denials = Some(Default::default())
+                }
                 _ => unreachable!("only unsupported capability decisions are exercised"),
             }
             assert_eq!(
