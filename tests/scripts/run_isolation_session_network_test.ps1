@@ -418,7 +418,13 @@ function Test-Icmp($name, $addr) {
         else { $s = "ICMP_$s" }
         "PROBE $name $s"
     } catch {
-        "PROBE $name $(Get-Wsa $_.Exception)"
+        # An unroutable destination throws rather than returning a status: the inner
+        # Win32Exception is ERROR_NETWORK_UNREACHABLE (1231) or ERROR_HOST_UNREACHABLE (1232).
+        $v = Get-Wsa $_.Exception
+        for ($e = $_.Exception; $v -eq 'ERR' -and $e; $e = $e.InnerException) {
+            if ($e -is [ComponentModel.Win32Exception] -and $e.NativeErrorCode -in 1231, 1232) { $v = 'UNREACH' }
+        }
+        "PROBE $name $v"
     }
 }
 '@
