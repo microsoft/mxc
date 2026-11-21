@@ -26,3 +26,8 @@ fn windows_sandbox_config_is_introduced_in_v11() {
 fn hyperlight_config_is_introduced_in_v11() {
     assert_v11_introduces(r#""hyperlight": {"runtime": "node"}"#);
 }
+
+#[test]
+fn kata_config_is_introduced_in_v11() {
+    assert_v11_introduces(r#""kata": {"rootfs": "/srv/rootfs", "hypervisor": "qemu"}"#);
+}

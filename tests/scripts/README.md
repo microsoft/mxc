@@ -138,6 +138,7 @@ overrides are assigned only to child processes, never to the invoking shell.
 |--------|-------------|---------------------|
 | `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap`, Python 3 for terminal isolation |
 | `run_bwrap_capabilities_test.sh` | Workload capability removal, refusal when the capability drop is blocked, read-only mount protection, firewall tamper resistance, and supervisor networking in all three modes; CI runs as both root and non-root | `lxc-exec`, Python 3, Bubblewrap network prerequisites, x86_64 or aarch64 |
+| `run_kata_all_tests.sh` | Kata backend tests on every configured hypervisor, then the in-process `streaming_kata` suite | `lxc-exec`, `streaming_kata` or a Rust toolchain, root, `/dev/kvm`, Kata `runtime-rs`, a root filesystem directory and ext4 image (see [`kata-backend.md`](../../docs/backends/kata/kata-backend.md)) |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
@@ -168,7 +169,7 @@ these dispatchers, which map a matrix backend id to the suites above:
 | Dispatcher | Platforms | Backend ids |
 |------------|-----------|-------------|
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm` |
-| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt` |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `kata`, `seatbelt` |
 
 The Unix dispatcher recognizes the catalog's `microvm` entry but exits nonzero
 because that suite is not wired. Neither dispatcher accepts `hyperlight`.

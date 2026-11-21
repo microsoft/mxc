@@ -222,7 +222,8 @@
           "pool": "1es-mxc-e2e-ubuntu-24.04-x64",
           "backends": [
             "bubblewrap",
-            "lxc"
+            "lxc",
+            "kata"
           ]
         },
         "arm64": {
@@ -399,7 +400,8 @@
         "os": "ubuntu-24.04",
         "backends": [
           "bubblewrap",
-          "lxc"
+          "lxc",
+          "kata"
         ]
       },
       {

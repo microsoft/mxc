@@ -443,7 +443,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Raw exact callers declare a registered version. High-level Rust, .NET, and Node v1 APIs do not expose this field and emit SDK-owned stable `1.0.0`. Windows Sandbox lifecycle is raw exact `1.1.0-alpha` only. |
+| `version` | string | Yes | Raw exact callers declare a registered version. High-level Rust, .NET, and Node v1 APIs do not expose this field and emit SDK-owned stable `1.0.0`. Windows Sandbox and Kata lifecycle are raw exact `1.1.0-alpha` only. |
 
 Backend-routing fields:
 
