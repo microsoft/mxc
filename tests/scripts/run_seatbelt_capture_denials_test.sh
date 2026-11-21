@@ -134,6 +134,7 @@ run_config "$(render seatbelt_capture_denials_block.json TESTDIR "$TESTDIR" OUTP
 expect_ok "block mode still enforces the policy" "CAPTURE_READ_BLOCKED"
 expect_absent "block mode does not leak the file" "CAPTURE_SECRET_CONTENT"
 expect_marker "block mode preserves unterminated workload stderr" "CAPTURE_STDERR_UNTERMINATED"
+expect_marker "mxc-exec-mac says it is collecting denials" "MXC: collecting sandbox denials"
 read_pointer "block mode separates the report pointer from unterminated stderr"
 expect_listed "block mode lists the denied read" file "$SECRET" read
 

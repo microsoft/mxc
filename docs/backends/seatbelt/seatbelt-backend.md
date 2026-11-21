@@ -478,10 +478,13 @@ adds a warning; the report and verbose file are not affected.
 
 - MXC reads the reports with `log show` after the workload exits. This adds about a second to each run. Before the
   workload starts, a short `log stream` confirms that reports are being
-  logged. If `log show` takes over 20 seconds, or its output still doesn't
-  cover the whole run after 5 seconds of retries, the report is
-  marked truncated and the verbose file sets `processedEventsTruncated` to
-  `true`. If `log show` fails, the capture
+  logged. macOS sometimes takes much longer to make the newest reports
+  available, so MXC keeps retrying for up to 60 seconds. `mxc-exec-mac`
+  prints a note on stderr when it starts collecting, and another if
+  collection takes over 5 seconds. If a single `log show` call takes over 20
+  seconds, or the output still doesn't cover the whole run after 60 seconds,
+  the report is marked truncated and the verbose file sets
+  `processedEventsTruncated` to `true`. If `log show` fails, the capture
   fails. Accounts that can't run `log stream` or `log show` haven't been
   tested.
 

@@ -291,7 +291,7 @@ fn spawn_exec(
         logger.warning_line(&allow_mode_warning(&plan.output_path));
     }
     let capture = capture_plan
-        .map(|plan| plan.start())
+        .map(|plan| plan.start(logger.progress_notes_enabled()))
         .transpose()
         .map_err(launch_failed_response)?;
 
@@ -391,7 +391,7 @@ struct DenialCapturePlan {
 }
 
 impl DenialCapturePlan {
-    fn start(self) -> Result<ActiveDenialCapture, String> {
+    fn start(self, progress_notes: bool) -> Result<ActiveDenialCapture, String> {
         let trace = match &self.trace_path {
             // Owner-only, like the reports: the trace holds the same paths.
             Some(path) => Some(
@@ -409,7 +409,7 @@ impl DenialCapturePlan {
             ),
             None => None,
         };
-        match DenialCollector::start(&self.tag, trace) {
+        match DenialCollector::start(&self.tag, trace, progress_notes) {
             Ok(collector) => Ok(ActiveDenialCapture {
                 collector,
                 output_path: self.output_path,
@@ -1996,7 +1996,7 @@ os.close(fd)
             trace_path,
             allow_mode: false,
         }
-        .start()
+        .start(false)
         .expect("log stream");
         SeatbeltSandboxProcess {
             child: Command::new("/usr/bin/true").spawn().unwrap(),
@@ -2112,7 +2112,7 @@ os.close(fd)
             trace_path: Some(trace_path.clone()),
             allow_mode: false,
         }
-        .start()
+        .start(false)
         .expect("log stream");
         assert!(trace_path.exists());
 

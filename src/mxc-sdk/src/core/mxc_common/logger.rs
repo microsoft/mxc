@@ -39,6 +39,8 @@ pub struct Logger {
     /// Accumulates fragments from `fmt::Write::write_str` so that diagnostic
     /// sinks receive whole lines instead of per-argument fragments.
     diag_line_buf: String,
+    /// Backends may print short progress notes to stderr during long waits.
+    progress_notes: bool,
 }
 
 thread_local! {
@@ -82,7 +84,18 @@ impl Logger {
             #[cfg(target_os = "windows")]
             diag_pipe: None,
             diag_line_buf: String::new(),
+            progress_notes: false,
         }
+    }
+
+    /// Lets backends print short progress notes to stderr during long waits.
+    /// For command-line executors; library callers keep the default (off).
+    pub fn enable_progress_notes(&mut self) {
+        self.progress_notes = true;
+    }
+
+    pub fn progress_notes_enabled(&self) -> bool {
+        self.progress_notes
     }
 
     /// Enable writing to a log file in addition to console/buffer output.
@@ -458,6 +471,7 @@ impl Logger {
             #[cfg(target_os = "windows")]
             diag_pipe: self.diag_pipe.as_ref().and_then(|p| p.try_clone().ok()),
             diag_line_buf: String::new(),
+            progress_notes: false,
         }
     }
 

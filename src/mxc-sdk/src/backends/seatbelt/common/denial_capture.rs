@@ -29,8 +29,11 @@ const MARKER_TARGET: &str = "/private/var/empty";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const MARKER_TIMEOUT: Duration = Duration::from_secs(5);
 const SHOW_TIMEOUT: Duration = Duration::from_secs(20);
-// How long to keep retrying `log show` while a marker is missing.
-const MARKER_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+// How long `finish` waits for the run's reports to reach the log store. On CI
+// hosts the newest reports have taken up to 37 seconds to appear.
+const COLLECT_TIMEOUT: Duration = Duration::from_secs(60);
+// When a terminal user is told that collection is taking longer than usual.
+const SLOW_NOTE_AFTER: Duration = Duration::from_secs(5);
 // Lets an orphaned `log stream` exit if MXC is killed during startup.
 const STREAM_TIMEOUT_SECS: u64 = READY_TIMEOUT.as_secs() + 5;
 // Widens the `log show` window so it still covers the ready marker.
@@ -75,6 +78,8 @@ pub(crate) struct DenialCollector {
     tag: String,
     started: Instant,
     trace: Option<File>,
+    /// Print progress notes to stderr while `finish` waits.
+    progress_notes: bool,
 }
 
 /// Whether `/usr/bin/log` is an executable file. Account or MDM policy can
@@ -88,25 +93,45 @@ pub(crate) fn log_tool_available() -> bool {
 impl DenialCollector {
     /// Returns once this run's tagged Seatbelt reports are confirmed to reach
     /// the log. Raw `log show` lines are later copied to `trace`.
-    pub(crate) fn start(tag: &str, trace: Option<File>) -> Result<Self, String> {
+    pub(crate) fn start(
+        tag: &str,
+        trace: Option<File>,
+        progress_notes: bool,
+    ) -> Result<Self, String> {
         let started = Instant::now();
         confirm_logging(tag)?;
         Ok(Self {
             tag: tag.to_string(),
             started,
             trace,
+            progress_notes,
         })
     }
 
     /// Logs the closing marker and reads the run's reports with `log show`,
     /// retrying while a marker is missing from the log store.
     pub(crate) fn finish(self) -> Result<CollectedEvents, String> {
+        let mut notes = WaitNotes::new(self.progress_notes, timeout(COLLECT_TIMEOUT));
+        let result = self.collect(&mut notes);
+        if notes.slow {
+            match &result {
+                Ok(collected) if collected.drained() => notes.say("MXC: all denials collected."),
+                Ok(_) => notes.say(
+                    "MXC: stopped waiting; the denials report may be missing the run's latest \
+                     denials.",
+                ),
+                Err(_) => {}
+            }
+        }
+        result
+    }
+
+    fn collect(&self, notes: &mut WaitNotes) -> Result<CollectedEvents, String> {
         emit_marker(
             &self.tag,
             CaptureMarker::Done,
             Instant::now() + timeout(MARKER_TIMEOUT),
         )?;
-        let retry_deadline = Instant::now() + timeout(MARKER_RETRY_TIMEOUT);
         loop {
             let trace = self.trace.as_ref().map(reset_trace).transpose();
             let trace = trace.map_err(|e| format!("could not reset trace file: {e}"))?;
@@ -118,7 +143,8 @@ impl DenialCollector {
                 trace,
                 None,
             )?;
-            let status = wait_until(&mut log.child, Instant::now() + timeout(SHOW_TIMEOUT));
+            let show_deadline = (Instant::now() + timeout(SHOW_TIMEOUT)).min(notes.deadline);
+            let status = wait_until(&mut log.child, show_deadline, || notes.check());
             let (mut collected, stderr) = log.stop();
             match status {
                 Ok(Some(status)) if !status.success() => {
@@ -135,10 +161,52 @@ impl DenialCollector {
                 }
                 Err(error) => return Err(format!("could not wait for '{LOG_TOOL} show': {error}")),
             }
-            if collected.drained() || Instant::now() + RETRY >= retry_deadline {
+            if collected.drained() || Instant::now() + RETRY >= notes.deadline {
                 return Ok(collected);
             }
             std::thread::sleep(RETRY);
+            notes.check();
+        }
+    }
+}
+
+/// Tells a terminal user what `finish` is waiting for.
+struct WaitNotes {
+    enabled: bool,
+    started: Instant,
+    deadline: Instant,
+    /// The slow note was printed.
+    slow: bool,
+}
+
+impl WaitNotes {
+    fn new(enabled: bool, limit: Duration) -> Self {
+        let started = Instant::now();
+        let notes = Self {
+            enabled,
+            started,
+            deadline: started + limit,
+            slow: false,
+        };
+        // The workload may have left its last stderr line unterminated.
+        notes.say("\nMXC: collecting sandbox denials from the macOS log...");
+        notes
+    }
+
+    fn check(&mut self) {
+        if self.enabled && !self.slow && self.started.elapsed() >= timeout(SLOW_NOTE_AFTER) {
+            self.slow = true;
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            self.say(&format!(
+                "MXC: macOS is taking a while to log the denials; waiting up to {} more seconds...",
+                left.as_secs_f64().round()
+            ));
+        }
+    }
+
+    fn say(&self, note: &str) {
+        if self.enabled {
+            eprintln!("{note}");
         }
     }
 }
@@ -235,11 +303,18 @@ impl LogProcess {
 
 /// Waits for `child` to exit. A child still running at `deadline` is killed
 /// and `None` is returned.
-fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<ExitStatus>> {
+fn wait_until(
+    child: &mut Child,
+    deadline: Instant,
+    mut on_poll: impl FnMut(),
+) -> std::io::Result<Option<ExitStatus>> {
     loop {
         match child.try_wait()? {
             Some(status) => return Ok(Some(status)),
-            None if Instant::now() < deadline => std::thread::sleep(POLL),
+            None if Instant::now() < deadline => {
+                on_poll();
+                std::thread::sleep(POLL);
+            }
             None => {
                 let _ = child.kill();
                 child.wait()?;
@@ -356,7 +431,7 @@ fn emit_marker(tag: &str, marker: CaptureMarker, deadline: Instant) -> Result<()
     let mut probe = command
         .spawn()
         .map_err(|e| format!("captureDenials could not run its log marker probe: {e}"))?;
-    wait_until(&mut probe, deadline)
+    wait_until(&mut probe, deadline, || {})
         .map(|_| ())
         .map_err(|e| format!("captureDenials could not wait for its log marker probe: {e}"))
 }
@@ -570,7 +645,7 @@ mod tests {
         });
         let started = Instant::now();
 
-        let error = DenialCollector::start("mxc-capture-stalledstart", None)
+        let error = DenialCollector::start("mxc-capture-stalledstart", None, false)
             .err()
             .expect("readiness fails");
 
@@ -600,6 +675,7 @@ mod tests {
             tag: tag.to_string(),
             started: Instant::now(),
             trace: None,
+            progress_notes: false,
         };
         collector.finish()
     }
@@ -650,7 +726,7 @@ mod tests {
     fn collector_sees_tagged_deny() {
         let tag = "mxc-capture-collectortest";
         let trace = tempfile::tempfile().unwrap();
-        let collector = DenialCollector::start(tag, Some(trace.try_clone().unwrap()))
+        let collector = DenialCollector::start(tag, Some(trace.try_clone().unwrap()), false)
             .unwrap_or_else(|error| panic!("log stream unavailable on this host: {error}"));
         let profile = format!(
             r#"(version 1)(allow default)(deny file-read-data (with message "{tag}") (literal "/private/etc/hosts"))"#

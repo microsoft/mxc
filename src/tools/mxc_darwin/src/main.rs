@@ -115,6 +115,7 @@ fn main() {
     } else {
         Mode::Buffer
     });
+    logger.enable_progress_notes();
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
