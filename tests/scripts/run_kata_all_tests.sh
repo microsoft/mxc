@@ -43,6 +43,12 @@ else
 fi
 [ -n "${MXC_KATA_TEST_ROOTFS:-}" ] && [ -d "$MXC_KATA_TEST_ROOTFS" ] \
     || not_ready "MXC_KATA_TEST_ROOTFS must name a root filesystem directory"
+case ",$HYPERVISORS," in
+    *,firecracker,*)
+        [ -f "${MXC_KATA_TEST_ROOTFS_IMAGE:-}" ] \
+            || not_ready "MXC_KATA_TEST_ROOTFS_IMAGE must name an ext4 image for firecracker"
+        ;;
+esac
 
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 [ -f "$LXC_EXEC" ] || LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
@@ -146,9 +152,6 @@ run_kata() {
 test_hypervisor() {
     local h="$1"
     echo "=== $h ==="
-    if [ "$h" = firecracker ] && [ ! -f "$(rootfs_for "$h")" ]; then
-        not_ready "MXC_KATA_TEST_ROOTFS_IMAGE must name an ext4 image for firecracker"
-    fi
 
     # Exit code, stdout and stderr relay, and the guest kernel.
     run_kata basic "$h" 'uname -r; echo err-line >&2; exit 3'
