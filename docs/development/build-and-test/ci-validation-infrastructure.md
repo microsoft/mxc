@@ -266,9 +266,10 @@ container in private storage and verify cleanup. The blocked-call hook is test-o
 for local commands and watchdog behavior.
 
 LXC also runs prebuilt Rust regressions for startup cancellation, cleanup after
-failed startup, long-running workloads, existing static networking, and
-cancellation during address acquisition.  Each named regression must be
-discoverable, and missing prerequisites fail the job.
+failed startup, long-running workloads, existing static networking,
+cancellation during address acquisition, and delivery of SIGHUP, SIGINT and
+SIGTERM to SDK streaming workloads whose host blocks them.  Each named
+regression must be discoverable, and missing prerequisites fail the job.
 
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The

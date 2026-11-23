@@ -506,6 +506,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
       "mxc-filesystem-probe-tests.exe",
       "wxc_e2e_tests_e2e_lxc_network_capability",
       "wxc_e2e_tests_e2e_lxc_static_network",
+      "streaming_lxc",
     ].map((name) => ({ arch, name }))
   );
   for (const { arch, name } of validationSuites) {

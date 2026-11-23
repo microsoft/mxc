@@ -104,7 +104,8 @@ case "$backend" in
             wxc_e2e_tests_e2e_lxc_network_capability:failed_startup_waits_for_cleanup_after_one_minute \
             wxc_e2e_tests_e2e_lxc_network_capability:successful_startup_does_not_time_out_the_workload \
             wxc_e2e_tests_e2e_lxc_static_network:existing_containers_keep_their_static_network_configuration \
-            wxc_e2e_tests_e2e_lxc_static_network:ctrl_c_during_address_acquisition_removes_temporary_host_networking; do
+            wxc_e2e_tests_e2e_lxc_static_network:ctrl_c_during_address_acquisition_removes_temporary_host_networking \
+            streaming_lxc:streaming_lxc_delivers_termination_signals_despite_host_mask; do
             executable="$release_directory/${regression%%:*}"
             test_name="${regression#*:}"
             test -f "$executable"
