@@ -13,6 +13,13 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+Native W365 loopback TLS fixtures run in parallel through
+`W365.Fixture.Test.Job.yml`, not in the binary build jobs. They retain the same
+Windows, Linux and macOS host coverage and require every named scenario to
+pass. The aggregate check is `w365-fixture-tests / W365 fixtures`; packaging
+does not depend on it. See the [fixture coverage and required-check rollout
+instructions](ci-validation-infrastructure.md#offline-tls-fixtures).
+
 Windows builds first run host-only regression checks for loopback command
 quoting and native-process output capture. These verify direct and
 shell-wrapped launches, normal stdout/stderr capture, and prompt failure when

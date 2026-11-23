@@ -37,11 +37,16 @@ preserve compatibility with the older supported host.
 
 ### Offline TLS fixtures
 
-W365 fixtures run against loopback TLS services in GitHub Actions and Azure
-build/SDK jobs. Native engine and execution-example coverage runs on Windows,
-Linux and macOS; Windows also tests fresh executor processes and console input.
-The .NET and Node suites cover the public Dev JSON APIs. The scheduled workflow
-reuses these build jobs.
+W365 fixtures run against loopback TLS services. In GitHub Actions,
+`W365.Fixture.Test.Job.yml` runs native engine and execution-example coverage
+independently of binary production on Windows x64/ARM64, Ubuntu 24.04 and 26.04
+x64/ARM64, and macOS 15 ARM64. Both `Build.yml` and the scheduled validation
+workflow call it after the dependency-feed check. Packaging and backend
+validation do not wait for these fixture jobs.
+
+Windows also tests fresh executor processes and console input. Azure retains
+its native fixtures in the build jobs. The .NET and Node suites cover the
+public Dev JSON APIs in their existing SDK jobs.
 
 GitHub Actions requires nine native fixtures on Windows and eight on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
@@ -49,7 +54,21 @@ cross-compiled Windows/Linux ARM64 jobs.
 
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and
-never replace shipping artifacts. Node selects its fixture library through
+never replace shipping artifacts. The standalone native jobs cache their build
+output under `src/target/w365-fixture`, separately from shipping output. Each
+required scenario must be discovered and pass, including the explicitly
+included ignored scenarios. Their aggregate check fails if any host lane fails,
+is cancelled, or is skipped.
+
+When rolling out the standalone workflow, add
+`w365-fixture-tests / W365 fixtures` to the repository ruleset's required status
+checks. Existing required build check names stay unchanged. Until that ruleset
+entry is added, a W365 failure fails the workflow but is not independently
+merge-blocking.
+
+Run `node --test scripts/tests/w365-fixtures.test.js` for the offline workflow
+and result-gate regressions; repository-consistency CI runs them as well.
+Node selects its fixture library through
 `scripts/ci/run-w365-node-fixture.ps1`; packaged-artifact tests still use shipping
 libraries. Fixtures retain TLS verification and need no live tenant, but do not
 establish live-service compatibility. See the
@@ -62,6 +81,7 @@ for coverage, local commands and prerequisites.
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
+| `.github/workflows/W365.Fixture.Test.Job.yml` | `workflow_call`-only. Runs native W365 loopback TLS fixtures independently of binary production and aggregates the host results. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |

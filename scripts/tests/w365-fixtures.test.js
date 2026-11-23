@@ -1,0 +1,197 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join, resolve } = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { stripVTControlCharacters } = require("node:util");
+
+const root = resolve(__dirname, "..", "..");
+const workflowName = "W365.Fixture.Test.Job.yml";
+const workflow = readFileSync(join(root, ".github", "workflows", workflowName), "utf8");
+const commonCases = [
+  "lifecycle_contract_and_recovery_fixture",
+  "transport_deadlines_fixture",
+  "readiness_contract_fixture",
+  "execution::native_execution_streams_fixture",
+  "execution::native_execution_backpressure_fixture",
+  "execution::native_execution_failure_and_disposal_fixture",
+  "execution::execution_upgrade_validation_fixture",
+];
+
+function fixtureStep() {
+  const match = workflow.match(
+    /      - name: Test W365 lifecycle and execution with trusted TLS fixtures\r?\n        run: \|\r?\n([\s\S]*?)\r?\n  result:/
+  );
+  assert.ok(match, "the native fixture step must exist");
+  return match[1].replace(/^          /gm, "");
+}
+
+function runFixture(target, mode = "") {
+  const directory = mkdtempSync(join(tmpdir(), "mxc-w365-ci-"));
+  const script = join(directory, "fixture.ps1");
+  const windows = target.endsWith("-windows-msvc");
+  const cases = [
+    ...commonCases,
+    ...(windows
+      ? ["lifecycle_fresh_executor_fixture", "execution::execution_fresh_executor_fixture"]
+      : ["execution::execution_host_output_fixture"]),
+  ];
+  writeFileSync(script, `
+$ErrorActionPreference = 'Stop'
+$global:cases = @($env:MXC_CI_W365_CASES | ConvertFrom-Json)
+function global:cargo {
+    $arguments = @($args)
+    foreach ($required in '--locked', '--target', '--target-dir', '--features', 'test-support') {
+        if ($arguments -notcontains $required) { throw "Missing Cargo argument: $required" }
+    }
+    $targetIndex = [Array]::IndexOf($arguments, '--target')
+    if ($arguments[$targetIndex + 1] -ne $env:MXC_CI_W365_TARGET) { throw 'Wrong target' }
+    $directoryIndex = [Array]::IndexOf($arguments, '--target-dir')
+    if ($arguments[$directoryIndex + 1] -ne 'target/w365-fixture') { throw 'Fixture build is not isolated' }
+    $global:LASTEXITCODE = 0
+    if ($arguments[0] -eq 'build') {
+        Write-Output "MOCK_BUILD $arguments"
+        if ($env:MXC_CI_W365_MODE -eq 'build-failure') {
+            $global:LASTEXITCODE = 17
+            return
+        }
+        if ($arguments -contains 'wxc') {
+            $bin = Join-Path 'target/w365-fixture' "$env:MXC_CI_W365_TARGET/debug"
+            New-Item -ItemType Directory -Path $bin -Force | Out-Null
+            New-Item -ItemType File -Path (Join-Path $bin 'wxc-exec.exe') | Out-Null
+        } elseif ($arguments -notcontains 'w365_execution') {
+            throw 'Unexpected build target'
+        }
+        return
+    }
+    if ($arguments -notcontains 'w365_lifecycle') { throw 'Wrong integration target' }
+    if ($arguments -contains '--list') {
+        if ($env:MXC_CI_W365_MODE -eq 'discovery-failure') {
+            $global:LASTEXITCODE = 19
+            return
+        }
+        foreach ($case in $global:cases) {
+            if ($env:MXC_CI_W365_MODE -ne 'missing-discovery' -or $case -ne $global:cases[-1]) {
+                Write-Output "\${case}: test"
+            }
+        }
+        return
+    }
+    foreach ($required in '--include-ignored', '--format', 'pretty', '--color', 'never') {
+        if ($arguments -notcontains $required) { throw "Missing test argument: $required" }
+    }
+    if ($env:MXC_CI_W365_TARGET.EndsWith('-windows-msvc') -and
+        -not (Test-Path $env:MXC_W365_TEST_EXECUTOR)) { throw 'Fixture executor was not selected' }
+    Write-Output 'MOCK_EXECUTED'
+    if ($env:MXC_CI_W365_MODE -eq 'empty-results') { return }
+    foreach ($case in $global:cases) {
+        if ($case -eq $global:cases[-1]) {
+            if ($env:MXC_CI_W365_MODE -eq 'missing-result') { continue }
+            if ($env:MXC_CI_W365_MODE -eq 'ignored-result') {
+                Write-Output "test $case ... ignored"
+                continue
+            }
+        }
+        Write-Output "test $case ... ok"
+    }
+    if ($env:MXC_CI_W365_MODE -eq 'test-failure') { $global:LASTEXITCODE = 23 }
+}
+${fixtureStep().replaceAll("${{ matrix.target }}", target)}
+`);
+  try {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-File", script], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        MXC_CI_W365_CASES: JSON.stringify(cases),
+        MXC_CI_W365_TARGET: target,
+        MXC_CI_W365_MODE: mode,
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.ifError(result.error);
+    return {
+      status: result.status,
+      output: stripVTControlCharacters(result.stdout + result.stderr),
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("native fixture coverage retains every build host and stays off artifact dependencies", () => {
+  const lanes = [...workflow.matchAll(/- runner: (\S+)\r?\n +target: (\S+)/g)]
+    .map(([, runner, target]) => [runner, target]);
+  assert.deepEqual(lanes, [
+    ["windows-2025", "x86_64-pc-windows-msvc"],
+    ["windows-11-arm", "aarch64-pc-windows-msvc"],
+    ["ubuntu-24.04", "x86_64-unknown-linux-gnu"],
+    ["ubuntu-26.04", "x86_64-unknown-linux-gnu"],
+    ["ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"],
+    ["ubuntu-26.04-arm", "aarch64-unknown-linux-gnu"],
+    ["macos-15", "aarch64-apple-darwin"],
+  ]);
+  for (const entry of ["Build.yml", "Validation.Tests.Scheduled.yml"]) {
+    const text = readFileSync(join(root, ".github", "workflows", entry), "utf8");
+    const caller = text.match(/^  w365-fixture-tests:\r?\n((?:    [^\r\n]*(?:\r?\n|$))+)/m);
+    assert.ok(caller, `${entry} must run W365 fixtures`);
+    assert.match(caller[1], /needs: dependency-feed-check/);
+    assert.ok(caller[1].includes(`uses: ./.github/workflows/${workflowName}`));
+    assert.doesNotMatch(text, /needs:[^\r\n]*w365-fixture-tests/);
+  }
+  for (const platform of ["Windows", "Linux", "MacOS"]) {
+    const build = readFileSync(join(root, ".github", "workflows", `Build.${platform}.Job.yml`), "utf8");
+    assert.doesNotMatch(build, /w365-fixture|--test w365_lifecycle/);
+  }
+  const manifest = readFileSync(join(root, "src", "mxc-sdk", "Cargo.toml"), "utf8");
+  assert.match(manifest, /\[\[test\]\]\r?\nname = "w365_lifecycle"\r?\npath = "tests\/w365_lifecycle.rs"\r?\nrequired-features = \["test-support"\]/);
+  const result = workflow.slice(workflow.indexOf("\n  result:"));
+  assert.match(result, /name: W365 fixtures/);
+  assert.match(result, /needs: fixture-tests/);
+  assert.match(result, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(result, /FIXTURE_RESULT: \$\{\{ needs.fixture-tests.result \}\}/);
+  assert.match(result, /test "\$FIXTURE_RESULT" = success/);
+});
+
+for (const target of [
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]) {
+  test(`fixture step builds isolated helpers and requires every ${target} case to pass`, () => {
+    const result = runFixture(target);
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.output, /MOCK_BUILD .*--example w365_execution/);
+    assert.equal((result.output.match(/MOCK_EXECUTED/g) || []).length, 1);
+    assert.equal(/MOCK_BUILD .* -p wxc /.test(result.output), target.endsWith("-windows-msvc"));
+  });
+}
+
+for (const [mode, error] of [
+  ["build-failure", /Building the W365 fixture executor failed/],
+  ["discovery-failure", /Listing W365 fixtures failed/],
+  ["missing-discovery", /Missing required W365 fixture/],
+  ["test-failure", /W365 fixtures failed/],
+  ["missing-result", /Required W365 fixture did not pass/],
+  ["ignored-result", /Required W365 fixture did not pass/],
+  ["empty-results", /Required W365 fixture did not pass/],
+]) {
+  test(`fixture step rejects ${mode}`, () => {
+    const result = runFixture("x86_64-pc-windows-msvc", mode);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, error);
+  });
+}
+
+test("Unix fixture discovery requires the host-output regression", () => {
+  const result = runFixture("x86_64-unknown-linux-gnu", "missing-discovery");
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /Missing required W365 fixture: execution::execution_host_output_fixture/);
+});

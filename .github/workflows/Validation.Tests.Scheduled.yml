@@ -39,6 +39,10 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
+  w365-fixture-tests:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/W365.Fixture.Test.Job.yml
+
   windows-sdk-bundle:
     needs: dependency-feed-check
     uses: ./.github/workflows/Package.WindowsSdk.TestBundle.Job.yml
