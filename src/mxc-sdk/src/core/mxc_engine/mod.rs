@@ -34,6 +34,7 @@ mod dispatch;
 mod error;
 mod experimental;
 mod platform;
+mod policy_preparation;
 mod probe;
 #[cfg(target_os = "windows")]
 mod request_probe;
@@ -47,6 +48,7 @@ pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
+pub(crate) use policy_preparation::prepare_policy_json;
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
 pub use request_probe::{probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport};

@@ -20,10 +20,25 @@ Creates an LXC container to provide:
 - **Filesystem isolation** via bind mounts with read-only/read-write/denied enforcement
 - **Network isolation** via iptables rules inside the container's own network namespace
 
+Before running the requested command, MXC checks the container's complete UID
+and GID maps.  It rejects unreadable or empty maps, malformed rows, invalid
+ranges, or any mapping to outside ID 0.  Container root must map to a nonzero
+outside UID.  Validation failure prevents the workload from starting and
+triggers a container stop; a failed stop is reported.
+
+MXC rejects `lxc.net.0.type = none` before network setup or container startup,
+including values inherited through `lxc.include`.
+
+After one minute, `lxc-exec` requests startup cancellation and cleanup instead
+of forcing an exit.  Stop and destroy commands retain their 120-second limits;
+the startup timer does not interrupt cleanup.  A successfully started workload
+has no one-minute runtime limit.
+
 ## Prerequisites
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
-- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
+- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc` for runtime)
+- BusyBox with the `udhcpc` applet only for MXC-managed IPv4 address reservations
 - Root privileges, or [unprivileged LXC](#running-without-root) for a policy
   that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
@@ -33,7 +48,7 @@ Creates an LXC container to provide:
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install lxc lxc-utils liblxc-dev
+sudo apt install lxc liblxc-dev
 ```
 
 **Fedora/RHEL:**
@@ -58,11 +73,67 @@ for unprivileged LXC.  Everything else needs root.
 2. Let the container's root user reach its files under your home directory:
    `chmod o+x ~`.
 
+### Running as root
+
+Running `lxc-exec` through `sudo` does not bypass the mapping checks.
+Configure the host before creating the container:
+
+1. Use nonzero ranges assigned to `root` in `/etc/subuid` and `/etc/subgid`.
+   If needed, allocate unused ranges; for example, add `root:100000:65536` to
+   each file after checking availability.
+2. Replace existing `lxc.idmap` entries in `/etc/lxc/default.conf` with entries
+   matching those assignments:
+
+   ```ini
+   lxc.idmap =
+   lxc.idmap = u 0 100000 65536
+   lxc.idmap = g 0 100000 65536
+   ```
+
+   Substitute your assigned host ID starts and counts if they differ from
+   the example.
+3. Create a fresh container, or recreate one that uses unsafe mappings.
+   Preserve any needed data before recreating an existing container.
 
 ### Container networking
 
-Refer to your distribution's manual to configure networking for LXC
-containers.  A config with a `network` section fails without it.
+For a networked run using an existing container with configured IPv4 or IPv6
+addresses, MXC preserves its bridge, addresses, gateway, and resolver settings.
+It does not reserve a DHCP address or replace the resolver.  Network filtering
+still applies before the workload starts.
+
+Containers without configured addresses require a local `lxc-net` bridge with
+dnsmasq serving its DHCP pool for networked runs.  Refer to your distribution's
+manual to configure it.
+
+This DHCP reservation path also needs BusyBox with `udhcpc`: install
+`busybox-static` on Debian/Ubuntu or `busybox` on Fedora/RHEL.  Runs without
+networking and existing containers with configured addresses do not need BusyBox.
+
+For these containers, MXC reuses the container's reservation or
+reserves one free IPv4 address from the existing `lxc-net` DHCP pool.
+MXC writes the reserved address and gateway into the LXC configuration before
+startup, without leaving a renewing DHCP client running.  The reservation
+remains after the container stops or MXC exits.  MXC removes it when it
+destroys the container.  A container first run without networking can obtain
+a reservation on a later networked run.
+
+If reservation support is not enabled, MXC enables it and restarts the shared
+`lxc-net` service.  Later reservations reload dnsmasq without restarting
+the bridge.
+
+**Warning:** Restarting `lxc-net` temporarily interrupts networking for containers
+already connected to the bridge.  The containers remain running.
+
+If the initial restart fails, MXC attempts to restore the local configuration
+files.  After successful restoration, it attempts one bounded restart with the
+restored settings.  Restoration or recovery failures are reported and may require
+operator intervention.
+
+When managing an address reservation, MXC requests DNS servers and search
+settings from the host DHCP server.
+A configured mount supplying `/etc/resolv.conf` or an ancestor directory
+keeps its own resolver settings.
 
 ## Configuration
 
@@ -111,6 +182,18 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 |-------|------|----------|-------------|
 | `distribution` | string | **Yes** | Linux distribution for the container rootfs (e.g., `"alpine"`, `"ubuntu"`) |
 | `release` | string | **Yes** | Distribution release version (e.g., `"3.20"`, `"24.04"`) |
+
+### Filesystem paths
+
+Entries in `filesystem.readwritePaths`, `filesystem.readonlyPaths` and
+`filesystem.deniedPaths` must not contain a `..` path segment. LXC rejects
+such a request before creating a container. Supply a fully resolved path
+without `..`; MXC does not remove it automatically because symbolic links
+can change where the path leads. This keeps parent mounts from hiding
+restrictions on their children. Filenames such as `report..txt` remain valid.
+
+`.` segments and repeated `/` separators do not change parent/child policy
+precedence. Backslashes are filename characters, not path separators.
 
 ### Supported Distributions
 
@@ -345,17 +428,6 @@ These failures carry the `backend_error` code and exit `-1`.
 - **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
   ICMP type through the firewall, but the command MXC runs can originate only Echo
   requests, the ones `ping` sends.
-- **The network restrictions bind only the command MXC runs and its children.**
-  MXC takes away that command's ability to change the firewall or send raw
-  packets, but the container's init process (PID 1) keeps both.  The command
-  runs as root inside the container, so it can ask init to start a new process,
-  for example with `systemd-run` on Ubuntu.  That process is not a child of the
-  command, and it can change the firewall and send raw packets.
-- **Network access stops after about an hour.** The stock `lxcbr0` hands out
-  DHCP leases that last one hour, and MXC's firewall blocks the DHCP request the
-  container sends to renew one.  When the lease expires the container loses its
-  address and the workload can no longer reach the network.  A run that finishes
-  within the hour is unaffected.
 - **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a

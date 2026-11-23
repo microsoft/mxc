@@ -5,6 +5,11 @@ Runs a Windows backend test from a downloaded CI artifact.
 .DESCRIPTION
 Takes the matrix backend id straight from the catalog, so there is no
 id-to-command mapping to keep in sync. 
+
+.PARAMETER AllowMachineMutation
+Allows suites that change host state outside MXC. WSLC needs it to run the Node
+and C# suites, whose cleanup stops every wslcsession.exe on the host, including
+WSLC sessions MXC did not start. Without it, those suites are skipped.
 #>
 [CmdletBinding()]
 param(
@@ -25,7 +30,9 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string]$Architecture,
 
-    [string]$TempDirectory
+    [string]$TempDirectory,
+
+    [switch]$AllowMachineMutation
 )
 
 $ErrorActionPreference = 'Stop'
@@ -191,10 +198,18 @@ function Invoke-ProcessContainerStreamingTests {
     }
 
     foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes',
+        'dev_json_processcontainer_policy_feedback_restricts_current_request',
         'inherited_stdio_processcontainer_uses_caller_stdio') {
+        $arguments = @('--ignored', '--exact', $rustCase, '--test-threads=1')
+        $requiredOutput = @()
+        if ($rustCase -eq 'dev_json_processcontainer_policy_feedback_restricts_current_request') {
+            $arguments += '--show-output'
+            $requiredOutput = @('0.9.0-alpha', '1.0.0', '1.1.0-alpha') |
+                ForEach-Object { "MXC_POLICY_PREPARATION_STRICT_CREATE_OK:$_" }
+        }
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
-            -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
-        $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+            -ArgumentList $arguments
+        $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase -RequiredOutputLines $requiredOutput
         if ($failure) { throw "Rust ProcessContainer streaming: $failure" }
     }
 
@@ -206,15 +221,26 @@ function Invoke-ProcessContainerStreamingTests {
         $resultXml = Join-Path $env:TEMP 'process-container-dotnet-streaming.xml'
         if (Test-Path -LiteralPath $resultXml) { Remove-Item -LiteralPath $resultXml }
         $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'process-container-dotnet-streaming.log' `
-            -ArgumentList @('-class', '*.MxcProcessTests', '-result-xml', $resultXml)
+            -ArgumentList @('-class', '*.MxcProcessTests', '-class', '*.DevEntryPointTests', '-result-xml', $resultXml)
         if ($run.ExitCode -ne 0) { throw ".NET ProcessContainer streaming exited $($run.ExitCode)." }
         $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests' -RejectSkipped `
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
                 'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
                 'DevJson_CapturesOutputAndStreamsInput',
-                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio')
+                'SpawnWithExtendedOptions_ConnectsPipesAndCallerStdio') `
+            -RequiredOutputText @('MXC_PREPARED_FILESYSTEM_BASELINE_RW_OK',
+                'MXC_PREPARED_FILESYSTEM_ACCEPTED:',
+                'MXC_PREPARED_FILESYSTEM_STRICT_RUN_SPAWN_OK:1.1.0-alpha:seed=unchanged:permitted=written')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
+        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'DevEntryPointTests' `
+            -RequiredMethods @('PolicyPreparationReturnsOwnedNativeRequestsWithoutLaunching',
+                'PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion',
+                'PolicyPreparationStoragePreservesDuplicateCommentMembers') `
+            -RequiredTestNames @(
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesLargeTextWithoutHtmlExpansion(nativePreparation: True)',
+                'Microsoft.Mxc.Sdk.Tests.DevEntryPointTests.PolicyPreparationStoragePreservesDuplicateCommentMembers(nativePreparation: True)')
+        if ($failure) { throw ".NET ProcessContainer policy preparation: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
         if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
@@ -225,6 +251,7 @@ function Invoke-ProcessContainerStreamingTests {
             'V1.Dev runJson captures output and exit status',
             'V1.Dev spawnJson supports bidirectional pipes',
             'V1.Dev spawnWithPtyJson supports an interactive terminal',
+            'V1.Dev prepares filesystem ceilings for caller-accepted strict creation',
             'spawnWithExtendedOptions with inherited stdio uses the calling process stdio',
             'V1.Dev spawnWithExtendedOptionsJson with inherited stdio uses the calling process stdio'
         )
@@ -324,13 +351,33 @@ function Invoke-NamedSuites {
 }
 
 # Daemon discovery reuses any running daemon, including one another suite started.
+# A session that a killed daemon left behind, or an idle one failed to terminate,
+# keeps wslcsession.exe running and holding its store; wsl --shutdown does not
+# end it. This stops every wslcsession.exe, including sessions MXC did not start.
 function Stop-WslcDaemons {
+    $idleExitSecs = [int]$env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS + 3 * [int]$env:MXC_WSLC_DAEMON_IDLE_POLL_SECS + 15
     foreach ($daemon in @(Get-Process -Name 'wxc-wslc-daemon' -ErrorAction SilentlyContinue)) {
-        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id) from an earlier suite."
+        Write-Host "Waiting up to $idleExitSecs s for wxc-wslc-daemon $($daemon.Id) from an earlier suite to idle out."
+        if ($daemon.WaitForExit($idleExitSecs * 1000)) { continue }
+
+        Write-Host "Stopping wxc-wslc-daemon $($daemon.Id); it did not idle out."
         Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
         if (-not $daemon.WaitForExit(30000)) {
             throw "wxc-wslc-daemon $($daemon.Id) did not exit within 30 s."
         }
+    }
+    foreach ($session in @(Get-Process -Name 'wslcsession' -ErrorAction SilentlyContinue)) {
+        Write-Host "Stopping wslcsession $($session.Id) left by an earlier suite."
+        Stop-Process -Id $session.Id -Force -ErrorAction SilentlyContinue
+        if (-not $session.WaitForExit(30000)) {
+            throw "wslcsession $($session.Id) did not exit within 30 s."
+        }
+    }
+    # The store stays attached until the session's VM exits, shortly after wslcsession.
+    $deadline = (Get-Date).AddSeconds(30)
+    while ($vm = Get-Process -Name 'vmmemmxc-wslc-daemon-*' -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $deadline) { throw "WSLc VM $($vm[0].Name) did not exit within 30 s." }
+        Start-Sleep -Milliseconds 250
     }
 }
 
@@ -373,7 +420,12 @@ function Invoke-WslcSuites {
     # failure below.
     $env:MXC_ENABLE_WSLC_TESTS = '1'
 
-    Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
+    # Daemons the suites spawn inherit these, so Stop-WslcDaemons can wait for
+    # one to idle out rather than kill it.
+    $env:MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS = '20'
+    $env:MXC_WSLC_DAEMON_IDLE_POLL_SECS = '5'
+
+    $suites = [ordered]@{
         'filesystem probe deadlines' = {
             $tests = Join-Path $binaryDirectoryPath 'mxc-filesystem-probe-tests.exe'
             Assert-File -Path $tests
@@ -409,7 +461,16 @@ function Invoke-WslcSuites {
                 if ($failure) { throw "${case}: $failure" }
             }
         }
-    })
+    }
+    if ($AllowMachineMutation) {
+        Write-Warning 'The WSLC Node and C# suites stop every wslcsession.exe on this host, including WSLC sessions MXC did not start.'
+    }
+    else {
+        Write-Warning 'Skipping the WSLC Node and C# suites: their cleanup stops every wslcsession.exe on this host. Pass -AllowMachineMutation to run them.'
+        $suites.Remove('Node')
+        $suites.Remove('C#')
+    }
+    Invoke-NamedSuites -Backend 'wslc' -Suites $suites
 }
 
 function Invoke-IsolationSessionSuites {

@@ -474,6 +474,16 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
+On Linux, Bubblewrap and LXC reject entries in these lists that contain a `..`
+path segment before creating a sandbox. Supply a fully resolved path without
+`..`. MXC does not remove parent segments automatically because symbolic links
+can change where they lead. This restriction applies to policy paths, not to
+paths used by the contained command.
+
+For these two backends, `.` segments and repeated `/` separators do not change
+parent/child policy precedence. Backslashes are filename characters, not path
+separators.
+
 Backend support for filesystem policy is described in each backend guide; see
 the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
 for MicroVM. Backend-specific sections, including
@@ -489,6 +499,14 @@ The ProcessContainer-only `processContainer.filesystem` section contains:
 On Windows, `deniedPaths` is enforced natively when PSEC advertises
 `PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
 rejected before execution.
+
+ProcessContainer requires fully qualified Windows paths in `readwritePaths`,
+`readonlyPaths`, `deniedPaths`, and `processContainer.filesystem.enumeratePaths`.
+Use an absolute drive path such as `C:\workspace\secret.txt` or a fully
+qualified UNC path. Relative paths such as `secret.txt`, `C:secret.txt`, and
+`\secret.txt` are rejected before execution, including during dry-run
+validation. Policy paths are not resolved against `process.cwd` or the
+launcher's working directory.
 
 Windows BaseContainer can also receive access through Windows permissions granted
 to `ALL_APPLICATION_PACKAGES`. An applicable explicit `deniedPaths` rule takes

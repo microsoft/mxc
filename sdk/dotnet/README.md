@@ -283,8 +283,10 @@ for complete signatures and types.
 ## Errors, warnings, and discovery
 
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
-`NativeCode`, and `Remediation` when available. Security and operational
-warnings are available on `ExecutionResult.Warnings` and `MxcProcess.Warnings`.
+`NativeCode`, `Remediation`, and optional `Details` when available. `Details`
+is a `JsonElement` that remains valid after native cleanup. Security and
+operational warnings are available on `ExecutionResult.Warnings` and
+`MxcProcess.Warnings`.
 Failures that occur after a process starts but before MXC can confirm its
 terminal result retain those fields from `MxcContainer.Run`,
 `MxcLifecycle.RunInContainer`, `MxcProcess.TryGetExitCode`, `Wait`, and

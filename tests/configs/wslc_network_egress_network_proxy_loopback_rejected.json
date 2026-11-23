@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-network-proxy-loopback-rejected",
+  "containment": "wslc",
+  "process": { "commandLine": "echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN" },
+  "runtimeConfig": { "networkProxy": "http://127.0.0.2:8888" },
+  "wslc": { "image": "alpine:latest" }
+}

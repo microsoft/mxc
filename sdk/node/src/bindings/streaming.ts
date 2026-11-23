@@ -27,6 +27,7 @@ import {
 } from './native-stdio.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -423,7 +424,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     this.pollExit[0] = 0;
     this.pollRunning[0] = 1;
     this.pollTimedOut[0] = 0;
-    const error = {} as AbiErrorDetail;
+    const error = createAbiErrorDetail();
     try {
       const status = this.native.tryWait(
         this.handle,
@@ -453,7 +454,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     return new Promise((resolve, reject) => {
       const exit = [0];
       const timedOut = [0];
-      const detail = {} as AbiErrorDetail;
+      const detail = createAbiErrorDetail();
       let freed = false;
       const freeDetail = (): void => {
         if (freed) return;
@@ -665,7 +666,7 @@ async function createStreamingDriverWith(
   spawn: StreamingNativeFacade['spawn'],
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = await new Promise<number>((resolve, reject) => {
     spawn(
       requestJson,
@@ -693,7 +694,7 @@ export function createStreamingDriverSync(
   experimental = false,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.spawnSync(
     JSON.stringify(request),
     experimental ? 1 : 0,
@@ -843,7 +844,7 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.stateAwareExec(
     requestJson,
     experimental ? 1 : 0,
@@ -911,7 +912,7 @@ export async function createStateAwareStreamingDriverAsync(
   output: 'stream' | 'capture' = 'stream',
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const exec = output === 'capture'
     ? native.stateAwareExecCaptureAsync.bind(native)
     : forRun

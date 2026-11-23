@@ -418,7 +418,14 @@ export interface LxcConfig {
 ## `@microsoft/mxc-sdk/v1::MxcError`
 
 Typed error thrown by the MXC SDK in response to a native JSON error object.
-
+Native status decoding preserves backend-specific `details` together with
+`details.ffiStatus`. `details` can contain policy resource paths.
+`console.log` and `util.inspect`
+use the SDK's custom inspector and omit `details`, even with `getters` enabled.
+`JSON.stringify(error)`, object copies, `util.inspect` with both
+`customInspect: false` and `getters: true`, and Node's uncaught-error printer
+when `util.inspect.defaultOptions.getters` is enabled include it. Filter
+`details` before logging or serializing an error.
 ```typescript
 export class MxcError extends Error {
   readonly code: ErrorCode;

@@ -127,6 +127,14 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      - name: Test Bubblewrap filesystem policy and denied-path masking
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: |
+          bash tests/scripts/run_bwrap_filesystem_test.sh
+          bash tests/scripts/run_bwrap_denied_masking_test.sh
+
       # The proxy-network unit tests drive the real supervisor script against
       # stubs and need `ip` (iproute2) from the install above. The module is not
       # covered by any other filter, so a zero-test run must fail.
@@ -226,6 +234,18 @@ jobs:
           done
           "$destination" --ignored filesystem_probe::launch_tests:: --skip lxc_mount_paths_reject_stalls
 
+      - name: Stage LXC Rust regression tests
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in wxc_e2e_tests_e2e_lxc_network_capability wxc_e2e_tests_e2e_lxc_static_network; do
+            payload="$(cargo test --locked --release --target "${{ matrix.target }}" \
+              -p mxc-sdk --test "$name" --no-run --message-format=json |
+              python3 -c 'import json,sys; items=[json.loads(line) for line in sys.stdin]; paths=[m["executable"] for m in items if m.get("reason")=="compiler-artifact" and m["target"]["name"]==sys.argv[1] and m["profile"]["test"] and m.get("executable")]; assert len(paths)==1, paths; print(paths[0])' "$name")"
+            cp "$payload" "target/${{ matrix.target }}/release/$name"
+          done
+
       - name: Test LXC mount-probe deadlines
         working-directory: src
         shell: bash
@@ -253,6 +273,7 @@ jobs:
         run: |
           # No `-e`: each run's status is checked below so a failure names it.
           set -uo pipefail
+          # Usage: run_pinned LABEL CARGO_TEST_ARGS...
           run_pinned() {
             local label="$1"; shift
             local log status
@@ -350,6 +371,12 @@ jobs:
             fi
           done
 
+      - name: Test Bubblewrap user-namespace denial (end-to-end)
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: bash tests/scripts/run_bwrap_user_namespace_test.sh
+
       - name: Upload binaries
         if: matrix.upload_artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -360,5 +387,7 @@ jobs:
             src/target/${{ matrix.target }}/release/unix-test-proxy
             src/target/${{ matrix.target }}/release/libmxc_ffi.so
             src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests
+            src/target/${{ matrix.target }}/release/wxc_e2e_tests_e2e_lxc_network_capability
+            src/target/${{ matrix.target }}/release/wxc_e2e_tests_e2e_lxc_static_network
           if-no-files-found: error
           retention-days: 1

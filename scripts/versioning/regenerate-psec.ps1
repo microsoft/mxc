@@ -1,19 +1,21 @@
 <#
 .SYNOPSIS
     Regenerates the FlatBuffers Rust bindings for the
-    `mxc_sdk::process_security_environment_spec` module, reproducibly.
+    `mxc_sdk::process_security_environment_spec` and
+    `mxc_sdk::process_security_environment_policy_result` modules, reproducibly.
 
 .DESCRIPTION
     Runs `flatc` against external/windows-sdk/ProcessSecurityEnvironment.fbs and
-    rewrites the output into the SDK module layout. Before generating it:
-      * validates the vendored schema's SHA-256 against the recorded provenance
+    external/windows-sdk/ExperimentalProcessSecurityEnvironmentPolicyResult.fbs
+    and rewrites the output into the SDK module layout. Before generating it:
+      * validates each vendored schema's SHA-256 against the recorded provenance
         (external/windows-sdk/ProcessSecurityEnvironment.provenance.toml), and
       * pins the EXACT flatc version recorded in that provenance file, so the
         generated output is byte-reproducible.
 
     The generated files are checked in and must NOT be hand-edited; rerun this
     script instead. The CI drift gate (scripts/versioning/check-psec-codegen.js)
-    fails if the committed schema or generated module drifts.
+    fails if a committed schema or generated module drifts.
 
 .PARAMETER Flatc
     Path to flatc.exe. Defaults to "flatc.exe" (must be on PATH).
@@ -34,13 +36,28 @@ if (-not $repoRoot) {
 }
 Set-Location $repoRoot
 
-$moduleDir = Join-Path $repoRoot "src\mxc-sdk\src\core\process_security_environment_spec"
-$generatedDir = Join-Path $moduleDir ".generated-$PID"
-$fbs = "external\windows-sdk\ProcessSecurityEnvironment.fbs"
 $provenanceFile = "external\windows-sdk\ProcessSecurityEnvironment.provenance.toml"
 
-if (-not (Test-Path $fbs)) {
-    throw "FlatBuffers schema not found: $fbs"
+# Each contract maps a vendored schema to its provenance section and SDK module.
+$contracts = @(
+    @{
+        Fbs = "external\windows-sdk\ProcessSecurityEnvironment.fbs"
+        Section = "schema"
+        Module = "process_security_environment_spec"
+        Layout = "process_security_environment_layout"
+    },
+    @{
+        Fbs = "external\windows-sdk\ExperimentalProcessSecurityEnvironmentPolicyResult.fbs"
+        Section = "policy_result"
+        Module = "process_security_environment_policy_result"
+        Layout = "experimental_process_security_environment_policy_result"
+    }
+)
+
+foreach ($contract in $contracts) {
+    if (-not (Test-Path $contract.Fbs)) {
+        throw "FlatBuffers schema not found: $($contract.Fbs)"
+    }
 }
 if (-not (Test-Path $provenanceFile)) {
     throw "Provenance file not found: $provenanceFile"
@@ -49,29 +66,34 @@ if (-not (Test-Path $Flatc) -and -not (Get-Command $Flatc -ErrorAction SilentlyC
     throw "flatc not found: $Flatc. Download from https://github.com/google/flatbuffers/releases"
 }
 
-# --- Read pinned toolchain + expected schema hash from provenance ------------
+# --- Read pinned toolchain from provenance -----------------------------------
 $provenance = Get-Content $provenanceFile -Raw
 $pinnedFlatc = [regex]::Match($provenance, 'flatc_version\s*=\s*"([^"]+)"')
-$expectedHash = [regex]::Match($provenance, 'sha256\s*=\s*"([^"]+)"')
 if (-not $pinnedFlatc.Success) {
     throw "Could not read flatc_version from $provenanceFile"
 }
-if (-not $expectedHash.Success) {
-    throw "Could not read schema sha256 from $provenanceFile"
-}
 $pinnedFlatcVersion = $pinnedFlatc.Groups[1].Value
-$expectedSchemaHash = $expectedHash.Groups[1].Value.ToLower()
 
-# --- Validate the vendored schema hash matches provenance --------------------
-# Hash the LF-normalized content so the check is checkout-independent (autocrlf).
-$schemaText = (Get-Content $fbs -Raw) -replace "`r`n", "`n"
-$schemaBytes = [System.Text.Encoding]::UTF8.GetBytes($schemaText)
-$sha = [System.Security.Cryptography.SHA256]::Create()
-$actualSchemaHash = (($sha.ComputeHash($schemaBytes) | ForEach-Object { $_.ToString("x2") }) -join "")
-if ($actualSchemaHash -ne $expectedSchemaHash) {
-    throw "Schema hash mismatch for $fbs.`n  expected (provenance): $expectedSchemaHash`n  actual   (on disk):    $actualSchemaHash`nIf you intentionally refreshed the schema, update $provenanceFile (sha256 + source revision) first."
+# --- Validate each vendored schema hash matches provenance -------------------
+foreach ($contract in $contracts) {
+    $fbs = $contract.Fbs
+    $section = [regex]::Match($provenance, '(?ms)^\[' + [regex]::Escape($contract.Section) + '\]\s*(.*?)(?=^\[|\z)')
+    $expectedHash = [regex]::Match($section.Groups[1].Value, 'sha256\s*=\s*"([^"]+)"')
+    if (-not $expectedHash.Success) {
+        throw "Could not read [$($contract.Section)] sha256 from $provenanceFile"
+    }
+    $expectedSchemaHash = $expectedHash.Groups[1].Value.ToLower()
+
+    # Hash the LF-normalized content so the check is checkout-independent (autocrlf).
+    $schemaText = (Get-Content $fbs -Raw) -replace "`r`n", "`n"
+    $schemaBytes = [System.Text.Encoding]::UTF8.GetBytes($schemaText)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $actualSchemaHash = (($sha.ComputeHash($schemaBytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+    if ($actualSchemaHash -ne $expectedSchemaHash) {
+        throw "Schema hash mismatch for $fbs.`n  expected (provenance): $expectedSchemaHash`n  actual   (on disk):    $actualSchemaHash`nIf you intentionally refreshed the schema, update $provenanceFile (sha256 + source pull request) first."
+    }
+    Write-Host "Schema hash OK for $fbs ($expectedSchemaHash)" -ForegroundColor Cyan
 }
-Write-Host "Schema hash OK ($expectedSchemaHash)" -ForegroundColor Cyan
 
 # --- Pin the EXACT flatc version for reproducible output ---------------------
 $versionOutput = (& $Flatc --version) 2>&1 | Out-String
@@ -85,48 +107,54 @@ if ($flatcVersion -ne $pinnedFlatcVersion) {
 }
 Write-Host "Using pinned flatc version $flatcVersion" -ForegroundColor Cyan
 
-Write-Host "Running flatc..." -ForegroundColor Cyan
-try {
-    New-Item -ItemType Directory -Path $generatedDir | Out-Null
-    & $Flatc `
-        --rust --gen-object-api --force-empty --no-prefix --rust-module-root-file --gen-all `
-        -o $generatedDir `
-        $fbs
-    if ($LASTEXITCODE -ne 0) {
-        throw "flatc failed with exit code $LASTEXITCODE"
-    }
+foreach ($contract in $contracts) {
+    $fbs = $contract.Fbs
+    $moduleDir = Join-Path $repoRoot "src\mxc-sdk\src\core\$($contract.Module)"
+    $generatedDir = Join-Path $moduleDir ".generated-$PID"
 
-    Write-Host "Replacing generated module files..." -ForegroundColor Cyan
-    $moduleRoot = Join-Path $moduleDir "mod.rs"
-    $layoutDir = Join-Path $moduleDir "process_security_environment_layout"
-    if (Test-Path $moduleRoot) {
-        Remove-Item $moduleRoot -Force
-    }
-    if (Test-Path $layoutDir) {
-        Remove-Item $layoutDir -Recurse -Force
-    }
-    Move-Item (Join-Path $generatedDir "mod.rs") $moduleRoot
-    Move-Item (Join-Path $generatedDir "process_security_environment_layout") $layoutDir
-
-    Write-Host "Patching mod.rs (lint suppression)..." -ForegroundColor Cyan
-    (Get-Content $moduleRoot) `
-        -replace '// @generated', "// @generated`n#![allow(unused_imports, non_snake_case, non_camel_case_types, clippy::all)]" |
-        Set-Content $moduleRoot
-
-    Write-Host "Formatting with cargo fmt..." -ForegroundColor Cyan
-    Push-Location src
+    Write-Host "Running flatc for $fbs..." -ForegroundColor Cyan
     try {
-        & cargo fmt -p mxc-sdk
+        New-Item -ItemType Directory -Path $generatedDir | Out-Null
+        & $Flatc `
+            --rust --gen-object-api --force-empty --no-prefix --rust-module-root-file --gen-all `
+            -o $generatedDir `
+            $fbs
         if ($LASTEXITCODE -ne 0) {
-            throw "cargo fmt failed with exit code $LASTEXITCODE"
+            throw "flatc failed with exit code $LASTEXITCODE"
         }
-    } finally {
-        Pop-Location
-    }
 
-    Write-Host "Done. Regenerated bindings in $moduleDir" -ForegroundColor Green
-} finally {
-    if (Test-Path $generatedDir) {
-        Remove-Item $generatedDir -Recurse -Force
+        Write-Host "Replacing generated module files..." -ForegroundColor Cyan
+        $moduleRoot = Join-Path $moduleDir "mod.rs"
+        $layoutDir = Join-Path $moduleDir $contract.Layout
+        if (Test-Path $moduleRoot) {
+            Remove-Item $moduleRoot -Force
+        }
+        if (Test-Path $layoutDir) {
+            Remove-Item $layoutDir -Recurse -Force
+        }
+        Move-Item (Join-Path $generatedDir "mod.rs") $moduleRoot
+        Move-Item (Join-Path $generatedDir $contract.Layout) $layoutDir
+
+        Write-Host "Patching mod.rs (lint suppression)..." -ForegroundColor Cyan
+        (Get-Content $moduleRoot) `
+            -replace '// @generated', "// @generated`n#![allow(unused_imports, non_snake_case, non_camel_case_types, clippy::all)]" |
+            Set-Content $moduleRoot
+    } finally {
+        if (Test-Path $generatedDir) {
+            Remove-Item $generatedDir -Recurse -Force
+        }
     }
 }
+
+Write-Host "Formatting with cargo fmt..." -ForegroundColor Cyan
+Push-Location src
+try {
+    & cargo fmt -p mxc-sdk
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo fmt failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    Pop-Location
+}
+
+Write-Host "Done. Regenerated bindings for $($contracts.Module -join ', ')" -ForegroundColor Green

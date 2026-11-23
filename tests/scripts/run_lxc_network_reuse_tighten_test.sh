@@ -90,13 +90,13 @@ fi
 # This test deliberately leaves a container running between its two runs, so it
 # owns the removal on every exit path rather than the runner.
 cleanup() {
-    lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 # Guards against a container left by an earlier failed run being mistaken for
 # this run's first run.
-lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
+"$LXC_EXEC" --delete --containername "$CONTAINER" >/dev/null 2>&1 || true
 
 CASE_OUTPUT=""
 

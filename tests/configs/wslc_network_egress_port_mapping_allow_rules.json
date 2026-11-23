@@ -4,7 +4,7 @@
   "containerId": "wslc-network-egress-port-mapping-allow-rules",
   "containment": "wslc",
   "process": {
-    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\nserve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho ALLOWED=$(p 1.1.1.1:443)\necho OTHER=$(p 8.8.8.8:443)\nnslookup example.com >/dev/null 2>&1 && echo DNS=RESOLVED || echo DNS=REFUSED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8081 1"
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\npa() { for i in 1 2 3; do s=$(p \"$1\"); [ \"$s\" = 502 ] || break; sleep 2; done; echo \"$s\"; }\nserve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho ALLOWED=$(pa 1.1.1.1:443)\necho OTHER=$(p 8.8.8.8:443)\nnslookup example.com >/dev/null 2>&1 && echo DNS=RESOLVED || echo DNS=REFUSED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8081 1"
   },
   "network": {
     "egress": {

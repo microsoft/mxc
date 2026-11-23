@@ -22,15 +22,16 @@
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 //!
-//! Create-and-run also accepts egress rules, mixed postures and port mappings
-//! without bridged networking, which [`create_and_run_network_mode`] routes
-//! through the built-in proxy.
+//! Create-and-run also accepts egress rules, mixed postures (including
+//! `hostLoopback: allow`), port mappings without bridged networking and a
+//! `networkProxy` with egress denied, which [`create_and_run_network_mode`]
+//! routes through the built-in proxy.
 //!
 //! Checks run filesystem → ui → network, so a request that trips several gets a
 //! stable message rather than one that depends on field order (asserted by
 //! tests). [`reject_ui_policy`] applies to both one-shot and state-aware validation.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPort,
@@ -65,6 +66,19 @@ const ERR_PROXY_URL_FORM: &str =
 const ERR_PROXY_WITHOUT_ROUTE: &str =
     "WSLc runtimeConfig.networkProxy requires bridged networking; a proxy cannot create a route \
      in an isolated container";
+const ERR_PROXY_WITH_RULES: &str =
+    "WSLc: runtimeConfig.networkProxy cannot be combined with egress filtering rules \
+     (network.egress allow/deny); the proxy decides where traffic goes. Remove the rules or the \
+     proxy";
+const ERR_PROXY_WITH_EGRESS_ALLOW: &str =
+    "WSLc: runtimeConfig.networkProxy with network.egress.default 'allow' requires bridged \
+     networking. Set network.ingress.default and network.ingress.hostLoopback to 'allow', or set \
+     network.egress.default to 'deny' so traffic leaves only through the proxy";
+const ERR_PROXY_NOT_URL: &str =
+    "WSLc: runtimeConfig.networkProxy requires a URL-backed proxy address";
+const ERR_PROXY_LOOPBACK: &str =
+    "WSLc: a runtimeConfig.networkProxy on Windows loopback must use 127.0.0.1 or localhost; \
+     the built-in proxy relays only to Windows 127.0.0.1";
 const ERR_UI_POLICY: &str =
     "WSLc: the ui section is not supported. The backend has no mechanism to enforce UI \
      restrictions on a container, so no ui posture is truthful here. Omitting the ui section is \
@@ -104,12 +118,54 @@ pub(crate) enum NetworkMode {
     Proxied(ProxiedEgress),
 }
 
+impl NetworkMode {
+    /// Whether the session must reach Windows loopback. The setting is
+    /// session-wide, which is safe only because each create-and-run gets its
+    /// own session.
+    pub(crate) fn session_host_loopback(&self) -> bool {
+        match self {
+            NetworkMode::Proxied(proxied) => {
+                proxied.host_loopback
+                    || matches!(
+                        proxied.custom_proxy,
+                        Some(CustomProxy {
+                            host: CustomProxyHost::Address(None),
+                            ..
+                        })
+                    )
+            }
+            NetworkMode::None | NetworkMode::Bridged => false,
+        }
+    }
+}
+
 /// Egress filtering for [`NetworkMode::Proxied`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProxiedEgress {
     pub(crate) egress: gateway::Egress,
+    /// Relay `host.wslc.internal` to Windows loopback.
+    pub(crate) host_loopback: bool,
+    /// Where the built-in proxy relays instead of filtering itself.
+    pub(crate) custom_proxy: Option<CustomProxy>,
     /// Deny entries the proxy has nothing to apply to.
     pub(crate) warnings: Vec<String>,
+}
+
+/// A `runtimeConfig.networkProxy` behind the built-in proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CustomProxy {
+    /// The configured URL.
+    pub(crate) url: String,
+    pub(crate) host: CustomProxyHost,
+    pub(crate) port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CustomProxyHost {
+    /// Resolved on Windows when the built-in proxy starts.
+    Name(String),
+    /// `None` is Windows 127.0.0.1.
+    Address(Option<Ipv4Addr>),
 }
 
 /// Choose how a create-and-run container is networked, rejecting what the
@@ -130,10 +186,7 @@ pub(crate) fn create_and_run_network_mode(
         && ingress.default == NetworkAction::Deny
         && ingress.host_loopback == NetworkAction::Deny
     {
-        if proxy {
-            return Err(MxcError::policy_validation(ERR_PROXY_WITHOUT_ROUTE));
-        }
-        if !has_port_mappings {
+        if !proxy && !has_port_mappings {
             return Ok(NetworkMode::None);
         }
     } else if egress.default == NetworkAction::Allow
@@ -145,22 +198,24 @@ pub(crate) fn create_and_run_network_mode(
         return Ok(NetworkMode::Bridged);
     }
 
-    if ingress.host_loopback == NetworkAction::Allow {
-        return Err(MxcError::policy_validation(
-            "WSLc: network.ingress.hostLoopback 'allow' cannot be combined with egress filtering \
-             by the built-in proxy. Set it to 'deny', or use bridged networking",
-        ));
-    }
-    if proxy {
-        return Err(MxcError::policy_validation(
-            "WSLc: runtimeConfig.networkProxy cannot be combined with egress filtering by the \
-             built-in proxy. Remove the proxy, or use bridged networking",
-        ));
-    }
+    let host_loopback = ingress.host_loopback == NetworkAction::Allow;
+    let custom_proxy = if proxy {
+        if !egress.allow.is_empty() || !egress.deny.is_empty() {
+            return Err(MxcError::policy_validation(ERR_PROXY_WITH_RULES));
+        }
+        if egress.default == NetworkAction::Allow {
+            return Err(MxcError::policy_validation(ERR_PROXY_WITH_EGRESS_ALLOW));
+        }
+        Some(custom_proxy(request)?)
+    } else {
+        None
+    };
     let mut proxied = proxied_egress(&egress)?;
     if ingress.default == NetworkAction::Allow {
         let warning = if egress.default == NetworkAction::Deny
             && egress.allow.is_empty()
+            && custom_proxy.is_none()
+            && !host_loopback
             && !has_port_mappings
         {
             "the workload has no network access: network.ingress.default 'allow' has no effect \
@@ -171,7 +226,80 @@ pub(crate) fn create_and_run_network_mode(
         };
         proxied.warnings.push(warning.to_string());
     }
+    proxied.host_loopback = host_loopback;
+    proxied.custom_proxy = custom_proxy;
     Ok(NetworkMode::Proxied(proxied))
+}
+
+fn custom_proxy(request: &ExecutionRequest) -> Result<CustomProxy, MxcError> {
+    let invalid = |reason: &str| {
+        MxcError::policy_validation(format!("WSLc: runtimeConfig.networkProxy {reason}"))
+    };
+    let url =
+        exec_proxy_url(request).ok_or_else(|| MxcError::policy_validation(ERR_PROXY_NOT_URL))?;
+    let parsed = url::Url::parse(url).map_err(|_| invalid("is not a valid URL"))?;
+    let port = parsed
+        .port_or_known_default()
+        .filter(|&port| port != 0)
+        .ok_or_else(|| invalid("must name a port"))?;
+    if port == 53 {
+        return Err(invalid(
+            "can't use port 53, where the built-in proxy serves DNS",
+        ));
+    }
+    let host = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => CustomProxyHost::Address(relayed_proxy_address(ip)?),
+        Some(url::Host::Domain(name)) => match name.parse::<Ipv4Addr>() {
+            Ok(ip) => CustomProxyHost::Address(relayed_proxy_address(ip)?),
+            Err(_) if name.eq_ignore_ascii_case("localhost") => {
+                CustomProxyHost::Address(relayed_proxy_address(Ipv4Addr::LOCALHOST)?)
+            }
+            Err(_) => CustomProxyHost::Name(name.to_string()),
+        },
+        Some(url::Host::Ipv6(_)) => {
+            return Err(invalid(
+                "must use a hostname or an IPv4 address; the built-in proxy carries IPv4 only",
+            ))
+        }
+        None => return Err(invalid("must name a host")),
+    };
+    if matches!(host, CustomProxyHost::Address(_)) && parsed.scheme() == "https" {
+        return Err(invalid(
+            "with an IP address or loopback host must use http://. The workload reaches it at \
+             the built-in proxy's address, which the proxy's certificate can't name; use the \
+             proxy's hostname for https://",
+        ));
+    }
+    Ok(CustomProxy {
+        url: url.to_string(),
+        host,
+        port,
+    })
+}
+
+/// The address the built-in proxy relays a custom proxy at; `None` is
+/// Windows 127.0.0.1, the only loopback address WSL relays to.
+pub(crate) fn relayed_proxy_address(ip: Ipv4Addr) -> Result<Option<Ipv4Addr>, MxcError> {
+    if ip == Ipv4Addr::LOCALHOST {
+        return Ok(None);
+    }
+    if ip.is_loopback() || ip.is_unspecified() {
+        return Err(MxcError::policy_validation(ERR_PROXY_LOOPBACK));
+    }
+    if gateway::GATEWAY_SUBNETS.contains(ip) {
+        return Err(MxcError::policy_validation(format!(
+            "WSLc: runtimeConfig.networkProxy address {ip} is inside {}, which the built-in \
+             proxy reserves for its own networks",
+            gateway::GATEWAY_SUBNETS
+        )));
+    }
+    if let Some(range) = gateway::ALWAYS_DENIED.iter().find(|c| c.contains(ip)) {
+        return Err(MxcError::policy_validation(format!(
+            "WSLc: runtimeConfig.networkProxy address {ip} is inside {range}, which the built-in \
+             proxy never relays to"
+        )));
+    }
+    Ok(Some(ip))
 }
 
 /// Lower egress rules to the proxy's TCP-only rules.
@@ -248,6 +376,8 @@ fn proxied_egress(egress: &NetworkEgressPolicy) -> Result<ProxiedEgress, MxcErro
             allow,
             deny,
         },
+        host_loopback: false,
+        custom_proxy: None,
         warnings,
     })
 }
@@ -762,9 +892,16 @@ mod tests {
 
     #[test]
     fn provision_accepts_standalone_denied_path() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let root = std::env::current_dir().unwrap().join(directory.path());
+        let mounted = root.join("mounted");
+        let denied = root.join("denied");
+        std::fs::create_dir(&mounted).unwrap();
+        std::fs::create_dir(&denied).unwrap();
+
         let req = request_with_policy(ContainerPolicy {
-            readwrite_paths: vec!["C:\\src".to_string()],
-            denied_paths: vec!["D:\\secrets".to_string()],
+            readwrite_paths: vec![mounted.to_string_lossy().into_owned()],
+            denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         });
         validate_provision_policy(&req).unwrap();
@@ -1165,6 +1302,7 @@ mod tests {
         let open = proxied(r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#);
         assert_eq!(open.egress.default, gateway::Action::Allow);
         assert!(open.egress.allow.is_empty() && open.egress.deny.is_empty());
+        assert!(!open.host_loopback);
         assert!(
             open.warnings
                 .iter()
@@ -1238,25 +1376,151 @@ mod tests {
     }
 
     #[test]
-    fn the_proxy_rejects_what_it_cannot_enforce() {
-        let rule = r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}]}]}}"#;
-        let mut with_proxy = one_shot(rule);
-        with_proxy.policy.network_proxy = url_proxy();
-        assert_policy_validation(
-            create_and_run_network_mode(&with_proxy, false).unwrap_err(),
-            "runtimeConfig.networkProxy cannot be combined",
-        );
-        let mut isolated_with_proxy = one_shot("{}");
-        isolated_with_proxy.policy.network_proxy = url_proxy();
-        assert_policy_validation(
-            create_and_run_network_mode(&isolated_with_proxy, true).unwrap_err(),
-            "requires bridged networking",
-        );
-        for (network, needle) in [
+    fn host_loopback_enables_session_loopback() {
+        for (network, mappings) in [
+            (r#"{"ingress":{"hostLoopback":"allow"}}"#, false),
+            (r#"{"ingress":{"hostLoopback":"allow"}}"#, true),
             (
                 r#"{"egress":{"default":"allow"},"ingress":{"hostLoopback":"allow"}}"#,
-                "hostLoopback 'allow' cannot be combined",
+                false,
             ),
+            (
+                r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],"ports":[{"protocol":"tcp"}]}]},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
+                false,
+            ),
+        ] {
+            let mode = create_and_run_network_mode(&one_shot(network), mappings).unwrap();
+            assert!(mode.session_host_loopback(), "{network}");
+            let NetworkMode::Proxied(p) = mode else {
+                panic!("{network} was not proxied");
+            };
+            assert!(p.host_loopback);
+            assert!(!p.warnings.iter().any(|w| w.contains("no network access")));
+        }
+        let proxied = proxy_mode(
+            r#"{"ingress":{"hostLoopback":"allow"}}"#,
+            "http://proxy.example:8080",
+            false,
+        )
+        .unwrap();
+        assert!(proxied.session_host_loopback());
+
+        for network in [
+            "{}",
+            r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#,
+            r#"{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
+        ] {
+            assert!(!mode(network).unwrap().session_host_loopback(), "{network}");
+        }
+    }
+
+    fn proxy_mode(network: &str, url: &str, port_mappings: bool) -> Result<NetworkMode, MxcError> {
+        let mut request = one_shot(network);
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(url, String::new(), 0)),
+        };
+        create_and_run_network_mode(&request, port_mappings)
+    }
+
+    #[test]
+    fn a_custom_proxy_is_relayed_through_the_built_in_proxy() {
+        for (url, host, port) in [
+            (
+                "http://proxy.example:8080",
+                CustomProxyHost::Name("proxy.example".to_string()),
+                8080,
+            ),
+            (
+                "https://Proxy.Example:8443",
+                CustomProxyHost::Name("proxy.example".to_string()),
+                8443,
+            ),
+            (
+                "http://192.0.2.10:3128",
+                CustomProxyHost::Address(Some(Ipv4Addr::new(192, 0, 2, 10))),
+                3128,
+            ),
+            (
+                "socks5://192.0.2.10:1080",
+                CustomProxyHost::Address(Some(Ipv4Addr::new(192, 0, 2, 10))),
+                1080,
+            ),
+            (
+                "http://127.0.0.1:8888",
+                CustomProxyHost::Address(None),
+                8888,
+            ),
+            (
+                "http://localhost:8888",
+                CustomProxyHost::Address(None),
+                8888,
+            ),
+        ] {
+            for (network, mappings) in [
+                ("{}", false),
+                ("{}", true),
+                (r#"{"ingress":{"default":"allow"}}"#, false),
+            ] {
+                let NetworkMode::Proxied(p) = proxy_mode(network, url, mappings).unwrap() else {
+                    panic!("{url} with {network} was not proxied");
+                };
+                assert_eq!(p.egress.default, gateway::Action::Deny);
+                assert!(!p.warnings.iter().any(|w| w.contains("no network access")));
+                assert!(!p.host_loopback);
+                assert_eq!(
+                    NetworkMode::Proxied(p.clone()).session_host_loopback(),
+                    host == CustomProxyHost::Address(None)
+                );
+                assert_eq!(
+                    p.custom_proxy,
+                    Some(CustomProxy {
+                        url: url.to_string(),
+                        host: host.clone(),
+                        port,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_proxy_rejects_what_it_cannot_enforce() {
+        for (network, url, needle) in [
+            (
+                r#"{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],"ports":[{"protocol":"tcp"}]}]}}"#,
+                "http://proxy.example:8080",
+                "cannot be combined with egress filtering rules",
+            ),
+            (
+                r#"{"egress":{"default":"allow"},"ingress":{"default":"allow"}}"#,
+                "http://proxy.example:8080",
+                "requires bridged networking",
+            ),
+            ("{}", "https://192.0.2.10:443", "must use http://"),
+            ("{}", "https://localhost:8443", "must use http://"),
+            ("{}", "http://[2001:db8::1]:8080", "IPv4 only"),
+            ("{}", "http://proxy.example:53", "port 53"),
+            ("{}", "http://127.0.0.2:8888", "127.0.0.1 or localhost"),
+            ("{}", "http://0.0.0.0:8888", "127.0.0.1 or localhost"),
+            (
+                "{}",
+                "http://10.231.1.254:3128",
+                "reserves for its own networks",
+            ),
+            ("{}", "http://169.254.169.254:8080", "inside 169.254.0.0/16"),
+            ("{}", "http://0.1.2.3:8080", "inside 0.0.0.0/8"),
+            ("{}", "http://224.0.0.1:8080", "inside 224.0.0.0/4"),
+            ("{}", "http://255.255.255.255:8080", "inside 240.0.0.0/4"),
+        ] {
+            assert_policy_validation(proxy_mode(network, url, false).unwrap_err(), needle);
+        }
+        let mut non_url = one_shot("{}");
+        non_url.policy.network_proxy = non_url_proxy();
+        assert_policy_validation(
+            create_and_run_network_mode(&non_url, false).unwrap_err(),
+            "URL-backed",
+        );
+        for (network, needle) in [
             (
                 r#"{"egress":{"allow":[{"ports":[{"protocol":"udp","port":53}]}]}}"#,
                 "only protocol 'tcp' (got 'udp')",

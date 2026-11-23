@@ -10,11 +10,12 @@
 //! Each check returns the caller-facing message; the backend wraps it as a
 //! `ScriptResponse`.
 
+use crate::mxc_common::config_deserialize::escape_diagnostic_text;
+use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{
     ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkAction, SeatbeltConfig,
     SeatbeltCustomDefault, SeatbeltCustomPosixShm, SeatbeltCustomRules, SeatbeltPosixShmAccess,
 };
-use crate::mxc_common::{escape_diagnostic_text, host_is_canonical_loopback};
 use std::collections::HashMap;
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI

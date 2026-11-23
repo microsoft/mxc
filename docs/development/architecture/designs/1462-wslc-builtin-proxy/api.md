@@ -155,7 +155,7 @@ and cancellation are unchanged.
   [runtime behavior changes](README.md#contracts-apis-and-compatibility):
   previously rejected requests now run, and `BRIDGED` containers may gain
   Windows loopback access.
-  
+
 - Request mapping is unchanged (contract `1.0.0`), apart from provision
   `runtimeConfig` in the development contract:
 

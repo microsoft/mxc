@@ -40,8 +40,10 @@ use crate::wslc_common::policy;
 use crate::wslc_common::policy_mapping;
 use crate::wslc_common::process_env;
 use crate::wslc_common::sdk_init;
+use crate::wslc_common::session_resources;
 use crate::wslc_common::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_common::wslc_bindings::*;
+use crate::wslc_gateway_policy as gateway;
 
 fn sdk_wait_error(operation: &str, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
     WslcError::sdk(format!("{operation} failed"), hr, sdk_msg)
@@ -526,8 +528,9 @@ impl ScriptRunner for WSLContainerRunner {
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::create_and_run_network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
-        self.network_mode(request).map_err(as_wslc_rejection)?;
+        let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
+        resolve_custom_proxy(&network_mode)?;
         Ok(())
     }
 
@@ -540,6 +543,28 @@ impl ScriptRunner for WSLContainerRunner {
 /// `policy_validation` with the same message the state-aware surface emits.
 fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
+}
+
+fn create_session_error(hr: HRESULT, host_loopback: bool, sdk_msg: &str) -> WslcError {
+    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
+        return WslcError::Unavailable(
+            "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
+             Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
+                .to_string(),
+        );
+    }
+    WslcError::sdk("WslcCreateSession failed", hr, sdk_msg)
+}
+
+fn resolve_custom_proxy(
+    network_mode: &policy::NetworkMode,
+) -> Result<Option<crate::wslc_gateway_policy::CustomProxy>, ScriptResponse> {
+    match network_mode {
+        policy::NetworkMode::Proxied(egress) => {
+            egress_gateway::resolve_custom_proxy(egress).map_err(WslcError::into_response)
+        }
+        policy::NetworkMode::None | policy::NetworkMode::Bridged => Ok(None),
+    }
 }
 
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
@@ -631,6 +656,7 @@ impl WSLContainerRunner {
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
         session_name_str: &str,
+        host_loopback: bool,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
@@ -693,15 +719,38 @@ impl WSLContainerRunner {
             }
         }
 
+        // The SDK reads the name when the session is created.
+        let host_loopback_name =
+            CString::new(gateway::HOST_LOOPBACK_NAME).expect("the host loopback name has no NUL");
+        if host_loopback {
+            let hr =
+                sdk.WslcSetSessionSettingsHostLoopback(&mut settings, host_loopback_name.as_ptr());
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetSessionSettingsHostLoopback failed",
+                    hr,
+                    "",
+                ));
+            }
+        }
+
         // Create session while string data is still alive
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
         if hr != S_OK {
-            let msg = err_msg.to_string_lossy();
-            return Err(sdk_error("WslcCreateSession failed", hr, &msg));
+            return Err(
+                create_session_error(hr, host_loopback, &err_msg.to_string_lossy()).into_response(),
+            );
         }
         let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
+        if host_loopback {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Session reaches Windows loopback as {}",
+                gateway::HOST_LOOPBACK_NAME
+            );
+        }
 
         Ok(WslcSessionGuard::from_raw(
             session,
@@ -993,11 +1042,19 @@ impl WSLContainerRunner {
 
         // -- Init: COM + SDK + preflight --
         let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
+        // Resolved again so this run relays to an address checked just now.
+        let custom_proxy = resolve_custom_proxy(&network_mode)?;
         let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
         let session_name = resolve_session_name(&request.container_id);
-        let session_guard = self.create_session(sdk, request, &session_name, logger)?;
+        let session_guard = self.create_session(
+            sdk,
+            request,
+            &session_name,
+            network_mode.session_host_loopback(),
+            logger,
+        )?;
 
         // -- Image resolution --
         // An isolated sandbox gets no registry fetch on its behalf; the pull
@@ -1044,6 +1101,7 @@ impl WSLContainerRunner {
                     &storage_path,
                     &session_name,
                     egress,
+                    custom_proxy,
                     &self.config.port_mappings,
                     logger,
                 )?)
@@ -1098,8 +1156,8 @@ impl WSLContainerRunner {
         // belongs to the proxy. Inject HTTP(S)_PROXY after scrubbing caller
         // proxy variables.
         // See crate::mxc_common::proxy_env.
-        let effective_env: Vec<String> = if gateway.is_some() {
-            egress_gateway::workload_env(request.env_entries(), process_env::EnvScope::of(request))
+        let effective_env: Vec<String> = if let Some(gateway) = &gateway {
+            gateway.workload_env(request.env_entries(), process_env::EnvScope::of(request))
         } else if request.policy.network_proxy.is_enabled() {
             // A directly constructed request must retain its proxy URL so the
             // guest receives a routable endpoint instead of an empty setting.
@@ -2042,7 +2100,7 @@ impl StartedContainer {
         if hr != RPC_E_DISCONNECTED && hr != WSLC_E_CONTAINER_NOT_FOUND {
             return Err(failed);
         }
-        match egress_gateway::open_container(
+        match session_resources::open_container(
             self.sdk,
             self.session_guard.as_raw(),
             &self.container_id,
@@ -3612,5 +3670,20 @@ mod tests {
     #[test]
     fn minted_session_names_do_not_repeat() {
         assert_ne!(resolve_session_name(""), resolve_session_name(""));
+    }
+
+    #[test]
+    fn an_old_runtime_is_unavailable_only_when_host_loopback_was_requested() {
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, true, ""),
+            WslcError::Unavailable(m) if m.contains("wsl --update")
+        ));
+        assert!(matches!(
+            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, false, ""),
+            WslcError::Sdk {
+                hr: WSLC_E_RUNTIME_UPDATE_NEEDED,
+                ..
+            }
+        ));
     }
 }

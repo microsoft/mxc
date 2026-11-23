@@ -4,7 +4,7 @@
   "containerId": "wslc-network-egress-port-mapping-allow-default",
   "containment": "wslc",
   "process": {
-    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\nserve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho ALLOWED=$(p 1.1.1.1:443)\necho RELAY_PROXY=$(p 10.231.0.2:8082)\nnc -z -w 3 10.231.1.254 8082 && echo RELAY_DIRECT=REACHED || echo RELAY_DIRECT=BLOCKED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8082 1\nserve 8083 2"
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\npa() { for i in 1 2 3; do s=$(p \"$1\"); [ \"$s\" = 502 ] || break; sleep 2; done; echo \"$s\"; }\nserve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho ALLOWED=$(pa 1.1.1.1:443)\necho RELAY_PROXY=$(p 10.231.0.2:8082)\nnc -z -w 3 10.231.1.254 8082 && echo RELAY_DIRECT=REACHED || echo RELAY_DIRECT=BLOCKED\nnc -z -w 3 1.1.1.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8082 1\nserve 8083 2"
   },
   "network": {
     "egress": { "default": "allow" },
