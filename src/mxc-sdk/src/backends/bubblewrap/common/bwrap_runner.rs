@@ -1159,12 +1159,10 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         }
         let exited = self.inner.lock_child().try_wait()?;
         if let Some(status) = exited {
-            // The sandbox is gone, so the mount points this run made for denied
-            // paths that did not exist are no longer in use. A caller that keeps
-            // this handle alive would otherwise still find a directory where it
-            // expects to create a file. Polling is documented as non-blocking,
-            // so teardown runs on its own thread.
-            self.run_teardown();
+            // Status polling only observes the child and hands host placeholder
+            // cleanup to a separate thread. Network finalization stays in wait
+            // or drop: it may block, and the monitor must remain available so a
+            // provider failure is not reclassified as an ordinary exit.
             self.hand_off_deny_cleanup();
             return Ok(Some(status.code().unwrap_or(-1)));
         }
@@ -1666,14 +1664,111 @@ mod tests {
         }
     }
 
+    fn exited_process(
+        deny_mountpoints: Option<missing_denials::DenyPreparation>,
+        monitor: Option<ProviderMonitor>,
+        child: Arc<Mutex<Child>>,
+    ) -> BubblewrapSandboxProcess {
+        BubblewrapSandboxProcess::new(BwrapChild {
+            deny_mountpoints,
+            child,
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            stdout_canceller: None,
+            stderr_canceller: None,
+            pty: None,
+            group: false,
+            proxy_network: None,
+            monitor,
+            timeout: None,
+            started: Instant::now(),
+            timed_out: false,
+            termination_error: None,
+        })
+    }
+
+    fn exited_child() -> Arc<Mutex<Child>> {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        Arc::new(Mutex::new(child))
+    }
+
+    #[test]
+    fn terminal_polling_returns_before_placeholder_cleanup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let placeholder = fixture.path().join("missing");
+        std::fs::create_dir(&placeholder).unwrap();
+        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let preparation = missing_denials::DenyPreparation::for_test(vec![(
+            placeholder.clone(),
+            (metadata.dev(), metadata.ino()),
+        )]);
+        let mut process = exited_process(Some(preparation), None, exited_child());
+        let (cleanup_started, release_cleanup) =
+            missing_denials::test_control::hold_cleanup(placeholder.clone());
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = process.try_wait();
+            returned_tx.send(result).unwrap();
+        });
+
+        cleanup_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cleanup did not start");
+        assert!(placeholder.exists());
+        let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(5));
+        release_cleanup.send(()).unwrap();
+        worker.join().unwrap();
+        let result = returned_before_release.expect(
+            "terminal polling stayed blocked behind placeholder cleanup instead of returning",
+        );
+        assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    fn terminal_polling_preserves_provider_loss_for_wait() {
+        let child = exited_child();
+        let (watch, provider) = nix::unistd::pipe().unwrap();
+        let monitor = ProviderMonitor::watch(watch, Arc::clone(&child), false);
+        let mut process = exited_process(None, Some(monitor), child);
+        drop(provider);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process.provider_lost() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(process.provider_lost(), "provider loss was not observed");
+        assert_eq!(process.try_wait().unwrap(), Some(0));
+
+        let error = process.wait().expect_err(
+            "poll-then-wait discarded the provider failure and returned a workload exit",
+        );
+        assert!(
+            error.to_string().contains("lost its network provider"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_failed_bwrap_spawn_is_a_launch_failure() {
         use crate::mxc_common::logger::Mode;
         use crate::mxc_common::mxc_error::MxcErrorCode;
 
-        // A NUL in an argument makes `Command::spawn` fail before exec.
+        // A NUL in an argument makes `Command::spawn` fail before exec, after
+        // the denied mount points have already been prepared.
+        let fixture = tempfile::tempdir().unwrap();
+        let denied = fixture.path().join("missing/deep");
         let request = ExecutionRequest {
             script_code: "echo \0".into(),
+            policy: crate::mxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![fixture.path().to_str().unwrap().into()],
+                denied_paths: vec![denied.to_str().unwrap().into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let Some(resp) = BubblewrapScriptRunner::new()
@@ -1706,6 +1801,10 @@ mod tests {
             resp.error_message.contains("failed to spawn bwrap"),
             "got: {}",
             resp.error_message
+        );
+        assert!(
+            !denied.exists(),
+            "a post-preparation spawn failure left the denied ancestor chain behind"
         );
     }
 

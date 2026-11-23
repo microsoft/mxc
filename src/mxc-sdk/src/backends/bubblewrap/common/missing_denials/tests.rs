@@ -202,6 +202,36 @@ fn caller_content_written_into_a_placeholder_stops_the_removal() {
 }
 
 #[test]
+fn caller_bytes_written_into_a_placeholder_file_stop_the_removal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing/config.json");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
+    ];
+    let preparation = prepare_with_files(
+        &mut mounts,
+        &[],
+        &[target.to_str().unwrap()],
+        BwrapVersion::new(0, 5, 0),
+    )
+    .unwrap();
+    assert!(target.is_file());
+    std::fs::write(&target, b"caller-owned content").unwrap();
+
+    remove_levels(&preparation.created_levels);
+
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"caller-owned content",
+        "a populated placeholder file is caller content, not an empty mount point"
+    );
+    assert!(target.parent().unwrap().is_dir());
+}
+
+#[test]
 fn an_object_the_caller_replaced_is_left_alone() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
@@ -354,13 +384,24 @@ fn writable_bind_aliases_of_private_storage_are_masked() {
 
 #[test]
 fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
-    let target = format!("/etc/mxc-missing-{}", uuid::Uuid::new_v4());
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let target = root.join("missing");
     let mut mounts = vec![
-        mount(Path::new("/"), FsIntent::ReadWrite),
-        mount(Path::new(&target), FsIntent::Denied),
+        mount(root, FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
     ];
     let preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
     assert!(preparation._storage.is_none());
+    assert_eq!(preparation.created_levels.len(), 1);
+    assert_eq!(preparation.created_levels[0].0, target);
+    assert!(target.is_dir());
+
+    drop(preparation);
+    assert!(
+        !target.exists(),
+        "the fixture placeholder was not cleaned up"
+    );
 }
 
 #[test]
@@ -548,6 +589,69 @@ fn a_handed_off_preparation_still_cleans_up_in_the_background() {
 }
 
 #[test]
+fn a_cleanup_thread_spawn_failure_does_not_block_the_caller() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let path = levels[0].0.clone();
+    test_control::fail_cleanup_spawn_for(path.clone());
+
+    prepared(levels).remove_placeholders_in_background();
+
+    assert!(
+        path.exists(),
+        "a failed background handoff must leave cleanup pending, not run it inline"
+    );
+}
+
+#[test]
+fn cleanup_spawn_failures_are_tracked_per_path() {
+    let first = PathBuf::from("/first-cleanup-target");
+    let second = PathBuf::from("/second-cleanup-target");
+    test_control::fail_cleanup_spawn_for(first.clone());
+    test_control::fail_cleanup_spawn_for(second.clone());
+
+    assert!(test_control::take_spawn_failure(&[(first, (0, 0))]));
+    assert!(test_control::take_spawn_failure(&[(second, (0, 0))]));
+}
+
+#[test]
+fn cleanup_spawn_failure_is_scoped_to_its_placeholder() {
+    let fixture = tempfile::tempdir().unwrap();
+    let intended_grant = fixture.path().join("intended");
+    let other_grant = fixture.path().join("other");
+    std::fs::create_dir(&intended_grant).unwrap();
+    std::fs::create_dir(&other_grant).unwrap();
+    let intended = created_placeholder(&intended_grant);
+    let intended_path = intended[0].0.clone();
+    let other = created_placeholder(&other_grant);
+    let other_path = other[0].0.clone();
+    let wait_absent = |path: &Path| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        !path.exists()
+    };
+    test_control::fail_cleanup_spawn_for(intended_path.clone());
+
+    prepared(other).remove_placeholders_in_background();
+    let other_was_cleaned = wait_absent(&other_path);
+    prepared(intended).remove_placeholders_in_background();
+    let intended_was_cleaned = wait_absent(&intended_path);
+
+    assert!(
+        other_was_cleaned,
+        "another cleanup consumed the injected failure"
+    );
+    assert!(
+        !intended_was_cleaned,
+        "the intended cleanup did not receive its injected failure"
+    );
+}
+
+#[test]
 fn sibling_denials_share_an_ancestor_that_is_removed_once() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
@@ -566,6 +670,58 @@ fn sibling_denials_share_an_ancestor_that_is_removed_once() {
     assert!(
         !grant.join("missing").exists(),
         "the ancestor the siblings shared is still on the host"
+    );
+}
+
+#[test]
+fn cleanup_uses_one_deadline_for_the_whole_walk() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels: Vec<_> = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| {
+            let path = grant.join(name);
+            std::fs::create_dir(&path).unwrap();
+            (path, id_of(&grant.join(name)))
+        })
+        .collect();
+    let (started, release) = test_control::hold_path(levels[0].0.clone());
+    let timeout = std::time::Duration::from_millis(150);
+    let probe = FilesystemProbe::for_test(timeout);
+
+    let start = std::time::Instant::now();
+    let result = remove_levels_with_probe(&levels, probe);
+    let elapsed = start.elapsed();
+    started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the blocked path was not reached");
+    release.send(()).unwrap();
+
+    assert!(result.is_err(), "the blocked cleanup must report a timeout");
+    assert!(
+        elapsed < timeout * 2 + std::time::Duration::from_millis(50),
+        "three levels consumed separate cleanup deadlines: {elapsed:?}"
+    );
+}
+
+#[test]
+fn aliased_paths_retry_an_ancestor_after_its_real_children_are_removed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let real = fixture.path().join("real/tree/branch");
+    std::fs::create_dir_all(&real).unwrap();
+    let alias = fixture.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+    let mut levels = create_mount_point(&real.join("missing/a"), false);
+    levels.extend(create_mount_point(&alias.join("missing/b/c/d/e"), false));
+    assert!(real.join("missing/b/c/d/e").is_dir());
+
+    remove_levels(&levels);
+
+    assert!(
+        !real.join("missing").exists(),
+        "pathname depth left the shared real ancestor behind after its aliased child was removed"
     );
 }
 
@@ -597,9 +753,9 @@ fn a_preparation_that_fails_later_takes_its_creations_back() {
     let path = levels[0].0.clone();
 
     // A preparation that gives up partway: the guard still holds what it made.
-    let mut pending = PendingCreations::default();
-    pending.record(levels);
-    drop(pending);
+    let group = CreationGroup::default();
+    group.record(levels);
+    drop(group);
 
     assert!(
         !path.exists(),
@@ -627,9 +783,9 @@ fn a_failed_preparation_releases_a_shared_ancestor_too() {
         (shared.join("b"), id_of(&shared.join("b"))),
     ];
 
-    let mut pending = PendingCreations::default();
-    pending.record(levels);
-    drop(pending);
+    let group = CreationGroup::default();
+    group.record(levels);
+    drop(group);
 
     assert!(
         !shared.exists(),
@@ -646,7 +802,7 @@ fn a_creation_guard_cleans_up_whatever_it_still_owns() {
 
     // What the creation job holds while it runs. A result that never reaches
     // the caller — a probe timeout drops it — takes the guard's drop with it.
-    let mut owned = PendingCreations::default();
+    let owned = CreationGroup::default();
     owned.record(create_mount_point(&target, false));
     assert!(target.is_dir());
     drop(owned);
@@ -658,30 +814,46 @@ fn a_creation_guard_cleans_up_whatever_it_still_owns() {
 }
 
 #[test]
-fn dbg_probe_timing() {
+fn a_late_creation_result_finishes_the_failed_preparations_ancestors() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
     std::fs::create_dir(&grant).unwrap();
-    let target = grant.join("missing");
-    let mut probe = FilesystemProbe::for_test(std::time::Duration::from_millis(1));
-    let t = target.clone();
-    let started = std::time::Instant::now();
-    let outcome = probe.run("job", move |_| {
-        eprintln!("DBG job start");
-        let r = create_mount_point(&t, false);
-        eprintln!("DBG created {:?} exists={}", r, t2_exists(&t));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        eprintln!("DBG job end");
-        r
-    });
-    eprintln!(
-        "DBG outcome_err={} elapsed={:?}",
-        outcome.is_err(),
-        started.elapsed()
+    let first = grant.join("missing/a");
+    let second = grant.join("missing/b");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&first, FsIntent::Denied),
+        mount(&second, FsIntent::Denied),
+    ];
+    let (creation_started, release_creation) = test_control::hold_creation(second.clone());
+    let probe = FilesystemProbe::for_test(std::time::Duration::from_millis(150));
+
+    let error = prepare_inner(
+        &mut mounts,
+        &[],
+        &Default::default(),
+        BwrapVersion::new(0, 5, 0),
+        false,
+        probe,
+    )
+    .expect_err("the second creation must exceed the probe deadline");
+    assert!(error.message().contains("timed out"), "{error:?}");
+    creation_started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the second creation did not reach its barrier");
+    assert!(
+        first.is_dir(),
+        "cleanup must wait for the outstanding creation before the shared walk"
     );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    eprintln!("DBG final exists={}", target.exists());
-}
-fn t2_exists(p: &Path) -> bool {
-    p.exists()
+    assert!(second.is_dir(), "the late creation has not settled yet");
+
+    release_creation.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while grant.join("missing").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        !grant.join("missing").exists(),
+        "the late guard removed its leaf but stranded the failed preparation's ancestor"
+    );
 }

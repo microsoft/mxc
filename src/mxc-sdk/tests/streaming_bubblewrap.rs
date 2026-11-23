@@ -65,6 +65,36 @@ fn bwrap_request(command: &str, timeout_ms: u32) -> ContainerRequest {
     }
 }
 
+fn bwrap_request_with_missing_denial(
+    command: &str,
+    timeout_ms: u32,
+    grant: &std::path::Path,
+) -> (ContainerRequest, std::path::PathBuf) {
+    let denied = grant.join("missing/deep");
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![denied.to_str().unwrap().to_string()],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: (timeout_ms != 0).then_some(timeout_ms),
+        ..ContainerRequest::new(command)
+    };
+    (request, denied)
+}
+
+fn assert_eventually_absent(path: &std::path::Path, lifecycle: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        !path.exists(),
+        "{lifecycle}: denied mount point remained on the host"
+    );
+}
+
 /// Whether `pid` still has a `/proc` entry. An exited child stays a zombie --
 /// with a live `/proc` entry -- until its parent `wait()`s and the kernel
 /// releases its pid and exit status; that is "reaped". So this distinguishes a
@@ -155,8 +185,12 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
     use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
 
     const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
+    const DENIED_ENV: &str = "MXC_TEST_MISSING_DENIAL";
     if std::env::var_os(FIXTURE_ENV).is_some() {
-        let mut request = bwrap_request("echo WORKLOAD_STARTED", 0);
+        let denied = std::path::PathBuf::from(std::env::var_os(DENIED_ENV).unwrap());
+        let grant = denied.parent().unwrap().parent().unwrap();
+        let (mut request, _) = bwrap_request_with_missing_denial("echo WORKLOAD_STARTED", 0, grant);
+        assert_eq!(denied, grant.join("missing/deep"));
         request.network = Some(NetworkPolicy {
             egress: Some(NetworkEgressPolicy {
                 default: Some(NetworkAction::Allow),
@@ -176,6 +210,10 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
                     && error.message.contains("user.max_net_namespaces"),
                 "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
             );
+            assert!(
+                !denied.exists(),
+                "post-preparation startup failure left its placeholder behind (pty={pty})"
+            );
         }
         return;
     }
@@ -184,11 +222,14 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
         return;
     }
 
+    let missing_fixture = tempfile::tempdir().expect("missing-denial fixture");
+    let denied = missing_fixture.path().join("missing/deep");
     let dir = tempfile::tempdir().expect("shim directory");
     let shim = dir.path().join("bwrap");
     std::fs::write(
         &shim,
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+         if [ ! -d \"$MXC_TEST_MISSING_DENIAL\" ]; then echo 'test: missing denial was not prepared' >&2; exit 2; fi\n\
          echo 'test: bwrap namespace refused' >&2\nexit 1\n",
     )
     .expect("write bwrap shim");
@@ -205,6 +246,7 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
             "--nocapture",
         ])
         .env(FIXTURE_ENV, "1")
+        .env(DENIED_ENV, &denied)
         .env("PATH", path)
         .output()
         .expect("run startup failure fixture");
@@ -214,6 +256,10 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !denied.exists(),
+        "startup failure fixture left the denied ancestor chain on the host"
     );
 }
 
@@ -563,6 +609,123 @@ exec "$MXC_TEST_REAL_BWRAP" "$@"
 }
 
 #[test]
+fn streaming_bubblewrap_pty_preserves_provider_loss() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Command;
+
+    use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_PROVIDER_LOSS_FIXTURE";
+    fn slirp_processes() -> Vec<i32> {
+        let mut processes: Vec<_> = std::fs::read_dir("/proc")
+            .expect("read /proc")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+                let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+                (comm.trim() == "slirp4netns").then_some(pid)
+            })
+            .collect();
+        processes.sort_unstable();
+        processes
+    }
+
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        for mode in ["wait", "poll_then_wait"] {
+            let before = slirp_processes();
+            let mut request = bwrap_request("echo PROVIDER_LOSS_STARTED; sleep 30", 0);
+            request.network = Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let process = spawn_with_pty(request, Default::default()).expect("spawn PTY fixture");
+            let mut reader = BufReader::new(process.try_clone_reader().expect("clone PTY reader"));
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read workload readiness");
+            assert_eq!(line.trim(), "PROVIDER_LOSS_STARTED");
+            drop(reader);
+
+            let after = slirp_processes();
+            let sandbox_pid = process.id();
+            let children =
+                std::fs::read_to_string(format!("/proc/{sandbox_pid}/task/{sandbox_pid}/children"))
+                    .expect("read sandbox children");
+            let namespace_pid = children
+                .split_whitespace()
+                .next()
+                .expect("sandbox has no namespace init")
+                .to_string();
+            let providers: Vec<_> = after
+                .iter()
+                .filter(|pid| !before.contains(pid))
+                .filter(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .ok()
+                        .is_some_and(|args| {
+                            args.split(|byte| *byte == 0)
+                                .any(|arg| arg == namespace_pid.as_bytes())
+                        })
+                })
+                .copied()
+                .collect();
+            assert_eq!(
+                providers.len(),
+                1,
+                "{mode}: could not identify this run's provider"
+            );
+            kill(Pid::from_raw(providers[0]), Signal::SIGKILL).expect("kill network provider");
+
+            if mode == "poll_then_wait" {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    if process
+                        .try_wait()
+                        .expect("poll provider-loss fixture")
+                        .is_some()
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "provider death did not terminate the workload"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            let error = process
+                .wait()
+                .expect_err("PTY wait reclassified provider loss as an ordinary workload exit");
+            assert!(
+                error.to_string().contains("lost its network provider"),
+                "{mode}: {error}"
+            );
+        }
+        return;
+    }
+
+    if !bwrap_network_available() {
+        return;
+    }
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "streaming_bubblewrap_pty_preserves_provider_loss",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FIXTURE_ENV, "1");
+    run_terminal_fixture(command);
+}
+
+#[test]
 fn bubblewrap_pty_supports_io_resize_and_merged_output() {
     if !bwrap_available() {
         return;
@@ -729,6 +892,82 @@ fn streaming_bubblewrap_kill_reaps_the_child() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(reaped, "pid {pid} should be reaped, not left as a zombie");
+}
+
+#[test]
+fn streaming_bubblewrap_cleans_missing_denials_across_lifecycles() {
+    if !bwrap_available() {
+        return;
+    }
+    for lifecycle in ["exit", "timeout", "kill", "drop"] {
+        let fixture = tempfile::tempdir().expect("writable lifecycle fixture");
+        let command = if lifecycle == "exit" {
+            "true"
+        } else {
+            "sleep 30"
+        };
+        let timeout = if lifecycle == "timeout" { 250 } else { 0 };
+        let (request, denied) = bwrap_request_with_missing_denial(command, timeout, fixture.path());
+        let mut process = spawn(request, Default::default()).expect("spawn lifecycle fixture");
+        assert!(
+            denied.is_dir(),
+            "{lifecycle}: preparation made no placeholder"
+        );
+
+        match lifecycle {
+            "exit" => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    if let Some(status) = process.try_wait().expect("poll exited workload") {
+                        assert_eq!(status, 0);
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "workload did not exit"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                // Keep the terminated handle alive while observing host cleanup.
+                assert_eventually_absent(&denied, lifecycle);
+            }
+            "timeout" => {
+                assert_eq!(process.wait().expect("wait"), WaitResult::TimedOut);
+            }
+            "kill" => {
+                process.kill().expect("kill lifecycle fixture");
+                assert_ne!(
+                    process.wait().expect("wait after kill"),
+                    WaitResult::Exited(0)
+                );
+            }
+            "drop" => drop(process),
+            _ => unreachable!(),
+        }
+        assert_eventually_absent(&denied, lifecycle);
+        assert!(
+            fixture.path().exists(),
+            "{lifecycle}: cleanup escaped its fixture"
+        );
+    }
+}
+
+#[test]
+fn streaming_bubblewrap_preserves_caller_content_in_missing_denials() {
+    if !bwrap_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("writable content fixture");
+    let (request, denied) = bwrap_request_with_missing_denial("sleep 30", 0, fixture.path());
+    let process = spawn(request, Default::default()).expect("spawn content fixture");
+    assert!(denied.is_dir());
+    let content = denied.join("caller.txt");
+    std::fs::write(&content, b"caller-owned").unwrap();
+
+    drop(process);
+
+    assert_eq!(std::fs::read(&content).unwrap(), b"caller-owned");
+    assert!(denied.is_dir(), "a populated placeholder must remain");
 }
 
 #[test]

@@ -69,6 +69,16 @@ fn baseline_mounts(
     Ok(mounts)
 }
 
+fn spawn_cleanup(levels: Vec<(PathBuf, ObjectId)>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if test_control::take_spawn_failure(&levels) {
+        return Err(std::io::Error::other("injected cleanup spawn failure"));
+    }
+    std::thread::Builder::new()
+        .name("bwrap-deny-cleanup".to_string())
+        .spawn(move || remove_levels(&levels))
+}
+
 /// What a policy needs before Bubblewrap can enforce its deny masks.
 #[derive(Debug)]
 pub(crate) struct DenyPreparation {
@@ -87,6 +97,15 @@ pub(crate) struct DenyPreparation {
 }
 
 impl DenyPreparation {
+    #[cfg(test)]
+    pub(crate) fn for_test(created_levels: Vec<(PathBuf, ObjectId)>) -> Self {
+        Self {
+            _storage: None,
+            created_levels,
+            armed: true,
+        }
+    }
+
     /// Hand the cleanup to whoever now owns the sandbox. That owner calls
     /// [`Self::remove_placeholders`] once the sandbox has stopped; until it
     /// does, dropping this no longer removes anything.
@@ -102,17 +121,12 @@ impl DenyPreparation {
             return;
         }
         self.armed = false;
-        // Shared rather than moved: a thread that never starts must still be
-        // able to clean up here, and taking the list first would empty it.
-        let levels = std::sync::Arc::new(std::mem::take(&mut self.created_levels));
-        let handed = std::sync::Arc::clone(&levels);
-        let spawned = std::thread::Builder::new()
-            .name("bwrap-deny-cleanup".to_string())
-            .spawn(move || remove_levels(&handed));
-        if spawned.is_err() {
-            // No thread to hand it to: do it here, since leaving the mount
-            // points on the host is the outcome this exists to prevent.
-            remove_levels(&levels);
+        let levels = std::mem::take(&mut self.created_levels);
+        if let Err(error) = spawn_cleanup(levels) {
+            // Polling must remain non-blocking even when no cleanup thread can
+            // be started. Leave the placeholders and make the incomplete
+            // cleanup visible rather than moving filesystem waits inline.
+            eprintln!("Bubblewrap: could not start denied-path cleanup: {error}");
         }
     }
 
@@ -199,7 +213,125 @@ fn create_mount_point(target: &Path, is_file: bool) -> Vec<(PathBuf, ObjectId)> 
     }
     // Deepest first, which is the order cleanup needs.
     created.reverse();
+    #[cfg(test)]
+    test_control::wait_for_creation(target);
     created
+}
+
+#[cfg(test)]
+pub(crate) mod test_control {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver, SyncSender};
+    use std::sync::{Mutex, OnceLock};
+
+    type PathGate = OnceLock<(PathBuf, SyncSender<()>, Mutex<Receiver<()>>)>;
+
+    static STARTED: OnceLock<SyncSender<()>> = OnceLock::new();
+    static RELEASE: OnceLock<Mutex<Receiver<()>>> = OnceLock::new();
+    static TARGET: OnceLock<PathBuf> = OnceLock::new();
+    static CLEANUP_ENABLED: AtomicBool = AtomicBool::new(false);
+    static PATH: PathGate = OnceLock::new();
+    static PATH_ENTERED: AtomicBool = AtomicBool::new(false);
+    static CREATION: PathGate = OnceLock::new();
+    static FAIL_SPAWN_TARGETS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+    pub(crate) fn hold_cleanup(path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        TARGET.set(path).expect("cleanup barrier installed twice");
+        STARTED
+            .set(started_tx)
+            .expect("cleanup barrier installed twice");
+        RELEASE
+            .set(Mutex::new(release_rx))
+            .expect("cleanup barrier installed twice");
+        CLEANUP_ENABLED.store(true, Ordering::Release);
+        (started_rx, release_tx)
+    }
+
+    pub(crate) fn fail_cleanup_spawn_for(path: PathBuf) {
+        FAIL_SPAWN_TARGETS.lock().unwrap().insert(path);
+    }
+
+    pub(super) fn take_spawn_failure(levels: &[(PathBuf, (u64, u64))]) -> bool {
+        let mut targets = FAIL_SPAWN_TARGETS.lock().unwrap();
+        let matched = targets
+            .iter()
+            .find(|target| levels.iter().any(|(path, _)| path == *target))
+            .cloned();
+        if let Some(matched) = matched {
+            targets.remove(&matched);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn hold_path(path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        PATH.set((path, started_tx, Mutex::new(release_rx)))
+            .expect("path barrier installed twice");
+        (started_rx, release_tx)
+    }
+
+    pub(crate) fn hold_creation(path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        CREATION
+            .set((path, started_tx, Mutex::new(release_rx)))
+            .expect("creation barrier installed twice");
+        (started_rx, release_tx)
+    }
+
+    fn wait_at(gate: &PathGate, path: &std::path::Path) {
+        let Some((selected, started, release)) = gate.get() else {
+            return;
+        };
+        if selected != path {
+            return;
+        }
+        started.send(()).expect("report path start");
+        release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("wait for path release");
+    }
+
+    pub(super) fn wait_for_path(path: &std::path::Path) {
+        if PATH.get().is_none_or(|(selected, _, _)| selected != path)
+            || PATH_ENTERED.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        wait_at(&PATH, path);
+    }
+
+    pub(super) fn wait_for_creation(path: &std::path::Path) {
+        wait_at(&CREATION, path);
+    }
+
+    pub(super) fn wait(created_levels: &[(PathBuf, (u64, u64))]) {
+        if !CLEANUP_ENABLED.load(Ordering::Acquire)
+            || !created_levels
+                .iter()
+                .any(|(path, _)| Some(path) == TARGET.get())
+        {
+            return;
+        }
+        let (Some(started), Some(release)) = (STARTED.get(), RELEASE.get()) else {
+            return;
+        };
+        started.send(()).expect("report cleanup start");
+        release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("wait for cleanup release");
+        CLEANUP_ENABLED.store(false, Ordering::Release);
+    }
 }
 
 /// Remove the mount points this run created for missing denied entries.
@@ -214,6 +346,21 @@ fn create_mount_point(target: &Path, is_file: bool) -> Vec<(PathBuf, ObjectId)> 
 /// and a timed-out sandbox's return open indefinitely; a probe that does not
 /// answer within its deadline leaves the objects in place instead.
 pub(crate) fn remove_levels(created_levels: &[(PathBuf, ObjectId)]) {
+    #[cfg(test)]
+    test_control::wait(created_levels);
+
+    if let Err(error) = remove_levels_with_probe(created_levels, FilesystemProbe::default()) {
+        eprintln!("Bubblewrap: denied-path cleanup did not finish: {error}");
+    }
+}
+
+fn remove_levels_with_probe(
+    created_levels: &[(PathBuf, ObjectId)],
+    mut probe: FilesystemProbe,
+) -> Result<(), String> {
+    if created_levels.is_empty() {
+        return Ok(());
+    }
     // Siblings share ancestors: `grant/missing/a` and `grant/missing/b` both
     // create `grant/missing`. Removing one entry at a time would leave the
     // shared ancestor behind, because it is not empty until the last sibling is
@@ -222,64 +369,83 @@ pub(crate) fn remove_levels(created_levels: &[(PathBuf, ObjectId)]) {
     let mut levels: Vec<(PathBuf, ObjectId)> = created_levels.to_vec();
     levels.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
 
-    let mut probe = FilesystemProbe::default();
-    for (path, created) in levels {
-        let display = path.display().to_string();
-        // A level that is no longer ours, or that still holds an entry we kept,
-        // is left alone. Neither stops the others: another entry may have the
-        // same ancestor and reach it again.
-        let _ = probe.run(&display, move |_| remove_level(&path, created));
-    }
-}
-
-/// Created levels that are removed unless a successful preparation takes them
-/// over. A preparation that fails partway has already made some of them, and
-/// nothing else would take them back.
-#[derive(Default)]
-struct PendingCreations {
-    levels: Vec<(PathBuf, ObjectId)>,
-    taken: bool,
-}
-
-impl PendingCreations {
-    fn record(&mut self, created: Vec<(PathBuf, ObjectId)>) {
-        self.levels.extend(created);
-    }
-
-    /// Take over a guard the creation job handed back. Its levels become this
-    /// preparation's, so a later failure still removes them.
-    fn adopt(&mut self, handed_back: PendingCreations) {
-        self.levels.extend(handed_back.release());
-    }
-
-    /// Give up ownership without removing anything.
-    fn release(mut self) -> Vec<(PathBuf, ObjectId)> {
-        self.taken = true;
-        std::mem::take(&mut self.levels)
-    }
-
-    fn take(&mut self) -> Vec<(PathBuf, ObjectId)> {
-        self.taken = true;
-        std::mem::take(&mut self.levels)
-    }
-}
-
-impl Drop for PendingCreations {
-    fn drop(&mut self) {
-        if self.taken || self.levels.is_empty() {
-            return;
+    let display = created_levels
+        .first()
+        .map(|(path, _)| path.display().to_string())
+        .unwrap_or_else(|| "denied paths".to_string());
+    probe.run(&display, move |_| {
+        // One deadline covers the whole dependent walk. If the caller stops
+        // waiting, this worker still finishes the same ordered passes, so a late
+        // child removal is always followed by another ancestor attempt.
+        loop {
+            let mut removed = false;
+            for (path, created) in levels.iter().cloned() {
+                // A level that is no longer ours, or that still holds an entry
+                // we kept, is left alone. A later pass retries it after a
+                // tracked descendant has been removed, including through an alias.
+                if remove_level(&path, created) {
+                    removed = true;
+                }
+            }
+            if !removed {
+                break;
+            }
         }
-        // The preparation failed. Remove what it already created, on this
-        // thread: the caller is unwinding and nothing else will look again.
-        // The same walk as a successful teardown, so siblings that share an
-        // ancestor still release it.
-        let levels = std::mem::take(&mut self.levels);
-        remove_levels(&levels);
+    })
+}
+
+/// Shared ownership of every level created during one preparation.
+///
+/// Creation jobs keep a reference in their probe result. If a preparation
+/// times out, its cleanup therefore waits for the outstanding job's ownership
+/// to settle; the last reference removes all levels, including ancestors that
+/// were nonempty when the preparation first unwound.
+#[derive(Debug, Default)]
+struct CreationGroup {
+    levels: std::sync::Mutex<Vec<(PathBuf, ObjectId)>>,
+}
+
+impl CreationGroup {
+    fn record(&self, created: Vec<(PathBuf, ObjectId)>) {
+        self.levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(created);
     }
+
+    fn take(mut self) -> Vec<(PathBuf, ObjectId)> {
+        std::mem::take(
+            self.levels
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+impl Drop for CreationGroup {
+    fn drop(&mut self) {
+        let levels = std::mem::take(
+            self.levels
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if !levels.is_empty() {
+            remove_levels(&levels);
+        }
+    }
+}
+
+fn finish_creations(group: std::sync::Arc<CreationGroup>) -> Vec<(PathBuf, ObjectId)> {
+    std::sync::Arc::try_unwrap(group)
+        .expect("all creation results settled before a successful preparation")
+        .take()
 }
 
 /// Remove one level if it is still the object this run created and still empty.
 fn remove_level(path: &Path, created: ObjectId) -> bool {
+    #[cfg(test)]
+    test_control::wait_for_path(path);
+
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
@@ -309,12 +475,29 @@ pub(crate) fn prepare(
     version: BwrapVersion,
     bwrap_is_setuid: bool,
 ) -> Result<DenyPreparation, FilesystemPolicyError> {
-    let mut probe = FilesystemProbe::default();
+    prepare_inner(
+        mounts,
+        baseline_links,
+        denied_files,
+        version,
+        bwrap_is_setuid,
+        FilesystemProbe::default(),
+    )
+}
+
+fn prepare_inner(
+    mounts: &mut Vec<PolicyMount>,
+    baseline_links: &[BaselineLink],
+    denied_files: &std::collections::HashSet<String>,
+    version: BwrapVersion,
+    bwrap_is_setuid: bool,
+    mut probe: FilesystemProbe,
+) -> Result<DenyPreparation, FilesystemPolicyError> {
     let baseline = baseline_mounts(BASELINE_RO_BIND_PATHS, baseline_links, &mut probe)?;
     let mut overlays = BTreeMap::<(String, String), Vec<PathBuf>>::new();
-    // Armed for the whole preparation: an error return below has already made
-    // some of these, and nothing else would take them back.
-    let mut pending = PendingCreations::default();
+    // Shared with every creation job so a failed preparation cannot release an
+    // ancestor before a late sibling result has settled.
+    let group = std::sync::Arc::new(CreationGroup::default());
     for (index, denied) in mounts.iter().enumerate() {
         if denied.intent != FsIntent::Denied {
             continue;
@@ -358,22 +541,17 @@ pub(crate) fn prepare(
             // the same path while the sandbox runs.
             let is_file = denied_files.contains(&denied.source);
             let display = host_target.display().to_string();
-            // The guard travels with the result: a creation that outlives the
-            // probe deadline still owns what it made, because the dropped result
-            // takes the guard's drop with it. Only a successful hand-off below
-            // releases that ownership to this thread.
-            let created_levels = probe
+            // The job returns its shared reference with the result. On timeout,
+            // dropping that result releases the last owner only after the job
+            // has finished, so the complete ancestor walk includes its levels.
+            let creations = std::sync::Arc::clone(&group);
+            let creation_result = probe
                 .run(&display, move |_| {
-                    let mut owned = PendingCreations::default();
-                    owned.record(create_mount_point(&host_target, is_file));
-                    owned
+                    creations.record(create_mount_point(&host_target, is_file));
+                    creations
                 })
                 .map_err(|error| FilesystemPolicyError::Host(format!("Bubblewrap: {error}")))?;
-            // Nothing to create means bwrap will make the mount point itself,
-            // and this run has no way to tell it from an object the caller puts
-            // there later. Leaving it is worse than trying to remove it, so the
-            // entry is not recorded and nothing is removed afterwards.
-            pending.adopt(created_levels);
+            drop(creation_result);
         }
     }
     let first_overlay = overlays
@@ -387,7 +565,7 @@ pub(crate) fn prepare(
     let Some((first_destination, first_path)) = first_overlay else {
         return Ok(DenyPreparation {
             _storage: None,
-            created_levels: pending.take(),
+            created_levels: finish_creations(group),
             armed: true,
         });
     };
@@ -495,7 +673,7 @@ pub(crate) fn prepare(
     mounts.sort_by_key(|mount| Path::new(&mount.destination).components().count());
     Ok(DenyPreparation {
         _storage: Some(directory),
-        created_levels: pending.take(),
+        created_levels: finish_creations(group),
         armed: true,
     })
 }
