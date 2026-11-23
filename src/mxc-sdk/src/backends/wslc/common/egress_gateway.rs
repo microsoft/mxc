@@ -9,25 +9,18 @@
 //! HTTP proxy that applies the egress rules, and reaches out through its own
 //! NAT network.
 //!
-//! Each proxy's networks and containers are named from its session name. MXC
-//! records the names before creating them, and when a session opens a store
-//! it deletes everything recorded there: a store admits one live session, so
-//! those were left by a run that ended without cleanup. Unrecorded names are
-//! never deleted.
+//! Each proxy's networks and containers are named from its session name and
+//! recorded in [`session_resources`] before they are created, and a session
+//! that opens a store deletes the proxies recorded there.
 
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-
-use crate::mxc_common::filesystem_security::{
-    lock_owner_only_directory_path, set_current_user_owner, LockedDirectoryPath,
-};
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{PortMapping, ScriptResponse};
 use crate::mxc_common::proxy_env;
@@ -38,17 +31,16 @@ use crate::wslc_common::image;
 use crate::wslc_common::policy::{self, CustomProxy, CustomProxyHost, ProxiedEgress};
 use crate::wslc_common::policy_mapping::VolumeMount;
 use crate::wslc_common::process_env::EnvScope;
+use crate::wslc_common::sandbox_network;
+use crate::wslc_common::session_resources::{
+    self, create_network, fingerprint, host_error, in_addr_of, network, open_container,
+    remove_recorded, Kind, OwnedNames, StoreRecords, SUBNET_PREFIX_LENGTH,
+};
 use crate::wslc_common::wslc_bindings::*;
 use crate::wslc_gateway_policy as gateway;
 
 const NAME_PREFIX: &str = "mxc-wslc-gw-";
 const LEFTOVERS_REMOVED: &str = "Removed the built-in proxy left by an earlier run";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    Container,
-    Network,
-}
 
 /// One proxy's container and network names: `mxc-wslc-gw-<key>-<role>`,
 /// where the key is a fingerprint of the session name.
@@ -64,6 +56,10 @@ impl ProxyNames {
     fn for_session(session_name: &str) -> Self {
         Self::from_key(fingerprint(session_name))
     }
+}
+
+impl OwnedNames for ProxyNames {
+    const RECORD_SUFFIX: &'static str = ".json";
 
     fn from_key(key: String) -> Self {
         let name = |role: &str| {
@@ -78,39 +74,22 @@ impl ProxyNames {
         }
     }
 
-    /// In delete order: a network can't be deleted while a container is attached.
-    fn resources(&self) -> [(Kind, &CStr); 4] {
-        [
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn resources(&self) -> Vec<(Kind, &CStr)> {
+        vec![
             (Kind::Container, self.workload.as_c_str()),
             (Kind::Container, self.gateway.as_c_str()),
             (Kind::Network, self.internal.as_c_str()),
             (Kind::Network, self.egress.as_c_str()),
         ]
     }
-
-    fn all(&self) -> Vec<String> {
-        self.resources()
-            .iter()
-            .map(|(_, name)| name.to_string_lossy().into_owned())
-            .collect()
-    }
-}
-
-/// 16 hex digits of SHA-256.
-fn fingerprint(text: &str) -> String {
-    Sha256::digest(text.as_bytes())[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn is_fingerprint(text: &str) -> bool {
-    text.len() == 16 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 const EGRESS_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 0);
 const INTERNAL_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 0);
-const SUBNET_PREFIX_LENGTH: u8 = 24;
 const GATEWAY_EGRESS_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 2);
 const GATEWAY_WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 254);
 /// Pinned so the gateway knows where to relay port mappings.
@@ -531,30 +510,6 @@ fn render_policy(
     }
 }
 
-const fn in_addr_of(ip: Ipv4Addr) -> IN_ADDR {
-    let [s_b1, s_b2, s_b3, s_b4] = ip.octets();
-    in_addr {
-        S_un: in_addr__bindgen_ty_1 {
-            S_un_b: in_addr__bindgen_ty_1__bindgen_ty_1 {
-                s_b1,
-                s_b2,
-                s_b3,
-                s_b4,
-            },
-        },
-    }
-}
-
-fn network(name: &CStr, address: *const IN_ADDR) -> WslcContainerNetwork {
-    WslcContainerNetwork {
-        name: name.as_ptr(),
-        aliases: ptr::null(),
-        aliasCount: 0,
-        ipv4Address: address,
-        ipv6Address: ptr::null(),
-    }
-}
-
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -622,34 +577,6 @@ unsafe fn image_present(
     }))
 }
 
-unsafe fn create_network(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    name: &CStr,
-    subnet: Ipv4Addr,
-    internal: bool,
-) -> Result<(), ScriptResponse> {
-    let mut settings = std::mem::zeroed::<WslcNetworkSettings>();
-    settings.name = name.as_ptr();
-    settings.flags = WslcNetworkFlags::WSLC_NETWORK_FLAG_ENABLE_IPV4;
-    if internal {
-        settings.flags |= WslcNetworkFlags::WSLC_NETWORK_FLAG_INTERNAL;
-    }
-    settings.ipv4PrefixLength = SUBNET_PREFIX_LENGTH;
-    settings.ipv4Subnet = in_addr_of(subnet);
-    let mut err_msg = CoTaskMemPWSTR::null();
-    let hr =
-        sdk.WslcCreateSessionNetwork(session, &settings, ptr::null_mut(), err_msg.as_mut_ptr());
-    if hr != S_OK {
-        return Err(sdk_error(
-            &format!("Could not create network {}", name.to_string_lossy()),
-            hr,
-            &err_msg.to_string_lossy(),
-        ));
-    }
-    Ok(())
-}
-
 /// Delete every proxy recorded for the store. Call once a session has
 /// opened the store and before starting a proxy: a store admits one live
 /// session, so anything recorded then was left by a run that ended without
@@ -665,83 +592,23 @@ pub(crate) unsafe fn sweep_leftovers(
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
     let records = StoreRecords::open(store_path).map_err(host_error)?;
-    let mut removed = false;
-    let mut errors = Vec::new();
-    for key in records.keys().map_err(host_error)? {
-        match remove_recorded(sdk, session, &records, &ProxyNames::from_key(key)) {
-            Ok(deleted) => removed |= deleted,
-            Err(e) => errors.push(e),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(host_error(format!(
-            "could not remove the built-in proxy left by an earlier run: {}",
-            errors.join(" ")
-        )));
-    }
+    let removed = session_resources::remove_all_recorded::<ProxyNames>(sdk, session, &records)
+        .map_err(|e| {
+            host_error(format!(
+                "could not remove the built-in proxy left by an earlier run: {e}"
+            ))
+        })?;
     if removed {
         let _ = writeln!(logger, "[WSLC] {LEFTOVERS_REMOVED}");
         logger.warning_line(&format!("WARNING: WSLc: {LEFTOVERS_REMOVED}"));
     }
-    Ok(())
-}
 
-/// Cleanup outcome: whether anything was deleted, and what failed.
-#[derive(Debug, Default, PartialEq)]
-struct Removal {
-    removed: bool,
-    remaining: Vec<String>,
-    errors: Vec<String>,
-}
-
-/// Try every owned resource, even after a failure, so one stuck resource
-/// doesn't strand the rest.
-fn remove_each(
-    resources: &[(Kind, &CStr)],
-    owned: &[String],
-    mut delete: impl FnMut(Kind, &CStr) -> Result<bool, String>,
-) -> Removal {
-    let mut removal = Removal::default();
-    for &(kind, name) in resources {
-        let name_text = name.to_string_lossy();
-        if !owned.iter().any(|owned| *owned == name_text) {
-            continue;
-        }
-        match delete(kind, name) {
-            Ok(deleted) => removal.removed |= deleted,
-            Err(e) => {
-                removal.remaining.push(name_text.into_owned());
-                removal.errors.push(e);
-            }
-        }
-    }
-    removal
-}
-
-/// Delete what the proxy's record lists, keeping any failures recorded.
-/// Returns whether anything was deleted.
-unsafe fn remove_recorded(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    records: &StoreRecords,
-    names: &ProxyNames,
-) -> Result<bool, String> {
-    let owned = records.read(names)?;
-    let removal = remove_each(&names.resources(), &owned, |kind, name| {
-        delete_resource(sdk, session, kind, name)
-    });
-    let mut errors = removal.errors;
-    if let Err(e) = records.write(names, &removal.remaining) {
-        errors.push(e);
-    }
-    if errors.is_empty() {
-        return Ok(removal.removed);
-    }
-    Err(format!(
-        "{}. {}",
-        errors.join("; "),
-        records.manual_cleanup(names, &removal.remaining)
-    ))
+    // A daemon's leftover sandbox network can hold one of the proxy's subnets.
+    sandbox_network::remove_leftovers(sdk, session, &records, logger).map_err(|e| {
+        host_error(format!(
+            "could not remove the sandbox networks left by an earlier daemon: {e}"
+        ))
+    })
 }
 
 /// Refuse proxy names that exist without a record. They're from a lost
@@ -757,22 +624,24 @@ unsafe fn refuse_unrecorded(
         return Err(host_error(format!(
             "the image store at {} already has a built-in proxy for this session, \
              recorded in {}",
-            records.store,
+            records.store(),
             record.display()
         )));
     }
-    let recorded = records.all_recorded().map_err(host_error)?;
+    let recorded = records.all_recorded::<ProxyNames>().map_err(host_error)?;
     let unrecorded = |kind: &str, name: &str| {
         host_error(format!(
             "the image store at {} has a {kind} named {name} that MXC can't prove it created \
              (no ownership record lists it), so MXC won't delete it; delete it from the store \
              by hand or set a different wslc.storagePath",
-            records.store
+            records.store()
         ))
     };
-    for network in network_names(sdk, session).map_err(host_error)? {
-        if network.starts_with(NAME_PREFIX) && !recorded.contains(&network) {
-            return Err(unrecorded("network", &network));
+    for network in
+        session_resources::list_networks(sdk, session).map_err(|e| host_error(e.to_string()))?
+    {
+        if network.name.starts_with(NAME_PREFIX) && !recorded.contains(&network.name) {
+            return Err(unrecorded("network", &network.name));
         }
     }
     for (kind, name) in names.resources() {
@@ -787,223 +656,6 @@ unsafe fn refuse_unrecorded(
     Ok(())
 }
 
-unsafe fn delete_resource(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    kind: Kind,
-    name: &CStr,
-) -> Result<bool, String> {
-    let mut err_msg = CoTaskMemPWSTR::null();
-    match kind {
-        Kind::Container => {
-            let Some(container) = open_container(sdk, session, name)? else {
-                return Ok(false);
-            };
-            let hr = sdk.WslcDeleteContainer(
-                container.as_raw(),
-                WslcDeleteContainerFlags::WSLC_DELETE_CONTAINER_FLAG_FORCE,
-                err_msg.as_mut_ptr(),
-            );
-            match hr {
-                S_OK => Ok(true),
-                WSLC_E_CONTAINER_NOT_FOUND => Ok(false),
-                _ => Err(failure("delete container", name, hr, &err_msg)),
-            }
-        }
-        Kind::Network => {
-            let hr = sdk.WslcDeleteSessionNetwork(session, name.as_ptr(), err_msg.as_mut_ptr());
-            match hr {
-                S_OK => Ok(true),
-                WSLC_E_NETWORK_NOT_FOUND => Ok(false),
-                _ => Err(failure("delete network", name, hr, &err_msg)),
-            }
-        }
-    }
-}
-
-unsafe fn network_names(sdk: &WslcSdk, session: WslcSession) -> Result<Vec<String>, String> {
-    let mut networks: *mut WslcNetworkInfo = ptr::null_mut();
-    let mut count: u32 = 0;
-    let mut err_msg = CoTaskMemPWSTR::null();
-    let hr = sdk.WslcListSessionNetworks(session, &mut networks, &mut count, err_msg.as_mut_ptr());
-    if hr != S_OK {
-        return Err(format!(
-            "could not list networks: {} (HRESULT 0x{:08X})",
-            err_msg.to_string_lossy(),
-            hr as u32
-        ));
-    }
-    if networks.is_null() {
-        return Ok(Vec::new());
-    }
-    let names = std::slice::from_raw_parts(networks, count as usize)
-        .iter()
-        .map(|info| {
-            let bytes =
-                std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            String::from_utf8_lossy(&bytes[..end]).into_owned()
-        })
-        .collect();
-    windows::Win32::System::Com::CoTaskMemFree(Some(networks as *const std::ffi::c_void));
-    Ok(names)
-}
-
-/// The proxies MXC created in one image store, recorded under
-/// `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>`. Each
-/// `<key>.json` lists the names one proxy created.
-struct StoreRecords {
-    /// As configured, for messages.
-    store: String,
-    /// `None` only while dropping.
-    dir: Option<LockedDirectoryPath>,
-}
-
-impl Drop for StoreRecords {
-    fn drop(&mut self) {
-        if let Some(dir) = self.dir.take() {
-            let path = dir.path().to_path_buf();
-            drop(dir);
-            // Fails, leaving it in place, while any record remains.
-            let _ = std::fs::remove_dir(path);
-        }
-    }
-}
-
-impl StoreRecords {
-    fn dir(&self) -> &Path {
-        self.dir.as_ref().expect("set until drop").path()
-    }
-
-    fn open(store_path: &str) -> Result<Self, String> {
-        // Different spellings of one store must share its records.
-        let store = std::fs::canonicalize(store_path)
-            .map_err(|e| format!("could not resolve the image store path {store_path}: {e}"))?;
-        let store_key = fingerprint(&store.to_string_lossy().to_lowercase());
-        let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or(
-            "could not find the built-in proxy's ownership records: LOCALAPPDATA is not set",
-        )?);
-        let components = ["Microsoft", "MXC", "wslc", "stores", &store_key];
-        let dir_path: PathBuf = components
-            .iter()
-            .fold(local_app_data.clone(), |p, c| p.join(c));
-        let failed = |e: &dyn std::fmt::Display| {
-            format!(
-                "could not open the built-in proxy's ownership records in {}: {e}",
-                dir_path.display()
-            )
-        };
-        let dir = lock_owner_only_directory_path(&local_app_data, &components.map(OsStr::new), 2)
-            .map_err(|e| failed(&e))?;
-        // An elevated run would otherwise leave them owned by Administrators,
-        // which the user's other runs reject.
-        for private in dir.path().ancestors().take(3) {
-            set_current_user_owner(private).map_err(|e| failed(&e))?;
-        }
-        Ok(Self {
-            store: store_path.to_string(),
-            dir: Some(dir),
-        })
-    }
-
-    fn path(&self, names: &ProxyNames) -> PathBuf {
-        self.dir().join(format!("{}.json", names.key))
-    }
-
-    /// The keys of the proxies recorded in this store.
-    fn keys(&self) -> Result<Vec<String>, String> {
-        let failed = |e: std::io::Error| format!("could not list {}: {e}", self.dir().display());
-        let mut keys = Vec::new();
-        for entry in std::fs::read_dir(self.dir()).map_err(failed)? {
-            let file_name = entry.map_err(failed)?.file_name();
-            if let Some(key) = file_name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".json"))
-                .filter(|key| is_fingerprint(key))
-            {
-                keys.push(key.to_string());
-            }
-        }
-        keys.sort();
-        Ok(keys)
-    }
-
-    fn all_recorded(&self) -> Result<Vec<String>, String> {
-        let mut recorded = Vec::new();
-        for key in self.keys()? {
-            recorded.extend(self.read(&ProxyNames::from_key(key))?);
-        }
-        Ok(recorded)
-    }
-
-    fn read(&self, names: &ProxyNames) -> Result<Vec<String>, String> {
-        let path = self.path(names);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(format!(
-                    "could not read {}: {e}. {}",
-                    path.display(),
-                    self.manual_cleanup(names, &names.all())
-                ))
-            }
-        };
-        recorded_names(&text, names).map_err(|e| {
-            format!(
-                "{} is not a valid ownership record ({e}). {}",
-                path.display(),
-                self.manual_cleanup(names, &names.all())
-            )
-        })
-    }
-
-    /// Record `remaining`, or delete the record once nothing remains.
-    fn write(&self, names: &ProxyNames, remaining: &[String]) -> Result<(), String> {
-        let path = self.path(names);
-        let failed =
-            |e: &dyn std::fmt::Display| format!("could not update {}: {e}", path.display());
-        if remaining.is_empty() {
-            return match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(failed(&e)),
-                _ => Ok(()),
-            };
-        }
-        let mut file = tempfile::NamedTempFile::new_in(self.dir()).map_err(|e| failed(&e))?;
-        serde_json::to_writer(&mut file, remaining).map_err(|e| failed(&e))?;
-        file.persist(&path).map_err(|e| failed(&e))?;
-        Ok(())
-    }
-
-    /// How to finish by hand a cleanup MXC couldn't.
-    fn manual_cleanup(&self, names: &ProxyNames, remaining: &[String]) -> String {
-        let record = self.path(names);
-        if remaining.is_empty() {
-            return format!("To clean up by hand, delete {}", record.display());
-        }
-        format!(
-            "To clean up by hand, delete {} from the image store at {}, then delete {}",
-            remaining.join(", "),
-            self.store,
-            record.display()
-        )
-    }
-}
-
-/// The recorded names that belong to `names`. Anything else is never deleted.
-fn recorded_names(text: &str, names: &ProxyNames) -> Result<Vec<String>, serde_json::Error> {
-    let recorded: Vec<String> = serde_json::from_str(text)?;
-    Ok(names
-        .all()
-        .into_iter()
-        .filter(|name| recorded.contains(name))
-        .collect())
-}
-
-fn host_error(message: String) -> ScriptResponse {
-    WslcError::Host(message).into_response()
-}
-
 fn create_container_error(hr: HRESULT, sdk_msg: &str) -> WslcError {
     if hr == WSLC_E_CAPABILITY_ADDITIONS_DISABLED {
         return WslcError::Unavailable(
@@ -1016,33 +668,6 @@ fn create_container_error(hr: HRESULT, sdk_msg: &str) -> WslcError {
         "Could not create the built-in proxy's container",
         hr,
         sdk_msg,
-    )
-}
-
-pub(crate) unsafe fn open_container(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    name: &CStr,
-) -> Result<Option<WslcContainerGuard>, String> {
-    let mut container: WslcContainer = ptr::null_mut();
-    let mut err_msg = CoTaskMemPWSTR::null();
-    let hr = sdk.WslcOpenContainer(session, name.as_ptr(), &mut container, err_msg.as_mut_ptr());
-    match hr {
-        S_OK => Ok(Some(WslcContainerGuard::from_raw(
-            container,
-            sdk.release_container_fn(),
-        ))),
-        WSLC_E_CONTAINER_NOT_FOUND => Ok(None),
-        _ => Err(failure("open container", name, hr, &err_msg)),
-    }
-}
-
-fn failure(action: &str, name: &CStr, hr: HRESULT, err_msg: &CoTaskMemPWSTR) -> String {
-    format!(
-        "could not {action} {}: {} (HRESULT 0x{:08X})",
-        name.to_string_lossy(),
-        err_msg.to_string_lossy(),
-        hr as u32
     )
 }
 
@@ -1342,53 +967,14 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_tries_every_owned_resource_after_a_failure() {
-        let names = ProxyNames::for_session("session");
-        let owned = [&names.workload, &names.internal, &names.egress]
-            .map(|name| name.to_string_lossy().into_owned());
-        let mut attempted = Vec::new();
-        let removal = remove_each(&names.resources(), &owned, |kind, name| {
-            attempted.push(name.to_string_lossy().into_owned());
-            match kind {
-                Kind::Container => Err("busy".to_string()),
-                Kind::Network => Ok(name == names.egress.as_c_str()),
-            }
-        });
-        assert_eq!(attempted, owned);
-        assert_eq!(
-            removal,
-            Removal {
-                removed: true,
-                remaining: vec![owned[0].clone()],
-                errors: vec!["busy".to_string()],
-            }
-        );
-    }
-
-    #[test]
-    fn records_honor_only_that_proxys_names() {
+    fn proxy_names_share_the_prefix_and_the_session_key() {
         let names = ProxyNames::for_session("session");
         let other = ProxyNames::for_session("other session");
-        assert!(is_fingerprint(&names.key));
+        assert!(session_resources::is_fingerprint(&names.key));
         assert_ne!(names.key, other.key);
         assert!(names
             .all()
             .iter()
             .all(|name| name.starts_with(&format!("{NAME_PREFIX}{}-", names.key))));
-
-        let text = serde_json::to_string(&[
-            names.all()[3].clone(),
-            other.all()[0].clone(),
-            "unrelated".to_string(),
-            names.all()[0].clone(),
-        ])
-        .unwrap();
-        assert_eq!(
-            recorded_names(&text, &names).unwrap(),
-            [names.all()[0].clone(), names.all()[3].clone()]
-        );
-        assert!(recorded_names("not json", &names).is_err());
-        assert!(!is_fingerprint("0123456789ABCDEF"));
-        assert!(!is_fingerprint("0123456789abcde"));
     }
 }

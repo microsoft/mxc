@@ -391,6 +391,31 @@ This containment correction does not change request JSON or add SDK fields.
 See [Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers)
 for prerequisites and ownership semantics.
 
+### Security-servicing exception: WSLc lifecycle bridged networking
+
+Bridged WSLc container lifecycle sandboxes in one session shared WSLC's
+default `bridge` network, so a sandbox could connect to every other bridged
+sandbox in that session, including sandboxes other callers placed in the
+implicit session. Each bridged sandbox now joins a network of its own, so V1
+callers lose container-to-container traffic between sandboxes. A sandbox can
+still reach another sandbox's mapped ports through the session VM. Outbound
+access, DNS, and port mappings from Windows are unchanged. See
+[Bridged networking](../../backends/wslc/wslc-state-aware.md#bridged-networking).
+
+No V1 SDK can name a session, so every bridged sandbox a V1 caller creates
+shares the implicit session, and these limits apply to it:
+
+- A session holds at most 256 bridged sandboxes.
+- A sandbox can't reach hosts outside the session VM at addresses in its
+  session's sandbox networks, which are allocated from `10.231.0.0/16`.
+- Bridged sandboxes need WSL 3.0.5, MXC's documented minimum. On an older
+  runtime that ran them before, a bridged provision now fails with
+  `backend_unavailable`.
+
+This security-servicing exception applies within V1 and does not require a new
+versioned API surface. The daemon control protocol moved to version 12, so a
+client refuses a daemon that would still use the shared network.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the

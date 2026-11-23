@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including dry runs. Policy paths are not resolved against `process.cwd`.
   See [filesystem policy](../../docs/schema.md#filesystem-policy).
 
+- WSLC container lifecycle sandboxes with bridged networking each join a
+  network of their own, so a sandbox can no longer connect to another
+  sandbox's container address in the same session. Mapped ports stay
+  reachable from other containers in the session, and outbound access, DNS,
+  and port mappings from Windows are unchanged. A session now holds at most
+  256 bridged sandboxes, a sandbox can't reach hosts at addresses in its
+  session's networks (allocated from `10.231.0.0/16`), and bridged sandboxes
+  need WSL 3.0.5. See
+  [bridged networking](../../docs/backends/wslc/wslc-state-aware.md#bridged-networking).
+
 - Reading a process's `warnings` or output metadata no longer corrupts the
   native heap and crashes Node when the native side returns a value.
 
