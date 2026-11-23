@@ -9,7 +9,7 @@ use super::config_deserialize::escape_diagnostic_text;
 use super::worker_gate::WorkerGate;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_PROBE_WORKERS: usize = 16;
+pub(crate) const MAX_PROBE_WORKERS: usize = 16;
 
 #[cfg(test)]
 #[path = "filesystem_probe_launch_tests.rs"]

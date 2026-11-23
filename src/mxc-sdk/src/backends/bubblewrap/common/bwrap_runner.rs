@@ -988,17 +988,19 @@ impl BwrapChild {
         self.child.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn cleanup(&mut self, logger: &mut Logger) {
+    fn cleanup(&mut self, logger: &mut Logger) -> Result<(), String> {
         // Stopping the supervisor closes the descriptor the monitor watches, so
         // disarming first is what keeps a normal teardown from reading as a
         // provider that died.
         self.monitor.take();
 
-        // Dropping the watchdog stops the sandbox before its network is torn down.
-        self.watchdog.take();
+        // Slirp is the sandbox's only route out, so stopping it still cuts off a sandbox the
+        // watchdog failed to stop.
+        let stopped = self.watchdog.take().map_or(Ok(()), SandboxWatchdog::stop);
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
+        stopped
     }
 }
 
@@ -1018,13 +1020,13 @@ impl BubblewrapSandboxProcess {
         }
     }
 
-    fn run_teardown(&mut self) {
+    fn run_teardown(&mut self) -> Result<(), String> {
         if self.teardown_done {
-            return;
+            return Ok(());
         }
         self.teardown_done = true;
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        self.inner.cleanup(&mut logger);
+        self.inner.cleanup(&mut logger)
     }
 
     fn provider_lost(&self) -> bool {
@@ -1351,7 +1353,15 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             pty.finish_native_bridge();
         }
         cancel_and_join_discard(pty_thread, &pty_canceller);
-        self.run_teardown();
+        if let Err(error) = self.run_teardown() {
+            self.inner.termination_error = Some(error.clone());
+            return Err(match result {
+                Ok(_) => std::io::Error::other(error),
+                Err(previous) => {
+                    std::io::Error::new(previous.kind(), format!("{previous}; {error}"))
+                }
+            });
+        }
         result
     }
 }
@@ -1367,7 +1377,7 @@ impl Drop for BubblewrapSandboxProcess {
         // a zombie.
         let _ = self.kill();
         let _ = self.inner.lock_child().wait();
-        self.run_teardown();
+        let _ = self.run_teardown();
     }
 }
 

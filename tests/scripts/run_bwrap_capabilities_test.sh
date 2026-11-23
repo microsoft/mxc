@@ -213,20 +213,34 @@ def descendants(parent):
     return found
 
 
+def mounts():
+    entries = set()
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields, filesystem = line.split(" - ", 1)
+        mount_point = fields.split()[4]
+        filesystem_type, source = filesystem.split()[:2]
+        entries.add((mount_point, filesystem_type, source))
+    return entries
+
+
 def separation_problem(executor, namespaces, mode):
     caller = os.readlink("/proc/self/ns/user")
-    supervisors, workloads = [], []
+    caller_mount_namespace = os.readlink("/proc/self/ns/mnt")
+    supervisors, relays, workloads = [], [], []
     for pid in descendants(executor):
         try:
             argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
             userns = os.readlink(f"/proc/{pid}/ns/user")
             netns = os.readlink(f"/proc/{pid}/ns/net")
+            mount_namespace = os.readlink(f"/proc/{pid}/ns/mnt")
             status = dict(line.split(":", 1)
                           for line in Path(f"/proc/{pid}/status").read_text().splitlines())
         except OSError:
             continue
         if b"mxc-bwrap-proxy-supervisor" in argv:
             supervisors.append((pid, userns, status["Uid"].split()))
+        elif os.path.basename(argv[0]) == b"slirp4netns":
+            relays.append((pid, mount_namespace, status))
         elif [userns, netns] == namespaces:
             workloads.append((pid, status["Uid"].split(), status["Gid"].split()))
     if not supervisors:
@@ -234,6 +248,18 @@ def separation_problem(executor, namespaces, mode):
     for pid, userns, uids in supervisors:
         if userns != caller or uids != ["0"] * 4:
             return f"supervisor {pid} runs as {uids} in {userns}, not as root in {caller}"
+    if not relays:
+        return "no live slirp4netns process was found"
+    CAP_NET_BIND_SERVICE = 1 << 10
+    SECCOMP_FILTER_MODE = "2"
+    for pid, mount_namespace, status in relays:
+        retained = [name for name in ("CapPrm", "CapEff", "CapBnd")
+                    if int(status[name].strip(), 16) & ~CAP_NET_BIND_SERVICE]
+        confinement = (status["NoNewPrivs"].strip(), status["Seccomp"].strip())
+        if retained or confinement != ("1", SECCOMP_FILTER_MODE) \
+                or mount_namespace == caller_mount_namespace:
+            return (f"slirp4netns {pid} kept host authority: retained {retained}, "
+                    f"NoNewPrivs/Seccomp {confinement}, mount namespace {mount_namespace}")
     if namespaces[0] == caller:
         return "the workload shares the caller's user namespace"
     if not workloads:
@@ -242,8 +268,9 @@ def separation_problem(executor, namespaces, mode):
         if uids != [str(uid_base + 1000)] * 4 or gids != [str(gid_base + 1000)] * 4:
             return f"workload process {pid} runs as host {uids}/{gids}"
     print(f"PASS: {mode} supervisor stays root in the caller's user namespace {caller}; "
-          f"workload runs in {namespaces[0]} as host {uid_base + 1000}:{gid_base + 1000}",
-          flush=True)
+          f"slirp4netns keeps only CAP_NET_BIND_SERVICE under seccomp in its own mount "
+          f"namespace; workload runs in {namespaces[0]} as host "
+          f"{uid_base + 1000}:{gid_base + 1000}", flush=True)
     return None
 
 
@@ -368,6 +395,7 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
         )
         return result.returncode, result.stdout + result.stderr
 
+    host_mounts = mounts()
     commands = {}
     for mode in ("isolated", "firewall", "proxy"):
         address, port = "10.0.2.2", proxy_port
@@ -462,6 +490,11 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-capabilities-") as directory,
                     or "WORKLOAD_STARTED" in result.stdout.splitlines():
                 raise AssertionError(f"root-only grant was not rejected before execution:\n{output}")
             print(f"PASS: rejected mapped-identity {field} grant to {path.name}", flush=True)
+
+    removed = sorted(host_mounts - mounts())
+    if removed:
+        print(f"FAIL: launches removed host mounts: {removed}", flush=True)
+        failed.append("host mounts")
 
 if failed:
     sys.exit(1)

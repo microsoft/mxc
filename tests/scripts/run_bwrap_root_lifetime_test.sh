@@ -20,7 +20,9 @@ for tool in bwrap python3 setpriv slirp4netns unshare nsenter ip iptables ip6tab
     fi
 done
 
-python3 - "$LXC_EXEC" <<'PY'
+program="$(mktemp)"
+trap 'rm -f "$program"' EXIT
+cat > "$program" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -45,34 +47,20 @@ ENDINGS = {
 }
 
 
-def processes():
-    return {int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()}
-
-
-def running_as(uid, excluded):
+def running_as(uid):
     found = []
-    for pid in processes() - excluded:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
         try:
             status = dict(line.split(":", 1)
-                          for line in Path(f"/proc/{pid}/status").read_text().splitlines())
-            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+                          for line in (entry / "status").read_text().splitlines())
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ")
         except (OSError, ValueError):
             continue
         if int(status["Uid"].split()[0]) == uid and not status["State"].strip().startswith("Z"):
-            found.append((pid, command.decode(errors="replace").strip()))
+            found.append(f"{entry.name} {command.decode(errors='replace').strip()}")
     return found
-
-
-def stop_leftovers(uid, excluded):
-    deadline = time.monotonic() + 10
-    while (left := running_as(uid, excluded)) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    for pid, _ in left:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    return [f"{pid} {command}" for pid, command in left]
 
 
 def host_uid(executor, log_path):
@@ -88,8 +76,9 @@ def host_uid(executor, log_path):
     return None
 
 
-def run(directory, mode, ending, prefix):
+def run(lxc_exec, directory, mode, ending, caller):
     command, timeout = ENDINGS[ending]
+    prefix = WITHOUT_KILL if caller == "without-kill" else []
     config = {
         "version": "1.0.0",
         "containment": "bubblewrap",
@@ -103,13 +92,12 @@ def run(directory, mode, ending, prefix):
         config["network"] = {
             "egress": {"default": "deny", "allow": [{"to": [{"cidr": "192.0.2.1/32"}]}]},
         }
-    config_path = directory / f"{mode}-{ending}.json"
+    config_path = directory / f"{mode}-{ending}-{caller}.json"
     config_path.write_text(json.dumps(config))
-    log_path = directory / f"{mode}-{ending}.log"
-    before = processes()
+    log_path = config_path.with_suffix(".log")
     with log_path.open("wb") as log:
         executor = subprocess.Popen(
-            [*prefix, sys.argv[1], "--experimental", str(config_path)],
+            [*prefix, lxc_exec, "--experimental", str(config_path)],
             stdout=log, stderr=subprocess.STDOUT,
         )
     problem = None
@@ -130,13 +118,25 @@ def run(directory, mode, ending, prefix):
         executor.kill()
         executor.wait()
     if uid is not None:
-        left = stop_leftovers(uid, before)
+        deadline = time.monotonic() + 10
+        while (left := running_as(uid)) and time.monotonic() < deadline:
+            time.sleep(0.1)
         if left and problem is None:
             problem = f"processes kept running as host UID {uid}:\n  " + "\n  ".join(left)
     if problem:
         return f"{problem}\n{log_path.read_text(errors='replace')}"
     return None
 
+
+if sys.argv[1] == "--case":
+    assert os.getpid() == 1, ("the case must run as PID 1 of its own PID namespace, so it sees "
+                              "only its own processes and the kernel ends them when it exits")
+    lxc_exec, directory, mode, ending, caller = sys.argv[2:7]
+    problem = run(lxc_exec, Path(directory), mode, ending, caller)
+    if problem:
+        print(problem, flush=True)
+        sys.exit(1)
+    sys.exit(0)
 
 status = subprocess.run(WITHOUT_KILL + ["cat", "/proc/self/status"],
                         capture_output=True, text=True, check=True).stdout
@@ -147,13 +147,17 @@ assert not any(int(line.split()[1], 16) & CAP_KILL
 
 failed = []
 with tempfile.TemporaryDirectory(prefix="mxc-bwrap-root-lifetime-") as directory:
-    for prefix, caller in (((), "root"), (WITHOUT_KILL, "root without CAP_KILL")):
+    for caller, description in (("with-kill", "root"), ("without-kill", "root without CAP_KILL")):
         for mode in ("isolated", "firewall"):
             for ending in ENDINGS:
-                name = f"{mode}, {ending}, {caller}"
-                problem = run(Path(directory), mode, ending, prefix)
-                if problem:
-                    print(f"FAIL: {name}: {problem}", flush=True)
+                name = f"{mode}, {ending}, {description}"
+                result = subprocess.run(
+                    ["unshare", "--pid", "--fork", "--mount-proc", "--", sys.executable,
+                     __file__, "--case", sys.argv[1], directory, mode, ending, caller],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if result.returncode != 0:
+                    print(f"FAIL: {name}: {result.stdout}{result.stderr}", flush=True)
                     failed.append(name)
                 else:
                     print(f"PASS: {name}", flush=True)
@@ -161,3 +165,4 @@ if failed:
     sys.exit(1)
 print("Bubblewrap root lifetime test complete.")
 PY
+python3 "$program" "$LXC_EXEC"

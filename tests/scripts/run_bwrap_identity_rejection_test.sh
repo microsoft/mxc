@@ -12,7 +12,7 @@ if [ ! -x "$LXC_EXEC" ]; then
     echo "FAIL: lxc-exec not found at $LXC_EXEC." >&2
     exit 1
 fi
-for tool in unshare mount umount python3 getent bwrap; do
+for tool in unshare nsenter setpriv mount umount python3 getent bwrap; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "SKIPPED: $tool is required for root identity rejection tests."
         exit 77
@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # Fixed account databases keep every case independent of the host's accounts.
 PASSWD = "root:x:0:0:root:/root:/bin/sh\n"
@@ -65,8 +66,8 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-identity-rejections-") as dir
         (etc / "passwd").write_text(passwd)
         (etc / "group").write_text(group)
 
-    def expect(name, diagnostic, environment=None):
-        result = subprocess.run([sys.argv[1], str(config)], env=environment,
+    def expect(name, diagnostic, environment=None, prefix=(), executor=sys.argv[1]):
+        result = subprocess.run([*prefix, executor, str(config)], env=environment,
                                 capture_output=True, text=True, timeout=30)
         output = result.stdout + result.stderr
         started = "WORKLOAD_STARTED" in result.stdout.splitlines()
@@ -153,6 +154,36 @@ with tempfile.TemporaryDirectory(prefix="mxc-bwrap-identity-rejections-") as dir
             shim.write_text(f"#!/bin/sh\n{body}\n")
             shim.chmod(0o755)
             expect(name, diagnostic, environment)
+
+        configure()
+
+        # A copy everyone can run, so shifted and non-root identities reach MXC's checks.
+        executor = root / "lxc-exec"
+        shutil.copy2(sys.argv[1], executor)
+        for path, mode in ((root, 0o755), (executor, 0o755), (config, 0o644)):
+            path.chmod(mode)
+        mixed = "root launches require both the real and effective UID to be 0"
+        for name, ids in (("real root, effective UID 1000", ["--ruid", "0", "--euid", "1000"]),
+                          ("real UID 1000, effective root", ["--ruid", "1000", "--euid", "0"])):
+            expect(name, mixed, prefix=["setpriv", *ids, "--"], executor=executor)
+
+        caller_namespace = os.readlink("/proc/self/ns/user")
+        for name, mapping in (("shifted user namespace", "0 100000 65536\n"),
+                              ("single-ID user namespace", "0 0 1\n")):
+            holder = subprocess.Popen(["unshare", "--user", "--", "sleep", "60"])
+            try:
+                deadline = time.monotonic() + 10
+                while os.readlink(f"/proc/{holder.pid}/ns/user") == caller_namespace:
+                    assert time.monotonic() < deadline, "unshare did not create a user namespace"
+                    time.sleep(0.01)
+                for kind in ("uid", "gid"):
+                    Path(f"/proc/{holder.pid}/{kind}_map").write_text(mapping)
+                expect(name, "root launches require an unshifted host user namespace",
+                       prefix=["nsenter", "--user", f"--target={holder.pid}", "--"],
+                       executor=executor)
+            finally:
+                holder.kill()
+                holder.wait()
     finally:
         subprocess.run(["umount", "--no-mtab", "--internal-only", "/etc"], check=True)
 print("Bubblewrap root identity rejection test complete.")

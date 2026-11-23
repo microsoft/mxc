@@ -308,13 +308,18 @@ impl RootIdentity {
             format!("Bubblewrap: could not start the sandbox watchdog: {error}")
         })?;
         match helper.result() {
-            Ok(_) => Ok(SandboxWatchdog { helper }),
+            Ok(_) => Ok(SandboxWatchdog { helper, uid }),
             Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => Err(
                 "Bubblewrap: root launches require Linux 5.3 or later; MXC needs pidfd_open to \
                  stop the sandbox when the run ends or MXC exits. On this kernel, run MXC as a \
                  non-root user"
                     .into(),
             ),
+            Err(error) if error.raw_os_error().is_some() => Err(format!(
+                "Bubblewrap: could not watch the sandbox ({error}); root launches need \
+                 pidfd_open and pidfd_send_signal to stop the sandbox when the run ends or MXC \
+                 exits"
+            )),
             Err(error) => Err(format!("Bubblewrap: could not watch the sandbox: {error}")),
         }
     }
@@ -362,8 +367,15 @@ pub(crate) fn open_as_workload(
 }
 
 pub(crate) fn read_as_workload(identity: Option<RootIdentity>, path: &Path) -> io::Result<String> {
+    let mut file = open_as_workload(identity, path, libc::O_NONBLOCK)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
     let mut contents = String::new();
-    open_as_workload(identity, path, 0)?.read_to_string(&mut contents)?;
+    file.read_to_string(&mut contents)?;
     Ok(contents)
 }
 
@@ -570,13 +582,14 @@ impl IdentityChild {
                 let entered = close_child_descriptors(fd)
                     .and_then(|()| arm_parent_death(parent_pid))
                     .and_then(|()| enter_identity(&operation, parent_pid));
-                match entered {
+                let status = match entered {
                     Ok(()) => run_child_operation(&operation, fd),
                     Err(setup_error) => {
                         send_reply(fd, [setup_error, 0], None);
+                        0
                     }
-                }
-                libc::_exit(0);
+                };
+                libc::_exit(status);
             }
             pid
         };
@@ -652,7 +665,7 @@ impl IdentityChild {
 
     fn finish(mut self) -> io::Result<()> {
         self.terminate();
-        self.reap()
+        self.reap().map(drop)
     }
 
     fn terminate(&self) {
@@ -662,14 +675,14 @@ impl IdentityChild {
         let _ = self.channel.shutdown(Shutdown::Both);
     }
 
-    fn reap(&mut self) -> io::Result<()> {
+    fn reap(&mut self) -> io::Result<libc::c_int> {
         loop {
             let mut status = 0;
 
             // SAFETY: this PID belongs to this helper and has not been reaped.
             if unsafe { libc::waitpid(self.pid, &mut status, 0) } >= 0 {
                 self.reaped = true;
-                return Ok(());
+                return Ok(status);
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
@@ -691,13 +704,36 @@ impl Drop for IdentityChild {
 
 pub(crate) struct SandboxWatchdog {
     helper: IdentityChild,
+    uid: u32,
+}
+
+impl SandboxWatchdog {
+    pub(crate) fn stop(mut self) -> Result<(), String> {
+        self.stop_sandbox()
+    }
+
+    fn stop_sandbox(&mut self) -> Result<(), String> {
+        // Closing the socket, not killing the helper, is what makes it stop the sandbox.
+        let _ = self.helper.channel.shutdown(Shutdown::Both);
+        match self.helper.reap() {
+            Ok(status) if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 => Ok(()),
+            Ok(_) => Err(format!(
+                "Bubblewrap: could not confirm that the sandbox stopped; its processes may still \
+                 be running as host UID {}",
+                self.uid
+            )),
+            Err(error) => Err(format!(
+                "Bubblewrap: could not wait for the sandbox watchdog: {error}"
+            )),
+        }
+    }
 }
 
 impl Drop for SandboxWatchdog {
     fn drop(&mut self) {
-        // Closing the socket, not killing the helper, is what makes it stop the sandbox.
-        let _ = self.helper.channel.shutdown(Shutdown::Both);
-        let _ = self.helper.reap();
+        if !self.helper.reaped {
+            let _ = self.stop_sandbox();
+        }
     }
 }
 
@@ -824,6 +860,9 @@ unsafe fn enter_identity(operation: &ChildOperation, parent: libc::pid_t) -> Res
     // The watchdog outlives MXC so that it can stop the sandbox after MXC exits.
     if !matches!(operation, ChildOperation::Watch { .. }) {
         arm_parent_death(parent)?;
+
+        // Root without CAP_KILL cannot signal this helper, so a stalled check must end it.
+        terminate_on_alarm()?;
     }
     let header = [LINUX_CAPABILITY_VERSION_3, 0];
     let capabilities = [0_u32; 6];
@@ -833,7 +872,21 @@ unsafe fn enter_identity(operation: &ChildOperation, parent: libc::pid_t) -> Res
     Ok(())
 }
 
-unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
+unsafe fn terminate_on_alarm() -> Result<(), i32> {
+    let mut alarm: libc::sigset_t = std::mem::zeroed();
+    let default: libc::sigaction = std::mem::zeroed();
+    if libc::sigemptyset(&mut alarm) != 0
+        || libc::sigaddset(&mut alarm, libc::SIGALRM) != 0
+        || libc::sigaction(libc::SIGALRM, &default, std::ptr::null_mut()) != 0
+        || libc::sigprocmask(libc::SIG_UNBLOCK, &alarm, std::ptr::null_mut()) != 0
+    {
+        return Err(*libc::__errno_location());
+    }
+    Ok(())
+}
+
+unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) -> libc::c_int {
+    let probe_seconds = PROBE_TIMEOUT.as_secs() as libc::c_uint;
     match operation {
         ChildOperation::Namespace => {
             if send_reply(socket, [0, 0], None) {
@@ -845,6 +898,7 @@ unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
         }
         ChildOperation::Access { paths, .. } => {
             for (path, mask) in paths {
+                libc::alarm(probe_seconds);
                 let error = match path {
                     Some(path) => check_access(path, *mask),
                     None => libc::EINVAL,
@@ -855,6 +909,7 @@ unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
             }
         }
         ChildOperation::Open { path, flags, .. } => {
+            libc::alarm(probe_seconds);
             let file = libc::open(
                 path.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOCTTY | flags,
@@ -868,20 +923,15 @@ unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
         ChildOperation::Watch {
             sandbox, launcher, ..
         } => {
-            let opened = open_process(*sandbox)
+            let watched = open_process(*sandbox)
+                .and_then(|sandbox| signal_process(sandbox, 0).map(|()| sandbox))
                 .and_then(|sandbox| open_process(*launcher).map(|launcher| (sandbox, launcher)));
-            match opened {
+            match watched {
                 Ok((sandbox, launcher)) => {
                     if send_reply(socket, [0, 0], None) {
                         wait_for_exit_or_disconnect(launcher, socket);
                     }
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        sandbox,
-                        libc::SIGKILL,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0_u32,
-                    );
+                    return if stop_process(sandbox) { 0 } else { 1 };
                 }
                 Err(error) => {
                     send_reply(socket, [0, error], None);
@@ -889,6 +939,7 @@ unsafe fn run_child_operation(operation: &ChildOperation, socket: libc::c_int) {
             }
         }
     }
+    0
 }
 
 unsafe fn open_process(pid: libc::pid_t) -> Result<libc::c_int, i32> {
@@ -898,6 +949,33 @@ unsafe fn open_process(pid: libc::pid_t) -> Result<libc::c_int, i32> {
     } else {
         Ok(pidfd as libc::c_int)
     }
+}
+
+unsafe fn signal_process(pidfd: libc::c_int, signal: libc::c_int) -> Result<(), i32> {
+    let result = libc::syscall(
+        libc::SYS_pidfd_send_signal,
+        pidfd,
+        signal,
+        std::ptr::null::<libc::siginfo_t>(),
+        0_u32,
+    );
+    if result != 0 {
+        Err(*libc::__errno_location())
+    } else {
+        Ok(())
+    }
+}
+
+unsafe fn stop_process(pidfd: libc::c_int) -> bool {
+    if matches!(signal_process(pidfd, libc::SIGKILL), Err(error) if error != libc::ESRCH) {
+        return false;
+    }
+    let mut exited = libc::pollfd {
+        fd: pidfd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    libc::poll(&mut exited, 1, PROBE_TIMEOUT.as_millis() as libc::c_int) == 1
 }
 
 unsafe fn wait_for_exit_or_disconnect(launcher: libc::c_int, socket: libc::c_int) {
@@ -1056,10 +1134,11 @@ mod tests {
         let helper = unsafe { libc::fork() };
         if helper == 0 {
             unsafe {
-                if close_child_descriptors(child.as_raw_fd()).is_ok() {
-                    run_child_operation(&operation, child.as_raw_fd());
-                }
-                libc::_exit(0);
+                let status = match close_child_descriptors(child.as_raw_fd()) {
+                    Ok(()) => run_child_operation(&operation, child.as_raw_fd()),
+                    Err(_) => 1,
+                };
+                libc::_exit(status);
             }
         }
         assert!(helper > 0, "{}", io::Error::last_os_error());
@@ -1069,25 +1148,43 @@ mod tests {
             reaped: false,
         };
         helper.result().unwrap();
-        SandboxWatchdog { helper }
+        SandboxWatchdog {
+            helper,
+            uid: getuid().as_raw(),
+        }
     }
 
     #[test]
     fn a_watchdog_kills_its_sandbox_when_the_launcher_exits_or_its_socket_closes() {
         use std::os::unix::process::ExitStatusExt;
 
-        for launcher_exits in [true, false] {
-            let mut sandbox = Command::new("sleep").arg("60").spawn().unwrap();
-            let mut launcher = Command::new("sleep").arg("60").spawn().unwrap();
-            let watchdog = fork_watchdog(&sandbox, &launcher);
-            if launcher_exits {
-                launcher.kill().unwrap();
-            } else {
-                drop(watchdog);
+        struct Fixture(std::process::Child);
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
             }
-            assert_eq!(sandbox.wait().unwrap().signal(), Some(libc::SIGKILL));
-            let _ = launcher.kill();
-            launcher.wait().unwrap();
+        }
+
+        // SAFETY: pidfd_open takes no pointers, and the descriptor it returns is owned here.
+        match unsafe { open_process(libc::getpid()) } {
+            Ok(pidfd) => drop(unsafe { OwnedFd::from_raw_fd(pidfd) }),
+            Err(libc::ENOSYS) => {
+                println!("SKIPPED: the sandbox watchdog requires pidfd_open (Linux 5.3 or later)");
+                return;
+            }
+            Err(error) => panic!("pidfd_open: {}", io::Error::from_raw_os_error(error)),
+        }
+        for launcher_exits in [true, false] {
+            let mut sandbox = Fixture(Command::new("sleep").arg("60").spawn().unwrap());
+            let mut launcher = Fixture(Command::new("sleep").arg("60").spawn().unwrap());
+            let watchdog = fork_watchdog(&sandbox.0, &launcher.0);
+            if launcher_exits {
+                launcher.0.kill().unwrap();
+            }
+            assert_eq!(watchdog.stop(), Ok(()));
+            assert_eq!(sandbox.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         }
     }
 
@@ -1190,15 +1287,51 @@ mod tests {
         }
     }
 
-    fn reran_in_private_mount_namespace(test: &str) -> bool {
+    #[derive(Default)]
+    struct Restrictions {
+        without_kill_capability: bool,
+        denied_syscall: Option<libc::c_long>,
+    }
+
+    fn reran_in_private_namespaces(test: &str, restrictions: Restrictions) -> bool {
         const PARENT_MOUNT: &str = "MXC_BWRAP_PARENT_MOUNT_NAMESPACE";
+        const DENIED_SYSCALL: &str = "MXC_BWRAP_DENIED_SYSCALL";
         let namespace = std::fs::read_link("/proc/self/ns/mnt").unwrap();
         if let Some(parent) = std::env::var_os(PARENT_MOUNT) {
             assert_ne!(namespace, std::path::PathBuf::from(parent));
+            assert_eq!(
+                std::process::id(),
+                1,
+                "the rerun must be PID 1 of its own PID namespace, so its leftover processes \
+                 end with it"
+            );
+            if let Ok(syscall) = std::env::var(DENIED_SYSCALL) {
+                deny_syscall(syscall.parse().unwrap());
+            }
             return false;
         }
-        let output = Command::new(host_tools::find("unshare").unwrap())
-            .args(["--mount", "--propagation", "private", "--"])
+        let mut command = Command::new(host_tools::find("unshare").unwrap());
+        command.args([
+            "--mount",
+            "--propagation",
+            "private",
+            "--pid",
+            "--fork",
+            "--mount-proc",
+            "--",
+        ]);
+        if restrictions.without_kill_capability {
+            command.arg(host_tools::find("setpriv").unwrap()).args([
+                "--inh-caps=-kill",
+                "--ambient-caps=-kill",
+                "--bounding-set=-kill",
+                "--",
+            ]);
+        }
+        if let Some(syscall) = restrictions.denied_syscall {
+            command.env(DENIED_SYSCALL, syscall.to_string());
+        }
+        let output = command
             .arg(std::env::current_exe().unwrap())
             .args(["--ignored", test, "--nocapture"])
             .env(PARENT_MOUNT, namespace)
@@ -1206,6 +1339,59 @@ mod tests {
             .unwrap();
         assert_one_test_passed(output);
         true
+    }
+
+    fn deny_syscall(syscall: libc::c_long) {
+        let instruction = |code: u32, jf: u8, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt: 0,
+            jf,
+            k,
+        };
+
+        // Load the syscall number, then fail that syscall with EPERM and allow every other.
+        let program = [
+            instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0),
+            instruction(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                1,
+                syscall as u32,
+            ),
+            instruction(
+                libc::BPF_RET | libc::BPF_K,
+                0,
+                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            ),
+            instruction(libc::BPF_RET | libc::BPF_K, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let filter = libc::sock_fprog {
+            len: program.len() as u16,
+            filter: program.as_ptr().cast_mut(),
+        };
+
+        // SAFETY: the filter and the program it points to outlive the call, which copies them.
+        let installed = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                libc::SECCOMP_FILTER_FLAG_TSYNC,
+                &filter as *const libc::sock_fprog,
+            )
+        };
+        assert_eq!(installed, 0, "{}", io::Error::last_os_error());
+    }
+
+    fn live_processes_owned_by(uid: u32) -> Vec<String> {
+        let uid = uid.to_string();
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("status")).ok())
+            .filter(|status| {
+                let field = |name: &str| status.lines().find_map(|line| line.strip_prefix(name));
+                field("Uid:").is_some_and(|ids| ids.split_whitespace().any(|id| id == uid))
+                    && !field("State:").is_some_and(|state| state.trim_start().starts_with('Z'))
+            })
+            .collect()
     }
 
     fn assert_one_test_passed(output: std::process::Output) {
@@ -1259,7 +1445,10 @@ mod tests {
 
         assert!(getuid().is_root());
         RootIdentity::for_caller().unwrap().expect("root identity");
-        if reran_in_private_mount_namespace("root_backend_hostname_pin_uses_mapped_identity") {
+        if reran_in_private_namespaces(
+            "root_backend_hostname_pin_uses_mapped_identity",
+            Restrictions::default(),
+        ) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
@@ -1326,18 +1515,22 @@ mod tests {
     #[test]
     #[ignore = "requires root with subordinate ranges and Bubblewrap network prerequisites"]
     fn root_resolver_inputs_use_mapped_identity() {
+        use crate::mxc_common::filesystem_probe::MAX_PROBE_WORKERS;
         use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
 
         assert!(getuid().is_root());
         RootIdentity::for_caller().unwrap().expect("root identity");
-        if reran_in_private_mount_namespace("root_resolver_inputs_use_mapped_identity") {
+        let restrictions = Restrictions {
+            without_kill_capability: true,
+            ..Default::default()
+        };
+        if reran_in_private_namespaces("root_resolver_inputs_use_mapped_identity", restrictions) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
         let resolver = link_resolver_outside_etc(directory.path());
-        let marker = format!("mxc-{}.invalid", uuid::Uuid::new_v4().simple());
         let mut request = ExecutionRequest {
-            script_code: "set -e; test \"$(id -u)\" = 1000; cat /etc/resolv.conf || true".into(),
+            script_code: "test \"$(id -u)\" = 1000".into(),
             script_timeout: 15_000,
             ..Default::default()
         };
@@ -1345,6 +1538,27 @@ mod tests {
             default: NetworkAction::Allow,
             ..Default::default()
         });
+
+        // One launch more than there are probe workers fails if each stalled read keeps a worker.
+        nix::unistd::mkfifo(&resolver, nix::sys::stat::Mode::from_bits_truncate(0o644)).unwrap();
+        for _ in 0..=MAX_PROBE_WORKERS {
+            let mut logger = Logger::new(Mode::Buffer);
+            let (status, output) = run_backend(&request, &mut logger).unwrap();
+            assert_eq!(status, 0, "{output}\n{}", logger.get_buffer());
+            assert!(
+                logger
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("is not a regular file")),
+                "{:?}",
+                logger.warnings()
+            );
+        }
+        std::fs::remove_file(&resolver).unwrap();
+
+        let marker = format!("mxc-{}.invalid", uuid::Uuid::new_v4().simple());
+        request.script_code =
+            "set -e; test \"$(id -u)\" = 1000; cat /etc/resolv.conf || true".into();
         for (mode, readable) in [(0o644, true), (0o600, false)] {
             std::fs::write(
                 &resolver,
@@ -1423,8 +1637,10 @@ mod tests {
 
         assert!(getuid().is_root());
         RootIdentity::for_caller().unwrap().expect("root identity");
-        if reran_in_private_mount_namespace("root_missing_denied_path_overlay_uses_mapped_identity")
-        {
+        if reran_in_private_namespaces(
+            "root_missing_denied_path_overlay_uses_mapped_identity",
+            Restrictions::default(),
+        ) {
             return;
         }
         nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
@@ -1456,6 +1672,52 @@ mod tests {
         let (status, output) = result.expect("mapped launch with a missing denied path");
         assert_eq!(status, 0, "{output}");
         assert!(output.contains("MISSING_PATH_MASKED"), "{output}");
+    }
+
+    #[test]
+    #[ignore = "requires root with subordinate ranges"]
+    fn root_launch_fails_closed_when_the_watchdog_cannot_open_the_sandbox() {
+        assert_failed_watchdog_never_releases_the_workload(
+            "root_launch_fails_closed_when_the_watchdog_cannot_open_the_sandbox",
+            libc::SYS_pidfd_open,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires root with subordinate ranges"]
+    fn root_launch_fails_closed_when_the_watchdog_cannot_signal_the_sandbox() {
+        assert_failed_watchdog_never_releases_the_workload(
+            "root_launch_fails_closed_when_the_watchdog_cannot_signal_the_sandbox",
+            libc::SYS_pidfd_send_signal,
+        );
+    }
+
+    fn assert_failed_watchdog_never_releases_the_workload(test: &str, denied: libc::c_long) {
+        assert!(getuid().is_root());
+        let identity = RootIdentity::for_caller().unwrap().expect("root identity");
+        let restrictions = Restrictions {
+            without_kill_capability: true,
+            denied_syscall: Some(denied),
+        };
+        if reran_in_private_namespaces(test, restrictions) {
+            return;
+        }
+        let grant = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(grant.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let marker = grant.path().join("started");
+        let mut request = ExecutionRequest {
+            script_code: format!("touch '{}'", marker.display()),
+            script_timeout: 15_000,
+            ..Default::default()
+        };
+        request.policy.readwrite_paths = vec![grant.path().display().to_string()];
+        let error = run_backend(&request, &mut Logger::new(Mode::Buffer))
+            .expect_err("a launch whose watchdog cannot work must fail");
+        assert!(error.contains("could not watch the sandbox"), "{error}");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(!marker.exists(), "the workload ran after: {error}");
+        let survivors = live_processes_owned_by(identity.workload_ids().0);
+        assert!(survivors.is_empty(), "{survivors:#?}");
     }
 
     #[test]

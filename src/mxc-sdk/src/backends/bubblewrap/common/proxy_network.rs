@@ -158,6 +158,8 @@ slirp4netns="$5"
 iptables_restore="$6"
 ip6tables_restore="$7"
 sleep="$8"
+unshare="$9"
+slirp_sandbox="${10}"
 
 # Dash redirections need fixed single-digit descriptors.
 # 3 carries the sandbox PID and reaches EOF if the parent exits before sending it.
@@ -187,7 +189,16 @@ done
 
 # Slirp readiness alone must not release the workload.
 exec 9> "$state_dir/slirp.internal"
-"$slirp4netns" --configure --mtu=65520 \
+
+# A root supervisor keeps host privileges, so slirp sheds them before it handles packets.
+# Slirp's sandbox detaches its old root, so a private mount namespace keeps host mounts in place.
+if [ "$slirp_sandbox" = yes ]; then
+    set -- "$unshare" --mount --propagation private -- \
+        "$slirp4netns" --enable-sandbox --enable-seccomp
+else
+    set -- "$slirp4netns"
+fi
+"$@" --configure --mtu=65520 \
     --ready-fd 9 --exit-fd 4 \
     "$child_pid" tap0 &
 slirp_pid=$!
@@ -826,11 +837,17 @@ impl ProxyNetworkNamespace {
                 .arg(&tools.sh);
             command
         };
+        let slirp_sandbox = if workload_userns.is_some() {
+            "yes"
+        } else {
+            "no"
+        };
         command
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-bwrap-proxy-supervisor"])
             .arg(state_dir.path())
             .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
             .args(tools.supervisor_arguments())
+            .arg(slirp_sandbox)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -2067,7 +2084,7 @@ impl NetworkTools {
     }
 
     /// The paths [`SUPERVISOR_SCRIPT`] reads from `$3` onward, in its order.
-    fn supervisor_arguments(&self) -> [&Path; 6] {
+    fn supervisor_arguments(&self) -> [&Path; 7] {
         [
             &self.nsenter,
             &self.ip,
@@ -2075,6 +2092,7 @@ impl NetworkTools {
             &self.iptables_restore,
             &self.ip6tables_restore,
             &self.sleep,
+            &self.unshare,
         ]
     }
 }
@@ -2134,7 +2152,7 @@ pub(crate) fn probe_private_namespaces(
 }
 
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0x6363_6f1a_0211_7a36;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xc1a5_bc1d_c051_a6fd;
 
 /// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
 /// pre-flight walk must check.
@@ -2146,6 +2164,7 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[&str] = &[
     "iptables-restore",
     "ip6tables-restore",
     "sleep",
+    "unshare",
 ];
 
 /// How each dependency check's command is built.
@@ -5947,6 +5966,7 @@ exec sleep 30
             .arg(&state)
             .arg("1")
             .args(tools.supervisor_arguments())
+            .arg("no")
             .env("PATH", dir.path().join("no-tools"))
             .env(
                 "MXC_TEST_STUB_PATH",
@@ -6564,6 +6584,7 @@ exec sleep 30
             .arg(state_dir.path())
             .arg("1")
             .args(tools.supervisor_arguments())
+            .arg("no")
             .env("MXC_TEST_BLOCKED_PID", &blocked_pid_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

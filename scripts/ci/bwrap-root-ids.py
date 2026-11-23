@@ -127,9 +127,6 @@ def get_accounts():
 
 def configure(etc, backup, host_accounts):
     root_names, uids, gids = host_accounts
-
-    # LXC's CI setup appends root:100000:65536 unless that exact line already exists.
-    owner = "root" if "root" in root_names else "0"
     originals, replacements, selected = {}, {}, {}
     for kind, occupied in zip(KINDS, (uids, gids)):
         path = etc / kind
@@ -146,7 +143,7 @@ def configure(etc, backup, host_accounts):
             selected[kind] = free_range(records, occupied, minimum, limit)
             previous = originals[kind] or ""
             separator = "\n" if previous and not previous.endswith("\n") else ""
-            replacements[kind] = previous + separator + f"{owner}:{selected[kind]}:{COUNT}\n"
+            replacements[kind] = previous + separator + f"0:{selected[kind]}:{COUNT}\n"
 
     backup.mkdir(mode=0o700)
     try:

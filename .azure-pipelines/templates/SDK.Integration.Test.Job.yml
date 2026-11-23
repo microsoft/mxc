@@ -120,8 +120,6 @@ jobs:
             sudo apt-get install -y -qq lxc uidmap dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
-        # MXC uses root's first range, so reserve a free one before the LXC step
-        # appends its fixed range, which can overlap another account's.
         - script: |
             set -euo pipefail
             sudo -n env TF_BUILD="$TF_BUILD" \
@@ -148,20 +146,21 @@ jobs:
               fi
             done
 
-            for file in /etc/subuid /etc/subgid; do
-              sudo touch "$file"
-              if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
-                printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
-              fi
-            done
+            # Select root's first allocation of at least 65,536 IDs, the range MXC uses.
+            uid_base=$(sudo awk -F: '($1 == "root" || $1 == "0") && $3 >= 65536 { print $2; exit }' /etc/subuid)
+            gid_base=$(sudo awk -F: '($1 == "root" || $1 == "0") && $3 >= 65536 { print $2; exit }' /etc/subgid)
+            if [ -z "$uid_base" ] || [ -z "$gid_base" ]; then
+              echo "root has no reserved subordinate UID and GID range for LXC; run the 'Reserve Bubblewrap root IDs' step first" >&2
+              exit 1
+            fi
 
             sudo touch /etc/lxc/default.conf
 
             # Remove active mappings before adding the test-only UID/GID range.
             sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
             printf '%s\n' \
-              'lxc.idmap = u 0 100000 65536' \
-              'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
+              "lxc.idmap = u 0 $uid_base 65536" \
+              "lxc.idmap = g 0 $gid_base 65536" | sudo tee -a /etc/lxc/default.conf >/dev/null
           displayName: Configure unprivileged LXC
 
         - script: |
