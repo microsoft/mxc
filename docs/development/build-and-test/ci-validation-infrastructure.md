@@ -48,6 +48,11 @@ Windows also tests fresh executor processes and console input. Azure retains
 its native fixtures in the build jobs. The .NET and Node suites cover the
 public Dev JSON APIs in their existing SDK jobs.
 
+The Windows release workspace suites also execute their existing W365 cases.
+Those suites run in `Test.Windows.Job.yml`, independently of artifact
+production, while the standalone fixture workflow retains the complete debug
+suite including fresh-executor cases.
+
 GitHub Actions requires nine native fixtures on Windows and eight on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
 cross-compiled Windows/Linux ARM64 jobs.
@@ -82,6 +87,7 @@ for coverage, local commands and prerequisites.
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `.github/workflows/W365.Fixture.Test.Job.yml` | `workflow_call`-only. Runs native W365 loopback TLS fixtures independently of binary production and aggregates the host results. |
+| `.github/workflows/Test.Windows.Job.yml` | `workflow_call`-only. Builds and runs the unfiltered Windows release workspace suites on x64 and ARM64 independently of artifact production. Called by PR and scheduled workflows. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
@@ -101,6 +107,8 @@ for coverage, local commands and prerequisites.
 Validation.Tests.Scheduled.yml
   └─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
+      ├─ windows-workspace-tests   →  Test.Windows.Job.yml (parallel release suites)
+      ├─ w365-fixture-tests        →  W365.Fixture.Test.Job.yml (parallel debug suites)
       ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
@@ -119,7 +127,8 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, focused telemetry and filesystem-probe tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
+| `windows-workspace-tests` | `Test.Windows.Job.yml` — parallel x64 + arm64 unfiltered release workspace suites, including the module-lifetime example and required NVX module-lifetime scenario. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, native Bubblewrap filesystem-policy and denied-path masking suites, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, Bubblewrap proxy-networking, workload-capability, and user-namespace-denial CLI tests, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |

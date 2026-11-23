@@ -195,3 +195,35 @@ test("Unix fixture discovery requires the host-output regression", () => {
   assert.notEqual(result.status, 0, result.output);
   assert.match(result.output, /Missing required W365 fixture: execution::execution_host_output_fixture/);
 });
+
+test("Windows workspace suites preserve release features and run independently of packaging", () => {
+  const tests = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
+  const builds = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const matrix = (text) => [...text.matchAll(
+    /- arch: (\S+)\r?\n +runner: (\S+)\r?\n +target: (\S+)\r?\n(?: +#.*\r?\n)* +features: ([^\r\n]+)/g
+  )].map(([, arch, runner, target, features]) => ({ arch, runner, target, features }));
+  assert.equal(matrix(tests).length, 2);
+  assert.deepEqual(matrix(tests), matrix(builds));
+  assert.match(tests, /MXC_W365_TEST_OPENSSL=\$openssl/);
+  assert.match(tests, /Force hyperlight-host rebuild/);
+  const commands = [...tests.matchAll(
+    /      - name: (Build|Build module lifetime regression fixture|Test)\r?\n        run: ([\s\S]*?)(?=\r?\n\r?\n|$)/g
+  )].map(([, name, command]) => [name, command.replace(/\s+/g, " ").trim()]);
+  assert.deepEqual(commands, [
+    ["Build", 'cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features "${{ matrix.features }}"'],
+    ["Build module lifetime regression fixture", 'cargo build --locked --release --target ${{ matrix.target }} -p mxc-sdk --example module_lifetime_fixture --no-default-features --features "${{ matrix.features }}"'],
+    ["Test", 'cargo test --locked --release --target ${{ matrix.target }} --no-default-features --features "${{ matrix.features }}"'],
+  ]);
+  assert.doesNotMatch(builds, /- name: Test\r?\n/);
+  assert.match(tests, /needs: test\r?\n +if: \$\{\{ always\(\) \}\}/);
+  assert.match(tests, /TEST_RESULT: \$\{\{ needs.test.result \}\}/);
+  assert.match(tests, /test "\$TEST_RESULT" = success/);
+  for (const entry of ["Build.yml", "Validation.Tests.Scheduled.yml"]) {
+    const text = readFileSync(join(root, ".github", "workflows", entry), "utf8");
+    const caller = text.match(/^  windows-workspace-tests:\r?\n((?:    [^\r\n]*(?:\r?\n|$))+)/m);
+    assert.ok(caller, `${entry} must run both Windows workspace suites`);
+    assert.match(caller[1], /needs: dependency-feed-check/);
+    assert.match(caller[1], /uses: \.\/\.github\/workflows\/Test\.Windows\.Job\.yml/);
+    assert.doesNotMatch(text, /needs:[^\r\n]*windows-workspace-tests/);
+  }
+});

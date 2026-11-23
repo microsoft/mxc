@@ -31,6 +31,10 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
 
+  windows-workspace-tests:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Test.Windows.Job.yml
+
   linux:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Linux.Job.yml

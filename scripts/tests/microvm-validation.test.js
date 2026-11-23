@@ -841,7 +841,7 @@ function stage(mode = "") {
 }
 
 function requireModuleLifetime(mode = "") {
-  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const workflow = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
   const block = workflow.match(
     /      - name: Require NVX module lifetime regression\n[\s\S]*?        run: \|\n((?:          [^\n]*\n)+)/
   );
