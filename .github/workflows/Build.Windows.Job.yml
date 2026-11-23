@@ -51,6 +51,10 @@ jobs:
         shell: pwsh
         run: ..\tests\scripts\test_sdk_suite_results.ps1
 
+      - name: Test isolation session network classifier
+        shell: pwsh
+        run: ..\tests\scripts\test_isolation_session_network_classifier.ps1
+
       # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
       # from the repo root only. Surface src/rust-toolchain.toml there so the
       # 1.93 pin is honored without duplicating the version in this workflow.

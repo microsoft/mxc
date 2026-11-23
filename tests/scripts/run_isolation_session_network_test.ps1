@@ -24,13 +24,15 @@
       PASS         admitted and the requested posture held: every target the
                    request allows was reached, every other target was
                    blocked, and the host fixtures were still healthy after
-                   the row. Rejection-surface rows (X*) pass when rejected
-                   with a typed admission error. E13 also passes when the
-                   rejection names linkLocal; P01/P02 (invalid proxy shapes)
-                   pass when rejected by the shared proxy rule.
+                   the row. A rejection-surface row (X*) passes when it is
+                   rejected with a typed admission error naming the field
+                   the row is about; P01/P02 (invalid proxy shapes) pass
+                   when rejected by the shared proxy rule.
       UNSUPPORTED  rejected with a typed admission error that names the
-                   network policy. The row records the capability it needs.
-                   Not a failure.
+                   network policy. The row records the capability it needs
+                   and the rejection message. A rejection-surface row that
+                   another rule rejected first is also UNSUPPORTED: it was
+                   not judged. Not a failure.
       FAIL         admitted but broader than requested (a target outside the
                    request was reached), admitted but narrower (an allowed
                    target was blocked), an indeterminate probe result, an
@@ -38,7 +40,7 @@
                    the baseline all-allow row rejected, a rejection-surface
                    row admitted, an incomplete output capture, or any other
                    error.
-      KNOWN-GAP    a recorded gap; see G13 below. Not a failure.
+      KNOWN-GAP    a recorded gap; see K01 below. Not a failure.
 
     A typed admission error is exit code 1 with a JSON line
     {"error":{"code":...}} whose code is malformed_request or
@@ -53,24 +55,33 @@
       udp        DNS query over UDP to -ExternalAddress:53; reached only when
                  a reply with the same transaction id comes back
       icmp       echo to -ExternalAddress; reached only when the reply comes
-                 from that address
+                 from that address. A ping that fails before sending (no
+                 route) counts as blocked; where the row denies icmp, the
+                 detail names it as "icmp not judged: <reason>"
       dns        resolve -DnsName
       declared   TCP to a host listener on 127.0.0.1 whose port the request
                  names
       other      TCP to a second 127.0.0.1 listener the request never names
       v6         TCP to a host listener on ::1, same port as declared
-      down       TCP to a 127.0.0.1 port held bound but not listening
-      linklocal  TCP to 169.254.169.254:80 (instance metadata); judged only
-                 in E13, recorded in every other row
-    Loopback listeners answer with a per-run nonce, so a relay that accepts
-    locally cannot pass as reaching the host. A target is blocked only on a
+      down       TCP to a 127.0.0.1 port held bound but not listening; in
+                 L02, to L02's own listener, then to its port after the
+                 listener is stopped
+      linklocal  TCP to 169.254.169.254:80 (instance metadata); judged
+                 blocked in every row whose policy denies it (egress default
+                 deny, or no egress), and in E13 and E14, which allow it;
+                 report-only where the egress default is allow
+    Loopback listeners answer with a per-run nonce and the probe reads it: a
+    connect can succeed before the host side answers, so a connect alone
+    does not show the host was reached. A target is blocked only on a
     timeout, a close, an unreachable reply, or a connect/resolve error that
     means refused, reset, unreachable or not found; any other error is
-    indeterminate and fails the row.
+    indeterminate and fails the row. Every target needs exactly one record:
+    a missing, repeated or unknown record fails an admitted row.
 
     Before the rows run, and again after every admitted row, the host checks
     the fixtures: the external destination answers, each listener returns
-    its nonce, and the down port refuses. A failure before the rows aborts
+    its nonce and is still accepting, and each down port refuses. A failure
+    before the rows aborts
     the pass; a failure after a row fails that row.
 
     Host positive controls: udp, icmp and v6 are also probed from the host
@@ -79,16 +90,18 @@
     control, a target the session does not reach is report-only where the
     row denies it; where the row allows it, icmp and v6 fail the row and udp
     is report-only.
-    E13 checks non-reachability, so a blocked metadata probe passes either
+    Metadata is judged on non-reachability, so a blocked probe passes either
     way; whether the host reaches the address is recorded in the row detail.
-    DNS is report-only in every restricted row: name resolution may leave a
-    default-deny session, so it is recorded but never fails a restricted row.
-    In the all-allow row it must resolve. The inbound path is not probed;
-    rows that claim it (A01, E05, L09) say so in their detail.
+    E13 and E14 assert this pass's requirement that the session never
+    reaches instance metadata even when the policy allows it.
+    DNS is report-only in every restricted row: the request has no field
+    that governs name resolution, so the result is recorded but never fails
+    a restricted row. In the all-allow row it must resolve. The inbound path
+    is not probed; rows that claim it (A01, E05, L09) say so in their detail.
 
-    Known gap G13: if a session outlives its timeout this script kills
-    wxc-exec; a killed wxc-exec can leave its session's agent user behind.
-    The row fails and a G13 KNOWN-GAP row is added.
+    Known gap K01 (cleanup): if a session outlives its timeout this script
+    kills wxc-exec; a killed wxc-exec can leave its session's agent user
+    behind. The row fails and a K01 KNOWN-GAP row is added.
 
     Runtime rows provision sessions, so run interactively as the console
     user, never in Session 0.
@@ -117,9 +130,13 @@
     Optional path for a JSON array of row results.
 
 .PARAMETER ConfigDir
-    Accepted for compatibility with the OS MXC integration harness, which
-    passes it to every bundle orchestrator. Unused: rows build their own
-    requests.
+    Accepted so callers can pass the same arguments to every bundled test
+    script. Unused, because rows build their own requests.
+
+.PARAMETER ClassifierOnly
+    Define the row classifier and return without running anything. Used by
+    test_isolation_session_network_classifier.ps1, which dot-sources this
+    script.
 
 .EXAMPLE
     .\run_isolation_session_network_test.ps1 -WxcExePath C:\test\wxc-exec.exe
@@ -136,7 +153,9 @@ param(
     [string]$Version = '1.1.0-alpha',
     [string[]]$Row,
     [string]$ResultsPath,
-    [string]$ConfigDir
+    [string]$ConfigDir,
+    # For tests: define the classifier functions and return without running anything.
+    [switch]$ClassifierOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -196,13 +215,207 @@ function Get-Rejection {
     return $null
 }
 
-if (-not $WxcExePath) {
-    # Repo build (honors CARGO_TARGET_DIR), then the TestBundle layout.
-    $roots = @($env:CARGO_TARGET_DIR, (Join-Path $RepoRoot 'src\target')) | Where-Object { $_ }
-    $candidates = foreach ($root in $roots) {
-        foreach ($cfg in 'release', 'debug') { Join-Path $root "$cfg\wxc-exec.exe" }
+# ---------------------------------------------------------------- classifier
+
+# The verdict a reached target shows, per target.
+$Reach = @{
+    external = 'CONNECTED'; udp = 'ANSWERED'; dns = 'RESOLVED'; declared = 'REACHED'; other = 'REACHED'
+    linklocal = 'CONNECTED'; icmp = 'ECHOED'; v6 = 'REACHED'; down = 'REACHED'
+}
+$Targets = @('external', 'udp', 'icmp', 'dns', 'declared', 'other', 'v6', 'down', 'linklocal')
+# The verdicts the probe emits. Any other value is not a record.
+$ValidRecord = '^(REACHED|CONNECTED|CLOSED|RESOLVED|ANSWERED|MISMATCH|TIMEOUT|ECHOED|UNREACH|ERR|ICMP_\w+|WSA\d+)$'
+
+# Outcomes that show a path is closed. Anything else (an invalid argument, no buffer space, an
+# unexpected error) is indeterminate, never evidence that a policy blocked the target.
+function Test-Blocked([string]$v) {
+    $codes = '10013|10050|10051|10053|10054|10060|10061|10064|10065|11001|11002|11003|11004'
+    return $v -match "^(TIMEOUT|CLOSED|UNREACH|WSA($codes))$"
+}
+
+# Every 'PROBE <name> <verdict>' line in the output, as name -> list of verdicts.
+function Get-ProbeRecords([string]$Output) {
+    $records = @{}
+    foreach ($m in [regex]::Matches($Output, 'PROBE (\S+) (\S+)')) {
+        $name = $m.Groups[1].Value
+        if (-not $records.ContainsKey($name)) { $records[$name] = [Collections.Generic.List[string]]::new() }
+        $records[$name].Add($m.Groups[2].Value)
     }
-    $candidates += @(Get-ChildItem (Join-Path $RepoRoot 'bin\*\wxc-exec.exe') -ErrorAction Ignore).FullName
+    return $records
+}
+
+function Get-RecordText([hashtable]$Records, [string]$Name) {
+    if (-not $Records.ContainsKey($Name) -or $Records[$Name].Count -eq 0) { return 'NORUN' }
+    return ($Records[$Name] -join '/')
+}
+
+# Judges an admitted row. $Allow lists the targets the request allows; every other target must be
+# blocked. Every target needs exactly one valid record first: a missing, repeated or unknown record
+# fails the row, and no exception below applies to it. dns is report-only unless DnsRequired is
+# set; linklocal unless LinkLocalJudged is set. A target the session reaches is always judged.
+# Without a host control ($HostOk[target] false), a target it does not reach is report-only where
+# denied; where allowed, udp is report-only and icmp and v6 are unjudgeable (FAIL).
+function Get-PostureVerdict {
+    param([hashtable]$Records, [string[]]$Allow = @(), [hashtable]$HostOk = @{}, [switch]$DnsRequired,
+          [switch]$LinkLocalJudged)
+    $broader = @(); $narrower = @(); $unknown = @(); $missing = @()
+    foreach ($t in $Targets) {
+        $got = Get-RecordText $Records $t
+        if ($got -notmatch $ValidRecord) { $missing += "$t=$got"; continue }
+        if ($t -eq 'dns' -and -not $DnsRequired) { continue }
+        if ($t -eq 'linklocal' -and -not $LinkLocalJudged) { continue }
+        if ($HostOk.ContainsKey($t) -and -not $HostOk[$t] -and $got -ne $Reach[$t]) {
+            if ($t -eq 'udp' -or $Allow -notcontains $t) { continue }
+            $unknown += "$t=$got (no host control)"
+            continue
+        }
+        if ($Allow -contains $t) {
+            if ($got -ne $Reach[$t]) {
+                if (Test-Blocked $got) { $narrower += "$t=$got" } else { $unknown += "$t=$got" }
+            }
+        } elseif (-not (Test-Blocked $got)) {
+            if ($got -eq $Reach[$t]) { $broader += "$t=$got" } else { $unknown += "$t=$got" }
+        }
+    }
+    $actual = (@($Targets | ForEach-Object { "$_=$(Get-RecordText $Records $_)" })) -join ' '
+    $why = @()
+    if ($missing) { $why += "no single valid record: $($missing -join ', ')" }
+    if ($broader) { $why += "broader than requested: $($broader -join ', ')" }
+    if ($narrower) { $why += "allowed target blocked: $($narrower -join ', ')" }
+    if ($unknown) { $why += "indeterminate: $($unknown -join ', ')" }
+    return [pscustomobject]@{ Ok = ($why.Count -eq 0); Actual = $actual; Why = ($why -join '; ') }
+}
+
+# The metadata address is judged blocked in every row whose policy denies it (egress default deny,
+# or no egress at all), and in a row that sets MetadataBlocked: there, the request allows it and the
+# row asserts this pass's requirement that the session never reaches it. Where the egress default
+# is allow, the policy permits it, so it is report-only.
+function Test-LinkLocalJudged([hashtable]$Row) {
+    if ($Row.MetadataBlocked) { return $true }
+    $egress = if ($Row.Net -is [hashtable]) { $Row.Net['egress'] } else { $null }
+    return -not ($egress -is [hashtable] -and $egress['default'] -eq 'allow')
+}
+
+function Get-RowExpected([hashtable]$Row, [string[]]$Allow) {
+    if ($Row.Reject) { return 'rejected' }
+    if ($Row.Invalid) { return 'rejected: networkProxy needs deny-by-default egress with no direct rules' }
+    return "admitted with {$($Allow -join ',')} or rejected naming network"
+}
+
+# Classifies one wxc-exec run of a row. Pure: the host checks are passed in. $HostOk holds the
+# udp/icmp/v6 host controls, $FixtureFailures the host fixture check after the run, $HostLinkLocal
+# whether the host itself reaches 169.254.169.254:80 ($null when not checked). $Allow overrides
+# the row's allow list. Returns Expected, Actual, Verdict and Detail.
+function Get-RowVerdict {
+    param([hashtable]$Row, $Run, [hashtable]$HostOk = @{}, [string[]]$FixtureFailures = @(),
+          $HostLinkLocal = $null, [string[]]$Allow)
+    if (-not $PSBoundParameters.ContainsKey('Allow')) { $Allow = @($Row.Allow) }
+    $expected = Get-RowExpected $Row $Allow
+    $records = Get-ProbeRecords $Run.Output
+    $admitted = $records.Count -gt 0
+    $tail = (($Run.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' | '
+    # A rejection counts only as a typed admission error on a clean exit 1.
+    $rej = if ($admitted) { $null } else { Get-Rejection $Run }
+    $got = if ($rej) { "rejected ($($rej.Code))" } else { "exit $($Run.ExitCode), no admission error" }
+    $v = { param($a, $verdict, $d = '') [pscustomobject]@{ Expected = $expected; Actual = $a; Verdict = $verdict; Detail = $d } }
+    if ($Run.Killed) { return & $v "killed after $($SessionTimeoutMs + $KillGraceMs) ms" 'FAIL' $tail }
+    if (-not $Run.Complete) { return & $v "exit $($Run.ExitCode)" 'FAIL' 'output capture incomplete' }
+    if ($Row.Reject) {
+        if ($admitted) { return & $v 'admitted' 'FAIL' 'a rejection-surface request was admitted' }
+        if ($rej -and $rej.Message -match $Row.Own -and $rej.Message -notmatch $NetworkRejection) {
+            return & $v $got 'PASS' $rej.Message
+        }
+        if ($rej) {
+            $rule = if ($rej.Message -match $NetworkRejection) { 'the isolation session network rule' }
+                else { 'another rule' }
+            return & $v $got 'UNSUPPORTED' "not judged: rejected by $rule before $($Row.Field) was checked: $($rej.Message)"
+        }
+        return & $v $got 'FAIL' $tail
+    }
+    if ($admitted -and $Row.Invalid) { return & $v 'admitted' 'FAIL' 'an invalid proxy shape was admitted' }
+    if ($admitted -and $Row.Unprobed) { return & $v 'admitted' 'FAIL' "admitted; no probe for $($Row.Unprobed)" }
+    if ($admitted) {
+        $llJudged = Test-LinkLocalJudged $Row
+        $pv = Get-PostureVerdict -Records $records -Allow $Allow -HostOk $HostOk `
+            -DnsRequired:([bool]$Row.DnsRequired) -LinkLocalJudged:$llJudged
+        $ok = $pv.Ok
+        $why = $pv.Why
+        if ($ok -and $Run.ExitCode -ne 0) { $ok = $false; $why = "session exited $($Run.ExitCode)" }
+        # A fixture that broke during the row makes its verdicts meaningless.
+        if ($FixtureFailures.Count -gt 0) { $ok = $false; $why = "fixture unhealthy: $($FixtureFailures -join ', ')" }
+        $ll = Get-RecordText $records 'linklocal'
+        $llNote = if (-not $llJudged) { "linklocal=$ll (report-only: the policy allows it)" }
+            elseif ($ok -and $HostLinkLocal -eq $false) { 'linklocal blocked (no host control: the host cannot reach 169.254.169.254:80)' }
+        $detail = @(@($why, $llNote, $Row.Note) | Where-Object { $_ })
+        if (-not $Row.DnsRequired) { $detail += "dns=$(Get-RecordText $records 'dns') (report-only)" }
+        foreach ($t in @('udp', 'icmp', 'v6')) {
+            $tv = Get-RecordText $records $t
+            if ($HostOk.ContainsKey($t) -and -not $HostOk[$t] -and $tv -ne $Reach[$t]) {
+                $detail += "$t not judged: no host control ($t=$tv)"
+            }
+        }
+        # A ping that throws never sent an echo, so a denied icmp was not observed being dropped.
+        $threw = if ($records.ContainsKey('icmpthrew')) { $records['icmpthrew'][0] }
+        if ($threw -and $HostOk['icmp'] -and $Allow -notcontains 'icmp') {
+            $reason = switch ($threw) {
+                'win32=1231' { 'no route to the network (1231)' }
+                'win32=1232' { 'no route to the host (1232)' }
+                default { $threw }
+            }
+            $counted = $(if (Test-Blocked (Get-RecordText $records 'icmp')) { 'counted as blocked' } else { 'indeterminate' })
+            $detail += "icmp not judged: ping failed before sending: $reason; $counted"
+        }
+        return & $v "admitted: $($pv.Actual)" $(if ($ok) { 'PASS' } else { 'FAIL' }) ($detail -join '; ')
+    }
+    if ($rej -and $rej.Message -match $NetworkRejection) {
+        if ($Row.Baseline) { return & $v $got 'FAIL' $rej.Message }
+        return & $v 'rejected (network)' 'UNSUPPORTED' $rej.Message
+    }
+    if ($rej -and $Row.Invalid -and $rej.Message -match 'networkProxy requires network\.egress\.default') {
+        return & $v 'rejected (proxy shape)' 'PASS'
+    }
+    return & $v $got 'FAIL' $(if ($rej) { $rej.Message } else { $tail })
+}
+
+# Combines L02's two runs. Phase 2 runs only after phase 1 passed, so the policy was admitted and
+# the port shown reachable; anything but a PASS on phase 2 (a rejection included) fails the row.
+function Join-L02Verdict($Up, $Down) {
+    $verdict = if ($Down.Verdict -eq 'PASS') { 'PASS' } else { 'FAIL' }
+    $detail = @(@($Up.Detail, $Down.Detail) | Where-Object { $_ })
+    if ($Down.Verdict -ne 'PASS' -and $Down.Verdict -ne 'FAIL') {
+        $detail += "listener down was $($Down.Verdict) after an admitted listener-up phase"
+    }
+    return [pscustomobject]@{
+        Expected = "listener up: $($Up.Expected); listener down: $($Down.Expected)"
+        Actual = "listener up: $($Up.Actual); listener down: $($Down.Actual)"
+        Verdict = $verdict
+        Detail = $detail -join '; '
+    }
+}
+
+# -ClassifierOnly (dot-sourced by test_isolation_session_network_classifier.ps1) stops here, with
+# the classifier defined and nothing run.
+if ($ClassifierOnly) { return }
+
+if (-not $WxcExePath) {
+    # TestBundle layout (<bundle>\test_scripts\this script, <bundle>\bin\<arch>\wxc-exec.exe),
+    # then repo builds (honors CARGO_TARGET_DIR): host-arch target, other-arch target, no target
+    # triple, release before debug.
+    $hostTarget = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64-pc-windows-msvc' }
+        else { 'x86_64-pc-windows-msvc' }
+    $otherTarget = if ($hostTarget -eq 'aarch64-pc-windows-msvc') { 'x86_64-pc-windows-msvc' }
+        else { 'aarch64-pc-windows-msvc' }
+    $candidates = [Collections.Generic.List[string]]::new()
+    foreach ($exe in Get-ChildItem (Join-Path (Split-Path -Parent $PSScriptRoot) 'bin\*\wxc-exec.exe') `
+        -ErrorAction Ignore) { $candidates.Add($exe.FullName) }
+    $roots = @($env:CARGO_TARGET_DIR, (Join-Path $RepoRoot 'src\target')) | Where-Object { $_ }
+    foreach ($root in $roots) {
+        foreach ($cfg in 'release', 'debug') {
+            foreach ($triple in "$hostTarget\", "$otherTarget\", '') {
+                $candidates.Add((Join-Path $root "$triple$cfg\wxc-exec.exe"))
+            }
+        }
+    }
     $WxcExePath = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }
 if (-not $WxcExePath -or -not (Test-Path $WxcExePath)) {
@@ -253,7 +466,9 @@ function Add-Row {
     param([string]$Id, [string]$Area, [string]$Capability, [string]$Needs,
           [string]$Expected, [string]$Actual, [string]$Verdict, [string]$Detail = '')
     $color = switch ($Verdict) { 'PASS' { 'Green' } 'FAIL' { 'Red' } default { 'Yellow' } }
-    $label = if ($Verdict -eq 'UNSUPPORTED') { "UNSUPPORTED (needs $Needs)" } else { $Verdict }
+    $label = if ($Verdict -ne 'UNSUPPORTED') { $Verdict }
+        elseif ($Needs -eq '-') { 'UNSUPPORTED (not judged)' }
+        else { "UNSUPPORTED (needs $Needs)" }
     Write-Host ("  {0,-5} {1,-46} {2}" -f $Id, $Capability, $label) -ForegroundColor $color
     if ($Verdict -eq 'FAIL' -or $Verdict -eq 'KNOWN-GAP') {
         Write-Host "        expected: $Expected" -ForegroundColor Gray
@@ -349,8 +564,8 @@ function Test-Tcp($name, $addr, $port, $nonce) {
         # A non-loopback server may send nothing until the client speaks (TLS), so a connect
         # alone proves reachability there.
         if (-not $nonce) { "PROBE $name CONNECTED"; return }
-        # Always read: a loopback relay accepts locally and only resets after its host-side
-        # connect fails, so a connect alone cannot tell "reached" from "relay refused".
+        # Always read: a connect can succeed before the host side answers, so a connect alone
+        # cannot tell "reached" from "refused".
         $s = $c.GetStream()
         $s.ReadTimeout = 5000
         $buf = New-Object byte[] 256
@@ -421,10 +636,13 @@ function Test-Icmp($name, $addr) {
         # An unroutable destination throws rather than returning a status: the inner
         # Win32Exception is ERROR_NETWORK_UNREACHABLE (1231) or ERROR_HOST_UNREACHABLE (1232).
         $v = Get-Wsa $_.Exception
-        for ($e = $_.Exception; $v -eq 'ERR' -and $e; $e = $e.InnerException) {
-            if ($e -is [ComponentModel.Win32Exception] -and $e.NativeErrorCode -in 1231, 1232) { $v = 'UNREACH' }
+        $why = $_.Exception.GetType().Name
+        for ($e = $_.Exception; $e; $e = $e.InnerException) {
+            if ($e -is [ComponentModel.Win32Exception]) { $why = "win32=$($e.NativeErrorCode)" }
+            if ($v -eq 'ERR' -and $e -is [ComponentModel.Win32Exception] -and $e.NativeErrorCode -in 1231, 1232) { $v = 'UNREACH' }
         }
         "PROBE $name $v"
+        "PROBE ${name}threw $why"
     }
 }
 '@
@@ -434,25 +652,36 @@ function Start-NonceListener {
     $listener = [Net.Sockets.TcpListener]::new($Address, $Port)
     $listener.Start()
     $nonce = 'MXC-NONCE-' + [guid]::NewGuid().ToString('N')
+    # Stopping marks a shutdown; an accept failure outside one is recorded, so the fixture check
+    # reports it instead of a silent dead listener.
+    $state = [hashtable]::Synchronized(@{ Stopping = $false; AcceptError = $null })
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
-        param($l, $n)
+        param($l, $n, $st)
         $bytes = [Text.Encoding]::ASCII.GetBytes("$n`n")
         while ($true) {
+            try { $client = $l.AcceptTcpClient() } catch {
+                if (-not $st.Stopping) { $st.AcceptError = $_.Exception.Message }
+                break
+            }
+            # A client that resets mid-write costs only that client; the listener keeps accepting.
             try {
-                $client = $l.AcceptTcpClient()
                 $stream = $client.GetStream()
                 $stream.Write($bytes, 0, $bytes.Length)
                 $stream.Flush()
+            } catch {
+            } finally {
                 $client.Close()
-            } catch { break }
+            }
         }
-    }).AddArgument($listener).AddArgument($nonce)
+    }).AddArgument($listener).AddArgument($nonce).AddArgument($state)
     $handle = $ps.BeginInvoke()
     return [pscustomobject]@{
         Port = $listener.LocalEndpoint.Port
         Nonce = $nonce
+        State = $state
         Stop = {
+            $state.Stopping = $true
             try { $listener.Stop() } catch {}
             try { [void]$ps.EndInvoke($handle) } catch {}
             try { $ps.Dispose() } catch {}
@@ -462,17 +691,12 @@ function Start-NonceListener {
 
 # The down port stays bound but never listens, so a connect to 127.0.0.1 on it is refused. The
 # exclusive bind on 0.0.0.0 keeps any other socket, wildcard or not, off the port during the pass.
-function New-ReservedLoopbackPort {
+function New-ReservedLoopbackPort([int]$Port = 0) {
     $s = New-Object Net.Sockets.Socket([Net.Sockets.AddressFamily]::InterNetwork,
         [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Tcp)
     $s.ExclusiveAddressUse = $true
-    $s.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)))
+    $s.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Any, $Port)))
     return $s
-}
-
-$Reach = @{
-    external = 'CONNECTED'; udp = 'ANSWERED'; dns = 'RESOLVED'; declared = 'REACHED'; other = 'REACHED'
-    linklocal = 'CONNECTED'; icmp = 'ECHOED'; v6 = 'REACHED'
 }
 
 # Host positive controls, run with the same probe code as the session. A target
@@ -480,7 +704,7 @@ $Reach = @{
 . ([ScriptBlock]::Create($ProbeBody))
 function Update-ProtocolControls {
     $HostOk['udp'] = (Test-Udp 'udp' $ExternalAddress 53 $DnsName) -eq "PROBE udp $($Reach.udp)"
-    $HostOk['icmp'] = (Test-Icmp 'icmp' $ExternalAddress) -eq "PROBE icmp $($Reach.icmp)"
+    $HostOk['icmp'] = @(Test-Icmp 'icmp' $ExternalAddress) -contains "PROBE icmp $($Reach.icmp)"
 }
 $HostOk = @{}
 Update-ProtocolControls
@@ -493,93 +717,74 @@ if (-not $HostOk.icmp) {
         'and a row that allows icmp cannot pass.') -ForegroundColor Yellow
 }
 $script:HostLinkLocal = $null
-$Targets = @('external', 'udp', 'icmp', 'dns', 'declared', 'other', 'v6', 'down', 'linklocal')
-
-# Outcomes that show a path is closed. Anything else (an invalid argument, no buffer space, an
-# unexpected error) is indeterminate, never evidence that a policy blocked the target.
-function Test-Blocked([string]$v) {
-    $codes = '10013|10050|10051|10053|10054|10060|10061|10064|10065|11001|11002|11003|11004'
-    return $v -match "^(TIMEOUT|CLOSED|UNREACH|WSA($codes))$"
-}
-
-# Judges an admitted row. $Allow lists the targets the request allows; every other target must be
-# blocked. dns is report-only unless DnsRequired is set; linklocal unless LinkLocalJudged is set.
-# A target the session reaches is always judged. Without a host control, a target it does not
-# reach is report-only where denied; where allowed, udp is report-only (agreed lab exception) and
-# icmp and v6 are unjudgeable (FAIL).
-function Get-PostureVerdict {
-    param([hashtable]$Verdicts, [string[]]$Allow, [switch]$DnsRequired, [switch]$LinkLocalJudged)
-    $broader = @(); $narrower = @(); $unknown = @()
-    foreach ($t in $Targets) {
-        $got = $Verdicts[$t]
-        if (-not $got) { $got = 'NORUN' }
-        if ($t -eq 'dns' -and -not $DnsRequired) { continue }
-        if ($t -eq 'linklocal' -and -not $LinkLocalJudged) { continue }
-        if ($HostOk.ContainsKey($t) -and -not $HostOk[$t] -and $got -ne $Reach[$t]) {
-            if ($t -eq 'udp' -or $Allow -notcontains $t) { continue }
-            $unknown += "$t=$got (no host control)"
-            continue
-        }
-        if ($Allow -contains $t) {
-            if ($got -ne $Reach[$t]) {
-                if (Test-Blocked $got) { $narrower += "$t=$got" } else { $unknown += "$t=$got" }
-            }
-        } elseif (-not (Test-Blocked $got)) {
-            if ($Reach.ContainsKey($t) -and $got -eq $Reach[$t]) { $broader += "$t=$got" }
-            else { $unknown += "$t=$got" }
-        }
-    }
-    $actual = (@($Targets | ForEach-Object {
-        $g = $Verdicts[$_]; if (-not $g) { $g = 'NORUN' }; "$_=$g"
-    })) -join ' '
-    $why = @()
-    if ($broader) { $why += "broader than requested: $($broader -join ', ')" }
-    if ($narrower) { $why += "allowed target blocked: $($narrower -join ', ')" }
-    if ($unknown) { $why += "indeterminate: $($unknown -join ', ')" }
-    return [pscustomobject]@{ Ok = ($why.Count -eq 0); Actual = $actual; Why = ($why -join '; ') }
-}
 
 # ---------------------------------------------------------------- rows
 
 # declared and v6 share one port number (127.0.0.1 and ::1), so a rule naming the port grants
 # exactly one of them by address family.
 $declared = $null; $other = $null; $v6 = $null; $downSocket = $null
+# L02's own listener: it answers while the row proves the port is reachable, then is stopped and its
+# port held bound but not listening while the row proves the port is no longer reachable.
+$l02 = $null; $l02Socket = $null; $script:L02Stopped = $false
 function Stop-Fixtures {
-    foreach ($l in @($declared, $other, $v6)) { if ($l) { & $l.Stop } }
-    if ($downSocket) { $downSocket.Dispose() }
+    foreach ($l in @($declared, $other, $v6, $l02)) { if ($l) { & $l.Stop } }
+    foreach ($s in @($downSocket, $l02Socket)) { if ($s) { $s.Dispose() } }
 }
 # Any terminating error from here on still releases the listeners and the reserved port.
 trap { Stop-Fixtures; break }
-for ($i = 0; $i -lt 5 -and -not $v6; $i++) {
-    if ($declared) { & $declared.Stop }
+# L04 declares $D-1..$D+1, so the declared port must leave room on both sides.
+for ($i = 0; $i -lt 20; $i++) {
     $declared = Start-NonceListener
-    try { $v6 = Start-NonceListener -Address ([Net.IPAddress]::IPv6Loopback) -Port $declared.Port } catch {}
+    if ($declared.Port -ge 2 -and $declared.Port -le 65534) {
+        try { $v6 = Start-NonceListener -Address ([Net.IPAddress]::IPv6Loopback) -Port $declared.Port } catch {}
+        if ($v6 -or $i -ge 4) { break }
+    }
+    & $declared.Stop
+    $declared = $null
+}
+if (-not $declared) {
+    Write-Host 'FAILED: no declared listener port in 2..65534 could be started. No rows were run.' -ForegroundColor Red
+    Stop-Fixtures
+    exit 1
 }
 $other = Start-NonceListener
 # Keep the never-named listener clear of the small port ranges rows declare.
-while ([Math]::Abs($other.Port - $declared.Port) -le 4) {
+for ($i = 0; $i -lt 20 -and [Math]::Abs($other.Port - $declared.Port) -le 4; $i++) {
     $prev = $other; $other = Start-NonceListener; & $prev.Stop
+}
+if ([Math]::Abs($other.Port - $declared.Port) -le 4) {
+    Write-Host 'FAILED: no second listener port clear of the declared port. No rows were run.' -ForegroundColor Red
+    Stop-Fixtures
+    exit 1
 }
 $downSocket = New-ReservedLoopbackPort
 $downPort = $downSocket.LocalEndPoint.Port
+$l02 = Start-NonceListener
+$l02Port = $l02.Port
 $D = $declared.Port
 $X = "$ExternalAddress/32"
 $proxyUrl = "http://127.0.0.1:$D"
 
 # Checks every fixture a verdict relies on from the host: the external destination answers, each
-# listener returns its own nonce, and the down port refuses. Returns the failures.
+# listener returns its own nonce and still accepts, and each down port refuses. Returns the failures.
 function Test-Fixtures {
     $bad = @()
     $ext = Test-Tcp 'external' $ExternalAddress $ExternalPort $null
     if ($ext -ne "PROBE external $($Reach.external)") { $bad += $ext }
+    $l02Up = if (-not $script:L02Stopped) { $l02 }
     foreach ($f in @(@('declared', '127.0.0.1', $declared), @('other', '127.0.0.1', $other),
-                     @('v6', '::1', $v6))) {
+                     @('v6', '::1', $v6), @('l02', '127.0.0.1', $l02Up))) {
         if (-not $f[2]) { continue }
         $got = Test-Tcp $f[0] $f[1] $f[2].Port $f[2].Nonce
         if ($got -ne "PROBE $($f[0]) REACHED") { $bad += $got }
+        if ($f[2].State.AcceptError) { $bad += "$($f[0]) listener stopped accepting: $($f[2].State.AcceptError)" }
     }
-    $down = Test-Tcp 'down' '127.0.0.1' $downPort 'MXC-NO-LISTENER'
-    if ($down -ne 'PROBE down WSA10061') { $bad += $down }
+    $downs = @(, @('down', $downPort))
+    if ($script:l02Socket) { $downs += , @('l02down', $l02Port) }
+    foreach ($d in $downs) {
+        $got = Test-Tcp $d[0] '127.0.0.1' $d[1] 'MXC-NO-LISTENER'
+        if ($got -ne "PROBE $($d[0]) WSA10061") { $bad += $got }
+    }
     return $bad
 }
 $HostOk['v6'] = $null -ne $v6
@@ -596,7 +801,8 @@ if ($fixtureFailures.Count -gt 0) {
 
 # Allow: targets the request allows. Needs: the capability a binary must have
 # to admit the shape (named when it is rejected). Baseline: rejection fails.
-# Reject: a rejection-surface row; admission fails, any clean rejection passes.
+# Reject: a rejection-surface row; admission fails, a validation rejection naming the Own field
+# path passes, and any other rejection means Field was not judged (UNSUPPORTED).
 $Matrix = @(
     # On/off (PC: capability matrix, model-3 equivalence)
     @{ Id = 'A01'; Area = 'on-off'; Cap = 'all-allow posture'; Needs = '-'; Baseline = $true
@@ -641,17 +847,30 @@ $Matrix = @(
     @{ Id = 'E12'; Area = 'egress'; Cap = 'protocol any to the target'; Needs = 'egressRules'
        Net = (DenyDefault -Allow @(Rule -Cidr $X -Protocol any -Port $ExternalPort))
        Allow = @(@('external') + @($(if ($ExternalPort -eq 53) { 'udp' }))) }
-    # Link-local / instance metadata is never reachable, whatever the policy allows. Preferred:
-    # rejected naming linkLocal (PASS); else admitted with 169.254.169.254:80 blocked.
+    # Every row whose policy denies 169.254.169.254:80 also judges it blocked. E13 and E14 go
+    # further: the request allows it, and the row asserts this pass's requirement that the session
+    # never reaches instance metadata whatever the policy allows. Admitted, the row passes only
+    # when 169.254.169.254:80 is blocked.
     @{ Id = 'E13'; Area = 'egress'; Cap = 'link-local metadata address never reachable'; Needs = 'egressRules'
        Net = (DenyDefault -Allow @(Rule -Cidr '169.254.0.0/16' -Protocol tcp -Port 80)); Allow = @()
-       LinkLocalJudged = $true; PassOnRejection = 'linkLocal' }
+       MetadataBlocked = $true }
+    # The exact metadata address, so the verdict does not rest on how a /16 is bounded.
+    @{ Id = 'E14'; Area = 'egress'; Cap = 'exact metadata address never reachable'; Needs = 'egressRules'
+       Net = (DenyDefault -Allow @(Rule -Cidr '169.254.169.254/32' -Protocol tcp -Port 80)); Allow = @()
+       MetadataBlocked = $true }
+    # E15: E04 with the allow and deny on the same destination, so no wide allow is needed.
+    @{ Id = 'E15'; Area = 'egress'; Cap = 'deny wins over a matching /32 allow'; Needs = 'egressRules'
+       Net = (DenyDefault -Allow @(Rule -Cidr $X -Protocol tcp -Port $ExternalPort) `
+              -Deny @(Rule -Cidr $X -Protocol tcp -Port $ExternalPort)); Allow = @() }
     # Host loopback (PC: host loopback). Declared ports only, never all ports.
     @{ Id = 'L01'; Area = 'loopback'; Cap = '127.0.0.1/32 exact tcp port'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port $D)); Allow = @('declared') }
-    @{ Id = 'L02'; Area = 'loopback'; Cap = 'declared port, host listener down'; Needs = 'loopbackPorts'
-       Net = (DenyDefault -Allow @((Rule -Cidr $Lo -Protocol tcp -Port $D), (Rule -Cidr $Lo -Protocol tcp -Port $downPort)))
-       Allow = @('declared'); DownCode = 'WSA10054' }
+    # Two runs under one policy that declares a second port. With its host listener up, the nonce
+    # must come back on that exact port (down=REACHED); after the listener is stopped, the same
+    # probe must be blocked. No particular socket error is required.
+    @{ Id = 'L02'; Area = 'loopback'; Cap = 'declared port, host listener up then down'; Needs = 'loopbackPorts'
+       Net = (DenyDefault -Allow @((Rule -Cidr $Lo -Protocol tcp -Port $D), (Rule -Cidr $Lo -Protocol tcp -Port $l02Port)))
+       Allow = @('declared', 'down'); AllowAfterStop = @('declared'); StopsListener = $true }
     @{ Id = 'L03'; Area = 'loopback'; Cap = 'endPort equal to port'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port $D -EndPort $D)); Allow = @('declared') }
     @{ Id = 'L04'; Area = 'loopback'; Cap = 'small port range'; Needs = 'loopbackPorts'
@@ -684,12 +903,16 @@ $Matrix = @(
        Net = (DenyDefault -Allow @()); Rc = @{ networkProxy = $proxyUrl }; Allow = @('declared') }
     # Rejection surface (PC: rejections). Never admitted on any build.
     @{ Id = 'X01'; Area = 'rejection'; Cap = 'legacy network.allowedHosts'; Needs = '-'; Reject = $true
+       Field = 'network.allowedHosts'; Own = '\bnetwork\.allowedHosts\b'
        Net = @{ allowedHosts = @('example.com') } }
     @{ Id = 'X02'; Area = 'rejection'; Cap = 'legacy network.proxy'; Needs = '-'; Reject = $true
+       Field = 'network.proxy'; Own = '\bnetwork\.proxy\b'
        Net = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
     @{ Id = 'X03'; Area = 'rejection'; Cap = 'malformed CIDR'; Needs = '-'; Reject = $true
+       Field = 'the CIDR'; Own = '\bnetwork\.egress\.allow\[0\]\.to\[0\]\.cidr\b'
        Net = (DenyDefault -Allow @(Rule -Cidr '127.0.0.1/33' -Protocol tcp -Port $D)) }
     @{ Id = 'X04'; Area = 'rejection'; Cap = 'loopback port 0'; Needs = '-'; Reject = $true
+       Field = 'the port'; Own = '\bnetwork\.egress\.allow\[0\]\.ports\[0\]\.port\b'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port 0)) }
 )
 if ($PSBoundParameters.ContainsKey('Row')) {
@@ -704,135 +927,98 @@ if ($PSBoundParameters.ContainsKey('Row')) {
     }
 }
 
-$calls = @(
-    "Test-Tcp 'other' '127.0.0.1' $($other.Port) '$($other.Nonce)'",
-    "Test-Tcp 'external' '$ExternalAddress' $ExternalPort `$null",
-    "Test-Tcp 'linklocal' '169.254.169.254' 80 `$null",
-    "Test-Udp 'udp' '$ExternalAddress' 53 '$DnsName'",
-    "Test-Icmp 'icmp' '$ExternalAddress'",
-    "Test-Dns 'dns' '$DnsName'",
-    # A nonce forces the read, so a relay reset (10054) is observed rather than its local accept.
-    "Test-Tcp 'down' '127.0.0.1' $downPort 'MXC-NO-LISTENER'",
-    "Test-Tcp 'v6' '::1' $D '$(if ($v6) { $v6.Nonce } else { 'MXC-NO-V6' })'",
-    "Test-Tcp 'declared' '127.0.0.1' $D '$($declared.Nonce)'"
-)
-$probeScript = ((($ProbeBody -split "`r?`n") | ForEach-Object { $_.Trim() } |
-    Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n") + "`n" + ($calls -join "`n")
-# UTF-16 base64 nearly triples the script, so ship it gzipped and expand it inside the session.
-$ms = New-Object IO.MemoryStream
-$gz = New-Object IO.Compression.GZipStream($ms, [IO.Compression.CompressionMode]::Compress)
-$raw = [Text.Encoding]::UTF8.GetBytes($probeScript)
-$gz.Write($raw, 0, $raw.Length)
-$gz.Dispose()
-$packed = [Convert]::ToBase64String($ms.ToArray())
-$loader = "`$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String('$packed'));" +
-    "`$z=New-Object IO.Compression.GZipStream(`$m,[IO.Compression.CompressionMode]::Decompress);" +
-    "Invoke-Expression (New-Object IO.StreamReader(`$z)).ReadToEnd()"
-$b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
-$probeCommand = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -EncodedCommand $b64"
+# Builds the session command line. $DownCall is the probe for the 'down' target: the reserved
+# never-listening port in every row but L02, which probes its own listener's port.
+function New-ProbeCommand([string]$DownCall) {
+    $calls = @(
+        "Test-Tcp 'other' '127.0.0.1' $($other.Port) '$($other.Nonce)'",
+        "Test-Tcp 'external' '$ExternalAddress' $ExternalPort `$null",
+        "Test-Tcp 'linklocal' '169.254.169.254' 80 `$null",
+        "Test-Udp 'udp' '$ExternalAddress' 53 '$DnsName'",
+        "Test-Icmp 'icmp' '$ExternalAddress'",
+        "Test-Dns 'dns' '$DnsName'",
+        $DownCall,
+        "Test-Tcp 'v6' '::1' $D '$(if ($v6) { $v6.Nonce } else { 'MXC-NO-V6' })'",
+        "Test-Tcp 'declared' '127.0.0.1' $D '$($declared.Nonce)'"
+    )
+    $probeScript = ((($ProbeBody -split "`r?`n") | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n") + "`n" + ($calls -join "`n")
+    # UTF-16 base64 nearly triples the script, so ship it gzipped and expand it inside the session.
+    $ms = New-Object IO.MemoryStream
+    $gz = New-Object IO.Compression.GZipStream($ms, [IO.Compression.CompressionMode]::Compress)
+    $raw = [Text.Encoding]::UTF8.GetBytes($probeScript)
+    $gz.Write($raw, 0, $raw.Length)
+    $gz.Dispose()
+    $packed = [Convert]::ToBase64String($ms.ToArray())
+    $loader = "`$m=New-Object IO.MemoryStream(,[Convert]::FromBase64String('$packed'));" +
+        "`$z=New-Object IO.Compression.GZipStream(`$m,[IO.Compression.CompressionMode]::Decompress);" +
+        "Invoke-Expression (New-Object IO.StreamReader(`$z)).ReadToEnd()"
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
+    return "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -EncodedCommand $b64"
+}
+# A nonce forces the read, so a reset after the connect (10054) is observed.
+$probeCommand = New-ProbeCommand "Test-Tcp 'down' '127.0.0.1' $downPort 'MXC-NO-LISTENER'"
+$l02Command = New-ProbeCommand "Test-Tcp 'down' '127.0.0.1' $l02Port '$($l02.Nonce)'"
 # Session launch refuses longer command lines ("The command line is too long."); keep under 8191.
-if ($probeCommand.Length -gt 8191) {
-    Write-Host "FAILED: probe command is $($probeCommand.Length) characters; the limit is 8191." -ForegroundColor Red
+$longest = [Math]::Max($probeCommand.Length, $l02Command.Length)
+if ($longest -gt 8191) {
+    Write-Host "FAILED: probe command is $longest characters; the limit is 8191." -ForegroundColor Red
     Stop-Fixtures
     exit 1
 }
 
+# Runs one request and classifies it against the current fixtures and host controls.
+function Invoke-RowRun([hashtable]$Row, [string]$Command, [string[]]$Allow) {
+    $req = New-Request -Network $Row.Net -RuntimeConfig $Row.Rc -CommandLine $Command
+    $run = Invoke-WxcRequest -Request $req
+    if ($run.Killed) { $script:Killed += $Row.Id }
+    $fx = @()
+    if ((Get-ProbeRecords $run.Output).Count -gt 0) {
+        # udp and icmp controls can change during the pass, so judge against fresh ones.
+        Update-ProtocolControls
+        $fx = @(Test-Fixtures)
+        if ($null -eq $script:HostLinkLocal -and (Test-LinkLocalJudged $Row)) {
+            # The property is non-reachability, so a block passes; the host control is recorded only.
+            $script:HostLinkLocal = (Test-Tcp 'linklocal' '169.254.169.254' 80 $null) -eq 'PROBE linklocal CONNECTED'
+        }
+    }
+    return Get-RowVerdict -Row $Row -Run $run -HostOk $HostOk -FixtureFailures $fx `
+        -HostLinkLocal $script:HostLinkLocal -Allow $Allow
+}
+
 $v6Text = if ($v6) { "::1:$D" } else { 'none' }
-Write-Host ("Listeners: declared=$D other=$($other.Port) v6=$v6Text down=$downPort; " +
+Write-Host ("Listeners: declared=$D other=$($other.Port) v6=$v6Text down=$downPort l02=$l02Port; " +
     "external=$ExternalAddress`:$ExternalPort") -ForegroundColor DarkGray
 try {
     foreach ($r in $Matrix) {
-        $expected = if ($r.Reject) { 'rejected' }
-            elseif ($r.Invalid) { 'rejected: networkProxy needs deny-by-default egress with no direct rules' }
-            else { "admitted with {$($r.Allow -join ',')} or rejected naming network" }
         try {
-            $req = New-Request -Network $r.Net -RuntimeConfig $r.Rc -CommandLine $probeCommand
-            $run = Invoke-WxcRequest -Request $req
-            if ($run.Killed) { $script:Killed += $r.Id }
-            $verdicts = @{}
-            foreach ($m in [regex]::Matches($run.Output, 'PROBE (\S+) (\S+)')) {
-                $verdicts[$m.Groups[1].Value] = $m.Groups[2].Value
-            }
-            $admitted = $verdicts.Count -gt 0
-            $tail = (($run.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' | '
-            # A rejection counts only as a typed admission error on a clean exit 1.
-            $rej = if ($admitted) { $null } else { Get-Rejection $run }
-            $got = if ($rej) { "rejected ($($rej.Code))" } else { "exit $($run.ExitCode), no admission error" }
-            if ($run.Killed) {
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "killed after $($SessionTimeoutMs + $KillGraceMs) ms" 'FAIL' $tail
-            } elseif (-not $run.Complete) {
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "exit $($run.ExitCode)" 'FAIL' 'output capture incomplete'
-            } elseif ($r.Reject) {
-                if ($admitted) {
-                    Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'admitted' 'FAIL' 'a rejection-surface request was admitted'
-                } elseif ($rej) {
-                    Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected $got 'PASS'
-                } else {
-                    Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected $got 'FAIL' $tail
-                }
-            } elseif ($admitted -and $r.Invalid) {
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'admitted' 'FAIL' 'an invalid proxy shape was admitted'
-            } elseif ($admitted -and $r.Unprobed) {
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'admitted' 'FAIL' "admitted; no probe for $($r.Unprobed)"
-            } elseif ($admitted) {
-                # udp and icmp controls can change during the pass, so judge against fresh ones.
-                Update-ProtocolControls
-                $pv = Get-PostureVerdict -Verdicts $verdicts -Allow $r.Allow `
-                    -DnsRequired:([bool]$r.DnsRequired) -LinkLocalJudged:([bool]$r.LinkLocalJudged)
-                $ok = $pv.Ok
-                $why = $pv.Why
-                if ($ok -and $r.DownCode -and $verdicts['down'] -ne $r.DownCode) {
-                    $ok = $false; $why = "declared port with no listener must fail with $($r.DownCode)"
-                }
-                if ($ok -and $run.ExitCode -ne 0) { $ok = $false; $why = "session exited $($run.ExitCode)" }
-                # A fixture that broke during the row makes its verdicts meaningless.
-                $fx = @(Test-Fixtures)
-                if ($fx.Count -gt 0) { $ok = $false; $why = "fixture unhealthy: $($fx -join ', ')" }
-                $llNote = $null
-                if ($ok -and $r.LinkLocalJudged) {
-                    # The property is non-reachability, so a block passes; the host control is recorded only.
-                    if ($null -eq $script:HostLinkLocal) {
-                        $script:HostLinkLocal = (Test-Tcp 'linklocal' '169.254.169.254' 80 $null) -eq 'PROBE linklocal CONNECTED'
-                    }
-                    if (-not $script:HostLinkLocal) {
-                        $llNote = 'blocked (no host control: the host cannot reach 169.254.169.254:80)'
-                    }
-                }
-                $detail = @(@($why, $llNote, $r.Note) | Where-Object { $_ })
-                if (-not $r.DnsRequired) { $detail += "dns=$($verdicts['dns']) (report-only)" }
-                foreach ($t in @('udp', 'icmp', 'v6')) {
-                    if (-not $HostOk[$t] -and $verdicts[$t] -ne $Reach[$t]) {
-                        $detail += "$t not judged: no host control ($t=$($verdicts[$t]))"
-                    }
-                }
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected "admitted: $($pv.Actual)" `
-                    ($(if ($ok) { 'PASS' } else { 'FAIL' })) ($detail -join '; ')
-            } elseif ($rej -and $r.PassOnRejection -and $rej.Message -cmatch "\b$($r.PassOnRejection)\b") {
-                Add-Row $r.Id $r.Area $r.Cap $r.PassOnRejection $expected "rejected ($($r.PassOnRejection))" 'PASS'
-            } elseif ($rej -and $rej.Message -match $NetworkRejection) {
-                $needs = $r.Needs
-                if ($rej.Message -match "requires platform capability '([A-Za-z]+)'") { $needs = $Matches[1] }
-                if ($r.Baseline) {
-                    Add-Row $r.Id $r.Area $r.Cap $needs $expected $got 'FAIL' $rej.Message
-                } else {
-                    Add-Row $r.Id $r.Area $r.Cap $needs $expected 'rejected (network)' 'UNSUPPORTED'
-                }
-            } elseif ($rej -and $r.Invalid -and $rej.Message -match 'networkProxy requires network\.egress\.default') {
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'rejected (proxy shape)' 'PASS'
+            if (-not $r.StopsListener) {
+                $rv = Invoke-RowRun $r $probeCommand @($r.Allow)
             } else {
-                $why = if ($rej) { $rej.Message } else { $tail }
-                Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected $got 'FAIL' $why
+                $up = Invoke-RowRun $r $l02Command @($r.Allow)
+                $rv = $up
+                if ($up.Verdict -eq 'PASS') {
+                    # Same policy, same probe; the listener is gone and its port held bound but not
+                    # listening, so the declared port must now be blocked.
+                    # Marked stopped before the reserve: if another process takes the port, only L02
+                    # fails (runner error) and later rows neither expect the listener nor its refusal.
+                    & $l02.Stop
+                    $script:L02Stopped = $true
+                    $script:l02Socket = New-ReservedLoopbackPort -Port $l02Port
+                    $down = Invoke-RowRun $r $l02Command @($r.AllowAfterStop)
+                    $rv = Join-L02Verdict $up $down
+                }
             }
+            Add-Row $r.Id $r.Area $r.Cap $r.Needs $rv.Expected $rv.Actual $rv.Verdict $rv.Detail
         } catch {
-            Add-Row $r.Id $r.Area $r.Cap $r.Needs $expected 'runner error' 'FAIL' $_.Exception.Message
+            Add-Row $r.Id $r.Area $r.Cap $r.Needs (Get-RowExpected $r @($r.Allow)) 'runner error' 'FAIL' $_.Exception.Message
         }
     }
 } finally {
     Stop-Fixtures
 }
-
 if ($script:Killed.Count -gt 0) {
-    Add-Row 'G13' 'quiesce' 'killed wxc-exec may leave its agent user' '-' 'no killed wxc-exec' `
+    Add-Row 'K01' 'cleanup' 'killed wxc-exec may leave its agent user' '-' 'no killed wxc-exec' `
         "killed in $($script:Killed -join ',')" 'KNOWN-GAP' 'check for and remove a leftover agent user'
 }
 
