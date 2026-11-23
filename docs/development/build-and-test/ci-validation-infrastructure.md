@@ -270,6 +270,11 @@ failed startup, long-running workloads, existing static networking, and
 cancellation during address acquisition.  Each named regression must be
 discoverable, and missing prerequisites fail the job.
 
+Reservation activation coverage delays DHCP confirmation past three probes,
+requires eventual workload execution, and rejects persistent address or lease
+duration mismatches within the activation deadline. PR LXC E2E failures also
+upload the recent `lxc-net` and dnsmasq journals.
+
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
 isolated, firewall, and proxy cases require empty workload capability sets,

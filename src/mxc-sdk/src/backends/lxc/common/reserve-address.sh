@@ -339,13 +339,20 @@ ip link set dev "$veth_peer" up
 acquire()
 {
     # Leave the finite lease active while the reservation is being installed.
-    if ! busybox udhcpc \
+    if ! timeout --foreground --signal=TERM --kill-after=2 "${1:-30}" busybox udhcpc \
         -i "$veth_peer" -f -q -n -t 3 -T 2 -a -B -O search \
         -s "$directory/dhcp-event.sh" > "$directory/client.log" 2>&1 ||
         ! test -s "$directory/address"; then
         cat "$directory/client.log" >&2
-        fail "Failed to acquire an LXC address from local lxc-net"
+        echo "Failed to acquire an LXC address from local lxc-net (limit ${1:-30}s)" >&2
+        return 1
     fi
+}
+
+monotonic_seconds()
+{
+    IFS=' ' read -r uptime idle < /proc/uptime
+    printf '%s\n' "${uptime%%.*}"
 }
 
 acquire
@@ -384,16 +391,34 @@ chmod 644 "$pending_file"
 mv -f -- "$pending_file" "$reservation"
 pending_file=
 server=$(server_pid)
-kill -HUP "$server" || fail "Failed to reload local lxc-net reservations"
+now=$(monotonic_seconds)
+activation_deadline=$((now + 30))
+attempt=0
 
-for attempt in 1 2 3; do
-    acquire
-    if [ "$(cat "$directory/address")" = "$address" ] &&
-        [ "$(cat "$directory/lease")" = "$duration" ]; then
-        test "$server" = "$(server_pid)" ||
-            fail "Local lxc-net restarted while activating the LXC reservation"
+while :; do
+    now=$(monotonic_seconds)
+    remaining=$((activation_deadline - now))
+    test "$remaining" -gt 0 || break
+    current_server=$(server_pid)
+    test "$server" = "$current_server" ||
+        fail "Local lxc-net restarted while activating the LXC reservation (PID $server -> $current_server)"
+    # A successful kill only queues SIGHUP; it does not acknowledge the reload.
+    kill -HUP "$server" || fail "Failed to reload local lxc-net reservations"
+    attempt=$((attempt + 1))
+    if ! acquire "$remaining"; then
+        fail "LXC reservation activation attempt $attempt failed (dnsmasq PID $server; expected address=$address lease=${duration}s)"
+    fi
+
+    observed_address=$(cat "$directory/address")
+    observed_lease=$(cat "$directory/lease")
+    current_server=$(server_pid)
+    test "$server" = "$current_server" ||
+        fail "Local lxc-net restarted while activating the LXC reservation (PID $server -> $current_server)"
+    if [ "$observed_address" = "$address" ] && [ "$observed_lease" = "$duration" ]; then
         exit 0
     fi
+    echo "LXC reservation activation attempt $attempt (dnsmasq PID $server): expected address=$address lease=${duration}s; observed address=$observed_address lease=${observed_lease}s" >&2
+    cat "$directory/client.log" >&2
     sleep 0.1
 done
-fail "Local lxc-net did not activate the LXC address reservation"
+fail "Local lxc-net did not activate the LXC address reservation within 30s"

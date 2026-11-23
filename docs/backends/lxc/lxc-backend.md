@@ -122,6 +122,12 @@ If reservation support is not enabled, MXC enables it and restarts the shared
 `lxc-net` service.  Later reservations reload dnsmasq without restarting
 the bridge.
 
+MXC retries reservation reload and verification for up to 30 seconds. Startup
+fails if DHCP does not confirm both the reserved address and its lease
+duration, or if dnsmasq restarts during verification. Failure diagnostics
+include the expected and observed values, the dnsmasq PID, and DHCP client
+output. Check the `lxc-net` and dnsmasq journals if activation keeps failing.
+
 **Warning:** Restarting `lxc-net` temporarily interrupts networking for containers
 already connected to the bridge.  The containers remain running.
 

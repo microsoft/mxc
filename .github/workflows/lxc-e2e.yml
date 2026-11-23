@@ -195,6 +195,13 @@ jobs:
           echo "--- leftover containers ---"
           sudo lxc-ls -f || echo "none"
 
+      - name: Collect LXC DHCP diagnostics on failure
+        if: failure() || cancelled()
+        run: |
+          mkdir -p logs
+          sudo journalctl -b -u lxc-net --no-pager -n 300 > logs/lxc-net.log
+          sudo journalctl -b -t dnsmasq -t dnsmasq-dhcp --no-pager -n 300 > logs/dnsmasq.log
+
       - name: Upload logs on failure
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
