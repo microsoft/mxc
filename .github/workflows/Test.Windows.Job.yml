@@ -72,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           & ..\scripts\ci\cargo-build-snapshot.ps1 -Mode Restore `
-            -Archive (Join-Path $env:RUNNER_TEMP 'windows-build\windows-build.tar') `
+            -Archive (Join-Path $env:RUNNER_TEMP 'windows-build\windows-build.tar.zst') `
             -Target '${{ matrix.target }}'
 
       - name: Build

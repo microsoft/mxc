@@ -22,7 +22,13 @@ $archivePath = [System.IO.Path]::GetFullPath($Archive)
 if ($Target -notmatch '^[a-zA-Z0-9_-]+$') {
     throw "Invalid Cargo target: $Target"
 }
-$metadataName = '.mxc-cargo-build-snapshot.json'
+$metadataPath = $archivePath + '.json'
+$compression = @()
+if ($archivePath.EndsWith('.tar.zst', [StringComparison]::OrdinalIgnoreCase)) {
+    $compression = @('--zstd')
+} elseif (-not $archivePath.EndsWith('.tar', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Cargo build snapshots require a .tar or .tar.zst archive.'
+}
 
 function Get-GitBuildInputs {
     $gitDirectory = git -C $root rev-parse --absolute-git-dir
@@ -50,10 +56,12 @@ function Get-GitBuildInputs {
 }
 
 if ($Mode -eq 'Restore') {
-    $metadataText = @(tar -xOf $archivePath $metadataName)
-    if ($LASTEXITCODE -ne 0) { throw 'Reading Cargo build snapshot metadata failed.' }
-    $metadata = ($metadataText -join "`n") | ConvertFrom-Json
+    $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+    if ($metadata.FormatVersion -ne 1) { throw 'Unsupported Cargo build snapshot metadata version.' }
     if ($metadata.Target -ne $Target) { throw 'Cargo build snapshot target mismatch.' }
+    if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -ne $metadata.ArchiveSha256) {
+        throw 'Cargo build snapshot archive checksum mismatch.'
+    }
     $currentInputs = @(Get-GitBuildInputs)
     if ($currentInputs.Count -ne @($metadata.GitInputs).Count) {
         throw 'Cargo build snapshot Git inputs do not match this checkout.'
@@ -64,7 +72,7 @@ if ($Mode -eq 'Restore') {
             throw "Cargo build snapshot Git input differs: $($saved.Name)"
         }
     }
-    tar -xf $archivePath --exclude $metadataName -C $root
+    tar -xf $archivePath -C $root
     if ($LASTEXITCODE -ne 0) { throw 'Restoring the Cargo build snapshot failed.' }
     # Version-resource build scripts watch Git metadata as well as tracked sources.
     foreach ($saved in $metadata.GitInputs) {
@@ -84,9 +92,6 @@ $tracked = @(git -C $root -c core.quotepath=false ls-files)
 if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) {
     throw 'Listing snapshot source files failed.'
 }
-if ($tracked -contains $metadataName) {
-    throw "Snapshot metadata name is reserved: $metadataName"
-}
 $targetPaths = @("src/target/$Target/release")
 if (Test-Path -LiteralPath (Join-Path $root 'src\target\release')) {
     $targetPaths += 'src/target/release'
@@ -98,27 +103,20 @@ foreach ($path in $targetPaths) {
 }
 
 $list = [System.IO.Path]::GetTempFileName()
-$metadataDirectory = Join-Path ([IO.Path]::GetTempPath()) "mxc-cargo-snapshot-$([guid]::NewGuid())"
 try {
-    New-Item -ItemType Directory -Path $metadataDirectory | Out-Null
     # Cargo freshness checks need the source timestamps from the producing job.
     @($tracked + $targetPaths) | Set-Content -LiteralPath $list -Encoding utf8NoBOM
-    @{
+    $metadata = @{
+        FormatVersion = 1
         Target = $Target
         GitInputs = @(Get-GitBuildInputs | Select-Object Name, Hash, UtcTicks)
-    } | ConvertTo-Json -Depth 4 |
-        Set-Content -LiteralPath (Join-Path $metadataDirectory $metadataName) -Encoding utf8NoBOM
-    tar --format pax -cf $archivePath -C $metadataDirectory $metadataName
-    if ($LASTEXITCODE -ne 0) { throw 'Saving Cargo build snapshot metadata failed.' }
-    tar --format pax -rf $archivePath -C $root -T $list
+    }
+    tar --format pax @compression -cf $archivePath -C $root -T $list
     if ($LASTEXITCODE -ne 0) { throw 'Saving the Cargo build snapshot failed.' }
+    $metadata.ArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    $metadata | ConvertTo-Json -Depth 4 |
+        Set-Content -LiteralPath $metadataPath -Encoding utf8NoBOM
 } finally {
     Remove-Item -LiteralPath $list -Force
-    if (Test-Path -LiteralPath (Join-Path $metadataDirectory $metadataName)) {
-        Remove-Item -LiteralPath (Join-Path $metadataDirectory $metadataName) -Force
-    }
-    if (Test-Path -LiteralPath $metadataDirectory) {
-        Remove-Item -LiteralPath $metadataDirectory -Force
-    }
 }
 Write-Host "Cargo build snapshot: $archivePath ($((Get-Item -LiteralPath $archivePath).Length) bytes)"

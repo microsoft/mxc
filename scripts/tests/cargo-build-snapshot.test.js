@@ -5,7 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
+  appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -22,13 +22,13 @@ function run(command, args, cwd, env = process.env) {
   return result.stdout + result.stderr;
 }
 
-test("restoring a shared build preserves Cargo freshness after a fresh source checkout", () => {
+function verifySnapshot(extension) {
   const scratch = mkdtempSync(join(tmpdir(), "mxc-cargo-snapshot-"));
   const repository = join(scratch, "repository");
   const source = join(repository, "src");
   const library = join(source, "src", "lib.rs");
   const gitHead = join(repository, ".git", "HEAD");
-  const archive = join(scratch, "build.tar");
+  const archive = join(scratch, "build" + extension);
   mkdirSync(join(source, "src"), { recursive: true });
   writeFileSync(join(source, "Cargo.toml"),
     '[package]\nname = "snapshot-fixture"\nversion = "0.1.0"\nedition = "2021"\n');
@@ -49,6 +49,10 @@ test("restoring a shared build preserves Cargo freshness after a fresh source ch
     const headBefore = statSync(gitHead).mtimeMs;
     run("pwsh", ["-NoProfile", "-File", helper, "-Mode", "Save",
       "-Archive", archive, "-Target", host, "-RepositoryRoot", repository], root);
+    if (extension === ".tar.zst") {
+      assert.equal(readFileSync(archive).subarray(0, 4).toString("hex"), "28b52ffd",
+        "the shared snapshot must contain a Zstandard frame, not an uncompressed tar");
+    }
     rmSync(join(source, "target"), { recursive: true, force: true });
     const later = new Date(Date.now() + 10_000);
     utimesSync(library, later, later);
@@ -64,6 +68,8 @@ test("restoring a shared build preserves Cargo freshness after a fresh source ch
       "matching Git build inputs must keep their producing timestamps");
     assert.equal(readFileSync(library, "utf8"), "pub fn answer() -> u32 { 42 }\n");
     const changedHead = "ref: refs/heads/different-checkout\n";
+    const sentinel = "source that a rejected snapshot must not overwrite";
+    writeFileSync(library, sentinel);
     writeFileSync(gitHead, changedHead);
     const rejected = spawnSync("pwsh", ["-NoProfile", "-File", helper, "-Mode", "Restore",
       "-Archive", archive, "-Target", host, "-RepositoryRoot", repository], {
@@ -74,7 +80,23 @@ test("restoring a shared build preserves Cargo freshness after a fresh source ch
     assert.match(rejected.stdout + rejected.stderr, /snapshot Git input differs/);
     assert.equal(readFileSync(gitHead, "utf8"), changedHead,
       "restoring a snapshot must never overwrite Git history or references");
+    assert.equal(readFileSync(library, "utf8"), sentinel);
+    appendFileSync(archive, Buffer.from([0]));
+    const corrupt = spawnSync("pwsh", ["-NoProfile", "-File", helper, "-Mode", "Restore",
+      "-Archive", archive, "-Target", host, "-RepositoryRoot", repository], {
+      cwd: root, encoding: "utf8", timeout: 30_000,
+    });
+    assert.ifError(corrupt.error);
+    assert.notEqual(corrupt.status, 0);
+    assert.match(corrupt.stdout + corrupt.stderr, /snapshot archive checksum mismatch/);
+    assert.equal(readFileSync(gitHead, "utf8"), changedHead);
+    assert.equal(readFileSync(library, "utf8"), sentinel);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-});
+}
+
+for (const extension of [".tar", ".tar.zst"]) {
+  test(`restoring a ${extension} shared build preserves Cargo freshness after a fresh checkout`,
+    () => verifySnapshot(extension));
+}

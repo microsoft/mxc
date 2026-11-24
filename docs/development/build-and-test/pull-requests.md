@@ -26,6 +26,11 @@ first builds the production executor and sidecars once per architecture.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
+The transfer contains a Zstandard-compressed PAX archive and a JSON metadata
+sidecar bound to the archive's SHA-256 checksum. Upload stores the compressed
+bytes without compressing them again. Restore validates the metadata and
+checksum before extracting once; it does not scan the compressed archive to
+find metadata.
 Version-resource build scripts also watch Git HEAD and its referenced ref.
 Snapshots record hashes and timestamps for those inputs, not their contents.
 Restore rejects mismatched Git inputs and restores timestamps only after
@@ -42,12 +47,14 @@ before merging the job extraction. The NVX module-lifetime gate follows its
 example into the workspace suite. The existing Windows build checks retain
 their focused telemetry, filesystem-probe, NVX artifact, and package validation.
 
-Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check snapshot
-reuse locally. The regression builds a small crate with a build script,
+Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check raw and
+compressed snapshot reuse locally; `tar` must support Zstandard compression.
+The regression builds a small crate with a build script,
 deletes its output, changes its source timestamp to simulate a fresh checkout,
 changes Git HEAD's timestamp, restores the snapshot, and requires Cargo to
 reuse the existing compilation. It also checks that a mismatched checkout is
-rejected without overwriting its Git references.
+rejected without overwriting its Git references or source files, and that
+archive corruption is rejected before extraction.
 Repository-consistency CI runs the same check.
 
 The shared Windows build, artifact validation, workspace tests, and telemetry

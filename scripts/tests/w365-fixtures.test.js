@@ -274,3 +274,13 @@ test("shared Windows builds and every consumer select the same pinned linker bef
     }
   }
 });
+
+test("shared Windows snapshots transfer compressed data and its bound metadata without recompression", () => {
+  const shared = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
+  assert.match(shared, /windows-build\.tar\.zst\r?\n +\$\{\{ runner.temp \}\}\/windows-build\.tar\.zst\.json/);
+  assert.match(shared, /compression-level: 0/);
+  for (const name of ["Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
+    const consumer = readFileSync(join(root, ".github", "workflows", name), "utf8");
+    assert.ok(consumer.includes("windows-build\\windows-build.tar.zst"), name);
+  }
+});
