@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Rootless private networking for Bubblewrap proxy mode.
+//! Private networking for Bubblewrap.
 
 use std::cell::Cell;
 use std::fs::{self, File};
@@ -29,6 +29,7 @@ use tempfile::TempDir;
 
 use crate::bwrap_common::bwrap_command::{path_is_denied, PolicyMount, COMMAND_TAIL};
 use crate::bwrap_common::host_tools::{self, LookupError};
+use crate::bwrap_common::identity::{read_as_workload, RootIdentity};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
@@ -143,38 +144,27 @@ const SUPERVISOR_LIVENESS_FD: RawFd = 5;
 /// Descriptors are staged above every target before being landed, so a source
 /// already sitting on a target cannot be clobbered mid-remap.
 const FD_STAGING_BASE: RawFd = 10;
-/// Brings up the private network, then closes it down to the proxy before the
-/// workload runs.
-///
-/// Ordering is the security property: the readiness signal is written only
-/// after every rule is installed, and `set -e` turns a failed rule into
-/// supervisor death rather than an unenforced sandbox. Rules are applied here
-/// because that needs `CAP_NET_ADMIN` in the owning user namespace, which the
-/// supervisor holds (`--keep-caps`) and the caller does not.
+
+// The network is marked ready only after every rule has been installed.
 const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
 lock_wait="$2"
 
-# Every host tool arrives as the absolute path the parent checked, so nothing
-# below depends on this process's PATH.
+# Use the absolute tool paths checked by the parent.
 nsenter="$3"
 ip="$4"
 slirp4netns="$5"
 iptables_restore="$6"
 ip6tables_restore="$7"
 sleep="$8"
+unshare="$9"
+slirp_sandbox="${10}"
 
-# Inherited descriptors are remapped to fixed numbers by the parent (see
-# `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
-# They are hardcoded rather than passed in argv because /bin/sh is dash on
-# Debian/Ubuntu, which rejects a *variable* descriptor >= 10 ("Bad fd number")
-# at parse time -- a failure that depends on how many files the parent happens
-# to hold open, so it surfaces nondeterministically and never in unit tests.
+# Dash redirections need fixed single-digit descriptors.
+# 3 carries the sandbox PID and reaches EOF if the parent exits before sending it.
+# 4 controls slirp's lifetime.
 printf ready > "$state_dir/userns.ready"
-# Block on the parent-owned PID pipe rather than polling for a file: if the
-# parent dies before it can publish the PID, the read ends at EOF and this
-# supervisor exits instead of spinning forever as an orphan.
 if ! IFS= read -r child_pid <&3; then
     child_pid="${child_pid:-}"
 fi
@@ -184,9 +174,7 @@ if [ -z "$child_pid" ]; then
     exit 1
 fi
 
-# The child PID is published before bwrap initializes loopback. Starting slirp
-# first brings lo up and creates 127.0.0.1/8, so bwrap's exclusive address
-# creation fails. The workload gate comes too late to order these two steps.
+# Wait for Bubblewrap's loopback setup before slirp creates the same address.
 ns="/proc/$child_pid/ns/net"
 while :; do
     loopback=$("$nsenter" --net="$ns" -- "$ip" -4 -o address show dev lo up) || {
@@ -199,12 +187,18 @@ while :; do
     "$sleep" 0.01
 done
 
-# slirp signals readiness internally so the supervisor, not slirp, decides when
-# the sandbox is ready -- the rules below must be in place first. Descriptor 9
-# is safe to hardcode: the parent hands this child exactly 0-4, so nothing else
-# can be sitting on it.
+# Slirp readiness alone must not release the workload.
 exec 9> "$state_dir/slirp.internal"
-"$slirp4netns" --configure --mtu=65520 \
+
+# A root supervisor keeps host privileges, so slirp sheds them before it handles packets.
+# Slirp's sandbox detaches its old root, so a private mount namespace keeps host mounts in place.
+if [ "$slirp_sandbox" = yes ]; then
+    set -- "$unshare" --mount --propagation private -- \
+        "$slirp4netns" --enable-sandbox --enable-seccomp
+else
+    set -- "$slirp4netns"
+fi
+"$@" --configure --mtu=65520 \
     --ready-fd 9 --exit-fd 4 \
     "$child_pid" tap0 &
 slirp_pid=$!
@@ -217,47 +211,25 @@ while [ ! -s "$state_dir/slirp.internal" ]; do
     "$sleep" 0.01
 done
 
-# Network filtering in both directions, programmed here because it needs
-# CAP_NET_ADMIN in the owning user namespace, which this supervisor holds
-# (`--keep-caps`) and the caller does not.
-#
-# Each family's rules arrive as one or more `iptables-restore` transactions,
-# numbered so this glob applies them in order. Both built-in hooks travel in
-# the *last* transaction of a family, so a hook is never live over a partially
-# built chain and the rules cannot be observed half-installed. Splitting is
-# forced by the kernel: one restore is one bounded netlink transaction, and a
-# large directional rule set would otherwise exceed it and install nothing. The payloads
-# are rendered in Rust from parsed addresses, so nothing here echoes caller
-# text.
-#
-# -w matters only on the legacy backend, the one that takes a lock: nsenter
-# enters the network namespace but not the mount namespace, so concurrent
-# sandboxes contend for the *host's* /run/xtables.lock, and set -e turns a lost
-# race into a dead supervisor. nf_tables takes no lock and ignores the wait.
-# A backend that cannot take the lock at all is refused by probe_dependencies.
-# -n keeps the restore additive, so it never clears a table it did not write
-# and so a later transaction appends to the chain an earlier one declared.
-#
-# A rejected transaction applies nothing, so a host that cannot support a rule
-# fails closed here rather than starting an unenforced sandbox. The most likely
-# cause is worth naming, because iptables reports it only as "Invalid argument".
 conntrack_hint="mxc: could not install the sandbox network policy. If the error above says \
 'Invalid argument', this host is missing the nf_conntrack kernel module that the inbound \
 connection-state match requires, and an unprivileged sandbox cannot load it."
+
+# One restore is one bounded kernel transaction, so large rule sets arrive in several.
+# The final transaction installs the hooks after the earlier rules exist.
 for payload in "$state_dir"/rules.v4.*; do
+
+    # -w waits for the host's legacy xtables lock, which concurrent sandboxes share
+    # because nsenter keeps the host's mount namespace. -n preserves earlier transactions.
     "$nsenter" --net="$ns" -- "$iptables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
-# No IPv6 payload is written when the kernel has no IPv6 stack (see
-# `rule_families`), and an unmatched glob expands to itself. IPv4 has no such
-# guard, so a missing IPv4 payload still fails the restore and kills the
-# supervisor.
+
+# A kernel without IPv6 has no IPv6 payloads.
 for payload in "$state_dir"/rules.v6.*; do
     [ -e "$payload" ] || continue
     "$nsenter" --net="$ns" -- "$ip6tables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 
-# Signalled by path, not through a descriptor: this is a plain file the parent
-# polls, so it needs no shell redirection and cannot hit dash's fd limit.
 printf ready > "$state_dir/slirp.ready"
 wait "$slirp_pid"
 "#;
@@ -639,6 +611,7 @@ pub(crate) struct BwrapStartup {
     /// Descriptors bwrap must inherit, cleared of `FD_CLOEXEC` in the child
     /// only. See [`inherit_descriptors`].
     inheritable: Vec<RawFd>,
+    _pins: Vec<File>,
 }
 
 impl BwrapStartup {
@@ -661,6 +634,7 @@ impl BwrapStartup {
             info_writer: Some(info_writer),
             gate_reader: Some(gate_reader),
             gate_writer: Some(gate_writer),
+            _pins: Vec::new(),
         })
     }
 
@@ -782,7 +756,6 @@ fn warn_skipped_ipv6_rules(kernel_ipv6: bool, logger: &mut Logger) {
     );
 }
 
-/// A same-UID user-namespace supervisor and its `slirp4netns` process.
 pub(crate) struct ProxyNetworkNamespace {
     state_dir: TempDir,
     supervisor: Supervisor,
@@ -790,8 +763,6 @@ pub(crate) struct ProxyNetworkNamespace {
     /// Write end of the pipe carrying the sandbox PID to the supervisor.
     /// Dropping it without writing ends the supervisor's wait at EOF.
     pid_writer: Option<OwnedFd>,
-    /// Handle to the supervisor's user namespace, passed to bwrap as
-    /// `--userns`. Released once bwrap owns it; see [`Self::userns_handed_off`].
     userns: Option<File>,
     /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
     hosts: Option<PathBuf>,
@@ -810,14 +781,7 @@ pub(crate) struct ProxyNetworkNamespace {
 }
 
 impl ProxyNetworkNamespace {
-    /// Create the capability-retaining namespace supervisor.
-    ///
-    /// `plan` is the outbound filtering posture the sandbox runs under once the
-    /// supervisor signals readiness; anything it does not accept is dropped.
-    /// `ingress` is the matching inbound posture. `pin` is the hosts-file entry
-    /// the sandbox needs to agree with the plan, which only a hostname proxy
-    /// endpoint produces. `resolver` redirects the sandbox's nameserver to
-    /// slirp's forwarder, which only a loopback-resolver host produces.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         tools: &NetworkTools,
         plan: &EgressPlan,
@@ -826,6 +790,8 @@ impl ProxyNetworkNamespace {
         resolver: Option<&ResolverPin>,
         logger: &mut Logger,
         script_timeout_ms: u32,
+        workload_userns: Option<&File>,
+        identity: Option<RootIdentity>,
     ) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
@@ -857,22 +823,31 @@ impl ProxyNetworkNamespace {
         let stderr = File::create(&stderr_path).map_err(|error| {
             format!("Bubblewrap: failed to create proxy-network diagnostics: {error}")
         })?;
-        let (exit_reader, exit_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        let (pid_reader, pid_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        let (liveness_reader, liveness_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        let (exit_reader, exit_writer) = pipe_above_stdio()?;
+        let (pid_reader, pid_writer) = pipe_above_stdio()?;
+        let (liveness_reader, liveness_writer) = pipe_above_stdio()?;
         set_nonblocking(liveness_reader.as_raw_fd())?;
 
-        let mut command = Command::new(&tools.unshare);
+        let mut command = if workload_userns.is_some() {
+            Command::new(&tools.sh)
+        } else {
+            let mut command = Command::new(&tools.unshare);
+            command
+                .args(["--user", "--map-current-user", "--keep-caps", "--"])
+                .arg(&tools.sh);
+            command
+        };
+        let slirp_sandbox = if workload_userns.is_some() {
+            "yes"
+        } else {
+            "no"
+        };
         command
-            .args(["--user", "--map-current-user", "--keep-caps", "--"])
-            .arg(&tools.sh)
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-bwrap-proxy-supervisor"])
             .arg(state_dir.path())
             .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
             .args(tools.supervisor_arguments())
+            .arg(slirp_sandbox)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -916,7 +891,9 @@ impl ProxyNetworkNamespace {
         }
 
         let userns_path = format!("/proc/{}/ns/user", supervisor.id());
-        let userns = match File::open(&userns_path)
+        let userns = match workload_userns
+            .map(File::try_clone)
+            .unwrap_or_else(|| File::open(&userns_path))
             .and_then(|file| above_stdio(file).map_err(std::io::Error::from))
         {
             Ok(file) => file,
@@ -927,12 +904,12 @@ impl ProxyNetworkNamespace {
                 ));
             }
         };
-        logger.log_line("Bubblewrap: created rootless proxy network namespace supervisor");
+        logger.log_line("Bubblewrap: created private network supervisor");
 
         let hosts = match pin {
             Some(pin) => {
                 let path = state_dir.path().join("hosts");
-                if let Err(error) = write_pinned_hosts(&path, pin) {
+                if let Err(error) = write_pinned_hosts(&path, pin, identity) {
                     let _ = supervisor.terminate();
                     return Err(error);
                 }
@@ -978,25 +955,27 @@ impl ProxyNetworkNamespace {
             .as_ref()
             .ok_or_else(|| "Bubblewrap: proxy user namespace is already handed off".to_string())?;
 
+        let mut pins = Vec::new();
         if let Some(hosts) = &self.hosts {
-            let path = hosts
-                .to_str()
-                .ok_or_else(|| "Bubblewrap: proxy hosts pin path is not valid UTF-8".to_string())?;
-            if insert_hosts_bind(args, path)? {
+            let file = open_pin(hosts)?;
+            if insert_hosts_bind(args, file.as_raw_fd())? {
                 logger.log_line(
                     "Bubblewrap: the proxy host pin overrides an earlier mount of \
                      /etc/hosts; the sandbox sees the pinned file",
                 );
             }
+            pins.push(file);
         }
 
         if let Some((source, destination)) = &self.resolver {
-            if insert_pin_bind(args, source, destination)? {
+            let file = open_pin(Path::new(source))?;
+            if insert_pin_bind(args, file.as_raw_fd(), destination)? {
                 logger.log_line(&format!(
                     "Bubblewrap: the resolver pin overrides an earlier mount of {destination}; \
                      the sandbox sees the pinned file"
                 ));
             }
+            pins.push(file);
         }
 
         let mut startup = BwrapStartup::configure(args)?;
@@ -1005,15 +984,13 @@ impl ProxyNetworkNamespace {
             ["--userns".to_string(), userns.as_raw_fd().to_string()],
         );
         startup.inheritable.push(userns.as_raw_fd());
+        startup
+            .inheritable
+            .extend(pins.iter().map(AsRawFd::as_raw_fd));
+        startup._pins = pins;
         Ok(startup)
     }
 
-    /// Drop this process's handle to the user namespace once bwrap holds it.
-    ///
-    /// The namespace itself stays alive through the supervisor, which is a
-    /// member of it. Releasing here bounds the window in which a concurrent
-    /// spawn could pick the descriptor up to the bwrap spawn itself, rather
-    /// than the whole sandbox lifetime.
     pub(crate) fn userns_handed_off(&mut self) {
         self.userns.take();
     }
@@ -1400,10 +1377,14 @@ fn namespace_probe_error(status: ExitStatus, shell: &Path, use_case: PrivateNetw
 /// The host's other entries are kept so the sandbox retains the mappings a
 /// workload expects (`localhost` above all). They are read before the file is
 /// created, so a read failure cannot leave a half-written pin behind.
-fn write_pinned_hosts(path: &Path, pin: &ProxyHostPin) -> Result<(), String> {
+fn write_pinned_hosts(
+    path: &Path,
+    pin: &ProxyHostPin,
+    identity: Option<RootIdentity>,
+) -> Result<(), String> {
     // The host file is optional: a host without one simply contributes no
     // entries, which is not a reason to refuse to pin.
-    let existing = match fs::read_to_string(SANDBOX_HOSTS_PATH) {
+    let existing = match read_as_workload(identity, Path::new(SANDBOX_HOSTS_PATH)) {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => {
@@ -1502,19 +1483,27 @@ impl ResolverPin {
     pub(crate) fn for_host(
         policy: &ContainerPolicy,
         mounts: &[PolicyMount],
+        identity: Option<RootIdentity>,
         logger: &mut Logger,
     ) -> Option<Self> {
-        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, mounts, logger)
+        Self::from_resolver(
+            Path::new(SANDBOX_RESOLV_CONF_PATH),
+            policy,
+            mounts,
+            identity,
+            logger,
+        )
     }
 
     pub(crate) fn from_resolver(
         resolver_path: &Path,
         policy: &ContainerPolicy,
         mounts: &[PolicyMount],
+        identity: Option<RootIdentity>,
         logger: &mut Logger,
     ) -> Option<Self> {
         let shown = resolver_path.display();
-        let host_contents = match fs::read_to_string(resolver_path) {
+        let host_contents = match read_as_workload(identity, resolver_path) {
             Ok(contents) => contents,
             // No resolver file is not a loopback stub to rescue, and is normal
             // on a host that configures DNS some other way.
@@ -1801,7 +1790,7 @@ fn command_separator(args: &[String]) -> Result<usize, String> {
 /// so the caller can report that the pin overrides it.
 fn insert_pin_bind(
     args: &mut Vec<String>,
-    source: &str,
+    source: RawFd,
     destination: &str,
 ) -> Result<bool, String> {
     let separator = command_separator(args)?;
@@ -1809,7 +1798,7 @@ fn insert_pin_bind(
     args.splice(
         separator..separator,
         [
-            "--ro-bind".to_string(),
+            "--ro-bind-data".to_string(),
             source.to_string(),
             destination.to_string(),
         ],
@@ -1817,8 +1806,19 @@ fn insert_pin_bind(
     Ok(overrides)
 }
 
-fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, String> {
-    insert_pin_bind(args, hosts_path, SANDBOX_HOSTS_PATH)
+fn insert_hosts_bind(args: &mut Vec<String>, hosts: RawFd) -> Result<bool, String> {
+    insert_pin_bind(args, hosts, SANDBOX_HOSTS_PATH)
+}
+
+fn open_pin(path: &Path) -> Result<File, String> {
+    File::open(path)
+        .and_then(|file| above_stdio(file).map_err(std::io::Error::from))
+        .map_err(|error| {
+            format!(
+                "Bubblewrap: could not open generated pin {}: {error}",
+                path.display()
+            )
+        })
 }
 
 /// What pulled this request into a private network namespace.
@@ -2084,7 +2084,7 @@ impl NetworkTools {
     }
 
     /// The paths [`SUPERVISOR_SCRIPT`] reads from `$3` onward, in its order.
-    fn supervisor_arguments(&self) -> [&Path; 6] {
+    fn supervisor_arguments(&self) -> [&Path; 7] {
         [
             &self.nsenter,
             &self.ip,
@@ -2092,6 +2092,7 @@ impl NetworkTools {
             &self.iptables_restore,
             &self.ip6tables_restore,
             &self.sleep,
+            &self.unshare,
         ]
     }
 }
@@ -2150,10 +2151,8 @@ pub(crate) fn probe_private_namespaces(
     )
 }
 
-/// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
-/// Bumping it acknowledges that the command list below was re-checked.
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xcbaa_8a75_caa4_2e8b;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xc1a5_bc1d_c051_a6fd;
 
 /// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
 /// pre-flight walk must check.
@@ -2165,6 +2164,7 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[&str] = &[
     "iptables-restore",
     "ip6tables-restore",
     "sleep",
+    "unshare",
 ];
 
 /// How each dependency check's command is built.
@@ -2456,7 +2456,7 @@ pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
+pub(crate) fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
     let (reader, writer) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
     let lift = |end: OwnedFd| {
@@ -2612,6 +2612,7 @@ mod tests {
             gate_reader: None,
             gate_writer: None,
             inheritable: Vec::new(),
+            _pins: Vec::new(),
         };
         let mut child = Command::new("sh")
             .args(["-c", "exit 7"])
@@ -3042,7 +3043,7 @@ mod tests {
         // below), but the pin still leads the file so the intent is legible.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(
@@ -3101,7 +3102,7 @@ mod tests {
         // End-to-end twin of the unit tests above, against the real host file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         let matches = written
@@ -3125,7 +3126,7 @@ mod tests {
         // and the loopback exemption both rely on.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        write_pinned_hosts(&path, &test_pin()).unwrap();
+        write_pinned_hosts(&path, &test_pin(), None).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         let host_file = fs::read_to_string(SANDBOX_HOSTS_PATH).unwrap_or_default();
@@ -3162,11 +3163,11 @@ mod tests {
             "/etc/hosts".to_string(),
         ];
         args.extend(command_tail());
-        insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap();
+        insert_hosts_bind(&mut args, 17).unwrap();
 
         let pin = args
             .windows(3)
-            .position(|window| window == ["--ro-bind", "/tmp/pin/hosts", SANDBOX_HOSTS_PATH])
+            .position(|window| window == ["--ro-bind-data", "17", SANDBOX_HOSTS_PATH])
             .expect("pin bind should be present");
         let policy = args
             .windows(3)
@@ -3188,11 +3189,11 @@ mod tests {
             "/etc/hosts".to_string(),
         ];
         args.extend(command_tail());
-        assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap());
+        assert!(insert_hosts_bind(&mut args, 17).unwrap());
 
         let mut untouched = vec!["--ro-bind-try".to_string()];
         untouched.extend(command_tail());
-        assert!(!insert_hosts_bind(&mut untouched, "/tmp/pin/hosts").unwrap());
+        assert!(!insert_hosts_bind(&mut untouched, 17).unwrap());
     }
 
     #[test]
@@ -3200,7 +3201,7 @@ mod tests {
         // Appending blindly to an argument list with no separator would pass
         // the bind to the workload as arguments and leave it unpinned.
         let mut args = vec!["--ro-bind-try".to_string(), "/etc".to_string()];
-        assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").is_err());
+        assert!(insert_hosts_bind(&mut args, 17).is_err());
     }
 
     /// The stub resolver the issue reports: readable inside the sandbox,
@@ -3334,9 +3335,14 @@ mod tests {
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
 
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         assert_eq!(pin.destination, resolver);
         assert!(pin.contents.contains("nameserver 10.0.2.3"));
@@ -3355,6 +3361,7 @@ mod tests {
             &resolver,
             &ContainerPolicy::default(),
             &[],
+            None,
             &mut logger
         )
         .is_none());
@@ -3369,10 +3376,14 @@ mod tests {
         let absent = dir.path().join("absent.conf");
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &[], &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &absent,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger
+        )
+        .is_none());
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
 
@@ -3388,7 +3399,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], None, &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
     }
@@ -3426,6 +3437,7 @@ mod tests {
                 &resolver,
                 &ContainerPolicy::default(),
                 &mounts,
+                None,
                 &mut logger,
             );
             assert_eq!(pin.is_some(), pinned, "{mounts:?}");
@@ -3445,7 +3457,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], None, &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(
             out.contains("loopback"),
@@ -3481,7 +3493,7 @@ mod tests {
             ] {
                 let mut logger = buffer_logger();
                 assert!(
-                    ResolverPin::from_resolver(&link, &policy, &[], &mut logger).is_none(),
+                    ResolverPin::from_resolver(&link, &policy, &[], None, &mut logger).is_none(),
                     "a grant on {} is the caller claiming the resolver",
                     grant.display()
                 );
@@ -3501,10 +3513,14 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &[], &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &first,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger
+        )
+        .is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("could not be read"), "got: {out}");
     }
@@ -3529,8 +3545,14 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &[], &mut logger)
-                .is_none(),
+            ResolverPin::from_resolver(
+                &root.join("link/stub.conf"),
+                &policy,
+                &[],
+                None,
+                &mut logger
+            )
+            .is_none(),
             "a denial of the canonical directory must stop the pin reached by an alias"
         );
         let out = logger.warnings().join("\n");
@@ -3545,9 +3567,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         let staged = stage_resolver(
             Some(&pin),
@@ -3575,9 +3602,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin =
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
-                .expect("a loopback stub is pinned");
+        let pin = ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            None,
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned");
 
         let staging = tempfile::tempdir().unwrap();
         let (source, destination) = stage_resolver(Some(&pin), staging.path(), &mut logger)
@@ -3839,12 +3871,8 @@ mod tests {
         ];
         args.extend(command_tail());
 
-        let overrides = insert_pin_bind(
-            &mut args,
-            "/tmp/pin/resolv.conf",
-            "/run/systemd/resolve/stub-resolv.conf",
-        )
-        .unwrap();
+        let overrides =
+            insert_pin_bind(&mut args, 17, "/run/systemd/resolve/stub-resolv.conf").unwrap();
 
         assert!(!overrides, "a parent directory mount is not the same path");
         let pin = args
@@ -3852,8 +3880,8 @@ mod tests {
             .position(|window| {
                 window
                     == [
-                        "--ro-bind",
-                        "/tmp/pin/resolv.conf",
+                        "--ro-bind-data",
+                        "17",
                         "/run/systemd/resolve/stub-resolv.conf",
                     ]
             })
@@ -3877,7 +3905,7 @@ mod tests {
         args.extend(command_tail());
 
         assert!(
-            insert_pin_bind(&mut args, "/tmp/pin/resolv.conf", "/etc/resolv.conf").unwrap(),
+            insert_pin_bind(&mut args, 17, "/etc/resolv.conf").unwrap(),
             "an earlier mount of the same path is an override"
         );
     }
@@ -3909,7 +3937,7 @@ mod tests {
         args.extend(command_tail());
         let decoy = 2;
 
-        insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap();
+        insert_hosts_bind(&mut args, 17).unwrap();
 
         assert_eq!(
             args[..=decoy],
@@ -3918,7 +3946,7 @@ mod tests {
         );
         let pin = args
             .windows(3)
-            .position(|window| window == ["--ro-bind", "/tmp/pin/hosts", SANDBOX_HOSTS_PATH])
+            .position(|window| window == ["--ro-bind-data", "17", SANDBOX_HOSTS_PATH])
             .expect("pin bind should be present");
         assert!(
             pin > decoy,
@@ -5938,6 +5966,7 @@ exec sleep 30
             .arg(&state)
             .arg("1")
             .args(tools.supervisor_arguments())
+            .arg("no")
             .env("PATH", dir.path().join("no-tools"))
             .env(
                 "MXC_TEST_STUB_PATH",
@@ -6555,6 +6584,7 @@ exec sleep 30
             .arg(state_dir.path())
             .arg("1")
             .args(tools.supervisor_arguments())
+            .arg("no")
             .env("MXC_TEST_BLOCKED_PID", &blocked_pid_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

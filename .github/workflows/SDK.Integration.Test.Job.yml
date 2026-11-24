@@ -209,6 +209,14 @@ jobs:
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
+      - name: Reserve Bubblewrap root IDs on the disposable CI host
+        if: matrix.os_label == 'linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"
+
       - name: Configure unprivileged LXC
         if: matrix.os_label == 'linux'
         shell: bash
@@ -230,20 +238,21 @@ jobs:
             fi
           done
 
-          for file in /etc/subuid /etc/subgid; do
-            sudo touch "$file"
-            if ! sudo grep -Fxq 'root:100000:65536' "$file"; then
-              printf '%s\n' 'root:100000:65536' | sudo tee -a "$file" >/dev/null
-            fi
-          done
+          # Select root's first allocation of at least 65,536 IDs, the range MXC uses.
+          uid_base=$(sudo awk -F: '($1 == "root" || $1 == "0") && $3 >= 65536 { print $2; exit }' /etc/subuid)
+          gid_base=$(sudo awk -F: '($1 == "root" || $1 == "0") && $3 >= 65536 { print $2; exit }' /etc/subgid)
+          if [ -z "$uid_base" ] || [ -z "$gid_base" ]; then
+            echo "::error::root has no reserved subordinate UID and GID range for LXC; run the 'Reserve Bubblewrap root IDs' step first"
+            exit 1
+          fi
 
           sudo touch /etc/lxc/default.conf
 
           # Remove active mappings before adding the test-only UID/GID range.
           sudo sed -i '/^[[:space:]]*lxc\.idmap[[:space:]]*=/d' /etc/lxc/default.conf
           printf '%s\n' \
-            'lxc.idmap = u 0 100000 65536' \
-            'lxc.idmap = g 0 100000 65536' | sudo tee -a /etc/lxc/default.conf >/dev/null
+            "lxc.idmap = u 0 $uid_base 65536" \
+            "lxc.idmap = g 0 $gid_base 65536" | sudo tee -a /etc/lxc/default.conf >/dev/null
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
@@ -297,3 +306,11 @@ jobs:
             done
             exit "$status"
           fi
+
+      - name: Restore Bubblewrap root ID configuration
+        if: always() && matrix.os_label == 'linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids"

@@ -46,27 +46,6 @@ enum Access {
     Uninspectable(String),
 }
 
-/// Checks whether the invoking user holds the requested access to `path`.
-///
-/// On Unix this uses `access(2)`, which checks the requested permissions
-/// against the process's **real** UID/GID (the invoking user) and covers both
-/// files and directories. This has full effect for **Bubblewrap**, which runs
-/// unprivileged.
-///
-/// Caveat — **root**: `access(2)` short-circuits for the superuser, so `R_OK`
-/// (and, on most filesystems, `W_OK`) always succeed for a real UID of 0
-/// regardless of the file mode. The **LXC** backend runs as root, so the
-/// delegation check is effectively a no-op there; it only has teeth for an
-/// unprivileged caller (Bubblewrap). Meaningfully enforcing delegation under a
-/// root LXC would require checking against the pre-elevation user (e.g.
-/// `SUDO_UID`/`SUDO_GID`) — tracked as a follow-up.
-///
-/// On Windows it probes the caller's effective access with `CreateFileW`
-/// (requesting `GENERIC_READ` / `GENERIC_READ | GENERIC_WRITE`, opened with
-/// `FILE_FLAG_BACKUP_SEMANTICS` so directories are covered too). A successful
-/// open means the access is granted. On both platforms only a missing path is
-/// skipped; every other failure is refused. This covers files *and* directories,
-/// including the common WSLC `readwritePaths` directory case.
 #[cfg(unix)]
 fn user_can_access(path: &str, mode: AccessMode) -> Access {
     use std::ffi::CString;
@@ -81,6 +60,8 @@ fn user_can_access(path: &str, mode: AccessMode) -> Access {
         AccessMode::Read => libc::R_OK,
         AccessMode::ReadWrite => libc::R_OK | libc::W_OK,
     };
+
+    // access(2) checks the caller's real IDs, so a root caller passes regardless of file mode.
     // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of the call.
     let rc = unsafe { libc::access(c_path.as_ptr(), mask) };
     if rc == 0 {

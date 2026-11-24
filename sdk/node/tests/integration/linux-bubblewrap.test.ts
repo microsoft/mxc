@@ -329,6 +329,7 @@ describe('Linux Bubblewrap spawn thread lifetime', {
 }, () => {
   it('keeps the sandbox running after the spawning Worker exits', { timeout: 30000 }, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-thread-'));
+    if (isLinuxRoot) fs.chmodSync(dir, 0o777);
     const marker = path.join(dir, 'marker');
     try {
       // The workload reports through a file: the Worker's end of the stdout

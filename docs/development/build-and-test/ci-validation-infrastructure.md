@@ -71,6 +71,7 @@ for coverage, local commands and prerequisites.
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
+| `scripts/ci/bwrap-root-ids.py` | Temporarily reserves root subordinate UID/GID ranges on disposable Bubblewrap CI hosts and restores their original configuration. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at the directory CI passes as `-TempDirectory`, so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
@@ -280,6 +281,102 @@ flush its firewall. Each case is repeated through a `bwrap` wrapper whose
 seccomp filter refuses `capset` and the bounding-set drop; that launch must
 fail without running the workload. The test's last line names the modes that
 passed, and CI requires all three.
+Root cases also require the configured UID/GID mappings, empty supplementary
+groups, denial of root-only files and grants, and shifted ownership of newly
+created files. The isolated root case is repeated without `CAP_KILL` in the
+caller's capability sets; its grants must still be accepted. In the root
+firewall and proxy cases, the script inspects the live process tree: the
+network supervisor must stay root in the caller's user namespace;
+slirp4netns must hold no capability other than `CAP_NET_BIND_SERVICE`, run
+with no-new-privileges under a seccomp filter, and have its own mount
+namespace; and the workload runs in its own user namespace as the mapped host
+UID/GID. The launches must leave the caller's mount table unchanged.
+Only the firewall case needs a non-loopback host IPv4 address
+outside slirp's subnet; if unavailable, isolated and proxy cases still run,
+then the script reports exit 77. A failed workload takes precedence over skips.
+
+The root lanes also run `run_bwrap_dns_test.sh`,
+`run_bwrap_resolver_isolation_test.sh`, and `run_bwrap_root_lifetime_test.sh`
+as root; any nonzero exit, including a prerequisite skip, fails the job. The
+resolver fixture copies root's allocation files into its private `/etc`,
+launches once to learn the mapped workload owner, and gives that owner the
+fixtures its cases write. The lifetime test ends root workloads in isolated
+and firewall modes five ways: a normal exit that leaves a process running in
+the background, the process timeout, `SIGTERM` and `SIGKILL` of `lxc-exec`,
+and `SIGKILL` of `lxc-exec`'s whole process group. Each case runs as PID 1 of
+its own PID namespace. Afterwards no
+process in that namespace may still run as the workload's mapped host UID;
+the kernel ends any that remain when the case exits, so the check never
+touches other workloads that share that UID. Each case is repeated without
+`CAP_KILL` in the caller's capability sets.
+
+The root lanes use `bwrap-root-ids.py` only on their disposable CI hosts. The
+Linux SDK integration jobs in GitHub Actions and Azure Pipelines also use it,
+because they run the Node SDK suite, including its Bubblewrap tests, as root.
+Those jobs also configure LXC, mapping its containers to the range the helper
+reserved for root, which is the range MXC selects, so no second root range can
+overlap it. They reserve the range before configuring LXC and restore it after
+restoring LXC.
+The helper reuses valid root allocations or selects free 65,536-ID blocks from
+the host's `SUB_UID_MIN/MAX` and `SUB_GID_MIN/MAX` pools in `/etc/login.defs`,
+excluding existing allocations, account UIDs, primary GIDs, and group GIDs.
+An unsafe existing root allocation or exhausted pool fails setup.
+The helper backs up both files before writing either one. Each of these jobs
+restores the original contents, metadata, and file absence in an `always()`
+cleanup step, including after test failures. A failed restoration retains the
+backups and fails the job. Run `python3 scripts/ci/test_bwrap_root_ids.py` for
+the selection and backup/restore fixtures; they never modify host configuration.
+The allocation-file cases in
+`src/mxc-sdk/tests/fixtures/bubblewrap/root_allocations.json` run against both
+this helper and the runtime's `identity` unit tests to keep the two allocation
+validators in agreement.
+
+This CI provisioning is not for persistent hosts. Production and manual root
+validation still require administrator-reserved ranges; see
+[Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers).
+`run_bwrap_identity_rejection_test.sh` writes fixed account databases and
+allocation files in a private mount namespace, without editing host
+configuration. A valid baseline must launch; each case then changes one
+setting and must reject startup.
+Further cases run a copy of `lxc-exec` that any identity can execute: with
+mixed real and effective UIDs in both directions, and as root of a shifted and
+of a single-ID user namespace. Each must reject startup with its diagnostic
+and without running the workload.
+It also places a `getent` shim first on `PATH`: a complete lookup must launch,
+while a nonzero exit or output past the 64 KiB capture limit must reject
+startup. `root_account_lookups_stop_at_the_validation_deadline` slows both
+lookups and checks that `getent group` is stopped at the shared five-second
+account-validation deadline.
+The staged `mxc-filesystem-probe-tests` payload also runs the ignored
+`backend_modules::bubblewrap::common::identity::tests::root_sdk_streaming_and_pty_use_mapped_identity`
+case as root. It exercises public SDK pipes, PTY input/output and resizing,
+and verifies that the SDK host's identity, groups, and user namespace stay
+unchanged. It then repeats as a root caller whose primary GID is 1000 and
+whose standard input is closed. Both the build and scheduled validation
+require these cases; missing prerequisites do not count as passing coverage.
+The same payload runs `root_backend_hostname_pin_uses_mapped_identity` against
+private mount fixtures. It checks hostname pins from private supervisor storage
+through the backend's programmatic request path; request JSON still restricts
+proxy hosts to loopback names and addresses. A `0600` hosts file must then
+reject the launch. `root_resolver_inputs_use_mapped_identity` overlays `/etc`
+in a private mount namespace so `/etc/resolv.conf` links to a fixture outside
+`/etc`, whatever the host's resolver layout. Running without `CAP_KILL`, it
+first makes that fixture a FIFO and launches once more than MXC has
+filesystem probe workers in firewall mode; every launch must succeed and warn
+that the resolver is not a regular file. It then makes the fixture readable
+and `0600`; only the readable contents may reach the workload.
+`root_missing_denied_path_overlay_uses_mapped_identity` denies a missing path
+beneath a read-only grant under umask `077`, which makes MXC's private overlay
+storage owner-only. With bwrap 0.11 or newer the workload must see an
+empty, read-only mask and the host must stay unchanged; older bwrap must
+reject the launch.
+`root_launch_fails_closed_when_the_watchdog_cannot_open_the_sandbox` and
+`root_launch_fails_closed_when_the_watchdog_cannot_signal_the_sandbox` run
+without `CAP_KILL` under a seccomp filter that refuses `pidfd_open` or
+`pidfd_send_signal`. Each launch must fail, its workload must not run, and no
+process may remain as the mapped host UID. These cases, and the other root
+cases that use private mounts, run as PID 1 of their own PID namespace, so any
+process they leave behind ends with them.
 
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET

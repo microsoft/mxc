@@ -370,6 +370,28 @@ field or set it to `"linux"`.
 This fail-closed exception applies within V1 and does not require a new
 versioned API surface.
 
+### Security-servicing exception: Bubblewrap root identity
+
+Bubblewrap root launches use administrator-reserved subordinate UID/GID
+ranges instead of exposing host root ownership to the workload. This applies
+to all supported contracts and SDK entrypoints, including V1. Root callers
+must provision the ranges and filesystem access for the mapped identity;
+missing or conflicting allocations reject startup. Unprivileged callers
+retain their existing identity behavior.
+
+For existing V1 root callers, workloads now run as sandbox UID/GID 1000
+without supplementary groups or capabilities, so commands that need root
+inside the sandbox fail. Root-only grants are rejected before launch, and
+files created through writable grants belong to the mapped host identity.
+Root launches also require Linux 5.3 or later, and root launches with private
+networking require slirp4netns to confine itself before it relays traffic.
+Before upgrading, reserve the ranges and give the mapped identity access to
+each granted path.
+
+This containment correction does not change request JSON or add SDK fields.
+See [Bubblewrap root callers](../../backends/bwrap/bubblewrap-backend.md#root-callers)
+for prerequisites and ownership semantics.
+
 ### Security-servicing exception: WSLc lifecycle bridged networking
 
 Bridged WSLc container lifecycle sandboxes in one session shared WSLC's
