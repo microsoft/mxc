@@ -78,6 +78,13 @@ Packaging does not wait for workspace tests; make
 before merging the job extraction. The NVX module-lifetime gate follows its
 example into the workspace suite. The existing Windows build checks retain
 their focused telemetry, filesystem-probe, NVX artifact, and package validation.
+The packaged-crate verification runs once on a separate native x64 package
+validation job, alongside those checks. It receives only the signed runtime
+data already staged by production, not another production compilation or
+Cargo snapshot. The unchanged helper builds tests from the extracted crate
+archive and runs its required signature/integrity scenario. Its Cargo outputs
+retain the existing target-directory behavior and use a separate dependency
+cache, seeded read-only from artifact validation when cold.
 
 Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check raw and
 compressed snapshot reuse locally; `tar` must support Zstandard compression.
@@ -131,7 +138,8 @@ separate test compilation.
 
 Make `windows / Windows validation` a required status check when rolling out
 this split. It fails unless both artifact validation and both telemetry host
-lanes succeed. Existing artifact and workspace check names stay unchanged.
+lanes, plus the x64 package verification, succeed. Existing artifact and
+workspace check names stay unchanged.
 
 Run locally on Windows from the repository root:
 

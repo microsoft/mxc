@@ -58,8 +58,15 @@ This retains dependency variants used only by tests or minimal-feature checks
 between runs, without changing their features, profiles, or test selection.
 Artifact validation uses its own compiled-dependency cache for filesystem
 probes, NVX staging, and the isolated debug executor. It restores before the
-same production snapshot and does not cache workspace crates. Verification
-of the extracted crate package remains in its existing isolated output tree.
+same production snapshot and does not cache workspace crates.
+
+The x64 packaged-crate check runs once in a parallel package-validation job,
+with only signed runtime data transferred from production and a separate
+compiled-dependency cache. Its source is extracted into a temporary directory,
+while Cargo outputs use the helper's existing workspace target directory.
+The Windows validation aggregate requires it as well as artifact and telemetry
+validation; publishing and backend validation still wait for all of them.
+
 `Build.Windows.Fixtures.Job.yml` moves the standalone module-lifetime example
 build off the serial workspace path. It runs once per Windows architecture,
 alongside production, with the original command, features and release profile.

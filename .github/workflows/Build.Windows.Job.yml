@@ -126,17 +126,6 @@ jobs:
         shell: powershell
         run: ./scripts/ci/test-npm-release-selection.ps1
 
-      - name: Verify packaged MicroVM tests
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: ${{ github.workspace }}
-        shell: pwsh
-        env:
-          ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR: ${{ github.workspace }}\src\target\${{ matrix.target }}\release\aci-edge-sandboxes
-        run: |
-          & ./scripts/ci/Invoke-CratePackage.ps1 `
-            -OutDir (Join-Path $env:RUNNER_TEMP 'microvm-crate') `
-            -VerifyMicrovmTests
-
       - name: Stage SDK MicroVM tests for scheduled validation
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: ${{ github.workspace }}
@@ -207,6 +196,64 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  package-validation:
+    name: Package validation (x64)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: pwsh
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+          cache: false
+
+      - name: Select the pinned Windows Rust linker
+        uses: ./.github/actions/setup-windows-linker
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - name: Restore package validation dependencies
+        id: package-cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target
+          shared-key: windows-package-validation-x86_64-pc-windows-msvc-v1
+          cache-on-failure: false
+
+      - name: Seed cold package dependencies from the artifact cache
+        if: steps.package-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target
+          shared-key: windows-validation-x86_64-pc-windows-msvc-v1-build
+          save-if: false
+          cache-on-failure: false
+
+      - name: Download signed runtime data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-package-validation-runtime-x86_64-pc-windows-msvc
+          path: src/target/x86_64-pc-windows-msvc/release/aci-edge-sandboxes
+
+      - name: Verify packaged MicroVM tests
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        env:
+          ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR: ${{ github.workspace }}\src\target\x86_64-pc-windows-msvc\release\aci-edge-sandboxes
+        run: |
+          & ./scripts/ci/Invoke-CratePackage.ps1 `
+            -OutDir (Join-Path $env:RUNNER_TEMP 'microvm-crate') `
+            -VerifyMicrovmTests
+
   telemetry-component-check:
     name: Telemetry component (${{ matrix.arch }})
     strategy:
@@ -260,16 +307,18 @@ jobs:
 
   result:
     name: Windows validation
-    needs: [build, telemetry-component-check]
+    needs: [build, telemetry-component-check, package-validation]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Confirm artifact and telemetry validation passed
+      - name: Confirm artifact, telemetry and package validation passed
         env:
           ARTIFACT_RESULT: ${{ needs.build.result }}
           TELEMETRY_RESULT: ${{ needs.telemetry-component-check.result }}
+          PACKAGE_RESULT: ${{ needs.package-validation.result }}
         shell: bash
         run: |
           set -euo pipefail
           test "$ARTIFACT_RESULT" = success
           test "$TELEMETRY_RESULT" = success
+          test "$PACKAGE_RESULT" = success

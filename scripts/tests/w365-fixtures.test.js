@@ -334,9 +334,36 @@ test("default release telemetry tests run once per architecture off the artifact
   assert.doesNotMatch(step[1], /--features|--all-features|--no-default-features/);
   assert.match(telemetry, /runner: windows-2025\r?\n +target: x86_64-pc-windows-msvc/);
   assert.match(telemetry, /runner: windows-11-arm\r?\n +target: aarch64-pc-windows-msvc/);
-  assert.match(workflow, /needs: \[build, telemetry-component-check\]\r?\n +if: \$\{\{ always\(\) \}\}/);
+  assert.match(workflow, /needs: \[build, telemetry-component-check, package-validation\]\r?\n +if: \$\{\{ always\(\) \}\}/);
   assert.match(workflow, /test "\$ARTIFACT_RESULT" = success/);
   assert.match(workflow, /test "\$TELEMETRY_RESULT" = success/);
+  assert.match(workflow, /test "\$PACKAGE_RESULT" = success/);
+});
+
+test("packaged crate verification runs once in parallel with shipping validation and remains required", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const shared = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
+  const [artifact, remainder] = workflow.split("\n  package-validation:");
+  assert.ok(remainder);
+  const packaging = remainder.split("\n  telemetry-component-check:")[0];
+  assert.doesNotMatch(artifact, /Verify packaged MicroVM|-VerifyMicrovmTests/);
+  assert.equal(workflow.split("-VerifyMicrovmTests").length - 1, 1);
+  assert.match(packaging, /runs-on: windows-2025/);
+  assert.doesNotMatch(packaging, /^\s+needs:/m);
+  assert.match(packaging, /target: x86_64-pc-windows-msvc/);
+  assert.ok(packaging.indexOf("setup-windows-linker") < packaging.indexOf("Swatinem/rust-cache"));
+  assert.match(packaging, /shared-key: windows-validation-x86_64-pc-windows-msvc-v1-build\r?\n +save-if: false/);
+  assert.match(packaging, /name: windows-package-validation-runtime-x86_64-pc-windows-msvc/);
+  assert.match(packaging, /path: src\/target\/x86_64-pc-windows-msvc\/release\/aci-edge-sandboxes/);
+  assert.doesNotMatch(packaging, /cargo-build-snapshot|wxc-binaries|--features/);
+  const command = packaging.match(/        run: \|\r?\n([\s\S]*?)\s*$/);
+  assert.ok(command);
+  assert.equal(command[1].replace(/`/g, "").replace(/\s+/g, " ").trim(),
+    "& ./scripts/ci/Invoke-CratePackage.ps1 -OutDir (Join-Path $env:RUNNER_TEMP 'microvm-crate') -VerifyMicrovmTests");
+  assert.match(shared, /name: Upload signed runtime data for package validation\r?\n +if: matrix.target == 'x86_64-pc-windows-msvc'/);
+  assert.match(shared, /name: windows-package-validation-runtime-x86_64-pc-windows-msvc\r?\n +path: src\/target\/x86_64-pc-windows-msvc\/release\/aci-edge-sandboxes\//);
+  assert.match(workflow, /PACKAGE_RESULT: \$\{\{ needs.package-validation.result \}\}/);
+  assert.match(workflow, /test "\$PACKAGE_RESULT" = success/);
 });
 
 test("Windows consumers retain compiled dependencies under separate test-variant cache keys", () => {
