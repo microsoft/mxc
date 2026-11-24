@@ -261,6 +261,21 @@ test("default release telemetry tests run once per architecture off the artifact
   assert.match(workflow, /test "\$TELEMETRY_RESULT" = success/);
 });
 
+test("Windows workspace consumers cache compiled dependencies for their test feature variants", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
+  const cache = workflow.match(
+    /      - uses: Swatinem\/rust-cache@[^\r\n]+\r?\n([\s\S]*?)(?=\r?\n      - name:)/
+  );
+  assert.ok(cache);
+  assert.match(cache[1], /workspaces: src -> target/);
+  assert.match(cache[1], /key: windows-tests-\$\{\{ matrix.target \}\}-v2/);
+  assert.match(cache[1], /cache-targets: true/);
+  assert.match(cache[1], /cache-on-failure: false/);
+  assert.doesNotMatch(cache[1], /cache-(?:all|workspace)-crates: true/);
+  assert.ok(workflow.indexOf("Restore shared Windows build") > workflow.indexOf(cache[0]),
+    "restore compatible same-run production outputs after the consumer dependency cache");
+});
+
 test("shared Windows builds and every consumer select the same pinned linker before caching", () => {
   for (const name of ["Build.Windows.Shared.Job.yml", "Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
     const workflow = readFileSync(join(root, ".github", "workflows", name), "utf8");

@@ -34,6 +34,11 @@ first builds the production executor and sidecars once per architecture.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
+Workspace consumers also keep an architecture-specific cache of compiled
+external dependencies for their example, workspace-test, and minimal-feature
+builds. It complements the production snapshot: registry-only caching would
+download source archives but still recompile these dependency variants.
+Workspace crates and test executables are not added to that dependency cache.
 The transfer contains a Zstandard-compressed PAX archive and a JSON metadata
 sidecar bound to the archive's SHA-256 checksum. Upload stores the compressed
 bytes without compressing them again. Restore validates the metadata and
