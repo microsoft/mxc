@@ -560,16 +560,9 @@ impl BubblewrapScriptRunner {
                 .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
             None => Vec::new(),
         };
-        // Armed until the sandbox takes the cleanup over, so every startup path
-        // that gives up after bwrap created its masks still removes them.
-        let mut deny_preparation = missing_denials::prepare(
-            &mut mounts,
-            baseline_links,
-            denied_files,
-            bwrap_version,
-            bwrap_is_setuid,
-        )
-        .map_err(|error| error.into_response())?;
+        let deny_mountpoints =
+            missing_denials::prepare(&mut mounts, baseline_links, bwrap_version, bwrap_is_setuid)
+                .map_err(|error| error.into_response())?;
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -872,12 +865,8 @@ impl BubblewrapScriptRunner {
             .and_then(|network| network.take_liveness_watch())
             .map(|watch| ProviderMonitor::watch(watch, Arc::clone(&child), group));
 
-        deny_preparation.disarm();
-        let cleanup_warnings = deny_preparation.warnings();
-
         Ok(BwrapChild {
             child,
-            cleanup_warnings,
             stdin,
             stdout,
             stderr,
@@ -891,8 +880,7 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
-            deny_mountpoints: Some(deny_preparation),
-            deny_cleanup: None,
+            _deny_mountpoints: deny_mountpoints,
         })
     }
 }
@@ -900,14 +888,7 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
-    /// Private deny-mountpoint storage, held for the sandbox's lifetime, and the
-    /// host mount points to take back once it exits. `None` once the cleanup has
-    /// been handed off.
-    deny_mountpoints: Option<missing_denials::DenyPreparation>,
-    /// Completion retained after a non-blocking poll hands cleanup off.
-    deny_cleanup: Option<missing_denials::CleanupCompletion>,
-    /// Retained warnings shared with a detached placeholder cleanup.
-    cleanup_warnings: missing_denials::CleanupWarnings,
+    _deny_mountpoints: Option<tempfile::TempDir>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -943,15 +924,6 @@ impl BwrapChild {
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
-        // Bubblewrap made these on the host as mount points for denied entries
-        // that did not exist yet. It never removes them, so a denied path would
-        // otherwise outlive the sandbox as a directory or an empty file.
-        if let Some(completion) = self.deny_cleanup.take() {
-            completion.wait();
-        }
-        if let Some(mut preparation) = self.deny_mountpoints.take() {
-            preparation.remove_placeholders();
-        }
     }
 }
 
@@ -968,21 +940,6 @@ impl BubblewrapSandboxProcess {
         Self {
             inner: child,
             teardown_done: false,
-        }
-    }
-
-    /// Give the deny-mountpoint cleanup its own thread, if it has not already
-    /// been handed off. Safe to call from every exit path.
-    fn hand_off_deny_cleanup(&mut self) {
-        if let Some(preparation) = self.inner.deny_mountpoints.take() {
-            match preparation.remove_placeholders_in_background() {
-                Ok(completion) => self.inner.deny_cleanup = Some(completion),
-                Err((_error, preparation)) => {
-                    // Keep a retrying owner when no cleanup thread can be started.
-                    // The blocking wait/drop teardown can still take it from here.
-                    self.inner.deny_mountpoints = Some(preparation);
-                }
-            }
         }
     }
 
@@ -1060,14 +1017,6 @@ enum BwrapOutcome {
 }
 
 impl SandboxProcess for BubblewrapSandboxProcess {
-    fn warnings(&self) -> Vec<String> {
-        self.inner
-            .cleanup_warnings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         if let Some(pty) = self.inner.pty.as_ref() {
             let stdio = pty.take_native_stdio()?;
@@ -1184,11 +1133,9 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         }
         let exited = self.inner.lock_child().try_wait()?;
         if let Some(status) = exited {
-            // Status polling only observes the child and hands host placeholder
-            // cleanup to a separate thread. Network finalization stays in wait
-            // or drop: it may block, and the monitor must remain available so a
-            // provider failure is not reclassified as an ordinary exit.
-            self.hand_off_deny_cleanup();
+            // Status polling only observes the child. Network finalization stays
+            // in wait or drop: it may block, and the monitor must remain available
+            // so a provider failure is not reclassified as an ordinary exit.
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -1205,11 +1152,6 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 return Err(std::io::Error::other(error));
             }
             self.inner.timed_out = true;
-            // The child is reaped, so its mount points are free to remove. Later
-            // polls return early from the `timed_out` branch above, so this is
-            // the only place a caller that keeps the handle alive would get them
-            // back.
-            self.hand_off_deny_cleanup();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Bubblewrap: script timed out",
@@ -1690,18 +1632,12 @@ mod tests {
     }
 
     fn exited_process(
-        deny_mountpoints: Option<missing_denials::DenyPreparation>,
+        deny_mountpoints: Option<tempfile::TempDir>,
         monitor: Option<ProviderMonitor>,
         child: Arc<Mutex<Child>>,
     ) -> BubblewrapSandboxProcess {
-        let cleanup_warnings = deny_mountpoints.as_ref().map_or_else(
-            missing_denials::CleanupWarnings::default,
-            missing_denials::DenyPreparation::warnings,
-        );
         BubblewrapSandboxProcess::new(BwrapChild {
-            deny_mountpoints,
-            deny_cleanup: None,
-            cleanup_warnings,
+            _deny_mountpoints: deny_mountpoints,
             child,
             stdin: None,
             stdout: None,
@@ -1726,111 +1662,6 @@ mod tests {
             .unwrap();
         child.wait().unwrap();
         Arc::new(Mutex::new(child))
-    }
-
-    #[test]
-    fn terminal_polling_returns_before_placeholder_cleanup() {
-        let fixture = tempfile::tempdir().unwrap();
-        let placeholder = fixture.path().join("missing");
-        std::fs::create_dir(&placeholder).unwrap();
-        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
-        use std::os::unix::fs::MetadataExt;
-        let preparation = missing_denials::DenyPreparation::for_test(vec![(
-            placeholder.clone(),
-            (metadata.dev(), metadata.ino()),
-        )]);
-        let mut process = exited_process(Some(preparation), None, exited_child());
-        let (cleanup_started, release_cleanup) =
-            missing_denials::test_control::hold_cleanup(placeholder.clone());
-        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let result = process.try_wait();
-            returned_tx.send(result).unwrap();
-        });
-
-        cleanup_started
-            .recv_timeout(Duration::from_secs(5))
-            .expect("cleanup did not start");
-        assert!(placeholder.exists());
-        let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(5));
-        release_cleanup.send(()).unwrap();
-        worker.join().unwrap();
-        let result = returned_before_release.expect(
-            "terminal polling stayed blocked behind placeholder cleanup instead of returning",
-        );
-        assert_eq!(result.unwrap(), Some(0));
-    }
-
-    #[test]
-    fn blocking_wait_waits_for_handed_off_placeholder_cleanup() {
-        let fixture = tempfile::tempdir().unwrap();
-        let placeholder = fixture.path().join("missing");
-        std::fs::create_dir(&placeholder).unwrap();
-        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
-        use std::os::unix::fs::MetadataExt;
-        let preparation = missing_denials::DenyPreparation::for_test(vec![(
-            placeholder.clone(),
-            (metadata.dev(), metadata.ino()),
-        )]);
-        let mut process = exited_process(Some(preparation), None, exited_child());
-        let (cleanup_started, release_cleanup) =
-            missing_denials::test_control::hold_completion_cleanup(placeholder.clone());
-        assert_eq!(process.try_wait().unwrap(), Some(0));
-        cleanup_started
-            .recv_timeout(Duration::from_secs(5))
-            .expect("cleanup did not start");
-
-        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let result = process.wait();
-            returned_tx.send(result).unwrap();
-        });
-        let returned_before_release = returned_rx.recv_timeout(Duration::from_millis(150));
-        release_cleanup.send(()).unwrap();
-        worker.join().unwrap();
-
-        assert!(
-            returned_before_release.is_err(),
-            "blocking wait returned before the handed-off cleanup finished"
-        );
-        assert_eq!(
-            returned_rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap()
-                .unwrap(),
-            0
-        );
-        assert!(!placeholder.exists());
-    }
-
-    #[test]
-    fn background_cleanup_failure_is_retained_as_a_warning() {
-        let fixture = tempfile::tempdir().unwrap();
-        let placeholder = fixture.path().join("missing");
-        std::fs::create_dir(&placeholder).unwrap();
-        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
-        use std::os::unix::fs::MetadataExt;
-        let preparation = missing_denials::DenyPreparation::for_test(vec![(
-            placeholder.clone(),
-            (metadata.dev(), metadata.ino()),
-        )]);
-        let mut process = exited_process(Some(preparation), None, exited_child());
-        missing_denials::test_control::fail_cleanup_spawn_for(placeholder.clone());
-
-        process.hand_off_deny_cleanup();
-
-        assert!(
-            process.inner.deny_mountpoints.is_some(),
-            "the failed handoff did not leave a cleanup owner for wait/drop"
-        );
-        assert!(placeholder.exists());
-        assert!(
-            process
-                .warnings()
-                .iter()
-                .any(|warning| warning.contains("could not start denied-path cleanup")),
-            "the retained warnings did not expose the failed cleanup handoff"
-        );
     }
 
     #[test]
@@ -1865,6 +1696,7 @@ mod tests {
         // the denied mount points have already been prepared.
         let fixture = tempfile::tempdir().unwrap();
         let denied = fixture.path().join("missing/deep");
+        std::fs::create_dir_all(&denied).unwrap();
         let request = ExecutionRequest {
             script_code: "echo \0".into(),
             policy: crate::mxc_common::models::ContainerPolicy {
@@ -1906,8 +1738,8 @@ mod tests {
             resp.error_message
         );
         assert!(
-            !denied.exists(),
-            "a post-preparation spawn failure left the denied ancestor chain behind"
+            denied.is_dir(),
+            "a post-preparation spawn failure removed an existing denied directory"
         );
     }
 

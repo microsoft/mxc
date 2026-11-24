@@ -234,13 +234,10 @@ fi
 sudo umount "$NESTED"
 NESTED_MOUNTED=0
 
-# A read-write grant is bound from the host as it is, so Bubblewrap makes the
-# mount point a missing denied entry needs inside the caller's own directory.
-# The executor takes those placeholders back when the sandbox exits: a denied
-# path that did not exist must not survive as a directory or an empty file.
-# Controls: a denied path that already existed keeps its content, an empty
-# directory the caller already had is not a placeholder, and content the
-# workload wrote is kept.
+# A read-write grant is bound from the host as it is, so a missing denied entry
+# would require a host-visible mount point. Reject that policy before launching:
+# no placeholder is created, and the workload never runs. Existing denied
+# content and pre-existing empty directories are not touched.
 RWTREE="$BASE/writable"
 mkdir -p "$RWTREE/kept-empty"
 printf 'EXISTING_SECRET\n' > "$RWTREE/existing.txt"
@@ -248,7 +245,7 @@ rw_config='{
   "version": "1.0.0",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "set -eu; printf written > /mnt/masktest/writable/workload.txt; test ! -s /mnt/masktest/writable/existing.txt; printf 'RW_WORKLOAD_OK\\n'"
+    "commandLine": "set -eu; printf should-not-run > /mnt/masktest/writable/workload.txt; printf 'RW_WORKLOAD_SHOULD_NOT_RUN\\n'"
   },
   "filesystem": {
     "readwritePaths": ["/mnt/masktest/writable"],
@@ -262,15 +259,18 @@ rw_config='{
 RW_STATUS=0
 RW_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
     --config-base64 "$(printf '%s' "$rw_config" | base64 -w0)" 2>&1) || RW_STATUS=$?
-if [ "$RW_STATUS" -eq 0 ] && echo "$RW_OUT" | grep -qFx "RW_WORKLOAD_OK" \
+if [ "$RW_STATUS" -ne 0 ] \
+    && echo "$RW_OUT" | grep -qF "read-write" \
+    && ! echo "$RW_OUT" | grep -qF "RW_WORKLOAD_SHOULD_NOT_RUN" \
     && [ ! -e "$RWTREE/missing-file.json" ] \
     && [ ! -e "$RWTREE/kept-empty/nested" ] \
+    && [ -d "$RWTREE/kept-empty" ] \
     && [ "$(cat "$RWTREE/existing.txt")" = "EXISTING_SECRET" ] \
-    && [ "$(cat "$RWTREE/workload.txt")" = "written" ]; then
-    echo "PASS: missing denials beneath a read-write grant leave no placeholder on the host, while existing, pre-existing-empty, and workload-written paths are kept."
+    && [ ! -e "$RWTREE/workload.txt" ]; then
+    echo "PASS: missing denials beneath a read-write grant are rejected before execution without creating host placeholders or touching existing paths."
 else
     echo "$RW_OUT"
-    echo "FAIL: a read-write grant kept a missing denied path as a host placeholder, or dropped caller content (sandbox $RW_STATUS)."
+    echo "FAIL: a missing denial beneath a read-write grant was not rejected safely (sandbox $RW_STATUS)."
     FAIL=1
 fi
 

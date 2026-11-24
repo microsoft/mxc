@@ -41,36 +41,20 @@ impl FilesystemProbe {
         path: &str,
         probe: impl FnOnce(&str) -> T + Send + 'static,
     ) -> Result<T, String> {
-        self.run_with_submission(path, probe).1
-    }
-
-    /// Return whether the worker accepted the job alongside its wait result.
-    /// Cleanup owners use this to distinguish a submission failure from a job
-    /// that is still guaranteed to finish after its caller stops waiting.
-    pub(crate) fn run_with_submission<T: Send + 'static>(
-        &mut self,
-        path: &str,
-        probe: impl FnOnce(&str) -> T + Send + 'static,
-    ) -> (bool, Result<T, String>) {
         let deadline = Instant::now() + self.timeout;
-        let mut submitted = false;
-        let result = self.submit(path, probe, deadline).and_then(|receiver| {
-            submitted = true;
-            wait_for_probe(receiver, deadline, self.timeout)
-        });
+        let result = self
+            .submit(path, probe, deadline)
+            .and_then(|receiver| wait_for_probe(receiver, deadline, self.timeout));
         if result.is_err() {
             self.worker = None;
         }
-        (
-            submitted,
-            result.map_err(|error| {
-                format!(
-                    "Filesystem path '{}' could not be checked: {error}. \
-                     Refusing sandbox startup; check for an unreachable mount or blocked filesystem.",
-                    escape_diagnostic_text(path)
-                )
-            }),
-        )
+        result.map_err(|error| {
+            format!(
+                "Filesystem path '{}' could not be checked: {error}. \
+                 Refusing sandbox startup; check for an unreachable mount or blocked filesystem.",
+                escape_diagnostic_text(path)
+            )
+        })
     }
 
     fn submit<T: Send + 'static>(
@@ -142,15 +126,6 @@ impl FilesystemProbe {
         Self {
             timeout,
             gate: WorkerGate::new(1),
-            worker: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test_with_gate(timeout: Duration, gate: Arc<WorkerGate>) -> Self {
-        Self {
-            timeout,
-            gate,
             worker: None,
         }
     }
