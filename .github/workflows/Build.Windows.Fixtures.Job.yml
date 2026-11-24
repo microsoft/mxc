@@ -19,6 +19,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             features: isolation_session wslc
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: src
@@ -58,8 +59,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src -> target
-          shared-key: test
-          key: windows-tests-${{ matrix.target }}-v2
+          shared-key: windows-tests-${{ matrix.target }}-v2-test
           save-if: false
           cache-on-failure: false
 

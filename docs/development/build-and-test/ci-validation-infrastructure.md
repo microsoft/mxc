@@ -68,6 +68,8 @@ subsequent minimal-feature NVX gate. Both producer results must succeed for
 the workspace aggregate to pass, including after a rerun with retained
 artifacts. A dedicated fixture dependency cache uses the existing workspace
 cache as a read-only cold seed; it does not add another production build.
+The consumer and seed use one explicit complete shared cache namespace so
+the fallback addresses the existing cache even from a differently named job.
 
 GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not

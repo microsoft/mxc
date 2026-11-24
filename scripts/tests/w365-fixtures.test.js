@@ -233,7 +233,13 @@ test("Windows workspace suites preserve release features and run independently o
   assert.match(fixtures, /module_lifetime_fixture\.pdb/);
   assert.match(fixtures, /if-no-files-found: error/);
   assert.match(fixtures, /if: steps.fixture-cache.outputs.cache-hit != 'true'/);
-  assert.match(fixtures, /shared-key: test\r?\n +key: windows-tests-\$\{\{ matrix.target \}\}-v2\r?\n +save-if: false/);
+  const consumerNamespace = tests.match(/shared-key: ([^\r\n]+)/);
+  const seedNamespace = fixtures.match(/shared-key: ([^\r\n]+)/);
+  assert.ok(consumerNamespace, "workspace consumers must declare the complete shared cache namespace");
+  assert.ok(seedNamespace);
+  assert.equal(seedNamespace[1], consumerNamespace[1],
+    "shared-key replaces the whole base: the seed must address the exact consumer namespace");
+  assert.match(fixtures, /shared-key: windows-tests-\$\{\{ matrix.target \}\}-v2-test\r?\n +save-if: false/);
   assert.doesNotMatch(builds, /- name: Test\r?\n/);
   assert.match(tests, /needs: test\r?\n +if: \$\{\{ always\(\) \}\}/);
   assert.match(tests, /TEST_RESULT: \$\{\{ needs.test.result \}\}/);
@@ -334,9 +340,9 @@ test("default release telemetry tests run once per architecture off the artifact
 });
 
 test("Windows consumers retain compiled dependencies under separate test-variant cache keys", () => {
-  for (const [file, key] of [
-    ["Test.Windows.Job.yml", "windows-tests-${{ matrix.target }}-v2"],
-    ["Build.Windows.Job.yml", "windows-validation-${{ matrix.target }}-v1"],
+  for (const [file, field, key] of [
+    ["Test.Windows.Job.yml", "shared-key", "windows-tests-${{ matrix.target }}-v2-test"],
+    ["Build.Windows.Job.yml", "key", "windows-validation-${{ matrix.target }}-v1"],
   ]) {
     const workflow = readFileSync(join(root, ".github", "workflows", file), "utf8");
     const cache = workflow.match(
@@ -344,7 +350,7 @@ test("Windows consumers retain compiled dependencies under separate test-variant
     );
     assert.ok(cache, file);
     assert.match(cache[1], /workspaces: src -> target/);
-    assert.ok(cache[1].includes(`key: ${key}`), file);
+    assert.ok(cache[1].includes(`${field}: ${key}`), file);
     assert.match(cache[1], /cache-targets: true/);
     assert.match(cache[1], /cache-on-failure: false/);
     assert.doesNotMatch(cache[1], /cache-(?:all|workspace)-crates: true/);

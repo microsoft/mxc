@@ -37,6 +37,10 @@ and linker. Workspace lanes download its same-run DLL and PDB instead of
 repeating that build after production finishes. The fixture producer uses a
 dedicated dependency cache, seeded read-only from the existing workspace-test
 cache when cold.
+The workspace consumer and cold seed declare the same complete `shared-key`
+namespace, preserving the existing architecture-specific cache names.
+For rust-cache, `shared-key` replaces the whole key base; it does not combine
+with a separate `key` input. Fixture-owned caches retain their own names.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
