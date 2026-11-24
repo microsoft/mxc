@@ -66,6 +66,11 @@ verifies a trusted TLS request through each before exercising the SDK.
 Both listeners share the same service handlers and are closed after the test;
 port collisions retry with a new pair, up to ten attempts. Existing lifecycle,
 streaming, timeout, and response-count assertions remain unchanged.
+The .NET Dev JSON fixture uses the same dual-family layout. Its TLS regression
+connects to each address with `localhost` hostname verification and the fixture
+certificate as a custom trust root. Both .NET target frameworks execute it
+alongside the existing public SDK scenarios, including Windows optional-backend
+validation.
 
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and

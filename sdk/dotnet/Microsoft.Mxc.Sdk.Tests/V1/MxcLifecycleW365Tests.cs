@@ -31,6 +31,16 @@ public class MxcLifecycleW365Tests
         $$"""{"version":"1.1.0-alpha","phase":"{{phase}}","sandboxId":"{{Id}}"}""";
 
     [Fact]
+    public async Task FixtureServesBothLoopbackFamiliesWithVerifiedTls()
+    {
+        await using var fixture = new Fixture();
+        await fixture.VerifyLoopback(IPAddress.Loopback);
+        await fixture.VerifyLoopback(IPAddress.IPv6Loopback);
+        Assert.Equal(2, fixture.Requests.Count);
+        Assert.All(fixture.Requests, request => Assert.StartsWith("GET /fixture-loopback ", request));
+    }
+
+    [Fact]
     public async Task DevJsonChecksOutAndReleasesWithProvisionRecoveryInMessage()
     {
         await using var fixture = new Fixture();
@@ -242,7 +252,7 @@ public class MxcLifecycleW365Tests
         private readonly Dictionary<string, (string? Managed, string? Native)> environment;
         private readonly string directory = Path.Combine(Path.GetTempPath(), $"mxc-w365-{Guid.NewGuid():N}");
         private readonly X509Certificate2 certificate;
-        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly TcpListener[] listeners = [];
         private readonly CancellationTokenSource cancellation;
         private readonly ConcurrentQueue<(int Status, string Body)> replies = new();
         private readonly ConcurrentQueue<(Func<SslStream, Task> Script, uint? TimeoutMs)> executions = new();
@@ -279,18 +289,79 @@ public class MxcLifecycleW365Tests
             certificate = new X509Certificate2(
                 archive, "fixture-only", X509KeyStorageFlags.UserKeySet);
 #endif
-            Directory.CreateDirectory(directory);
-            var ca = Path.Combine(directory, "certificate.pem");
-            File.WriteAllText(ca, certificate.ExportCertificatePem());
-            listener.Start();
-            SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
-            SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
-            SetEnvironmentVariable("W365A_DP_SUFFIX", "localhost");
-            SetEnvironmentVariable("W365A_DP_TOKEN", "synthetic-data-plane-token");
-            SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
-            SetEnvironmentVariable("MXC_W365_TEST_PORT",
-                ((IPEndPoint)listener.LocalEndpoint).Port.ToString());
-            worker = Serve();
+            try
+            {
+                Directory.CreateDirectory(directory);
+                var ca = Path.Combine(directory, "certificate.pem");
+                File.WriteAllText(ca, certificate.ExportCertificatePem());
+                listeners = StartListeners();
+                SetEnvironmentVariable("W365A_CONTROLPLANE_URL", "localhost");
+                SetEnvironmentVariable("W365A_CP_TOKEN", "fixture-token");
+                SetEnvironmentVariable("W365A_DP_SUFFIX", "localhost");
+                SetEnvironmentVariable("W365A_DP_TOKEN", "synthetic-data-plane-token");
+                SetEnvironmentVariable("MXC_W365_TEST_CA", ca);
+                SetEnvironmentVariable("MXC_W365_TEST_PORT",
+                    ((IPEndPoint)listeners[0].LocalEndpoint).Port.ToString());
+                worker = Task.WhenAll(listeners.Select(Serve));
+            }
+            catch
+            {
+                Cleanup();
+                throw;
+            }
+        }
+
+        private static TcpListener[] StartListeners()
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                var ipv4 = new TcpListener(IPAddress.Loopback, 0);
+                TcpListener? ipv6 = null;
+                try
+                {
+                    ipv4.Start();
+                    ipv6 = new TcpListener(IPAddress.IPv6Loopback,
+                        ((IPEndPoint)ipv4.LocalEndpoint).Port);
+                    ipv6.Server.DualMode = false;
+                    ipv6.Start();
+                    return [ipv4, ipv6];
+                }
+                catch (Exception error)
+                {
+                    ipv4.Stop();
+                    ipv6?.Stop();
+                    if (error is not SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse }
+                        || attempt == 9)
+                        throw;
+                }
+            }
+        }
+
+        public async Task VerifyLoopback(IPAddress address)
+        {
+            Reply(200, "loopback-ready");
+            using var client = new TcpClient(address.AddressFamily);
+            await client.ConnectAsync(address, ((IPEndPoint)listeners[0].LocalEndpoint).Port,
+                cancellation.Token);
+            using var stream = new SslStream(client.GetStream());
+            await stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                CertificateChainPolicy = new X509ChainPolicy
+                {
+                    TrustMode = X509ChainTrustMode.CustomRootTrust,
+                    CustomTrustStore = { certificate },
+                    RevocationMode = X509RevocationMode.NoCheck,
+                },
+            }, cancellation.Token);
+            await stream.WriteAsync(
+                "GET /fixture-loopback HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                cancellation.Token);
+            await stream.FlushAsync(cancellation.Token);
+            using var reader = new StreamReader(stream, Encoding.ASCII);
+            var response = await reader.ReadToEndAsync(cancellation.Token);
+            Assert.StartsWith("HTTP/1.1 200 Fixture\r\n", response);
+            Assert.EndsWith("\r\n\r\nloopback-ready", response);
         }
 
         public void Reply(int status, string body) => replies.Enqueue((status, body));
@@ -334,7 +405,7 @@ public class MxcLifecycleW365Tests
             }
         }
 
-        private async Task Serve()
+        private async Task Serve(TcpListener listener)
         {
             while (!cancellation.IsCancellationRequested)
             {
@@ -386,17 +457,24 @@ public class MxcLifecycleW365Tests
             }
             finally
             {
-                listener.Stop();
-                certificate.Dispose();
-                cancellation.Dispose();
-                foreach (var (key, value) in environment)
-                {
-                    if (!OperatingSystem.IsWindows())
-                        SetNativeEnvironmentVariable(key, value.Native);
-                    Environment.SetEnvironmentVariable(key, value.Managed);
-                }
-                Directory.Delete(directory, recursive: true);
+                Cleanup();
             }
+        }
+
+        private void Cleanup()
+        {
+            foreach (var listener in listeners)
+                listener.Stop();
+            certificate.Dispose();
+            cancellation.Dispose();
+            foreach (var (key, value) in environment)
+            {
+                if (!OperatingSystem.IsWindows())
+                    SetNativeEnvironmentVariable(key, value.Native);
+                Environment.SetEnvironmentVariable(key, value.Managed);
+            }
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
         }
     }
 }
