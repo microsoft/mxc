@@ -31,6 +31,9 @@ instructions](ci-validation-infrastructure.md#offline-tls-fixtures).
 Windows release workspace suites run independently through
 `Test.Windows.Job.yml` on native x64 and ARM64 hosts. `Build.Windows.Shared.Job.yml`
 first builds the production executor and sidecars once per architecture.
+On x64 it regenerates `hyperlight-host` assets after restoring dependencies
+and before building. Those generated surrogate files are not retained by the
+dependency cache, so restored compiled metadata alone is insufficient.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
@@ -40,6 +43,9 @@ minimal-feature, filesystem-probe, NVX-staging, and debug-executor builds.
 They complement the production snapshot: registry-only caching would download
 source archives but still recompile these dependency variants.
 Workspace crates and test executables are not added to that dependency cache.
+The workspace cache declares the complete shared namespace
+`windows-tests-<target>-v2-test`. A `shared-key` replaces the whole cache-key
+base rather than adding a suffix to a separate `key`.
 The transfer contains a Zstandard-compressed PAX archive and a JSON metadata
 sidecar bound to the archive's SHA-256 checksum. Upload stores the compressed
 bytes without compressing them again. Restore validates the metadata and

@@ -262,9 +262,9 @@ test("default release telemetry tests run once per architecture off the artifact
 });
 
 test("Windows consumers retain compiled dependencies under separate test-variant cache keys", () => {
-  for (const [file, key] of [
-    ["Test.Windows.Job.yml", "windows-tests-${{ matrix.target }}-v2"],
-    ["Build.Windows.Job.yml", "windows-validation-${{ matrix.target }}-v1"],
+  for (const [file, field, key] of [
+    ["Test.Windows.Job.yml", "shared-key", "windows-tests-${{ matrix.target }}-v2-test"],
+    ["Build.Windows.Job.yml", "key", "windows-validation-${{ matrix.target }}-v1"],
   ]) {
     const workflow = readFileSync(join(root, ".github", "workflows", file), "utf8");
     const cache = workflow.match(
@@ -272,7 +272,7 @@ test("Windows consumers retain compiled dependencies under separate test-variant
     );
     assert.ok(cache, file);
     assert.match(cache[1], /workspaces: src -> target/);
-    assert.ok(cache[1].includes(`key: ${key}`), file);
+    assert.ok(cache[1].includes(`${field}: ${key}`), file);
     assert.match(cache[1], /cache-targets: true/);
     assert.match(cache[1], /cache-on-failure: false/);
     assert.doesNotMatch(cache[1], /cache-(?:all|workspace)-crates: true/);
@@ -307,6 +307,19 @@ test("Windows .NET native builds select pinned LLVM without changing validation 
   assert.equal((workflow.match(/foreach \(\$framework in @\('net8\.0', 'net10\.0'\)\)/g) || []).length, 4);
   assert.match(workflow, /dotnet publish Microsoft\.Mxc\.Sdk\.AotSmokeTest -c Release -f \$framework/);
   assert.match(workflow, /test-dotnet-package\.ps1/);
+});
+
+test("cached Windows production regenerates Hyperlight assets after restore and before build", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
+  const cleanup = workflow.match(
+    /      - name: Force hyperlight-host rebuild \(cache workaround\)\r?\n +if: matrix.target == 'x86_64-pc-windows-msvc'\r?\n +shell: pwsh\r?\n +run: ([^\r\n]+)/
+  );
+  assert.ok(cleanup, "production must regenerate assets missing from a restored target cache");
+  assert.equal(cleanup[1],
+    "cargo clean --release --target ${{ matrix.target }} -p hyperlight-host");
+  const position = workflow.indexOf(cleanup[0]);
+  assert.ok(workflow.lastIndexOf("uses: Swatinem/rust-cache") < position);
+  assert.ok(workflow.indexOf("      - name: Build\n") > position);
 });
 
 test("shared Windows snapshots transfer compressed data and its bound metadata without recompression", () => {

@@ -56,10 +56,17 @@ The workspace suites restore compiled external dependencies from a separate
 per-architecture cache before restoring the same-run production snapshot.
 This retains dependency variants used only by tests or minimal-feature checks
 between runs, without changing their features, profiles, or test selection.
+The workspace cache uses the complete shared namespace
+`windows-tests-<target>-v2-test`, preserving the existing cache identity
+independently of the job name.
 Artifact validation uses its own compiled-dependency cache for filesystem
 probes, NVX staging, and the isolated debug executor. It restores before the
-same production snapshot and does not cache workspace crates. Verification
-of the extracted crate package remains in its existing isolated output tree.
+same production snapshot and does not cache workspace crates. Packaged-crate
+verification extracts source into a temporary directory while retaining the
+helper's existing workspace Cargo output directory.
+The shared x64 production build regenerates `hyperlight-host` surrogate
+assets after restoring dependencies and before compilation because those
+generated files are absent from dependency caches.
 
 GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
