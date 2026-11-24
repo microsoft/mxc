@@ -112,4 +112,24 @@ expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
 expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
 
+# `--clearenv` only changes the workload's environment. bwrap itself is the
+# sandbox's PID 1 and keeps the environment it was started with, which the
+# workload can read from /proc. The config sweeps every pid in the sandbox and
+# counts only after a successful read, so a pid that cannot be read is reported
+# as unreadable instead of passing with a zero count.
+run_config bwrap_env_host_environ.json
+expect_ok "the probe ran" "ENV_PROBE_DONE"
+expect_ok "a supplied env reaches the command" "FOO=[bar]"
+expect_ok "a successful read of the command's own environ holds the supplied env" "CONTROL_SELF=[1]"
+expect_ok "the sandbox's pid 1 environ is readable" "READABLE_1=[yes]"
+expect_ok "no host variable in the sandbox's pid 1 environ" "LEAK_1=[0]"
+expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
+if grep -q 'READABLE_[0-9]*=\[no\]' <<<"$OUT"; then
+    fail "a sandbox pid's environ could not be read" "$OUT"
+fi
+if grep -q 'LEAK_[0-9]*=\[[1-9]' <<<"$OUT"; then
+    fail "a host variable is readable from /proc" "$OUT"
+fi
+pass "no sandbox pid exposes a host variable"
+
 echo "All $PASS_COUNT Bubblewrap environment assertions passed."

@@ -321,7 +321,7 @@ from pathlib import Path
 import sys
 if '--version' not in sys.argv:
     for value in sys.argv[1:]:
-        if value.startswith(os.environ['TMPDIR'] + '/mxc-bwrap-resolver-'):
+        if value.startswith({str(work / 'scratch')!r} + '/mxc-bwrap-resolver-'):
             os.unlink(value)
             os.symlink({str(work / 'ungranted-sentinel')!r}, value)
     if '--file' in sys.argv:
