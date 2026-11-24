@@ -278,6 +278,17 @@ receiving a wrong lease duration, the regression requires another container to
 reserve an address, run its workload, and release its reservation without
 waiting for the first reservation's activation deadline.
 
+The PR LXC workflow captures DHCP/ARP packets and samples published reservations,
+dnsmasq arguments and leases, container MAC/address settings, and host networking
+once per second during the Rust network suites. Packet capture uses two rotating
+5 MB files. A capability-suite failure triggers two parallel and two serial
+diagnostic reruns on the same runner, each with its own capture directory.
+The original failure remains a failed gate even if every diagnostic rerun passes.
+Address regressions still run after a capability-suite failure. Failure artifacts
+include these captures and the complete boot journal for `lxc-net` and dnsmasq.
+Manual workflow dispatch with `reproduce_dhcp=true` runs the diagnostic reruns
+and uploads their artifacts even when the initial tests pass.
+
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The
 isolated, firewall, and proxy cases require empty workload capability sets,
