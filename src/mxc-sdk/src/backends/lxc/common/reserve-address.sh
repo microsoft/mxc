@@ -398,7 +398,7 @@ attempt=0
 while :; do
     now=$(monotonic_seconds)
     remaining=$((activation_deadline - now))
-    test "$remaining" -gt 0 || break
+    test "$remaining" -ge 3 || break
     current_server=$(server_pid)
     test "$server" = "$current_server" ||
         fail "Local lxc-net restarted while activating the LXC reservation (PID $server -> $current_server)"

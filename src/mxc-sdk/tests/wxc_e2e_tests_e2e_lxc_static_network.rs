@@ -298,12 +298,21 @@ fi
                         && diagnostics.contains("LXC reservation activation attempt")
                         && diagnostics.contains("expected address=")
                         && diagnostics.contains("observed address=")
-                        && diagnostics.contains("reservation fixture acquisition"),
+                        && diagnostics.contains("reservation fixture acquisition")
+                        && diagnostics.contains(
+                            "Local lxc-net did not activate the LXC address reservation within 30s",
+                        )
+                        && diagnostics.contains(if mode == "wrong-lease" {
+                            "lease=1s"
+                        } else {
+                            "observed address=192.0.2.1/24"
+                        })
+                        && acquisitions >= 3,
                     "{mode} must fail with DHCP observations and no workload execution\n{diagnostics}"
                 );
                 assert!(
-                    elapsed < Duration::from_secs(50),
-                    "{mode} exceeded the activation budget: {elapsed:?}\n{diagnostics}"
+                    (Duration::from_secs(25)..Duration::from_secs(50)).contains(&elapsed),
+                    "{mode} did not exhaust the activation budget: {elapsed:?}\n{diagnostics}"
                 );
             }
         }));
