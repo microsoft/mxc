@@ -31,6 +31,12 @@ instructions](ci-validation-infrastructure.md#offline-tls-fixtures).
 Windows release workspace suites run independently through
 `Test.Windows.Job.yml` on native x64 and ARM64 hosts. `Build.Windows.Shared.Job.yml`
 first builds the production executor and sidecars once per architecture.
+Alongside it, `Build.Windows.Fixtures.Job.yml` runs the existing standalone
+module-lifetime example build with the same release profile, features, hosts
+and linker. Workspace lanes download its same-run DLL and PDB instead of
+repeating that build after production finishes. The fixture producer uses a
+dedicated dependency cache, seeded read-only from the existing workspace-test
+cache when cold.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
@@ -52,8 +58,12 @@ checking the existing files, without replacing Git references or configuration.
 Make `windows-build / Shared Windows build` a required status check when
 rolling out shared compilation, so failed producers block merging even when
 their consumers cannot start.
-Each workspace lane builds the module-lifetime example and runs the full
-unfiltered workspace tests with its existing release features. The suites
+Each workspace lane checks that both producers succeeded, downloads the
+module-lifetime example, and runs the full unfiltered workspace tests with
+its existing release features. Failed, skipped or cancelled producer results
+fail the workspace aggregate even if an earlier run attempt left artifacts.
+Cargo's normal example compilation in that full suite is unchanged, as is the
+minimal-feature NVX gate that runs afterward. The suites
 retain their release W365 cases as well as the separate debug fixture coverage.
 Packaging does not wait for workspace tests; make
 `windows-workspace-tests / Windows workspace tests` a required status check
@@ -138,8 +148,9 @@ then closes its library handle, releases the blocked operation, and checks that
 the worker can finish. Removing the probe's module pin must fail this regression.
 It runs in a subprocess so an unload
 regression cannot crash the test runner. The full native Cargo test suites also
-build the fixture example and run this test in the independent Windows
-workspace suites and the macOS build. Both Linux
+run this test in the independent Windows workspace suites and the macOS build.
+Windows builds the standalone fixture in its early producer; macOS builds it
+before its suite. Both Linux
 matrix lanes explicitly build the fixture and run the test in their release
 profile with the lane's target.
 

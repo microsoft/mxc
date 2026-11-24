@@ -60,6 +60,14 @@ Artifact validation uses its own compiled-dependency cache for filesystem
 probes, NVX staging, and the isolated debug executor. It restores before the
 same production snapshot and does not cache workspace crates. Verification
 of the extracted crate package remains in its existing isolated output tree.
+`Build.Windows.Fixtures.Job.yml` moves the standalone module-lifetime example
+build off the serial workspace path. It runs once per Windows architecture,
+alongside production, with the original command, features and release profile.
+Consumers download its DLL and PDB before their unchanged full suite and
+subsequent minimal-feature NVX gate. Both producer results must succeed for
+the workspace aggregate to pass, including after a rerun with retained
+artifacts. A dedicated fixture dependency cache uses the existing workspace
+cache as a read-only cold seed; it does not add another production build.
 
 GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
@@ -120,6 +128,7 @@ for coverage, local commands and prerequisites.
 | `.github/workflows/W365.Fixture.Test.Job.yml` | `workflow_call`-only. Runs native W365 loopback TLS fixtures independently of binary production and aggregates the host results. |
 | `.github/workflows/Test.Windows.Job.yml` | `workflow_call`-only. Builds and runs the unfiltered Windows release workspace suites on x64 and ARM64 independently of artifact production. Called by PR and scheduled workflows. |
 | `.github/workflows/Build.Windows.Shared.Job.yml` | Builds the production Windows workspace once per architecture and publishes a same-run Cargo snapshot consumed by Windows artifact validation and workspace tests. |
+| `.github/workflows/Build.Windows.Fixtures.Job.yml` | Builds the standalone Windows module-lifetime example on each native architecture alongside production and publishes its test-only DLL and PDB for workspace consumers. |
 | `.github/actions/setup-windows-linker/action.yml` | Selects the Windows LLVM linker bundled with the pinned Rust toolchain, consistently across the shared build and its native consumers, before cache selection. |
 | `scripts/ci/cargo-build-snapshot.ps1` | Transfers tracked sources, native/host release outputs, and Cargo fingerprints in a compressed PAX archive with checksum-bound metadata. Validates before a single extraction and restores watched Git timestamps only when their contents match, without copying Git references or configuration. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
@@ -143,6 +152,7 @@ Validation.Tests.Scheduled.yml
       ├─ windows-build             →  Build.Windows.Shared.Job.yml (shared Cargo snapshot)
       │    ├─ windows              →  Build.Windows.Job.yml (validate and upload artifacts)
       │    └─ windows-workspace-tests → Test.Windows.Job.yml (parallel release suites)
+      ├─ windows-fixture-build      →  Build.Windows.Fixtures.Job.yml (DLL/PDB; also required by workspace suites)
       ├─ linux / macos             →  Build.*.Job.yml (upload artifacts)
       ├─ w365-fixture-tests        →  W365.Fixture.Test.Job.yml (parallel debug suites)
       ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
@@ -165,7 +175,8 @@ test jobs only ever `download-artifact`.
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows-build` | `Build.Windows.Shared.Job.yml` — x64 + arm64 production builds and same-run Cargo snapshots. Downstream jobs restore tracked source timestamps and release outputs before invoking Cargo. |
 | `windows` | `Build.Windows.Job.yml` — restores shared builds, runs filesystem-probe tests and telemetry smoke tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. Parallel telemetry-component jobs run default-feature release consent/policy tests. The `Windows validation` aggregate requires both groups to pass. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
-| `windows-workspace-tests` | `Test.Windows.Job.yml` — parallel x64 + arm64 unfiltered release workspace suites, including the module-lifetime example and required NVX module-lifetime scenario. |
+| `windows-fixture-build` | `Build.Windows.Fixtures.Job.yml` — the original standalone module-lifetime example build on x64 + arm64, independent of production. Uploads the DLL and PDB. |
+| `windows-workspace-tests` | `Test.Windows.Job.yml` — requires both production and fixture producers, downloads the fixture, and runs parallel x64 + arm64 unfiltered release workspace suites with the existing required minimal-feature NVX module-lifetime scenario afterward. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, native Bubblewrap filesystem-policy and denied-path masking suites, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, Bubblewrap proxy-networking, workload-capability, and user-namespace-denial CLI tests, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |

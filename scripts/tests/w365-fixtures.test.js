@@ -201,12 +201,14 @@ test("Windows workspace suites preserve release features and run independently o
   const tests = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
   const builds = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
   const shared = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
+  const fixtures = readFileSync(join(root, ".github", "workflows", "Build.Windows.Fixtures.Job.yml"), "utf8");
   const matrix = (text) => [...text.matchAll(
     /- arch: (\S+)\r?\n +runner: (\S+)\r?\n +target: (\S+)\r?\n(?: +#.*\r?\n)* +features: ([^\r\n]+)/g
   )].map(([, arch, runner, target, features]) => ({ arch, runner, target, features }));
   assert.equal(matrix(tests).length, 2);
   assert.deepEqual(matrix(tests), matrix(builds));
   assert.deepEqual(matrix(tests), matrix(shared));
+  assert.deepEqual(matrix(tests), matrix(fixtures));
   assert.match(tests, /MXC_W365_TEST_OPENSSL=\$openssl/);
   assert.match(shared, /Force hyperlight-host rebuild/);
   for (const consumer of [tests, builds]) {
@@ -214,14 +216,24 @@ test("Windows workspace suites preserve release features and run independently o
     assert.match(consumer, /cargo-build-snapshot\.ps1 -Mode Restore/);
     assert.doesNotMatch(consumer, /cargo clean/);
   }
-  const commands = [...tests.matchAll(
+  const commands = (text) => [...text.matchAll(
     /      - name: (Build|Build module lifetime regression fixture|Test)\r?\n        run: ([\s\S]*?)(?=\r?\n\r?\n|$)/g
   )].map(([, name, command]) => [name, command.replace(/\s+/g, " ").trim()]);
-  assert.deepEqual(commands, [
+  assert.deepEqual(commands(tests), [
     ["Build", 'cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features "${{ matrix.features }}"'],
-    ["Build module lifetime regression fixture", 'cargo build --locked --release --target ${{ matrix.target }} -p mxc-sdk --example module_lifetime_fixture --no-default-features --features "${{ matrix.features }}"'],
     ["Test", 'cargo test --locked --release --target ${{ matrix.target }} --no-default-features --features "${{ matrix.features }}"'],
   ]);
+  assert.deepEqual(commands(fixtures), [
+    ["Build module lifetime regression fixture", 'cargo build --locked --release --target ${{ matrix.target }} -p mxc-sdk --example module_lifetime_fixture --no-default-features --features "${{ matrix.features }}"'],
+  ]);
+  assert.doesNotMatch(tests, /cargo build[^\r\n]*--example/);
+  assert.match(tests, /name: windows-module-lifetime-fixture-\$\{\{ matrix.target \}\}/);
+  assert.match(tests, /path: src\/target\/\$\{\{ matrix.target \}\}\/release\/examples/);
+  assert.match(fixtures, /module_lifetime_fixture\.dll/);
+  assert.match(fixtures, /module_lifetime_fixture\.pdb/);
+  assert.match(fixtures, /if-no-files-found: error/);
+  assert.match(fixtures, /if: steps.fixture-cache.outputs.cache-hit != 'true'/);
+  assert.match(fixtures, /shared-key: test\r?\n +key: windows-tests-\$\{\{ matrix.target \}\}-v2\r?\n +save-if: false/);
   assert.doesNotMatch(builds, /- name: Test\r?\n/);
   assert.match(tests, /needs: test\r?\n +if: \$\{\{ always\(\) \}\}/);
   assert.match(tests, /TEST_RESULT: \$\{\{ needs.test.result \}\}/);
@@ -230,10 +242,70 @@ test("Windows workspace suites preserve release features and run independently o
     const text = readFileSync(join(root, ".github", "workflows", entry), "utf8");
     const caller = text.match(/^  windows-workspace-tests:\r?\n((?:    [^\r\n]*(?:\r?\n|$))+)/m);
     assert.ok(caller, `${entry} must run both Windows workspace suites`);
-    assert.match(caller[1], /needs: windows-build/);
+    assert.match(caller[1], /needs: \[windows-build, windows-fixture-build\]/);
+    assert.match(caller[1], /if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
     assert.match(caller[1], /uses: \.\/\.github\/workflows\/Test\.Windows\.Job\.yml/);
+    assert.match(caller[1], /production-build-result: \$\{\{ needs.windows-build.result \}\}/);
+    assert.match(caller[1], /fixture-build-result: \$\{\{ needs.windows-fixture-build.result \}\}/);
     assert.doesNotMatch(text, /needs:[^\r\n]*windows-workspace-tests/);
     assert.match(text, /windows-build:\r?\n +needs: dependency-feed-check\r?\n +uses: \.\/\.github\/workflows\/Build\.Windows\.Shared\.Job\.yml/);
+    assert.match(text, /windows-fixture-build:\r?\n +needs: dependency-feed-check\r?\n +uses: \.\/\.github\/workflows\/Build\.Windows\.Fixtures\.Job\.yml/);
+  }
+});
+
+test("Windows workspace gates reject failed producers even when artifacts from an earlier attempt exist", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
+  const step = workflow.match(
+    /      - name: Require production and fixture builds to succeed[\s\S]*?        run: \|\r?\n([\s\S]*?)(?=\r?\n      - uses:)/
+  );
+  assert.ok(step);
+  assert.match(workflow, /PRODUCTION_RESULT: \$\{\{ inputs.production-build-result \}\}/);
+  assert.match(workflow, /FIXTURE_RESULT: \$\{\{ inputs.fixture-build-result \}\}/);
+  const cases = [
+    ["success", "success"],
+    ...["failure", "cancelled", "skipped"].flatMap(result => [
+      [result, "success"], ["success", result],
+    ]),
+  ];
+  for (const [production, fixture] of cases) {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-Command", step[1].replace(/^          /gm, "")], {
+      env: { ...process.env, PRODUCTION_RESULT: production, FIXTURE_RESULT: fixture },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.ifError(result.error);
+    const success = production === "success" && fixture === "success";
+    assert.equal(result.status === 0, success, result.stdout + result.stderr);
+    if (!success) {
+      assert.match(stripVTControlCharacters(result.stderr), /Windows workspace prerequisites did not succeed:/);
+    }
+  }
+});
+
+test("the early fixture producer requires both the DLL and its PDB before uploading", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Fixtures.Job.yml"), "utf8");
+  const step = workflow.match(
+    /      - name: Require the fixture library and debug symbols[\s\S]*?        run: \|\r?\n([\s\S]*?)(?=\r?\n      - name:)/
+  );
+  assert.ok(step);
+  for (const missing of ["", "module_lifetime_fixture.dll", "module_lifetime_fixture.pdb"]) {
+    const directory = mkdtempSync(join(tmpdir(), "mxc-module-fixture-"));
+    try {
+      const output = join(directory, "target", "x86_64-pc-windows-msvc", "release", "examples");
+      mkdirSync(output, { recursive: true });
+      for (const file of ["module_lifetime_fixture.dll", "module_lifetime_fixture.pdb"]) {
+        if (file !== missing) writeFileSync(join(output, file), "");
+      }
+      const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-Command",
+        step[1].replace(/^          /gm, "").replaceAll("${{ matrix.target }}", "x86_64-pc-windows-msvc")], {
+        cwd: directory, encoding: "utf8", timeout: 30_000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status === 0, missing === "", result.stdout + result.stderr);
+      if (missing) assert.ok(result.stderr.includes(missing), result.stderr);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -282,7 +354,7 @@ test("Windows consumers retain compiled dependencies under separate test-variant
 });
 
 test("shared Windows builds and every consumer select the same pinned linker before caching", () => {
-  for (const name of ["Build.Windows.Shared.Job.yml", "Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
+  for (const name of ["Build.Windows.Shared.Job.yml", "Build.Windows.Fixtures.Job.yml", "Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
     const workflow = readFileSync(join(root, ".github", "workflows", name), "utf8");
     const jobs = name === "Build.Windows.Job.yml"
       ? workflow.split("\n  telemetry-component-check:") : [workflow];
