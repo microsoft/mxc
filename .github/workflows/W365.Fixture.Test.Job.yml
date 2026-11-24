@@ -81,6 +81,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Building the W365 execution example failed' }
 
           $required = @(
+            'loopback_tls_fixture_serves_both_address_families',
             'lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture',
             'readiness_contract_fixture', 'execution::native_execution_streams_fixture',
             'execution::native_execution_backpressure_fixture',

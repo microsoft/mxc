@@ -53,9 +53,14 @@ Those suites run in `Test.Windows.Job.yml`, independently of artifact
 production, while the standalone fixture workflow retains the complete debug
 suite including fresh-executor cases.
 
-GitHub Actions requires nine native fixtures on Windows and eight on Linux/macOS.
+GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
 cross-compiled Windows/Linux ARM64 jobs.
+
+The Rust fixture services listen on both IPv4 and IPv6 loopback at the same
+port. This avoids a refused-address retry when `localhost` resolves to the
+other family. A required TLS regression sends an HTTP request through each
+family while retaining certificate and hostname verification.
 
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and

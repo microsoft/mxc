@@ -13,6 +13,7 @@ const root = resolve(__dirname, "..", "..");
 const workflowName = "W365.Fixture.Test.Job.yml";
 const workflow = readFileSync(join(root, ".github", "workflows", workflowName), "utf8");
 const commonCases = [
+  "loopback_tls_fixture_serves_both_address_families",
   "lifecycle_contract_and_recovery_fixture",
   "transport_deadlines_fixture",
   "readiness_contract_fixture",
