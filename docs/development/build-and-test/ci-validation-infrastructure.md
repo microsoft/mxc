@@ -80,7 +80,15 @@ Run `node --test scripts/tests/w365-fixtures.test.js` for the offline workflow
 and result-gate regressions; repository-consistency CI runs them as well.
 Node selects its fixture library through
 `scripts/ci/run-w365-node-fixture.ps1`; packaged-artifact tests still use shipping
-libraries. Fixtures retain TLS verification and need no live tenant, but do not
+libraries. In the PR Build workflow, `W365.Node.Fixture.Build.Job.yml` builds
+the Windows Debug `test-support` library once on `windows-latest`, in parallel
+with shipping builds. Both Windows Node versions download that same-run DLL
+and pass `-NativeDirectory` to the helper. Missing artifacts or libraries fail
+the job; consumers do not rebuild. Linux and macOS retain native compilation
+on their respective integration host images. `-BuildOnly` builds the isolated
+library without running Node; the default helper invocation still builds and
+runs the fixture locally and in Azure. Neither mode replaces shipping outputs.
+Fixtures retain TLS verification and need no live tenant, but do not
 establish live-service compatibility. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md#offline-functional-fixtures)
 for coverage, local commands and prerequisites.

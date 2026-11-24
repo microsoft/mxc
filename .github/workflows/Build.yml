@@ -62,6 +62,10 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/W365.Fixture.Test.Job.yml
 
+  w365-node-fixture-build:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/W365.Node.Fixture.Build.Job.yml
+
   wslc-gateway-image-check:
     needs: dependency-feed-check
     uses: ./.github/workflows/WSLC.Gateway.Image.Check.Job.yml
@@ -78,5 +82,8 @@ jobs:
     uses: ./.github/workflows/Package.NpmSdk.Job.yml
 
   sdk-integration-tests:
-    needs: [package-lock-check, package-npm-sdk]
+    needs: [package-lock-check, package-npm-sdk, w365-node-fixture-build]
+    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/SDK.Integration.Test.Job.yml
+    with:
+      windows-fixture-result: ${{ needs.w365-node-fixture-build.result }}

@@ -2,6 +2,11 @@ name: SDK Integration Tests
 
 on:
   workflow_call:
+    inputs:
+      windows-fixture-result:
+        description: Result of the same-run Windows fixture producer
+        required: true
+        type: string
 
 jobs:
   sdk-integration-tests:
@@ -47,6 +52,17 @@ jobs:
       # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
     steps:
+      - name: Require the Windows fixture producer to succeed
+        if: matrix.os_label == 'windows'
+        env:
+          FIXTURE_RESULT: ${{ inputs.windows-fixture-result }}
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ($env:FIXTURE_RESULT -ne 'success') {
+            throw "Windows fixture producer did not succeed: $env:FIXTURE_RESULT"
+          }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -88,16 +104,32 @@ jobs:
           sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - name: Surface toolchain file at repo root
+        if: matrix.os_label != 'windows'
         shell: bash
         working-directory: ${{ github.workspace }}
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        if: matrix.os_label != 'windows'
         with:
           override: false
           rustflags: ''
 
+      - name: Download the shared Windows native fixture
+        if: matrix.os_label == 'windows'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: w365-node-fixture-windows
+          path: ${{ runner.temp }}/w365-node-fixture
+
+      - name: Test W365 Dev JSON with the shared Windows native TLS fixture
+        if: matrix.os_label == 'windows'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/ci/run-w365-node-fixture.ps1 -NativeDirectory (Join-Path $env:RUNNER_TEMP 'w365-node-fixture')
+
       - name: Test W365 Dev JSON with an isolated native TLS fixture
+        if: matrix.os_label != 'windows'
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: ./scripts/ci/run-w365-node-fixture.ps1

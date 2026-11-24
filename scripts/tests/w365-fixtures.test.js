@@ -3,7 +3,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -284,3 +284,146 @@ test("shared Windows snapshots transfer compressed data and its bound metadata w
     assert.ok(consumer.includes("windows-build\\windows-build.tar.zst"), name);
   }
 });
+
+test("Windows Node versions share one early native fixture build without changing Unix hosts", () => {
+  const build = readFileSync(join(root, ".github", "workflows", "Build.yml"), "utf8");
+  const producer = readFileSync(join(root, ".github", "workflows", "W365.Node.Fixture.Build.Job.yml"), "utf8");
+  const integration = readFileSync(join(root, ".github", "workflows", "SDK.Integration.Test.Job.yml"), "utf8");
+  assert.match(build, /w365-node-fixture-build:\r?\n +needs: dependency-feed-check\r?\n +uses: .*W365.Node.Fixture.Build.Job.yml/);
+  assert.match(build, /sdk-integration-tests:\r?\n +needs: \[package-lock-check, package-npm-sdk, w365-node-fixture-build\]\r?\n +if: \$\{\{ always\(\) && !cancelled\(\) \}\}/);
+  assert.match(build, /windows-fixture-result: \$\{\{ needs.w365-node-fixture-build.result \}\}/);
+  assert.match(integration, /FIXTURE_RESULT: \$\{\{ inputs.windows-fixture-result \}\}/);
+  assert.match(integration, /if \(\$env:FIXTURE_RESULT -ne 'success'\) \{\r?\n +throw "Windows fixture producer did not succeed:/);
+  assert.match(producer, /runs-on: windows-latest/);
+  assert.match(producer, /run-w365-node-fixture.ps1 -BuildOnly/);
+  assert.match(producer, /workspaces: src -> target\/w365-sdk-fixture/);
+  assert.match(producer, /name: w365-node-fixture-windows/);
+  assert.match(producer, /path: src\/target\/w365-sdk-fixture\/debug\/mxc_ffi.dll/);
+  assert.match(producer, /if-no-files-found: error/);
+  assert.doesNotMatch(producer, /--release|setup-windows-linker/);
+  assert.match(integration, /setup-rust-toolchain@[^\r\n]+\r?\n +if: matrix.os_label != 'windows'/);
+  assert.match(integration, /name: Download the shared Windows native fixture\r?\n +if: matrix.os_label == 'windows'/);
+  assert.match(integration, /run-w365-node-fixture.ps1 -NativeDirectory/);
+  assert.match(integration, /name: Test W365 Dev JSON with an isolated native TLS fixture\r?\n +if: matrix.os_label != 'windows'/);
+  const lanes = [...integration.matchAll(
+    /- name_label: (\S+)\r?\n +os_label: (\S+)\r?\n +runner: (\S+)\r?\n +node_version: (\S+)/g
+  )].map(([, name, os, runner, node]) => [name, os, runner, node]);
+  assert.deepEqual(lanes, [
+    ["windows-node24", "windows", "windows-latest", "24.21.0"],
+    ["windows-node26", "windows", "windows-latest", "26.8.0"],
+    ["linux-ubuntu24.04", "linux", "ubuntu-24.04", "24"],
+    ["linux-ubuntu26.04", "linux", "ubuntu-26.04", "24"],
+    ["macos", "macos", "macos-26", "24"],
+  ]);
+});
+
+function runNodeFixture(mode) {
+  const directory = mkdtempSync(join(tmpdir(), "mxc-node-fixture-"));
+  const helper = join(directory, "scripts", "ci", "run-w365-node-fixture.ps1");
+  mkdirSync(join(directory, "scripts", "ci"), { recursive: true });
+  mkdirSync(join(directory, "src"));
+  mkdirSync(join(directory, "sdk", "node", "tests", "integration", "dist"), { recursive: true });
+  copyFileSync(join(root, "scripts", "ci", "run-w365-node-fixture.ps1"), helper);
+  writeFileSync(join(directory, "sdk", "node", "tests", "integration", "dist", "w365-fixture.js"), "");
+  const script = join(directory, "test.ps1");
+  writeFileSync(script, `
+$ErrorActionPreference = 'Stop'
+$global:builds = 0
+$global:tests = 0
+$library = if ($IsWindows) { 'mxc_ffi.dll' } elseif ($IsMacOS) { 'libmxc_ffi.dylib' } else { 'libmxc_ffi.so' }
+$prebuilt = Join-Path $PSScriptRoot 'downloaded fixture'
+New-Item -ItemType Directory -Path $prebuilt | Out-Null
+if ($env:MXC_NODE_FIXTURE_MODE -eq 'prebuilt') {
+    New-Item -ItemType File -Path (Join-Path $prebuilt $library) | Out-Null
+}
+function global:cargo {
+    if ($env:MXC_NODE_FIXTURE_MODE -in @('prebuilt', 'missing-prebuilt')) { throw 'Prebuilt consumer invoked Cargo' }
+    $global:builds++
+    $arguments = @($args)
+    foreach ($required in 'build', '--locked', '-p', 'mxc_ffi', '--features', 'test-support', '--target-dir') {
+        if ($arguments -notcontains $required) { throw "Missing Cargo argument: $required" }
+    }
+    if ($arguments -contains '--release') { throw 'Fixture profile changed' }
+    $global:LASTEXITCODE = 0
+    if ($env:MXC_NODE_FIXTURE_MODE -eq 'build-failure') { $global:LASTEXITCODE = 17; return }
+    if ($env:MXC_NODE_FIXTURE_MODE -eq 'missing-output') { return }
+    $bin = Join-Path $arguments[-1] 'debug'
+    New-Item -ItemType Directory -Path $bin -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $bin $library) | Out-Null
+}
+function global:node {
+    $global:tests++
+    if ("$args" -ne '--test dist/w365-fixture.js') { throw 'Wrong fixture selection' }
+    if (-not (Test-Path -LiteralPath (Join-Path $env:MXC_FFI_DIR $library))) { throw 'Wrong fixture library' }
+    if ($env:MXC_NODE_FIXTURE_MODE -eq 'prebuilt' -and $env:MXC_FFI_DIR -ne $prebuilt) { throw 'Downloaded fixture was not selected' }
+    $global:LASTEXITCODE = if ($env:MXC_NODE_FIXTURE_MODE -eq 'test-failure') { 23 } else { 0 }
+}
+$env:MXC_FFI_DIR = 'original-ffi'
+$env:MXC_W365_TEST_OPENSSL = 'original-openssl'
+$failed = $false
+try {
+    if ($env:MXC_NODE_FIXTURE_MODE -in @('prebuilt', 'missing-prebuilt')) {
+        & '${helper.replaceAll("'", "''")}' -NativeDirectory $prebuilt
+    } elseif ($env:MXC_NODE_FIXTURE_MODE -eq 'build-only') {
+        & '${helper.replaceAll("'", "''")}' -BuildOnly
+    } else {
+        & '${helper.replaceAll("'", "''")}'
+    }
+} catch {
+    $failed = $true
+    Write-Output $_.Exception.Message
+}
+if ($env:MXC_FFI_DIR -ne 'original-ffi' -or $env:MXC_W365_TEST_OPENSSL -ne 'original-openssl') { throw 'Caller environment changed' }
+Write-Output "COUNTS builds=$global:builds tests=$global:tests"
+if ($failed) { exit 1 }
+`);
+  try {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-File", script], {
+      cwd: directory,
+      env: { ...process.env, MXC_NODE_FIXTURE_MODE: mode },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.ifError(result.error);
+    return { status: result.status, output: stripVTControlCharacters(result.stdout + result.stderr) };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("Windows Node consumers reject unsuccessful producers even with a retained artifact", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "SDK.Integration.Test.Job.yml"), "utf8");
+  const step = workflow.match(
+    /      - name: Require the Windows fixture producer to succeed[\s\S]*?        run: \|\r?\n([\s\S]*?)(?=\r?\n      - uses:)/
+  );
+  assert.ok(step);
+  for (const conclusion of ["success", "failure", "cancelled", "skipped"]) {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-Command", step[1].replace(/^          /gm, "")], {
+      env: { ...process.env, FIXTURE_RESULT: conclusion },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status === 0, conclusion === "success", result.stdout + result.stderr);
+    if (conclusion !== "success") {
+      assert.match(stripVTControlCharacters(result.stderr), /Windows fixture producer did not succeed:/);
+    }
+  }
+});
+
+for (const [mode, status, expected] of [
+  ["default", 0, /COUNTS builds=1 tests=1/],
+  ["build-only", 0, /COUNTS builds=1 tests=0/],
+  ["prebuilt", 0, /COUNTS builds=0 tests=1/],
+  ["missing-prebuilt", 1, /W365 Node fixture native library missing:/],
+  ["missing-output", 1, /W365 Node fixture native library missing:/],
+  ["build-failure", 1, /W365 Node fixture native build failed/],
+  ["test-failure", 1, /W365 Node Dev JSON fixture failed/],
+]) {
+  test(`Node fixture helper preserves isolation, errors and environment in ${mode} mode`, () => {
+    const result = runNodeFixture(mode);
+    assert.equal(result.status, status, result.output);
+    assert.match(result.output, expected);
+    assert.doesNotMatch(result.output, /Caller environment changed|Prebuilt consumer invoked Cargo/);
+  });
+}

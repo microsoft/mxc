@@ -13,6 +13,14 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+`W365.Node.Fixture.Build.Job.yml` compiles the isolated Windows Node fixture
+library once on `windows-latest` alongside shipping builds. Node 24 and 26
+integration jobs download the same DLL rather than repeating Cargo setup and
+compilation after packaging. Both versions still run the complete fixture.
+The caller forwards the producer result, and Windows consumers fail before
+testing if it did not succeed, including when a previous run attempt left an
+artifact behind. Unix integration jobs retain their existing native builds.
+
 Native W365 loopback TLS fixtures run in parallel through
 `W365.Fixture.Test.Job.yml`, not in the binary build jobs. They retain the same
 Windows, Linux and macOS host coverage and require every named scenario to
