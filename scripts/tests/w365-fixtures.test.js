@@ -373,6 +373,24 @@ test("shared Windows builds and every consumer select the same pinned linker bef
   }
 });
 
+test("cached Windows Hyperlight producers regenerate surrogate assets after restore and before build", () => {
+  for (const [file, buildName] of [
+    ["Build.Windows.Shared.Job.yml", "Build"],
+    ["Build.Windows.Fixtures.Job.yml", "Build module lifetime regression fixture"],
+  ]) {
+    const workflow = readFileSync(join(root, ".github", "workflows", file), "utf8");
+    const cleanup = workflow.match(
+      /      - name: Force hyperlight-host rebuild \(cache workaround\)\r?\n +if: matrix.target == 'x86_64-pc-windows-msvc'\r?\n +shell: pwsh\r?\n +run: ([^\r\n]+)/
+    );
+    assert.ok(cleanup, `${file} must regenerate assets missing from a restored target cache`);
+    assert.equal(cleanup[1],
+      "cargo clean --release --target ${{ matrix.target }} -p hyperlight-host");
+    const position = workflow.indexOf(cleanup[0]);
+    assert.ok(workflow.lastIndexOf("uses: Swatinem/rust-cache") < position, file);
+    assert.ok(workflow.indexOf(`      - name: ${buildName}`) > position, file);
+  }
+});
+
 test("shared Windows snapshots transfer compressed data and its bound metadata without recompression", () => {
   const shared = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
   assert.match(shared, /windows-build\.tar\.zst\r?\n +\$\{\{ runner.temp \}\}\/windows-build\.tar\.zst\.json/);

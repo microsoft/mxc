@@ -63,6 +63,11 @@ jobs:
           save-if: false
           cache-on-failure: false
 
+      - name: Force hyperlight-host rebuild (cache workaround)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: cargo clean --release --target ${{ matrix.target }} -p hyperlight-host
+
       - name: Build module lifetime regression fixture
         run: cargo build --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --example module_lifetime_fixture

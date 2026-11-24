@@ -70,6 +70,9 @@ artifacts. A dedicated fixture dependency cache uses the existing workspace
 cache as a read-only cold seed; it does not add another production build.
 The consumer and seed use one explicit complete shared cache namespace so
 the fallback addresses the existing cache even from a differently named job.
+The x64 fixture producer applies the same targeted `hyperlight-host` cache
+workaround as production, regenerating missing surrogate assets after restore
+and before compiling. It retains Hyperlight feature coverage.
 
 GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not

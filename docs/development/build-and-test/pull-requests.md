@@ -41,6 +41,10 @@ The workspace consumer and cold seed declare the same complete `shared-key`
 namespace, preserving the existing architecture-specific cache names.
 For rust-cache, `shared-key` replaces the whole key base; it does not combine
 with a separate `key` input. Fixture-owned caches retain their own names.
+Both cached x64 producers retain the targeted `hyperlight-host` regeneration
+step after cache restoration and before building. Its generated surrogate
+assets are not retained by the dependency cache; restoring compiled metadata
+alone is insufficient.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
