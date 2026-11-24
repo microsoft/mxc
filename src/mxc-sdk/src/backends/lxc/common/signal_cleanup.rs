@@ -238,6 +238,7 @@ pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Resul
     use std::os::unix::process::CommandExt;
 
     let tool = command.get_program().to_string_lossy().into_owned();
+    termination_signals::unblock_in_child(&mut command);
     if !watchdog_installed() {
         return command
             .output()
@@ -251,7 +252,6 @@ pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Resul
         .stdin(Stdio::null())
         .stdout(stdout.try_clone().map_err(|error| error.to_string())?)
         .stderr(stderr.try_clone().map_err(|error| error.to_string())?);
-    termination_signals::unblock_in_child(&mut command);
     let deadline = Instant::now() + timeout.min(startup_time_remaining().unwrap_or(timeout));
     {
         let mut slot = lock_slot();
@@ -1002,5 +1002,44 @@ mod tests {
              it, so taking the ownership record would aim the removal at whichever LXC \
              container registered last"
         );
+    }
+
+    /// A library host that blocks the termination signals itself must not
+    /// pass them on blocked to startup tools such as the address-reservation
+    /// shell.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_tools_run_with_the_hosts_blocked_signals_unblocked() {
+        let _watchdog = Watchdog::uninstalled();
+
+        struct Restore(SigSet);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = self.0.thread_set_mask();
+            }
+        }
+        let _restore = Restore(
+            termination_signals::mask()
+                .thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK)
+                .expect("block the termination signals"),
+        );
+
+        let mut command = Command::new("cat");
+        command.arg("/proc/self/status");
+        let output = run_startup_tool(command, Duration::from_secs(10)).expect("run cat");
+        assert!(output.status.success(), "{}", output.status);
+        let status = String::from_utf8(output.stdout).expect("utf-8");
+        let blocked = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigBlk:"))
+            .map(|hex| u64::from_str_radix(hex.trim(), 16).expect("hex signal set"))
+            .unwrap_or_else(|| panic!("SigBlk missing from:\n{status}"));
+        for signal in termination_signals::TERMINATION_SIGNALS {
+            assert_eq!(
+                blocked & (1u64 << (*signal as u32 - 1)),
+                0,
+                "{signal} still blocked in the startup tool"
+            );
+        }
     }
 }
