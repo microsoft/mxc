@@ -184,13 +184,29 @@ Bubblewrap creates a namespace-isolated process by:
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
 4. Setting up minimal `/dev`, `/proc`, and `/tmp`
 5. Installing a seccomp filter that permits `socket()` and `socketpair()` only
-   for Unix-domain, IPv4, IPv6, and netlink address families, and disables
-   io_uring
+   for Unix-domain, IPv4, IPv6, and netlink address families, disables
+   io_uring, and blocks creation of new user namespaces
 6. Clearing the environment and applying only requested variables
-7. Executing the command via `sh -c`
+7. Dropping all workload capabilities with `--cap-drop ALL`, including for root callers
+8. Executing the command via `sh -c`
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+Capability removal does not change the workload's UID or GID. Run MXC as an
+unprivileged user: a root caller still gives the workload root-owner access
+to visible host files, including secrets in `/etc` and writable policy grants.
+The separate network supervisor retains the namespace capabilities it needs
+to install firewall rules.
+
+Bubblewrap ignores a refused capability drop when the caller is root, for
+example when the host's seccomp or security policy blocks `capset`. MXC
+therefore holds every launch at Bubblewrap's startup barrier until the sandbox
+process has empty inheritable, permitted, effective, and ambient capability
+sets and has no-new-privileges set. On kernels before Linux 4.10, which do not
+report no-new-privileges, MXC requires an empty bounding set instead. If that
+does not happen within five seconds, MXC stops the sandbox and fails the launch
+without running the workload.
 
 `bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
 when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
@@ -198,14 +214,26 @@ a dedicated thread that lives as long as the process, so a sandbox started from
 a pooled or short-lived thread (for example a Tokio `spawn_blocking` worker)
 survives that thread and dies only with the embedding process.
 
-The address-family filter is always active. Attempts to create VSOCK, packet,
+The seccomp filter is always active. Attempts to create VSOCK, packet,
 or other unlisted socket families fail with `EPERM`. Because io_uring can
 create sockets from submission-queue entries that seccomp cannot inspect, the
 filter also makes `io_uring_setup`, `io_uring_enter`, and `io_uring_register`
 fail with `ENOSYS`; runtimes that probe for io_uring fall back to their
-non-io_uring paths. Other system calls are not restricted by this filter.
-Filter construction, writing, or descriptor inheritance failures abort the
-launch instead of running without the filter.
+non-io_uring paths. Filter construction, writing, or descriptor inheritance
+failures abort the launch instead of running without the filter.
+
+The filter also stops the workload from creating user namespaces. A new user
+namespace gives its creator full capabilities inside it, which exposes kernel
+interfaces that are otherwise unavailable to the workload. `unshare` and
+`clone` calls that request `CLONE_NEWUSER` fail with `EPERM`, so commands such
+as `unshare -Ur` fail. `clone3` passes its flags through a pointer that seccomp
+cannot inspect, so every `clone3` call fails with `ENOSYS`; glibc then falls
+back to `clone`, so threads and child processes still start. Programs that
+call `clone3` directly must make the same fallback. Tools that create their
+own user namespace, such as a nested `bwrap`, rootless Podman, or Chromium's
+sandbox, do not work inside the sandbox; configure them not to create one
+(for example, Chromium's `--no-sandbox`). No request option re-enables user
+namespaces. Other system calls are not restricted by this filter.
 
 On x86-64 hosts, native and x32 workloads retain their normal syscall ABI, and
 i386 workloads using the direct `socket` and `socketpair` syscalls receive the
@@ -213,7 +241,7 @@ same family filtering. The legacy i386 `socketcall` interface passes the socket
 arguments through a pointer that seccomp cannot inspect, so its socket-creation
 and socket-pair subcalls fail with `EPERM`; its other subcalls remain available.
 On AArch64 hosts, native and AArch32 direct socket syscalls receive the same
-family filtering.
+family filtering. User-namespace creation is blocked on each of these ABIs.
 
 MXC supplies one generated program through the legacy `--seccomp FD` option.
 Bubblewrap rejects combining that option with `--add-seccomp-fd`, so any future
@@ -370,6 +398,16 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 | `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
 | `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
+
+Policy paths containing a `..` segment are rejected before sandbox setup.
+Supply a fully resolved path without `..`. MXC orders mounts from parent
+directories to their children; counting unresolved parent segments could apply
+a parent grant after a child's restriction and hide that restriction.
+MXC does not remove `..` automatically because symbolic links can change its
+meaning. Filenames containing dots, such as `report..txt`, are still accepted.
+
+`.` segments and repeated `/` separators do not change parent/child policy
+precedence. Backslashes are filename characters, not path separators.
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
 no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
@@ -924,10 +962,10 @@ shared-host-network behavior.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
    creating its own, so the sandbox lives in the namespace that owns the
-   rule-bearing network namespace. This relies on Bubblewrap dropping
-   capabilities in the sandboxed process — the runner passes no `--cap-add` —
-   which is what prevents the workload from holding the `CAP_NET_ADMIN` needed
-   to flush the chain.
+   rule-bearing network namespace. MXC passes `--cap-drop ALL` so the workload
+   has no capabilities, regardless of the caller's UID. The supervisor keeps
+   its namespace capabilities; the workload cannot use `CAP_NET_ADMIN` to
+   flush the chain or `CAP_NET_RAW` to create packet sockets.
 4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
    `bwrap --setenv` (caller-supplied values for these keys, including
@@ -1068,11 +1106,10 @@ so a Node caller keeps the first answer it received.
   than creating its own, and the namespace descriptor stays open in the
   workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
   to close it. Re-entering the namespace with `setns` requires
-  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
-  capability bounding set before `exec`, so the workload runs with
-  `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
-  those are zero, because that assumption is what makes the exposed
-  descriptor inert.
+  `CAP_SYS_ADMIN`, which MXC removes with `--cap-drop ALL` before workload
+  execution. The permitted, effective, inheritable, bounding, and ambient
+  capability sets are empty. Functional tests cover root and non-root callers
+  in isolated, firewall, and proxy modes.
 - **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
   and additionally programs a default-DROP egress chain inside the sandbox's
@@ -1187,6 +1224,9 @@ These failures carry the `backend_error` code and exit `-1`.
   IPv6 destinations remain unreachable until slirp supports IPv6 here.
   `runtimeConfig.networkProxy` restricts direct egress to the configured
   loopback proxy endpoint; hostname policy belongs to that external proxy.
+- **No nested user namespaces** — workloads cannot create user namespaces, so
+  nested sandboxes and rootless container tools do not run inside Bubblewrap
+  (see [How It Works](#how-it-works)).
 - **No container lifecycle operations**: Bubblewrap's `ScriptRunner`
   supports create-and-run execution, not `StatefulSandboxBackend` lifecycle calls.
 - **Provider-loss detection is exit-based** — in the private-namespace modes a

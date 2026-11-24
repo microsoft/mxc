@@ -68,6 +68,7 @@
           "pool": "1es-mxc-windows-26h2-pro-x64",
           "backends": [
             "process",
+            "isolation-session",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -123,6 +124,7 @@
           "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
             "process",
+            "isolation-session",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -150,6 +152,7 @@
           "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
             "process",
+            "isolation-session",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -350,6 +353,7 @@
         "os": "windows-26h2",
         "backends": [
           "process",
+          "isolation-session",
           "wslc"
         ]
       },
@@ -365,6 +369,7 @@
         "os": "windows-25h2",
         "backends": [
           "process",
+          "isolation-session",
           "wslc",
           "microvm"
         ]
@@ -373,6 +378,7 @@
         "os": "windows-24h2",
         "backends": [
           "process",
+          "isolation-session",
           "wslc"
         ]
       },

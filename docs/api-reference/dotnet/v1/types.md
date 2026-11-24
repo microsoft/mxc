@@ -584,6 +584,7 @@ public sealed class MxcException : Exception
     public string? Operation { get; }
     public string? NativeCode { get; }
     public string? Remediation { get; }
+    public System.Text.Json.JsonElement? Details { get; }
 
     public MxcException(ErrorCode code, string message)
     : this(code, message, null, null, null);
@@ -591,6 +592,12 @@ public sealed class MxcException : Exception
     public override string ToString();
 }
 ```
+
+`Details` preserves optional backend data independently of native memory and
+the original JSON document. Backend details remain available through the
+`JsonElement`; the exception message does not include them.
+`Details` may contain sensitive backend values, including resource paths.
+Filter or omit it before logging or serializing an exception.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle`
@@ -709,6 +716,13 @@ public class MxcProcess : IMxcProcess
     public void Dispose();
 }
 ```
+
+
+`TryGetExitCode`, `Wait`, `WaitAsync`, and `WaitForExitWithOutputAsync` throw
+`MxcException` when MXC cannot obtain a terminal process result after
+admission. The exception preserves `Code`, `Message`, `Operation`,
+`NativeCode`, and `Remediation`; the failure is not converted into an exit
+code. `MxcPtyProcess` does not preserve these fields.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcPtyProcess`

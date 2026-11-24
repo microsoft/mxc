@@ -95,6 +95,7 @@ run_test "LXC Network Enforcement" "$SCRIPT_DIR/run_lxc_network_enforcement_test
 run_test "LXC Retired Network Contracts" "$SCRIPT_DIR/run_lxc_network_retired_contract_test.sh"
 run_test "LXC Network GA Egress" "$SCRIPT_DIR/run_lxc_network_ga_egress_test.sh"
 run_test "LXC Network Omitted Network Section" "$SCRIPT_DIR/run_lxc_network_no_network_test.sh"
+run_test "LXC Host Network Rejection" "$SCRIPT_DIR/run_lxc_host_network_rejection_test.sh"
 run_test "LXC Network Extra Interface Isolation" "$SCRIPT_DIR/run_lxc_network_extra_nic_test.sh"
 run_test "LXC Network Deny-All Loopback" "$SCRIPT_DIR/run_lxc_network_deny_all_loopback_test.sh"
 run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"

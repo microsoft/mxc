@@ -21,7 +21,7 @@ use tokio::time::Instant;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A relayed connection with no data either way for this long is closed, so
 /// idle clients can't hold every connection slot.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Per listener, so one listener's clients can't starve the others.
 const MAX_CONNECTIONS: usize = 512;
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
@@ -74,8 +74,12 @@ pub async fn bind(address: SocketAddrV4) -> Result<TcpListener, String> {
 }
 
 /// Copies both ways until both sides finish, either fails, or the connection
-/// is idle for [`IDLE_TIMEOUT`]. A write the peer doesn't read counts as idle.
-pub async fn splice(a: impl AsyncRead + AsyncWrite, b: impl AsyncRead + AsyncWrite) {
+/// is idle for `idle_timeout`. A write the peer doesn't read counts as idle.
+pub async fn splice(
+    a: impl AsyncRead + AsyncWrite,
+    b: impl AsyncRead + AsyncWrite,
+    idle_timeout: Option<Duration>,
+) {
     let (mut a_read, mut a_write) = tokio::io::split(a);
     let (mut b_read, mut b_write) = tokio::io::split(b);
     let start = Instant::now();
@@ -87,9 +91,12 @@ pub async fn splice(a: impl AsyncRead + AsyncWrite, b: impl AsyncRead + AsyncWri
         )
     };
     let idle = async {
+        let Some(idle_timeout) = idle_timeout else {
+            return std::future::pending().await;
+        };
         loop {
             let deadline =
-                start + Duration::from_millis(active_ms.load(Ordering::Relaxed)) + IDLE_TIMEOUT;
+                start + Duration::from_millis(active_ms.load(Ordering::Relaxed)) + idle_timeout;
             if deadline <= Instant::now() {
                 return;
             }
@@ -205,13 +212,14 @@ pub async fn fixed<N: Network>(
     listener: TcpListener,
     target: Target,
     what: &'static str,
+    idle_timeout: Option<Duration>,
     net: Arc<N>,
 ) -> Result<(), String> {
     accept_loop(listener, what, move |client, peer| {
         let (target, net) = (target.clone(), net.clone());
         async move {
             match net.connect(&target.host, target.port).await {
-                Ok(upstream) => splice(client, upstream).await,
+                Ok(upstream) => splice(client, upstream, idle_timeout).await,
                 Err(e) => log!("RELAY {what} {peer} -> {target} failed: {e}"),
             }
         }
@@ -237,7 +245,7 @@ pub async fn host_loopback<N: Network>(
                 return log!("RELAY host loopback {peer} -> {destination}:{port} dropped");
             }
             match net.connect(HOST_LOOPBACK_NAME, port).await {
-                Ok(upstream) => splice(client, upstream).await,
+                Ok(upstream) => splice(client, upstream, Some(IDLE_TIMEOUT)).await,
                 Err(e) => {
                     log!("RELAY host loopback {peer} -> {HOST_LOOPBACK_NAME}:{port} failed: {e}")
                 }
@@ -357,7 +365,7 @@ mod tests {
     async fn splice_copies_both_ways_and_closes_idle_connections() {
         let (a, mut a_peer) = tokio::io::duplex(64);
         let (b, mut b_peer) = tokio::io::duplex(64);
-        let relay = tokio::spawn(splice(a, b));
+        let relay = tokio::spawn(splice(a, b, Some(IDLE_TIMEOUT)));
         let mut buf = [0u8; 4];
         a_peer.write_all(b"ping").await.unwrap();
         b_peer.read_exact(&mut buf).await.unwrap();
@@ -379,7 +387,7 @@ mod tests {
     async fn splice_keeps_a_slowly_drained_connection_open() {
         let (a, mut a_peer) = tokio::io::duplex(64);
         let (b, mut b_peer) = tokio::io::duplex(1);
-        let relay = tokio::spawn(splice(a, b));
+        let relay = tokio::spawn(splice(a, b, Some(IDLE_TIMEOUT)));
         a_peer.write_all(b"abcd").await.unwrap();
         let mut received = Vec::new();
         let mut byte = [0u8; 1];
@@ -390,5 +398,18 @@ mod tests {
         }
         assert_eq!(received, b"abcd");
         assert!(!relay.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn splice_without_an_idle_timeout_keeps_an_idle_connection_open() {
+        let (a, mut a_peer) = tokio::io::duplex(64);
+        let (b, mut b_peer) = tokio::io::duplex(64);
+        let relay = tokio::spawn(splice(a, b, None));
+        tokio::time::sleep(IDLE_TIMEOUT * 3).await;
+        assert!(!relay.is_finished());
+        a_peer.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        b_peer.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
     }
 }

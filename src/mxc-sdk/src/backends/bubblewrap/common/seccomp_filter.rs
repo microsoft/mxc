@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Builds Bubblewrap's always-on address-family seccomp filter.
+//! Builds Bubblewrap's always-on seccomp filter.
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -14,7 +14,6 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use super::proxy_network::above_stdio;
 
 const BPF_LD_W_ABS: u16 = 0x20;
-#[cfg(any(target_arch = "x86_64", test))]
 const BPF_ALU_AND_K: u16 = 0x54;
 const BPF_JMP_JEQ_K: u16 = 0x15;
 const BPF_RET_K: u16 = 0x06;
@@ -65,10 +64,30 @@ const ARM_SOCKET: u32 = 281;
 #[cfg(any(target_arch = "aarch64", test))]
 const ARM_SOCKETPAIR: u32 = 288;
 
+#[cfg(any(target_arch = "x86_64", test))]
+const X86_64_CLONE: u32 = 56;
+#[cfg(any(target_arch = "x86_64", test))]
+const X86_64_UNSHARE: u32 = 272;
+#[cfg(any(target_arch = "x86_64", test))]
+const I386_CLONE: u32 = 120;
+#[cfg(any(target_arch = "x86_64", test))]
+const I386_UNSHARE: u32 = 310;
+#[cfg(any(target_arch = "aarch64", test))]
+const AARCH64_UNSHARE: u32 = 97;
+#[cfg(any(target_arch = "aarch64", test))]
+const AARCH64_CLONE: u32 = 220;
+#[cfg(any(target_arch = "aarch64", test))]
+const ARM_CLONE: u32 = 120;
+#[cfg(any(target_arch = "aarch64", test))]
+const ARM_UNSHARE: u32 = 337;
+
 const IO_URING_SETUP: u32 = 425;
 const IO_URING_ENTER: u32 = 426;
 const IO_URING_REGISTER: u32 = 427;
 const IO_URING_SYSCALLS: [u32; 3] = [IO_URING_SETUP, IO_URING_ENTER, IO_URING_REGISTER];
+const CLONE3: u32 = 435;
+
+const CLONE_NEWUSER: u32 = 0x1000_0000;
 
 const AF_UNIX: u32 = 1;
 const AF_INET: u32 = 2;
@@ -197,6 +216,8 @@ fn build_x86_program() -> Vec<Instruction> {
     let x86_64_socketpair = program.len();
     program.push(Instruction::jump(BPF_JMP_JEQ_K, X86_64_SOCKETPAIR));
     let mut io_uring_checks = push_io_uring_checks(&mut program);
+    let mut user_namespace_checks = UserNamespaceChecks::default();
+    user_namespace_checks.push(&mut program, X86_64_UNSHARE, X86_64_CLONE);
     program.push(Instruction::statement(BPF_RET_K, SECCOMP_RET_ALLOW));
 
     let i386_start = program.len();
@@ -209,6 +230,7 @@ fn build_x86_program() -> Vec<Instruction> {
     let i386_socketcall = program.len();
     program.push(Instruction::jump(BPF_JMP_JEQ_K, I386_SOCKETCALL));
     io_uring_checks.extend(push_io_uring_checks(&mut program));
+    user_namespace_checks.push(&mut program, I386_UNSHARE, I386_CLONE);
     program.push(Instruction::statement(BPF_RET_K, SECCOMP_RET_ALLOW));
 
     let socketcall_check = program.len();
@@ -244,6 +266,7 @@ fn build_x86_program() -> Vec<Instruction> {
         set_true_target(&mut program, socket_check, family_check);
     }
     append_io_uring_denial(&mut program, &io_uring_checks);
+    user_namespace_checks.append_denial(&mut program);
 
     program
 }
@@ -268,6 +291,8 @@ fn build_aarch64_program() -> Vec<Instruction> {
     let aarch64_socketpair = program.len();
     program.push(Instruction::jump(BPF_JMP_JEQ_K, AARCH64_SOCKETPAIR));
     let mut io_uring_checks = push_io_uring_checks(&mut program);
+    let mut user_namespace_checks = UserNamespaceChecks::default();
+    user_namespace_checks.push(&mut program, AARCH64_UNSHARE, AARCH64_CLONE);
     program.push(Instruction::statement(BPF_RET_K, SECCOMP_RET_ALLOW));
 
     let arm_start = program.len();
@@ -278,6 +303,7 @@ fn build_aarch64_program() -> Vec<Instruction> {
     let arm_socketpair = program.len();
     program.push(Instruction::jump(BPF_JMP_JEQ_K, ARM_SOCKETPAIR));
     io_uring_checks.extend(push_io_uring_checks(&mut program));
+    user_namespace_checks.push(&mut program, ARM_UNSHARE, ARM_CLONE);
     program.push(Instruction::statement(BPF_RET_K, SECCOMP_RET_ALLOW));
 
     let family_check = append_family_filter(&mut program);
@@ -290,6 +316,7 @@ fn build_aarch64_program() -> Vec<Instruction> {
         set_true_target(&mut program, socket_check, family_check);
     }
     append_io_uring_denial(&mut program, &io_uring_checks);
+    user_namespace_checks.append_denial(&mut program);
 
     program
 }
@@ -312,6 +339,50 @@ fn append_io_uring_denial(program: &mut Vec<Instruction>, checks: &[usize]) {
     program.push(Instruction::statement(BPF_RET_K, errno(ENOSYS)));
     for &check in checks {
         set_true_target(program, check, deny);
+    }
+}
+
+#[derive(Default)]
+struct UserNamespaceChecks {
+    flag_checks: Vec<usize>,
+    clone3_checks: Vec<usize>,
+}
+
+impl UserNamespaceChecks {
+    fn push(&mut self, program: &mut Vec<Instruction>, unshare: u32, clone: u32) {
+        for number in [unshare, clone] {
+            self.flag_checks.push(program.len());
+            program.push(Instruction::jump(BPF_JMP_JEQ_K, number));
+        }
+        self.clone3_checks.push(program.len());
+        program.push(Instruction::jump(BPF_JMP_JEQ_K, CLONE3));
+    }
+
+    fn append_denial(self, program: &mut Vec<Instruction>) {
+        // clone3 passes its flags in a structure that seccomp cannot read, so it
+        // fails as unimplemented and callers fall back to clone.
+        let deny_clone3 = program.len();
+        program.push(Instruction::statement(BPF_RET_K, errno(ENOSYS)));
+        for check in self.clone3_checks {
+            set_true_target(program, check, deny_clone3);
+        }
+
+        // The kernel ignores the upper half of clone's flags and rejects unshare
+        // flags it does not know, so the low word decides.
+        let flag_check = program.len();
+        program.extend([
+            Instruction::statement(BPF_LD_W_ABS, SECCOMP_DATA_ARG0_LOW_OFFSET),
+            Instruction::statement(BPF_ALU_AND_K, CLONE_NEWUSER),
+        ]);
+        let without_new_user = program.len();
+        program.push(Instruction::jump(BPF_JMP_JEQ_K, 0));
+        program.push(Instruction::statement(BPF_RET_K, errno(EPERM)));
+        let allow = program.len();
+        program.push(Instruction::statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+        set_true_target(program, without_new_user, allow);
+        for check in self.flag_checks {
+            set_true_target(program, check, flag_check);
+        }
     }
 }
 
@@ -358,6 +429,10 @@ mod tests {
 
     const AF_PACKET: u64 = 17;
     const AF_VSOCK: u64 = 40;
+    const SIGCHLD: u64 = 17;
+    const CLONE_FILES: u64 = 0x400;
+    const CLONE_NEWNS: u64 = 0x2_0000;
+    const GLIBC_THREAD_FLAGS: u64 = 0x003d_0f00;
 
     // Syscall and audit values follow Linux v6.18's UAPI headers and syscall tables:
     // https://github.com/torvalds/linux/tree/v6.18
@@ -372,6 +447,20 @@ mod tests {
         (NativeArchitecture::X86_64, 0x4000_0003, 359, 360),
         (NativeArchitecture::Aarch64, 0xc000_00b7, 198, 199),
         (NativeArchitecture::Aarch64, 0x4000_0028, 281, 288),
+    ];
+
+    const USER_NAMESPACE_ABIS: [(NativeArchitecture, u32, u32, u32, u32); 5] = [
+        (NativeArchitecture::X86_64, 0xc000_003e, 272, 56, 435),
+        (
+            NativeArchitecture::X86_64,
+            0xc000_003e,
+            0x4000_0110,
+            0x4000_0038,
+            0x4000_01b3,
+        ),
+        (NativeArchitecture::X86_64, 0x4000_0003, 310, 120, 435),
+        (NativeArchitecture::Aarch64, 0xc000_00b7, 97, 220, 435),
+        (NativeArchitecture::Aarch64, 0x4000_0028, 337, 120, 435),
     ];
 
     fn evaluate(program: &[Instruction], data: &[u8; 64]) -> u32 {
@@ -527,6 +616,60 @@ mod tests {
                     result(native, audit, bit | neighbor, 0),
                     0x7fff_0000,
                     "syscall {neighbor} should stay allowed on arch {audit:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn denies_new_user_namespaces_on_every_supported_abi() {
+        let new_user = u64::from(CLONE_NEWUSER);
+        for (native, audit, unshare, clone, _) in USER_NAMESPACE_ABIS {
+            for number in [unshare, clone] {
+                for flags in [
+                    new_user,
+                    new_user | CLONE_NEWNS | SIGCHLD,
+                    (0xffff_ffff << 32) | new_user,
+                ] {
+                    assert_eq!(
+                        result(native, audit, number, flags),
+                        0x0005_0001,
+                        "flags {flags:#x} should be denied for syscall {number:#x} on arch {audit:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allows_clone_and_unshare_without_a_new_user_namespace() {
+        let new_user = u64::from(CLONE_NEWUSER);
+        for (native, audit, unshare, clone, _) in USER_NAMESPACE_ABIS {
+            for (number, flags) in [
+                (clone, SIGCHLD),
+                (clone, GLIBC_THREAD_FLAGS),
+                (clone, new_user << 32),
+                (unshare, CLONE_FILES),
+                (unshare, CLONE_NEWNS),
+            ] {
+                assert_eq!(
+                    result(native, audit, number, flags),
+                    0x7fff_0000,
+                    "flags {flags:#x} should be allowed for syscall {number:#x} on arch {audit:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn denies_clone3_as_unimplemented_on_every_supported_abi() {
+        for (native, audit, _, _, clone3) in USER_NAMESPACE_ABIS {
+            assert_eq!(result(native, audit, clone3, 0), 0x0005_0026);
+            for neighbor in [clone3 - 1, clone3 + 1] {
+                assert_eq!(
+                    result(native, audit, neighbor, 0),
+                    0x7fff_0000,
+                    "syscall {neighbor:#x} should stay allowed on arch {audit:#x}"
                 );
             }
         }

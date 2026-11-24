@@ -253,6 +253,71 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
 }
 
 #[test]
+fn streaming_bubblewrap_launches_with_closed_caller_stdio() {
+    use std::io::Read;
+    use std::process::Command;
+
+    use mxc_sdk::v1::{NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_CLOSED_STDIO_FIXTURE";
+    const FIXTURE_DONE: &str = "BUBBLEWRAP_CLOSED_STDIO_FIXTURE_DONE";
+    if let Some(mode) = std::env::var_os(FIXTURE_ENV) {
+        // SAFETY: this fixture process never uses its stdin or stdout again.
+        unsafe {
+            libc::close(libc::STDIN_FILENO);
+            libc::close(libc::STDOUT_FILENO);
+        }
+        let mut request = bwrap_request("echo WORKLOAD_STARTED", 30_000);
+        if mode == "firewall" {
+            request.network = Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        let mut process = spawn(request, Default::default())
+            .unwrap_or_else(|error| panic!("{mode:?} launch failed: {error:?}"));
+        let mut output = String::new();
+        process
+            .take_stdout()
+            .expect("stdout available")
+            .read_to_string(&mut output)
+            .expect("read stdout");
+        assert_eq!(output, "WORKLOAD_STARTED\n", "{mode:?}");
+        assert_eq!(
+            process.wait().expect("wait"),
+            WaitResult::Exited(0),
+            "{mode:?}"
+        );
+        eprintln!("{FIXTURE_DONE}");
+        std::process::exit(0);
+    }
+
+    if !bwrap_network_available() {
+        return;
+    }
+    for mode in ["isolated", "firewall"] {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "streaming_bubblewrap_launches_with_closed_caller_stdio",
+                "--nocapture",
+            ])
+            .env(FIXTURE_ENV, mode)
+            .output()
+            .expect("run closed-stdio fixture");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stderr.contains(FIXTURE_DONE),
+            "{mode} closed-stdio fixture exited {}:\n{stderr}",
+            output.status
+        );
+    }
+}
+
+#[test]
 fn streaming_bubblewrap_rule_failure_never_runs_workload() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;

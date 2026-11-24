@@ -5,7 +5,7 @@
 //! request per connection, allowed or denied by the egress rules.
 
 use crate::gateway_policy::{Action, Policy, HOST_LOOPBACK_NAME};
-use crate::relay::{accept_loop, splice, Network};
+use crate::relay::{accept_loop, splice, Network, IDLE_TIMEOUT};
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ async fn handle<N: Network>(mut client: TcpStream, policy: &Policy, net: &N) -> 
         upstream.write_all(&request.head).await?;
     }
     upstream.write_all(&rest).await?;
-    splice(client, upstream).await;
+    splice(client, upstream, Some(IDLE_TIMEOUT)).await;
     Ok(())
 }
 

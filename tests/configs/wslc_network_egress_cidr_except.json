@@ -4,7 +4,7 @@
   "containerId": "wslc-network-egress-cidr-except",
   "containment": "wslc",
   "process": {
-    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 3 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\necho IN_RANGE=$(p 1.1.1.1:443)\necho SECOND_TARGET=$(p 1.0.0.1:443)\necho EXCEPT=$(p 1.1.1.2:443)\necho DENY_WINS=$(p 1.1.1.3:443)\necho OUTSIDE=$(p 1.1.2.1:443)\necho NAME_ALLOWED=$(p one.one.one.one:443)\necho NAME_DENIED=$(p dns.google:443)\nnslookup one.one.one.one >/tmp/ns 2>&1 && grep -q '1\\.[01]\\.[01]\\.1' /tmp/ns && echo DNS=RESOLVED || echo DNS=FAILED\nnc -z -w 3 1.0.0.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
+    "commandLine": "hp=${HTTPS_PROXY#http://}\np() { printf 'CONNECT %s HTTP/1.1\\r\\n\\r\\n' \"$1\" | nc -w 10 \"${hp%:*}\" \"${hp##*:}\" | head -n1 | cut -d' ' -f2; }\npa() { for i in 1 2 3; do s=$(p \"$1\"); [ \"$s\" = 502 ] || break; sleep 2; done; echo \"$s\"; }\necho IN_RANGE=$(pa 1.1.1.1:443)\necho SECOND_TARGET=$(pa 1.0.0.1:443)\necho EXCEPT=$(p 1.1.1.2:443)\necho DENY_WINS=$(p 1.1.1.3:443)\necho OUTSIDE=$(p 1.1.2.1:443)\necho NAME_ALLOWED=$(pa one.one.one.one:443)\necho NAME_DENIED=$(p dns.google:443)\nnslookup one.one.one.one >/tmp/ns 2>&1 && grep -q '1\\.[01]\\.[01]\\.1' /tmp/ns && echo DNS=RESOLVED || echo DNS=FAILED\nnc -z -w 3 1.0.0.1 443 && echo DIRECT=REACHED || echo DIRECT=BLOCKED"
   },
   "network": {
     "egress": {

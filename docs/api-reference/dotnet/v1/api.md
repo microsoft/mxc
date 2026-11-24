@@ -21,7 +21,8 @@ execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
 and operation options. Create-and-run PTY support covers IsolationSession, Bubblewrap,
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
 IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
-give the caller explicit input, output, resize, and process ownership.
+give the caller explicit input, output, resize, and process ownership; there
+is no separate public attached-console launch API.
 `SpawnWithExtendedOptions` takes extensible options; its default
 `SpawnStdio.Pipes` behaves like `Spawn`. `SpawnStdio.Inherit` instead attaches
 the workload to whatever the calling process's standard streams already are,
@@ -355,6 +356,9 @@ On Windows, ProcessContainer requires native PSEC support. Other supported
 backends are detected independently; the host is unsupported when none are available.
 MicroVM is reported when available, but execution requires the development
 JSON API; typed V1 requests cannot select it. Availability is advisory.
+
+For what IsolationSession availability depends on, see
+[IsolationSession availability](https://github.com/microsoft/mxc/blob/main/docs/backends/isolation-session/availability.md).
 
 ```csharp
 public static PlatformSupport GetPlatformSupport();

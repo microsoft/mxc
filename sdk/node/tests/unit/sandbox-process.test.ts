@@ -12,6 +12,7 @@ import {
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../../src/v1/container-process.js';
+import { MxcError } from '../../src/v1/errors.js';
 
 class FakeDriver implements NativeLifecycleDriver {
   readonly standardInput = new PassThrough();
@@ -25,6 +26,7 @@ class FakeDriver implements NativeLifecycleDriver {
     timedOut: false,
   };
   pollError: Error | undefined;
+  waitError: Error | undefined;
   timeoutKillError: Error | undefined;
   completeOnTimeoutKill: NativeLifecycleStatus | undefined;
   completeOnPoll: number | undefined;
@@ -54,6 +56,7 @@ class FakeDriver implements NativeLifecycleDriver {
 
   async wait(): Promise<{ exitCode: number; timedOut: boolean }> {
     this.waitCount += 1;
+    if (this.waitError !== undefined) throw this.waitError;
     if (this.deferWait) {
       this.waitInFlight = true;
       return new Promise((resolve) => {
@@ -273,6 +276,34 @@ describe('native sandbox process', () => {
 
     await assert.rejects(proc.wait(), /poll failed/);
     assert.strictEqual(driver.waitCount, 0);
+    assert.strictEqual(driver.freeCount, 1);
+  });
+
+  it('shares one typed blocking-wait rejection and cleanup', async () => {
+    const driver = new FakeDriver();
+    const scheduler = new ManualScheduler();
+    const waitError = new MxcError({
+      code: 'backend_unavailable',
+      message: 'test process wait failed',
+      operation: 'TestSandbox.Wait',
+      nativeCode: '0x80004005',
+      remediation: 'Retry the test process wait.',
+    });
+    driver.waitError = waitError;
+    const proc = new MxcProcess(driver, undefined, scheduler);
+
+    const first = proc.wait();
+    const second = proc.wait();
+    assert.strictEqual(first, second);
+
+    driver.complete(23);
+    scheduler.advance(100);
+
+    await assert.rejects(first, (error: unknown) => error === waitError);
+    await assert.rejects(second, (error: unknown) => error === waitError);
+    assert.strictEqual(driver.waitCount, 1);
+    assert.strictEqual(driver.freeCount, 1);
+    proc.dispose();
     assert.strictEqual(driver.freeCount, 1);
   });
 

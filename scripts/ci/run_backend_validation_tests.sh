@@ -57,17 +57,25 @@ case "$backend" in
         # not that the assertion held. Without this the job goes green having
         # verified none of the directional enforcement.
         MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_bwrap_all_tests.sh"
-        # The inbound chain test needs real host CAP_NET_ADMIN to read the
-        # sandbox's network namespace and inject a peer into it, so the non-root
-        # suite above can only report it as skipped. Invoking it separately here
-        # is what makes that security assertion actually run in CI; it must not
-        # be folded into the suite, which asserts the sandbox drops capabilities
-        # and therefore cannot itself run as root.
+
         if ! sudo -n true 2>/dev/null; then
-            echo "Bubblewrap CI requires passwordless sudo to run the inbound" \
-                 "default-deny test; it cannot be verified unprivileged." >&2
+            echo "Bubblewrap CI requires passwordless sudo for root capability" \
+                 "and inbound default-deny tests." >&2
             exit 2
         fi
+        capability_log="$(mktemp)"
+        if ! sudo -n env LXC_EXEC="$release_directory/lxc-exec" \
+            bash "$test_script_root/run_bwrap_capabilities_test.sh" | tee "$capability_log"; then
+            echo "The Bubblewrap root capability test failed or skipped." >&2
+            exit 1
+        fi
+        if [[ "$(tail -n 1 "$capability_log")" != \
+            "Bubblewrap capability test complete: isolated, firewall, proxy." ]]; then
+            echo "The Bubblewrap root capability test did not complete every mode." >&2
+            exit 1
+        fi
+        rm -f "$capability_log"
+
         # A skip here means a prerequisite is missing on the runner, not that
         # the assertion passed. Translate it into an explicit failure so the
         # inbound guarantee can never be reported as verified without running.
@@ -88,6 +96,23 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
+
+        # Each entry pairs a test executable with one exact regression name.
+        for regression in \
+            wxc_e2e_tests_e2e_lxc_network_capability:invalid_identity_mapping_configurations_are_rejected \
+            wxc_e2e_tests_e2e_lxc_network_capability:cancelling_startup_preserves_a_stopped_container \
+            wxc_e2e_tests_e2e_lxc_network_capability:failed_startup_waits_for_cleanup_after_one_minute \
+            wxc_e2e_tests_e2e_lxc_network_capability:successful_startup_does_not_time_out_the_workload \
+            wxc_e2e_tests_e2e_lxc_static_network:existing_containers_keep_their_static_network_configuration \
+            wxc_e2e_tests_e2e_lxc_static_network:ctrl_c_during_address_acquisition_removes_temporary_host_networking; do
+            executable="$release_directory/${regression%%:*}"
+            test_name="${regression#*:}"
+            test -f "$executable"
+            chmod +x "$executable"
+            "$executable" --list --exact "$test_name" | grep -Fx "$test_name: test"
+            MXC_LXC_TESTS_REQUIRE_EXECUTION=1 "$executable" --exact "$test_name"
+        done
+
         # A skip here means a prerequisite disappeared on a runner provisioned
         # to execute this suite, so turn it into a failure rather than a
         # vacuously green gate.

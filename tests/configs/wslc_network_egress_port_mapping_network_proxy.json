@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-port-mapping-network-proxy",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "serve() { echo \"MAPPED_$1\" | timeout 120 nc -l -p \"$1\" > /tmp/r; echo \"RECEIVED_$2=$(cat /tmp/r)\"; }\necho PROXY_ENV=$HTTP_PROXY\necho RESOLVED=$(nslookup one.one.one.one 2>/dev/null | awk '/^Address/ {a=$NF} END {print a}')\necho VIA_PROXY=$(printf 'GET http://one.one.one.one/cdn-cgi/trace HTTP/1.1\\r\\nHost: one.one.one.one\\r\\nConnection: close\\r\\n\\r\\n' | nc -w 10 one.one.one.one 8080 | head -n1 | cut -d' ' -f2)\nnc -z -w 3 1.1.1.1 80 && echo DIRECT=REACHED || echo DIRECT=BLOCKED\nserve 8089 1"
+  },
+  "runtimeConfig": { "networkProxy": "http://one.one.one.one:8080" },
+  "wslc": {
+    "image": "alpine:latest",
+    "portMappings": [{ "windowsPort": 18089, "containerPort": 8089, "protocol": "tcp" }]
+  }
+}

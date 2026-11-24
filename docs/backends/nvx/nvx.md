@@ -232,10 +232,17 @@ and returns its ID in Rust `Error.details.nvxRecovery.sandboxId`, with
 Use that ID to continue or deprovision through the development JSON APIs; do
 not retry provision. Treat the ID as sensitive; ordinary error formatting omits it.
 Pre-existing error details are retained under `details.primaryDetails`.
-These fields are part of the experimental Rust `v1::dev` behaviour and may
-change as the development API evolves.
+These fields are part of the experimental development API behavior and may
+change as it evolves.
 
-Node and .NET do not expose the retained container ID in this failure case.
+The C ABI carries structured `Error.details` as JSON, so callers of the C ABI
+SDKs (Node and .NET) read `details.nvxRecovery` through `MxcError.details` and
+`MxcException.Details`. Keep the container ID out of logs and telemetry:
+Node's `console.log` and `util.inspect` omit `details`, even with `getters`
+enabled. `JSON.stringify`, object copies, `util.inspect` with both
+`customInspect: false` and `getters: true`, Node's uncaught-error printer when
+`util.inspect.defaultOptions.getters` is enabled, and the .NET property expose
+it.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only

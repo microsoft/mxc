@@ -18,8 +18,9 @@ request has no selected tier and an explanatory error, while host facts remain
 available.
 
 Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
-for caller-authored MXC request JSON. It supports execution, container
-lifecycle operations, and validation through the in-process engine.
+for caller-authored MXC request JSON, including execution, container lifecycle
+operations, validation, and caller-owned policy preparation through the
+in-process engine.
 
 ## Run to completion and spawn
 
@@ -53,6 +54,15 @@ same in-process native engine; neither launches an MXC executor binary.
 Captured execution drains both streams concurrently. Output-read failures are
 returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
+
+`run` and the container lifecycle captured-run helpers preserve structured
+backend failures that occur while obtaining the terminal process result.
+For live processes, use `try_wait_detailed`, `wait_detailed`, or
+`wait_with_output_detailed` when the caller needs `ErrorCode`, `operation`,
+`native_code`, `remediation`, and backend `details`. The existing `try_wait`,
+`wait`, and `wait_with_output` methods keep their `std::io::Error` signatures
+and message-only rendering for compatibility. A terminal wait failure is
+replayed by later waits and does not disable kill or drop cleanup.
 
 Creation takes `RunOptions`, `SpawnOptions`, `SpawnWithPtyOptions`, or
 `SpawnExtendedOptions` after the request. `SpawnWithPtyOptions.size`

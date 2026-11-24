@@ -46,7 +46,8 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 /// Control-channel wire-protocol version. The daemon and client are shipped
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
-/// install. Bump only for incompatible changes to framing or message shape.
+/// install. Bump for incompatible changes to framing or message shape, and
+/// when a client must not rely on an older daemon's handling of a request.
 ///
 /// A new optional field counts: these structs do not deny unknown fields, so a
 /// daemon predating one drops it and acts on a request it only partly
@@ -54,7 +55,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 ///
 /// Changing this strands whatever a running daemon is holding, since the SDK
 /// offers no way to re-attach to a live session from another process.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Largest payload one [`StreamFrame::Stdin`] may carry.
 pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;

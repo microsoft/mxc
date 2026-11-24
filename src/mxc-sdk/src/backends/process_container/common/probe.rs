@@ -54,10 +54,8 @@ pub struct ProbeFacts {
     /// Whether BaseContainer supports an identity-less proxy on loopback.
     /// Requires explicit host-loopback allow; not general ingress support.
     pub base_container_supports_identityless_loopback_proxy: bool,
-    /// Whether the in-proc IsolationSession service can be activated on this
-    /// host. Always `false` here — `process_container_common` has no dependency on
-    /// the isolation-session backend; `wxc-exec --probe` overrides it when
-    /// that backend is compiled in.
+    /// Whether Windows reports isolation sessions enabled for the calling
+    /// process. Always `false` without the `isolation_session` feature.
     pub isolation_session_available: bool,
     /// Whether Hyperlight is available on this host.
     pub hyperlight_available: bool,
@@ -104,7 +102,7 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
     let base_container_usable = BaseContainerRunner::is_base_container_api_present();
     let decision = BaseContainerRunner::can_backend_service_request(request);
-    let error = decision.rejection_message().map(str::to_string);
+    let error = decision.rejection_message();
     let mut warnings = Vec::new();
     let identityless_loopback_proxy =
         match BaseContainerRunner::supports_identityless_loopback_proxy() {

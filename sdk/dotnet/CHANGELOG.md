@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ProcessContainer rejects filesystem policy paths that are not fully qualified
+  Windows paths, including relative denies that could leave files accessible
+  through broader grants. This applies to all supported contracts and SDK V1,
+  including dry runs. Policy paths are not resolved against `process.cwd`.
+  See [filesystem policy](../../docs/schema.md#filesystem-policy).
+
+- WSLC container lifecycle sandboxes with bridged networking each join a
+  network of their own, so a sandbox can no longer connect to another
+  sandbox's container address in the same session. Mapped ports stay
+  reachable from other containers in the session, and outbound access, DNS,
+  and port mappings from Windows are unchanged. A session now holds at most
+  256 bridged sandboxes, a sandbox can't reach hosts at addresses in its
+  session's networks (allocated from `10.231.0.0/16`), and bridged sandboxes
+  need WSL 3.0.5. See
+  [bridged networking](../../docs/backends/wslc/wslc-state-aware.md#bridged-networking).
+
 - `MxcProcess.Kill`, `Dispose`, `Warnings`, and `OutputMetadata` return at once
   when a wait has already seen the process exit, or killed it at its timeout,
   and is finishing its cleanup, and cancelling `WaitAsync` returns at once

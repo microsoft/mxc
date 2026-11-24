@@ -18,6 +18,9 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcLifecycleWslcE2ETests
 {
+    private const string ForcedWaitFailureCommand =
+        "true # mxc-test-force-wslc-get-exit-code-failure";
+
     [Fact]
     public async Task DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership()
     {
@@ -321,4 +324,56 @@ public class MxcLifecycleWslcE2ETests
         }
     }
 
+    [Fact]
+    public void RunInContainer_PreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+
+        var error = Assert.Throws<MxcException>(() =>
+            MxcLifecycle.RunInContainer(
+                container.Id,
+                new ExecutionRequest(ForcedWaitFailureCommand) { TimeoutMs = 60_000 }));
+
+        AssertForcedWaitFailure(error);
+        Assert.Equal(
+            "CAPTURED-RECOVERED",
+            MxcLifecycle.RunInContainer(
+                container.Id,
+                new ExecutionRequest("echo CAPTURED-RECOVERED") { TimeoutMs = 60_000 })
+                .Stdout
+                .Trim());
+    }
+
+    [Fact]
+    public void SpawnInContainer_WaitPreservesStructuredPostAdmissionWaitFailure()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+        using var process = MxcLifecycle.SpawnInContainer(
+            container.Id,
+            new ExecutionRequest(ForcedWaitFailureCommand) { TimeoutMs = 60_000 });
+
+        var error = Assert.Throws<MxcException>(() => process.Wait());
+
+        AssertForcedWaitFailure(error);
+        Assert.Equal(
+            "PROCESS-RECOVERED",
+            MxcLifecycle.RunInContainer(
+                container.Id,
+                new ExecutionRequest("echo PROCESS-RECOVERED") { TimeoutMs = 60_000 })
+                .Stdout
+                .Trim());
+    }
+
+    private static void AssertForcedWaitFailure(MxcException error)
+    {
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Equal(
+            "exec failed: WslcGetProcessExitCode failed: HRESULT 0x80004005",
+            error.Message);
+        Assert.Equal("WslcGetProcessExitCode", error.Operation);
+        Assert.Equal("0x80004005", error.NativeCode);
+        Assert.Null(error.Remediation);
+    }
 }

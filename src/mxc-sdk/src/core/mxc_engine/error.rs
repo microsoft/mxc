@@ -92,9 +92,9 @@ impl From<MxcErrorCode> for ErrorCode {
 /// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
 /// `operation`, `native_code`, and `remediation` are top-level fields also
-/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
-/// in Rust errors and executor JSON error envelopes. The C error structure
-/// does not expose them.
+/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are
+/// preserved in Rust errors, executor JSON error envelopes, and the C error
+/// structure; Node and .NET expose them as `details` and `Details`.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
@@ -215,6 +215,34 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+    use crate::mxc_common::policy_failures::PolicyFailures;
+
+    #[test]
+    fn policy_failures_error_debug_does_not_render_structured_resources() {
+        let payload =
+            serde_json::json!({ "policyFailures": { "resource": "POLICY_RESOURCE_MARKER" } });
+        let inner = MxcError::backend_error("Creation refused.").with_details(payload);
+        assert!(!format!("{inner:?}").contains("POLICY_RESOURCE_MARKER"));
+        let error = Error::from(inner);
+        assert!(!format!("{error:?}").contains("POLICY_RESOURCE_MARKER"));
+        assert!(error
+            .details
+            .as_deref()
+            .unwrap()
+            .get("policyFailures")
+            .is_some());
+    }
+
+    #[test]
+    fn policy_failures_details_survive_sdk_conversions() {
+        let payload = serde_json::json!({ "policyFailures": PolicyFailures::default() });
+        let original = MxcError::backend_error("Creation refused.").with_details(payload.clone());
+        let converted = Error::from(original);
+        assert_eq!(converted.details.as_deref(), Some(&payload));
+        assert_eq!(converted.into_mxc_error().details, Some(payload));
+        assert!(std::mem::size_of::<Error>() < 128);
+    }
+
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///
@@ -225,6 +253,7 @@ mod tests {
     #[test]
     fn the_conversion_preserves_the_api_detail() {
         let inner = MxcError::backend_error("The provision was not found.")
+            .with_details(serde_json::json!({"backend": "test"}))
             .with_api_failure(
                 InnerFailure::new("IsoSessionOps.StopSessionAsync").with_native_code("0x80070490"),
             )
@@ -234,6 +263,10 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::BackendError);
         assert_eq!(error.message, "The provision was not found.");
+        assert_eq!(
+            error.details,
+            Some(Box::new(serde_json::json!({"backend": "test"})))
+        );
         assert_eq!(
             error.operation.as_deref(),
             Some("IsoSessionOps.StopSessionAsync")
@@ -268,12 +301,24 @@ mod tests {
         assert_eq!(converted.operation, None);
         assert_eq!(converted.native_code, None);
         assert_eq!(converted.remediation, None);
+        assert_eq!(converted.details, None);
 
         let constructed = Error::new(ErrorCode::BackendError, "x");
 
         assert_eq!(constructed.operation, None);
         assert_eq!(constructed.native_code, None);
         assert_eq!(constructed.remediation, None);
+        assert_eq!(constructed.details, None);
+    }
+
+    #[test]
+    fn the_conversion_round_trip_preserves_details() {
+        let inner = MxcError::backend_error("boom")
+            .with_details(serde_json::json!({"phase": "wait"}))
+            .with_api_failure(InnerFailure::new("Iface.Wait").with_native_code("0x80004005"))
+            .with_remediation("Retry.");
+
+        assert_eq!(Error::from(inner.clone()).into_mxc_error(), inner);
     }
 
     /// A hint with no API call behind it survives the conversion, and `Display`

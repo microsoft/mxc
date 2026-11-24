@@ -9,6 +9,7 @@ import { loadMxcFfi } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   type AbiErrorDetail,
@@ -82,12 +83,7 @@ function createStateAwareResult(): StateAwareNativeResult {
   return {
     status: 0,
     responseJsonUtf8: null,
-    error: {
-      message: null,
-      operation: null,
-      nativeCode: null,
-      remediation: null,
-    },
+    error: createAbiErrorDetail(),
   };
 }
 

@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-custom-proxy-ip",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport os, socket, urllib.parse\nprint('PROXY_ENV=' + os.environ.get('HTTP_PROXY', 'unset') + ' ' + os.environ.get('HTTPS_PROXY', 'unset'))\nprint('NO_PROXY=' + os.environ.get('NO_PROXY', 'unset'))\ndef status(host, port):\n    try:\n        with socket.create_connection((host, port), timeout=10) as s:\n            s.sendall(b'GET http://one.one.one.one/cdn-cgi/trace HTTP/1.1\\r\\nHost: one.one.one.one\\r\\nConnection: close\\r\\n\\r\\n')\n            return s.recv(64).split(b' ')[1].decode()\n    except (OSError, IndexError) as e:\n        return 'ERROR ' + str(e)\nproxy = urllib.parse.urlsplit(os.environ['HTTP_PROXY'])\nprint('VIA_PROXY=' + status(proxy.hostname, proxy.port))\nprint('BUILT_IN=' + status('10.231.1.254', 3128))\nprint('DIRECT=' + status('1.1.1.1', 80))\ntry:\n    print('RESOLVED=' + socket.gethostbyname('example.com'))\nexcept OSError as e:\n    print('RESOLVED=ERROR', e)\nEOF"
+  },
+  "runtimeConfig": { "networkProxy": "http://1.1.1.1:8080" },
+  "wslc": { "image": "python:3.12-alpine" }
+}

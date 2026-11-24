@@ -113,8 +113,8 @@ if grep -Fq '"network"' "$OMIT_CONFIG"; then
 fi
 
 cleanup() {
-    lxc-destroy -n "CLI-LXC-V08-DenyAll-Ctrl" -f >/dev/null 2>&1 || true
-    lxc-destroy -n "CLI-LXC-V08-DenyAll-Omit" -f >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "CLI-LXC-V08-DenyAll-Ctrl" >/dev/null 2>&1 || true
+    "$LXC_EXEC" --delete --containername "CLI-LXC-V08-DenyAll-Omit" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

@@ -27,6 +27,7 @@ import {
 } from './native-stdio.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -56,11 +57,13 @@ export interface LifecycleNativeFacade {
     outExit: number[],
     outRunning: number[],
     outTimedOut: number[],
+    error: AbiErrorDetail,
   ): number;
   wait(
     handle: Pointer,
     outExit: number[],
     outTimedOut: number[],
+    error: AbiErrorDetail,
     completion: NativeWaitCompletion,
   ): void;
   kill(handle: Pointer): number;
@@ -183,13 +186,15 @@ function bindStreamingNativeFacade(
     sandbox: Pointer,
     outExit: number[],
     outTimedOut: number[],
+    error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_sandbox_wait',
+    symbol: 'mxc_sandbox_wait_with_error',
     result: 'int32_t',
     parameters: [
       sandboxPointer,
       koffi.out(koffi.pointer('int32_t')),
       koffi.out(koffi.pointer('int32_t')),
+      koffi.out(koffi.pointer(AbiErrorDetailType)),
     ],
   });
 
@@ -295,18 +300,25 @@ function bindStreamingNativeFacade(
     }),
 
     tryWait: bindNativeFunction(handle, {
-      symbol: 'mxc_sandbox_try_wait',
+      symbol: 'mxc_sandbox_try_wait_with_error',
       result: 'int32_t',
       parameters: [
         sandboxPointer,
         koffi.out(koffi.pointer('int32_t')),
         koffi.out(koffi.pointer('int32_t')),
         koffi.out(koffi.pointer('int32_t')),
+        koffi.out(koffi.pointer(AbiErrorDetailType)),
       ],
     }),
 
-    wait(sandbox, outExit, outTimedOut, completion) {
-      waitAsyncBinding.async(sandbox, outExit, outTimedOut, completion);
+    wait(sandbox, outExit, outTimedOut, error, completion) {
+      waitAsyncBinding.async(
+        sandbox,
+        outExit,
+        outTimedOut,
+        error,
+        completion,
+      );
     },
 
     kill: bindNativeFunction(handle, {
@@ -412,15 +424,25 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     this.pollExit[0] = 0;
     this.pollRunning[0] = 1;
     this.pollTimedOut[0] = 0;
-    throwIfFailed(
-      this.native.tryWait(
+    const error = createAbiErrorDetail();
+    try {
+      const status = this.native.tryWait(
         this.handle,
         this.pollExit,
         this.pollRunning,
         this.pollTimedOut,
-      ),
-      'polling sandbox process failed',
-    );
+        error,
+      );
+      if (status !== 0) {
+        throw nativeStatusError(
+          status,
+          error,
+          'polling sandbox process failed',
+        );
+      }
+    } finally {
+      this.native.freeError(error);
+    }
     return {
       exitCode: this.pollExit[0],
       running: this.pollRunning[0] !== 0,
@@ -432,21 +454,41 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     return new Promise((resolve, reject) => {
       const exit = [0];
       const timedOut = [0];
-      this.native.wait(this.handle, exit, timedOut, (error, status) => {
-        if (error !== null) {
-          reject(error);
-          return;
-        }
-        try {
-          throwIfFailed(status, 'waiting for sandbox process failed');
-          resolve({
-            exitCode: exit[0],
-            timedOut: timedOut[0] !== 0,
-          });
-        } catch (failure) {
-          reject(failure);
-        }
-      });
+      const detail = createAbiErrorDetail();
+      let freed = false;
+      const freeDetail = (): void => {
+        if (freed) return;
+        freed = true;
+        this.native.freeError(detail);
+      };
+      try {
+        this.native.wait(this.handle, exit, timedOut, detail, (error, status) => {
+          try {
+            if (error !== null) {
+              reject(error);
+              return;
+            }
+            if (status !== 0) {
+              throw nativeStatusError(
+                status,
+                detail,
+                'waiting for sandbox process failed',
+              );
+            }
+            resolve({
+              exitCode: exit[0],
+              timedOut: timedOut[0] !== 0,
+            });
+          } catch (failure) {
+            reject(failure);
+          } finally {
+            freeDetail();
+          }
+        });
+      } catch (failure) {
+        freeDetail();
+        reject(failure);
+      }
     });
   }
 
@@ -624,7 +666,7 @@ async function createStreamingDriverWith(
   spawn: StreamingNativeFacade['spawn'],
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = await new Promise<number>((resolve, reject) => {
     spawn(
       requestJson,
@@ -652,7 +694,7 @@ export function createStreamingDriverSync(
   experimental = false,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.spawnSync(
     JSON.stringify(request),
     experimental ? 1 : 0,
@@ -802,7 +844,7 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.stateAwareExec(
     requestJson,
     experimental ? 1 : 0,
@@ -870,7 +912,7 @@ export async function createStateAwareStreamingDriverAsync(
   output: 'stream' | 'capture' = 'stream',
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const exec = output === 'capture'
     ? native.stateAwareExecCaptureAsync.bind(native)
     : forRun

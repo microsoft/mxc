@@ -35,7 +35,7 @@ use crate::bwrap_common::network_rules::{
 use crate::bwrap_common::probe_exec;
 use crate::bwrap_common::resolver_file::{resolver_target_is_denied, sandbox_mount_path};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
 ///
 /// Only the legacy backend takes that lock, and `nsenter --net` leaves the mount
@@ -642,6 +642,28 @@ pub(crate) struct BwrapStartup {
 }
 
 impl BwrapStartup {
+    pub(crate) fn configure(args: &mut Vec<String>) -> Result<Self, String> {
+        let (info_reader, info_writer) = pipe_above_stdio()?;
+        let (gate_reader, gate_writer) = pipe_above_stdio()?;
+        args.splice(
+            0..0,
+            [
+                "--info-fd".to_string(),
+                info_writer.as_raw_fd().to_string(),
+                "--block-fd".to_string(),
+                gate_reader.as_raw_fd().to_string(),
+            ],
+        );
+
+        Ok(Self {
+            inheritable: vec![info_writer.as_raw_fd(), gate_reader.as_raw_fd()],
+            info_reader: File::from(info_reader),
+            info_writer: Some(info_writer),
+            gate_reader: Some(gate_reader),
+            gate_writer: Some(gate_writer),
+        })
+    }
+
     /// Arrange for bwrap -- and only bwrap -- to inherit the startup
     /// descriptors.
     pub(crate) fn prepare_command(&self, command: &mut Command) {
@@ -696,7 +718,6 @@ impl BwrapStartup {
         }
     }
 
-    /// Allow Bubblewrap to execute the workload after networking is ready.
     pub(crate) fn release(&mut self) -> Result<(), String> {
         let writer = self
             .gate_writer
@@ -895,7 +916,9 @@ impl ProxyNetworkNamespace {
         }
 
         let userns_path = format!("/proc/{}/ns/user", supervisor.id());
-        let userns = match File::open(&userns_path) {
+        let userns = match File::open(&userns_path)
+            .and_then(|file| above_stdio(file).map_err(std::io::Error::from))
+        {
             Ok(file) => file,
             Err(error) => {
                 let _ = supervisor.terminate();
@@ -950,11 +973,6 @@ impl ProxyNetworkNamespace {
         args: &mut Vec<String>,
         logger: &mut Logger,
     ) -> Result<BwrapStartup, String> {
-        let (info_reader, info_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        let (gate_reader, gate_writer) =
-            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-
         let userns = self
             .userns
             .as_ref()
@@ -981,27 +999,13 @@ impl ProxyNetworkNamespace {
             }
         }
 
-        let runtime_args = [
-            "--userns".to_string(),
-            userns.as_raw_fd().to_string(),
-            "--info-fd".to_string(),
-            info_writer.as_raw_fd().to_string(),
-            "--block-fd".to_string(),
-            gate_reader.as_raw_fd().to_string(),
-        ];
-        args.splice(0..0, runtime_args);
-
-        Ok(BwrapStartup {
-            inheritable: vec![
-                userns.as_raw_fd(),
-                info_writer.as_raw_fd(),
-                gate_reader.as_raw_fd(),
-            ],
-            info_reader: File::from(info_reader),
-            info_writer: Some(info_writer),
-            gate_reader: Some(gate_reader),
-            gate_writer: Some(gate_writer),
-        })
+        let mut startup = BwrapStartup::configure(args)?;
+        args.splice(
+            0..0,
+            ["--userns".to_string(), userns.as_raw_fd().to_string()],
+        );
+        startup.inheritable.push(userns.as_raw_fd());
+        Ok(startup)
     }
 
     /// Drop this process's handle to the user namespace once bwrap holds it.
@@ -2452,6 +2456,17 @@ pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+fn pipe_above_stdio() -> Result<(OwnedFd, OwnedFd), String> {
+    let (reader, writer) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+    let lift = |end: OwnedFd| {
+        above_stdio(File::from(end))
+            .map(OwnedFd::from)
+            .map_err(|error| format!("Bubblewrap: failed to move a pipe above stdio: {error}"))
+    };
+    Ok((lift(reader)?, lift(writer)?))
+}
+
 /// Hand `mapping` to one specific child at fixed, known descriptor numbers.
 ///
 /// Two problems are solved together. `FD_CLOEXEC` is per-process, so clearing
@@ -2575,7 +2590,7 @@ impl Supervisor {
 }
 
 /// Whether `pid` has exited without reaping it.
-fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
+pub(crate) fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
     waitid(
         Id::Pid(Pid::from_raw(pid as i32)),
         WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
