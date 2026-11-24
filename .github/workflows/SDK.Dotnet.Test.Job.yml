@@ -46,6 +46,12 @@ jobs:
           override: false
           rustflags: ''
 
+      - name: Select the pinned Windows Rust linker
+        if: matrix.os_label == 'windows'
+        uses: ./.github/actions/setup-windows-linker
+        with:
+          target: x86_64-pc-windows-msvc
+
       - name: Build .NET SDK
         run: dotnet build Microsoft.Mxc.Sdk.slnx
 

@@ -79,6 +79,10 @@ connects to each address with `localhost` hostname verification and the fixture
 certificate as a custom trust root. Both .NET target frameworks execute it
 alongside the existing public SDK scenarios, including Windows optional-backend
 validation.
+The Windows .NET job selects the LLVM linker from the pinned Rust toolchain
+before any native SDK build. This applies to its existing Debug and Release
+Cargo builds, including optional backends, AOT publishing and package checks;
+managed compilation and the other hosts retain their existing toolchains.
 
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and
