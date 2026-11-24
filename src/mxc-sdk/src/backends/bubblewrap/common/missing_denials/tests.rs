@@ -261,6 +261,69 @@ fn an_object_the_caller_replaced_is_left_alone() {
 }
 
 #[test]
+fn a_replacement_between_check_and_removal_is_not_deleted() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let levels = created_placeholder(&grant);
+    let target = levels[0].0.clone();
+    let (checking, release) = test_control::hold_removal(target.clone());
+    let worker = std::thread::spawn(move || {
+        let mut preparation = prepared(levels);
+        preparation.remove_placeholders();
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("cleanup did not reach its identity check");
+    let replacement = grant.join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_dir(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+    let replacement_id = id_of(&target);
+    release.send(()).unwrap();
+    worker.join().unwrap();
+
+    assert!(target.is_dir(), "cleanup deleted the caller's replacement");
+    assert_eq!(id_of(&target), replacement_id);
+}
+
+#[test]
+fn bytes_written_between_check_and_removal_are_not_deleted() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing/config.json");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
+    ];
+    let preparation = prepare_with_files(
+        &mut mounts,
+        &[],
+        &[target.to_str().unwrap()],
+        BwrapVersion::new(0, 5, 0),
+    )
+    .unwrap();
+    let (checking, release) = test_control::hold_file_removal(target.clone());
+    let worker = std::thread::spawn(move || {
+        let mut preparation = preparation;
+        preparation.remove_placeholders();
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("cleanup did not reach its file-size check");
+    std::fs::write(&target, b"written after the check").unwrap();
+    release.send(()).unwrap();
+    worker.join().unwrap();
+
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"written after the check",
+        "cleanup deleted content written after its zero-length check"
+    );
+}
+
+#[test]
 fn a_preexisting_denied_path_is_never_a_mount_point() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
@@ -512,6 +575,7 @@ fn prepared(levels: Vec<(PathBuf, (u64, u64))>) -> DenyPreparation {
         _storage: None,
         created_levels: levels,
         armed: true,
+        cleanup_warnings: CleanupWarnings::default(),
     }
 }
 
@@ -574,7 +638,9 @@ fn a_handed_off_preparation_still_cleans_up_in_the_background() {
     let levels = created_placeholder(&grant);
     let path = levels[0].0.clone();
 
-    prepared(levels).remove_placeholders_in_background();
+    prepared(levels)
+        .remove_placeholders_in_background()
+        .expect("background cleanup handoff");
 
     // The cleanup runs on its own thread, so wait for the effect rather than
     // assuming it finished before the call returned.
@@ -589,20 +655,128 @@ fn a_handed_off_preparation_still_cleans_up_in_the_background() {
 }
 
 #[test]
-fn a_cleanup_thread_spawn_failure_does_not_block_the_caller() {
+fn background_handoff_retains_storage_until_cleanup_finishes() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
     std::fs::create_dir(&grant).unwrap();
     let levels = created_placeholder(&grant);
     let path = levels[0].0.clone();
+    let storage = tempfile::tempdir().unwrap();
+    let storage_path = storage.path().to_path_buf();
+    let (cleanup_started, release_cleanup) = test_control::hold_storage_cleanup(path.clone());
+    let preparation = DenyPreparation {
+        _storage: Some(std::sync::Arc::new(storage)),
+        created_levels: levels,
+        armed: true,
+        cleanup_warnings: CleanupWarnings::default(),
+    };
+
+    preparation
+        .remove_placeholders_in_background()
+        .expect("background storage handoff");
+    cleanup_started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("background cleanup did not start");
+    let retained_until_cleanup = storage_path.exists();
+    release_cleanup.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while (path.exists() || storage_path.exists()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(
+        retained_until_cleanup,
+        "handoff dropped the overlay storage on the caller's thread"
+    );
+    assert!(!path.exists());
+    assert!(!storage_path.exists());
+}
+
+#[test]
+fn background_handoff_with_only_storage_drops_it_off_thread() {
+    let storage = tempfile::tempdir().unwrap();
+    let storage_path = storage.path().to_path_buf();
+    let (job_started, release_job) = test_control::hold_storage_job();
+    let preparation = DenyPreparation {
+        _storage: Some(std::sync::Arc::new(storage)),
+        created_levels: Vec::new(),
+        armed: true,
+        cleanup_warnings: CleanupWarnings::default(),
+    };
+
+    preparation
+        .remove_placeholders_in_background()
+        .expect("storage-only handoff");
+    job_started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("storage-only cleanup did not start");
+    let retained_until_job = storage_path.exists();
+    release_job.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while storage_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(
+        retained_until_job,
+        "an empty cleanup list dropped storage on the caller's thread"
+    );
+    assert!(!storage_path.exists());
+}
+
+#[test]
+fn a_failed_handoff_returns_storage_with_its_cleanup_owner() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let path = grant.join("missing");
+    let levels = create_mount_point(&grant, &path, false).unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let storage_path = storage.path().to_path_buf();
+    test_control::fail_cleanup_spawn_for(path.clone());
+    let preparation = DenyPreparation {
+        _storage: Some(std::sync::Arc::new(storage)),
+        created_levels: levels,
+        armed: true,
+        cleanup_warnings: CleanupWarnings::default(),
+    };
+
+    let (_error, preparation) = preparation
+        .remove_placeholders_in_background()
+        .expect_err("the injected handoff must fail");
+    assert!(path.exists());
+    assert!(storage_path.exists());
+    drop(preparation);
+
+    assert!(!path.exists());
+    assert!(!storage_path.exists());
+}
+
+#[test]
+fn a_cleanup_thread_spawn_failure_does_not_block_the_caller() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let path = grant.join("missing");
+    let levels = create_mount_point(&grant, &path, false).unwrap();
     test_control::fail_cleanup_spawn_for(path.clone());
 
-    prepared(levels).remove_placeholders_in_background();
+    let (_error, preparation) = prepared(levels)
+        .remove_placeholders_in_background()
+        .expect_err("the injected handoff must fail");
 
     assert!(
         path.exists(),
         "a failed background handoff must leave cleanup pending, not run it inline"
     );
+    drop(preparation);
+    assert!(
+        !path.exists(),
+        "the returned preparation did not release cleanup ownership"
+    );
+    let retry = create_mount_point(&grant, &path, false).unwrap();
+    remove_levels(&retry);
+    assert!(!path.exists());
 }
 
 #[test]
@@ -636,9 +810,13 @@ fn cleanup_spawn_failure_is_scoped_to_its_placeholder() {
     };
     test_control::fail_cleanup_spawn_for(intended_path.clone());
 
-    prepared(other).remove_placeholders_in_background();
+    prepared(other)
+        .remove_placeholders_in_background()
+        .expect("other cleanup handoff");
     let other_was_cleaned = wait_absent(&other_path);
-    prepared(intended).remove_placeholders_in_background();
+    let (_error, intended_preparation) = prepared(intended)
+        .remove_placeholders_in_background()
+        .expect_err("the intended handoff must fail");
     let intended_was_cleaned = wait_absent(&intended_path);
 
     assert!(
@@ -649,6 +827,7 @@ fn cleanup_spawn_failure_is_scoped_to_its_placeholder() {
         !intended_was_cleaned,
         "the intended cleanup did not receive its injected failure"
     );
+    drop(intended_preparation);
 }
 
 #[test]
@@ -706,6 +885,134 @@ fn cleanup_uses_one_deadline_for_the_whole_walk() {
 }
 
 #[test]
+fn an_initial_staging_metadata_failure_rolls_back_the_staging_object() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    test_control::fail_initial_staging_metadata_for(target.clone());
+
+    let error = create_mount_point(&grant, &target, false).unwrap_err();
+
+    let remaining: Vec<_> = std::fs::read_dir(&grant).unwrap().collect();
+    assert!(
+        remaining.is_empty(),
+        "staging survived its first metadata failure: {error:?}; remaining={remaining:?}"
+    );
+}
+
+#[test]
+fn a_staging_directory_open_failure_rolls_back_the_staging_object() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    test_control::fail_staging_open_for(target.clone());
+
+    let error = create_mount_point(&grant, &target, false).unwrap_err();
+
+    let remaining: Vec<_> = std::fs::read_dir(&grant).unwrap().collect();
+    assert!(
+        remaining.is_empty(),
+        "staging survived an open failure: {error:?}; remaining={remaining:?}"
+    );
+}
+
+#[test]
+fn a_staging_file_metadata_failure_rolls_back_the_staging_object() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    test_control::fail_staging_metadata_for(target.clone());
+
+    let error = create_mount_point(&grant, &target, true).unwrap_err();
+
+    let remaining: Vec<_> = std::fs::read_dir(&grant).unwrap().collect();
+    assert!(
+        remaining.is_empty(),
+        "staging survived a metadata failure: {error:?}; remaining={remaining:?}"
+    );
+}
+
+#[test]
+fn unsupported_directory_publication_fails_preparation_and_removes_partial_levels() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing/deep");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
+    ];
+    test_control::fail_rename_for(target.clone());
+
+    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
+        .expect_err("an atomic-create failure must reject sandbox startup");
+
+    let message = format!("{error:?}");
+    assert!(message.contains("could not create"), "{message}");
+    assert!(
+        !grant.join("missing").exists(),
+        "the partial ancestor survived the failed preparation"
+    );
+}
+
+#[test]
+fn unsupported_cleanup_rename_is_reported_as_a_warning() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
+    ];
+    let mut preparation = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0)).unwrap();
+    let warnings = preparation.warnings();
+    test_control::fail_rename_for(target.clone());
+
+    preparation.remove_placeholders();
+
+    let warnings = warnings.lock().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning.contains("missing")),
+        "the cleanup failure was silent: {warnings:?}"
+    );
+    assert!(
+        target.is_dir(),
+        "an unsupported rename must not delete by path"
+    );
+    drop(warnings);
+    test_control::clear_rename_failure_for(&target);
+    let retry = create_mount_point(&grant, &target, false).unwrap();
+    remove_levels(&retry);
+    assert!(
+        !target.exists(),
+        "the failed final cleanup left a stale registry user and exclusive lock"
+    );
+}
+
+#[test]
+fn two_runs_release_their_shared_ancestor_after_the_last_run() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let run_a = create_mount_point(&grant, &grant.join("missing/a"), false).unwrap();
+    let run_b = create_mount_point(&grant, &grant.join("missing/b"), false).unwrap();
+
+    remove_levels(&run_a);
+    assert!(!grant.join("missing/a").exists());
+    assert!(grant.join("missing/b").is_dir());
+    remove_levels(&run_b);
+
+    assert!(
+        !grant.join("missing").exists(),
+        "the first run discarded the shared ancestor record before the second run exited"
+    );
+}
+
+#[test]
 fn aliased_paths_retry_an_ancestor_after_its_real_children_are_removed() {
     let fixture = tempfile::tempdir().unwrap();
     let real = fixture.path().join("real/tree/branch");
@@ -713,15 +1020,39 @@ fn aliased_paths_retry_an_ancestor_after_its_real_children_are_removed() {
     let alias = fixture.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
 
-    let mut levels = create_mount_point(&real.join("missing/a"), false);
-    levels.extend(create_mount_point(&alias.join("missing/b/c/d/e"), false));
+    let mut levels = create_mount_point(fixture.path(), &real.join("missing/a"), false).unwrap();
+    levels
+        .extend(create_mount_point(fixture.path(), &alias.join("missing/b/c/d/e"), false).unwrap());
     assert!(real.join("missing/b/c/d/e").is_dir());
 
     remove_levels(&levels);
 
+    let registry = CleanupRegistry::global().lock().unwrap();
+    let tracked: Vec<_> = registry
+        .users
+        .iter()
+        .filter(|(id, _)| {
+            registry
+                .paths
+                .get(id)
+                .is_some_and(|path| path.starts_with(fixture.path()))
+        })
+        .map(|(key, users)| {
+            (
+                registry.paths.get(key).cloned(),
+                *users,
+                registry.removing.contains(key),
+                registry.handles.contains_key(key),
+                registry.parents.contains_key(key),
+            )
+        })
+        .collect();
+    drop(registry);
     assert!(
         !real.join("missing").exists(),
-        "pathname depth left the shared real ancestor behind after its aliased child was removed"
+        "aliased ancestor remained; a={} b={} tracked={tracked:?}",
+        real.join("missing/a").exists(),
+        real.join("missing/b").exists()
     );
 }
 
@@ -735,13 +1066,152 @@ fn a_level_another_process_created_is_not_recorded() {
     std::fs::create_dir_all(grant.join("missing/deep")).unwrap();
     let theirs = id_of(&grant.join("missing/deep"));
 
-    let created = create_mount_point(&grant.join("missing/deep"), false);
+    let created = create_mount_point(&grant, &grant.join("missing/deep"), false).unwrap();
 
     assert!(
         created.is_empty(),
         "a level another process made is not this run's: {created:?}"
     );
     assert_eq!(id_of(&grant.join("missing/deep")), theirs);
+}
+
+#[test]
+fn identity_comes_from_the_object_created_not_a_later_path_lookup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    let (created, release) = test_control::hold_identity(target.clone());
+    let worker_target = target.clone();
+    let worker_root = grant.clone();
+    let worker = std::thread::spawn(move || {
+        create_mount_point(&worker_root, &worker_target, false).unwrap()
+    });
+    created
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("creation did not reach identity capture");
+    let original = id_of(&target);
+    let replacement = grant.join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_dir(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+    let replacement_id = id_of(&target);
+    assert_ne!(original, replacement_id);
+    release.send(()).unwrap();
+    let levels = worker.join().unwrap();
+
+    assert_eq!(levels.len(), 1);
+    assert!(
+        CleanupRegistry::global()
+            .lock()
+            .unwrap()
+            .handles
+            .contains_key(&original),
+        "the created object's handle was not retained"
+    );
+    assert_eq!(
+        levels[0].1, original,
+        "the path lookup captured the caller's replacement as this run's object"
+    );
+    remove_levels(&levels);
+    assert!(target.is_dir(), "the caller's replacement was deleted");
+}
+
+#[test]
+fn an_intermediate_symlink_swap_cannot_redirect_creation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    let original = fixture.path().join("original");
+    let outside = fixture.path().join("outside");
+    std::fs::create_dir(&grant).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let target = grant.join("missing/deep");
+    let (creating, release) = test_control::hold_root_swap_create(grant.join("missing"));
+    let worker_target = target.clone();
+    let worker_root = grant.clone();
+    let worker = std::thread::spawn(move || {
+        create_mount_point(&worker_root, &worker_target, false).unwrap()
+    });
+    creating
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("creation did not reach the root-swap barrier");
+    std::fs::rename(&grant, &original).unwrap();
+    std::os::unix::fs::symlink(&outside, &grant).unwrap();
+    release.send(()).unwrap();
+    let levels = worker.join().unwrap();
+
+    assert!(
+        !outside.join("missing").exists(),
+        "creation followed the replacement symlink outside the original grant"
+    );
+    remove_levels(&levels);
+    assert!(
+        !original.join("missing").exists(),
+        "cleanup did not follow the retained original grant"
+    );
+}
+
+#[test]
+fn an_intermediate_symlink_swap_cannot_redirect_cleanup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    let original = fixture.path().join("original");
+    let outside = fixture.path().join("outside");
+    std::fs::create_dir(&grant).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let target = grant.join("missing/deep");
+    let levels = create_mount_point(&grant, &target, false).unwrap();
+    let (checking, release) = test_control::hold_root_swap_remove(target.clone());
+    let worker = std::thread::spawn(move || remove_levels(&levels));
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("cleanup did not reach the root-swap barrier");
+    std::fs::rename(&grant, &original).unwrap();
+    std::os::unix::fs::symlink(&outside, &grant).unwrap();
+    release.send(()).unwrap();
+    worker.join().unwrap();
+
+    assert!(
+        !original.join("missing").exists(),
+        "cleanup left the original grant's placeholders behind"
+    );
+    assert!(
+        !outside.join("missing").exists(),
+        "cleanup escaped through the replacement symlink"
+    );
+}
+
+#[test]
+fn an_existing_ancestor_does_not_skip_missing_descendants() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let ancestor = grant.join("missing");
+    let target = ancestor.join("deep");
+    let (creating, release) = test_control::hold_before_create(ancestor.clone());
+    let worker_target = target.clone();
+    let worker_root = grant.clone();
+    let worker = std::thread::spawn(move || {
+        create_mount_point(&worker_root, &worker_target, false).unwrap()
+    });
+    creating
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("creation did not reach the ancestor");
+    std::fs::create_dir(&ancestor).unwrap();
+    release.send(()).unwrap();
+    let levels = worker.join().unwrap();
+
+    assert!(
+        target.is_dir(),
+        "creation stopped at the competing ancestor"
+    );
+    assert_eq!(levels.len(), 1);
+    assert_eq!(levels[0].0, target);
+    remove_levels(&levels);
+    assert!(
+        ancestor.is_dir(),
+        "the untracked competing ancestor was claimed"
+    );
 }
 
 #[test]
@@ -803,13 +1273,80 @@ fn a_creation_guard_cleans_up_whatever_it_still_owns() {
     // What the creation job holds while it runs. A result that never reaches
     // the caller — a probe timeout drops it — takes the guard's drop with it.
     let owned = CreationGroup::default();
-    owned.record(create_mount_point(&target, false));
+    owned.record(create_mount_point(&grant, &target, false).unwrap());
     assert!(target.is_dir());
     drop(owned);
 
     assert!(
         !target.exists(),
         "a creation guard that never handed its levels back left them on the host"
+    );
+}
+
+#[test]
+fn a_stalled_creation_does_not_block_an_unrelated_grant() {
+    let fixture = tempfile::tempdir().unwrap();
+    let first_grant = fixture.path().join("first");
+    let second_grant = fixture.path().join("second");
+    std::fs::create_dir(&first_grant).unwrap();
+    std::fs::create_dir(&second_grant).unwrap();
+    let first = first_grant.join("missing/deep");
+    let second = second_grant.join("missing/deep");
+    let (creation_started, release_creation) = test_control::hold_stalled_creation(first.clone());
+    let first_worker = {
+        let first = first.clone();
+        let root = first_grant.clone();
+        std::thread::spawn(move || create_mount_point(&root, &first, false).unwrap())
+    };
+    creation_started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the first creation did not reach its barrier");
+
+    let (second_done, second_result) = std::sync::mpsc::sync_channel(1);
+    let second_root = second_grant.clone();
+    let second_worker = std::thread::spawn(move || {
+        let levels = create_mount_point(&second_root, &second, false).unwrap();
+        second_done.send(()).unwrap();
+        levels
+    });
+    let finished_while_first_was_stalled =
+        second_result.recv_timeout(std::time::Duration::from_secs(1));
+    release_creation.send(()).unwrap();
+    let first_levels = first_worker.join().unwrap();
+    let second_levels = second_worker.join().unwrap();
+    remove_levels(&first_levels);
+    remove_levels(&second_levels);
+
+    assert!(
+        finished_while_first_was_stalled.is_ok(),
+        "an unrelated grant waited for the stalled creation"
+    );
+    assert!(!first_grant.join("missing").exists());
+    assert!(!second_grant.join("missing").exists());
+}
+
+#[test]
+fn unused_path_locks_are_reclaimed_without_replacing_live_locks() {
+    let fixture = tempfile::tempdir().unwrap();
+    let first = fixture.path().join("first");
+    let second = fixture.path().join("second");
+    let third = fixture.path().join("third");
+
+    let first_lock = path_lock(&first);
+    let first_weak = std::sync::Arc::downgrade(&first_lock);
+    let second_lock = path_lock(&second);
+    assert!(
+        std::sync::Arc::ptr_eq(&first_lock, &path_lock(&first)),
+        "acquiring an unrelated path replaced a lock that was still in use"
+    );
+    assert!(first_weak.upgrade().is_some());
+
+    drop(second_lock);
+    drop(first_lock);
+    drop(path_lock(&third));
+    assert!(
+        first_weak.upgrade().is_none(),
+        "the global path-lock table retained an unused path forever"
     );
 }
 

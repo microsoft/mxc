@@ -873,9 +873,11 @@ impl BubblewrapScriptRunner {
             .map(|watch| ProviderMonitor::watch(watch, Arc::clone(&child), group));
 
         deny_preparation.disarm();
+        let cleanup_warnings = deny_preparation.warnings();
 
         Ok(BwrapChild {
             child,
+            cleanup_warnings,
             stdin,
             stdout,
             stderr,
@@ -901,6 +903,8 @@ struct BwrapChild {
     /// host mount points to take back once it exits. `None` once the cleanup has
     /// been handed off.
     deny_mountpoints: Option<missing_denials::DenyPreparation>,
+    /// Retained warnings shared with a detached placeholder cleanup.
+    cleanup_warnings: missing_denials::CleanupWarnings,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -965,7 +969,11 @@ impl BubblewrapSandboxProcess {
     /// been handed off. Safe to call from every exit path.
     fn hand_off_deny_cleanup(&mut self) {
         if let Some(preparation) = self.inner.deny_mountpoints.take() {
-            preparation.remove_placeholders_in_background();
+            if let Err((_error, preparation)) = preparation.remove_placeholders_in_background() {
+                // Keep a retrying owner when no cleanup thread can be started.
+                // The blocking wait/drop teardown can still take it from here.
+                self.inner.deny_mountpoints = Some(preparation);
+            }
         }
     }
 
@@ -1043,6 +1051,14 @@ enum BwrapOutcome {
 }
 
 impl SandboxProcess for BubblewrapSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        self.inner
+            .cleanup_warnings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         if let Some(pty) = self.inner.pty.as_ref() {
             let stdio = pty.take_native_stdio()?;
@@ -1669,8 +1685,13 @@ mod tests {
         monitor: Option<ProviderMonitor>,
         child: Arc<Mutex<Child>>,
     ) -> BubblewrapSandboxProcess {
+        let cleanup_warnings = deny_mountpoints.as_ref().map_or_else(
+            missing_denials::CleanupWarnings::default,
+            missing_denials::DenyPreparation::warnings,
+        );
         BubblewrapSandboxProcess::new(BwrapChild {
             deny_mountpoints,
+            cleanup_warnings,
             child,
             stdin: None,
             stdout: None,
@@ -1728,6 +1749,36 @@ mod tests {
             "terminal polling stayed blocked behind placeholder cleanup instead of returning",
         );
         assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    fn background_cleanup_failure_is_retained_as_a_warning() {
+        let fixture = tempfile::tempdir().unwrap();
+        let placeholder = fixture.path().join("missing");
+        std::fs::create_dir(&placeholder).unwrap();
+        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let preparation = missing_denials::DenyPreparation::for_test(vec![(
+            placeholder.clone(),
+            (metadata.dev(), metadata.ino()),
+        )]);
+        let mut process = exited_process(Some(preparation), None, exited_child());
+        missing_denials::test_control::fail_cleanup_spawn_for(placeholder.clone());
+
+        process.hand_off_deny_cleanup();
+
+        assert!(
+            process.inner.deny_mountpoints.is_some(),
+            "the failed handoff did not leave a cleanup owner for wait/drop"
+        );
+        assert!(placeholder.exists());
+        assert!(
+            process
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("could not start denied-path cleanup")),
+            "the retained warnings did not expose the failed cleanup handoff"
+        );
     }
 
     #[test]

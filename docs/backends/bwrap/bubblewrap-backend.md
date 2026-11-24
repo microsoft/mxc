@@ -383,14 +383,16 @@ nested host mount, startup also fails before the workload starts rather than
 exposing the directory underneath that mount.
 
 **A missing denied path under a writable grant leaves nothing behind.** A
-read-write grant is bound from the host as it is, so bwrap creates the mount
-point its deny mask needs inside the caller's own directory and never removes
-it: a denied file that did not exist would otherwise come back as an empty
-directory, and a denied file masked with `/dev/null` as an empty file. The
-executor removes those placeholders when the sandbox exits. It removes only
-paths bwrap created — a directory the workload wrote into, a file with content,
-and any ancestor that already existed when the policy was prepared are kept —
-so a denied path that already existed is masked in place and never touched.
+read-write grant is bound from the host as it is, so bwrap needs a real mount
+point inside the caller's directory for its deny mask. Without preparation,
+bwrap creates that mount point and never removes it: a denied directory would
+come back as an empty directory, and a denied file masked with `/dev/null` as an
+empty file. The executor therefore creates and marks only the missing levels,
+then removes those same empty objects when their last sandbox exits. Markers
+and shared file locks coordinate overlapping host processes; retained object
+and parent-directory handles keep replacement or symlink changes from
+redirecting cleanup. Caller-created objects, replaced objects, directories with
+entries, and files with content are kept.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

@@ -953,6 +953,122 @@ fn streaming_bubblewrap_cleans_missing_denials_across_lifecycles() {
 }
 
 #[test]
+fn streaming_bubblewrap_two_live_runs_share_missing_ancestor() {
+    if !bwrap_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("shared lifecycle fixture");
+    let shared = fixture.path().join("missing");
+    let denied_a = shared.join("a");
+    let denied_b = shared.join("b");
+    let (mut request_a, _) = bwrap_request_with_missing_denial("sleep 30", 0, fixture.path());
+    let (mut request_b, _) = bwrap_request_with_missing_denial("sleep 30", 0, fixture.path());
+    request_a.filesystem.as_mut().unwrap().denied_paths = vec![denied_a.to_str().unwrap().into()];
+    request_b.filesystem.as_mut().unwrap().denied_paths = vec![denied_b.to_str().unwrap().into()];
+    let process_a = spawn(request_a, Default::default()).expect("spawn first run");
+    let process_b = spawn(request_b, Default::default()).expect("spawn second run");
+    assert!(denied_a.is_dir() && denied_b.is_dir());
+
+    drop(process_a);
+    assert!(!denied_a.exists());
+    assert!(denied_b.is_dir());
+    assert!(
+        shared.is_dir(),
+        "the first run removed the shared parent too early"
+    );
+    drop(process_b);
+    assert_eventually_absent(&shared, "two live runs");
+}
+
+#[test]
+fn streaming_bubblewrap_cross_process_placeholder_user() {
+    const CHILD: &str = "MXC_BWRAP_CROSS_PROCESS_CHILD";
+    const GRANT: &str = "MXC_BWRAP_CROSS_PROCESS_GRANT";
+    if std::env::var_os(CHILD).is_some() {
+        let grant = std::path::PathBuf::from(std::env::var_os(GRANT).expect("child grant"));
+        let check = grant.join("check");
+        let result = grant.join("result");
+        let release = grant.join("release");
+        let denied = grant.join("missing/deep");
+        let script = format!(
+            "while [ ! -e '{0}' ]; do sleep 0.05; done; \
+             if mkdir -p '{1}/escaped' 2>/dev/null; then \
+               printf writable > '{2}'; \
+             else \
+               printf denied > '{2}'; \
+             fi; \
+             while [ ! -e '{3}' ]; do sleep 0.05; done",
+            check.display(),
+            denied.display(),
+            result.display(),
+            release.display()
+        );
+        let (request, _) = bwrap_request_with_missing_denial(&script, 0, &grant);
+        let process = spawn(request, Default::default()).expect("spawn child sandbox");
+        std::fs::write(grant.join("ready"), b"ready").unwrap();
+        while !release.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(process);
+        assert_eventually_absent(&denied, "child process cleanup");
+        return;
+    }
+    if !bwrap_available() {
+        return;
+    }
+
+    let fixture = tempfile::tempdir().expect("cross-process lifecycle fixture");
+    let denied = fixture.path().join("missing/deep");
+    let (request_a, _) = bwrap_request_with_missing_denial("sleep 30", 0, fixture.path());
+    let process_a = spawn(request_a, Default::default()).expect("spawn first sandbox");
+    let log = std::fs::File::create(fixture.path().join("child.log")).unwrap();
+    let errors = log.try_clone().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "streaming_bubblewrap_cross_process_placeholder_user",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env(GRANT, fixture.path())
+        .stdout(log)
+        .stderr(errors)
+        .spawn()
+        .expect("spawn second host process");
+    let wait_for = |path: &std::path::Path| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        path.exists()
+    };
+    let ready = wait_for(&fixture.path().join("ready"));
+    drop(process_a);
+    let survived_first_exit = denied.is_dir();
+    std::fs::write(fixture.path().join("check"), b"check").unwrap();
+    let finished = wait_for(&fixture.path().join("result"));
+    let outcome = std::fs::read_to_string(fixture.path().join("result")).unwrap_or_default();
+    std::fs::write(fixture.path().join("release"), b"release").unwrap();
+    let status = child.wait().expect("reap second host process");
+    let child_log = std::fs::read_to_string(fixture.path().join("child.log")).unwrap();
+
+    assert!(
+        ready && status.success(),
+        "second host process failed: {child_log}"
+    );
+    assert!(
+        survived_first_exit,
+        "the first process removed the live second process's mount point"
+    );
+    assert!(finished, "the second sandbox did not reach its check");
+    assert_eq!(
+        outcome, "denied",
+        "the first process detached the second sandbox's deny mask"
+    );
+    assert_eventually_absent(&denied, "cross-process last user");
+}
+
+#[test]
 fn streaming_bubblewrap_preserves_caller_content_in_missing_denials() {
     if !bwrap_available() {
         return;
