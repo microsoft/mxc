@@ -387,12 +387,15 @@ read-write grant is bound from the host as it is, so bwrap needs a real mount
 point inside the caller's directory for its deny mask. Without preparation,
 bwrap creates that mount point and never removes it: a denied directory would
 come back as an empty directory, and a denied file masked with `/dev/null` as an
-empty file. The executor therefore creates and marks only the missing levels,
-then removes those same empty objects when their last sandbox exits. Markers
-and shared file locks coordinate overlapping host processes; retained object
-and parent-directory handles keep replacement or symlink changes from
-redirecting cleanup. Caller-created objects, replaced objects, directories with
-entries, and files with content are kept.
+empty file. The executor therefore creates and marks only missing directory
+levels, then removes those same empty objects when their last sandbox exits. If
+a path classified as a file disappears before preparation, startup is rejected
+instead of creating a host file placeholder: no conditional unlink can exclude
+a later write through an already-open descriptor. Markers and shared file locks
+coordinate overlapping host processes; retained object and parent-directory
+handles keep replacement or symlink changes from redirecting cleanup.
+Caller-created objects, replaced objects, directories with entries, and all
+files are kept.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

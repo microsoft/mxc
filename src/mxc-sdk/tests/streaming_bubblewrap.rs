@@ -1069,6 +1069,73 @@ fn streaming_bubblewrap_cross_process_placeholder_user() {
 }
 
 #[test]
+fn streaming_bubblewrap_masks_existing_fifo_and_socket() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixListener;
+
+    if !bwrap_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("special-file deny fixture");
+    let fifo = fixture.path().join("private.pipe");
+    let socket = fixture.path().join("private.sock");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .expect("create FIFO");
+    let _listener = UnixListener::bind(&socket).expect("create Unix socket");
+    let result = fixture.path().join("result");
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![fixture.path().to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![
+                fifo.to_str().unwrap().to_string(),
+                socket.to_str().unwrap().to_string(),
+            ],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(5_000),
+        ..ContainerRequest::new(format!(
+            "stat -c '%F %n' '{}' '{}' > '{}'; \
+             cat '{}' '{}' >> '{}' 2>&1; printf 'cat=%s\\n' \"$?\" >> '{}'",
+            fifo.display(),
+            socket.display(),
+            result.display(),
+            fifo.display(),
+            socket.display(),
+            result.display(),
+            result.display()
+        ))
+    };
+
+    let mut process = spawn(request, Default::default()).expect("spawn with special-file denials");
+    assert_eq!(
+        process.wait().expect("wait for masked reads"),
+        WaitResult::Exited(0)
+    );
+    let observed = std::fs::read_to_string(&result).unwrap();
+    assert!(
+        observed.starts_with(&format!(
+            "character special file {}\ncharacter special file {}\n",
+            fifo.display(),
+            socket.display()
+        )) && observed.matches("Permission denied").count() == 2
+            && observed.ends_with("cat=1\n"),
+        "unexpected special-file masks: {observed}"
+    );
+    assert!(std::fs::symlink_metadata(&fifo)
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    assert!(std::fs::symlink_metadata(&socket)
+        .unwrap()
+        .file_type()
+        .is_socket());
+}
+
+#[test]
 fn streaming_bubblewrap_preserves_caller_content_in_missing_denials() {
     if !bwrap_available() {
         return;

@@ -892,6 +892,7 @@ impl BubblewrapScriptRunner {
             timed_out: false,
             termination_error: None,
             deny_mountpoints: Some(deny_preparation),
+            deny_cleanup: None,
         })
     }
 }
@@ -903,6 +904,8 @@ struct BwrapChild {
     /// host mount points to take back once it exits. `None` once the cleanup has
     /// been handed off.
     deny_mountpoints: Option<missing_denials::DenyPreparation>,
+    /// Completion retained after a non-blocking poll hands cleanup off.
+    deny_cleanup: Option<missing_denials::CleanupCompletion>,
     /// Retained warnings shared with a detached placeholder cleanup.
     cleanup_warnings: missing_denials::CleanupWarnings,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
@@ -943,6 +946,9 @@ impl BwrapChild {
         // Bubblewrap made these on the host as mount points for denied entries
         // that did not exist yet. It never removes them, so a denied path would
         // otherwise outlive the sandbox as a directory or an empty file.
+        if let Some(completion) = self.deny_cleanup.take() {
+            completion.wait();
+        }
         if let Some(mut preparation) = self.deny_mountpoints.take() {
             preparation.remove_placeholders();
         }
@@ -969,10 +975,13 @@ impl BubblewrapSandboxProcess {
     /// been handed off. Safe to call from every exit path.
     fn hand_off_deny_cleanup(&mut self) {
         if let Some(preparation) = self.inner.deny_mountpoints.take() {
-            if let Err((_error, preparation)) = preparation.remove_placeholders_in_background() {
-                // Keep a retrying owner when no cleanup thread can be started.
-                // The blocking wait/drop teardown can still take it from here.
-                self.inner.deny_mountpoints = Some(preparation);
+            match preparation.remove_placeholders_in_background() {
+                Ok(completion) => self.inner.deny_cleanup = Some(completion),
+                Err((_error, preparation)) => {
+                    // Keep a retrying owner when no cleanup thread can be started.
+                    // The blocking wait/drop teardown can still take it from here.
+                    self.inner.deny_mountpoints = Some(preparation);
+                }
             }
         }
     }
@@ -1691,6 +1700,7 @@ mod tests {
         );
         BubblewrapSandboxProcess::new(BwrapChild {
             deny_mountpoints,
+            deny_cleanup: None,
             cleanup_warnings,
             child,
             stdin: None,
@@ -1749,6 +1759,48 @@ mod tests {
             "terminal polling stayed blocked behind placeholder cleanup instead of returning",
         );
         assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    fn blocking_wait_waits_for_handed_off_placeholder_cleanup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let placeholder = fixture.path().join("missing");
+        std::fs::create_dir(&placeholder).unwrap();
+        let metadata = std::fs::symlink_metadata(&placeholder).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let preparation = missing_denials::DenyPreparation::for_test(vec![(
+            placeholder.clone(),
+            (metadata.dev(), metadata.ino()),
+        )]);
+        let mut process = exited_process(Some(preparation), None, exited_child());
+        let (cleanup_started, release_cleanup) =
+            missing_denials::test_control::hold_completion_cleanup(placeholder.clone());
+        assert_eq!(process.try_wait().unwrap(), Some(0));
+        cleanup_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cleanup did not start");
+
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = process.wait();
+            returned_tx.send(result).unwrap();
+        });
+        let returned_before_release = returned_rx.recv_timeout(Duration::from_millis(150));
+        release_cleanup.send(()).unwrap();
+        worker.join().unwrap();
+
+        assert!(
+            returned_before_release.is_err(),
+            "blocking wait returned before the handed-off cleanup finished"
+        );
+        assert_eq!(
+            returned_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(!placeholder.exists());
     }
 
     #[test]

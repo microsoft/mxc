@@ -104,6 +104,7 @@ fn remove_levels_with_warnings(created_levels: &[(PathBuf, ObjectId)], warnings:
     #[cfg(test)]
     {
         test_control::wait(created_levels);
+        test_control::wait_for_completion_cleanup(created_levels);
         test_control::wait_for_storage_cleanup(created_levels);
     }
 
@@ -112,6 +113,39 @@ fn remove_levels_with_warnings(created_levels: &[(PathBuf, ObjectId)], warnings:
             warnings,
             format!("Bubblewrap: denied-path cleanup did not finish: {error}"),
         );
+    }
+}
+
+/// Completion state for a detached cleanup. Polling drops nothing that a later
+/// blocking teardown needs in order to wait for the worker and read its warnings.
+#[derive(Debug)]
+pub(crate) struct CleanupCompletion {
+    worker: Option<std::thread::JoinHandle<()>>,
+    warnings: CleanupWarnings,
+}
+
+impl CleanupCompletion {
+    pub(crate) fn wait(mut self) {
+        const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
+        while self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            if std::time::Instant::now() >= deadline {
+                warn_cleanup(
+                    &self.warnings,
+                    "Bubblewrap: denied-path cleanup did not finish within 5 seconds".to_string(),
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -163,9 +197,12 @@ impl DenyPreparation {
     /// promises not to block, so the work is handed off rather than done here.
     pub(crate) fn remove_placeholders_in_background(
         mut self,
-    ) -> Result<(), (std::io::Error, Self)> {
+    ) -> Result<CleanupCompletion, (std::io::Error, Self)> {
         if self.created_levels.is_empty() && self._storage.is_none() {
-            return Ok(());
+            return Ok(CleanupCompletion {
+                worker: None,
+                warnings: self.warnings(),
+            });
         }
         self.armed = false;
         let levels = std::mem::take(&mut self.created_levels);
@@ -175,7 +212,10 @@ impl DenyPreparation {
             std::sync::Arc::clone(&warnings),
             self._storage.clone(),
         ) {
-            Ok(_) => Ok(()),
+            Ok(worker) => Ok(CleanupCompletion {
+                worker: Some(worker),
+                warnings,
+            }),
             Err(error) => {
                 // Polling must remain non-blocking. Return the complete owner so
                 // the runner can keep it for the blocking wait/drop teardown;
@@ -315,6 +355,21 @@ impl CleanupRegistry {
         }
         false
     }
+
+    fn release_unstarted(&mut self, created: ObjectId) {
+        self.removing.remove(&created);
+        let Some(users) = self.users.get_mut(&created) else {
+            return;
+        };
+        if *users > 1 {
+            *users -= 1;
+            return;
+        }
+        self.users.remove(&created);
+        self.handles.remove(&created);
+        self.parents.remove(&created);
+        self.paths.remove(&created);
+    }
 }
 
 fn metadata_id(metadata: &std::fs::Metadata) -> ObjectId {
@@ -328,6 +383,7 @@ fn marker_name() -> std::ffi::CString {
     std::ffi::CString::new("user.mxc.deny-placeholder").unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn set_placeholder_marker(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
@@ -350,6 +406,14 @@ fn set_placeholder_marker(file: &std::fs::File) -> std::io::Result<()> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn set_placeholder_marker(_file: &std::fs::File) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "host deny placeholders are only supported on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn path_has_placeholder_marker(path: &Path) -> std::io::Result<bool> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -377,6 +441,12 @@ fn path_has_placeholder_marker(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn path_has_placeholder_marker(_path: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
 fn file_has_placeholder_marker(file: &std::fs::File) -> std::io::Result<bool> {
     use std::os::unix::io::AsRawFd;
 
@@ -400,6 +470,11 @@ fn file_has_placeholder_marker(file: &std::fs::File) -> std::io::Result<bool> {
         Some(nix::libc::ENODATA) | Some(nix::libc::ENOTSUP) => Ok(false),
         _ => Err(error),
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn file_has_placeholder_marker(_file: &std::fs::File) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 fn lock_shared(file: &std::fs::File) -> std::io::Result<()> {
@@ -539,7 +614,13 @@ fn open_parent(root: &std::fs::File, relative: &Path) -> std::io::Result<std::fs
 }
 
 fn open_object(root: &std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
-    open_relative(root, relative, nix::libc::O_RDONLY | nix::libc::O_NOFOLLOW)
+    // A caller can replace a checked regular file with a FIFO before this open.
+    // Nonblocking mode keeps that race from stalling the bounded probe worker.
+    open_relative(
+        root,
+        relative,
+        nix::libc::O_RDONLY | nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK,
+    )
 }
 
 fn metadata_at(
@@ -555,27 +636,19 @@ fn metadata_at(
     )
 }
 
-fn unlink_at(
-    directory: &std::fs::File,
-    name: &std::ffi::OsStr,
-    is_directory: bool,
-) -> std::io::Result<()> {
+fn unlink_at(directory: &std::fs::File, name: &std::ffi::OsStr) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
 
     let name = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| std::io::Error::other("denied mount point contains a NUL byte"))?;
-    // SAFETY: directory is open and name is NUL-terminated. The flags select
-    // unlink versus rmdir without resolving any mutable parent pathname.
+    // SAFETY: directory is open and name is NUL-terminated. AT_REMOVEDIR makes
+    // this helper incapable of unlinking a caller-written regular file.
     let result = unsafe {
         nix::libc::unlinkat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            if is_directory {
-                nix::libc::AT_REMOVEDIR
-            } else {
-                0
-            },
+            nix::libc::AT_REMOVEDIR,
         )
     };
     if result == 0 {
@@ -585,6 +658,7 @@ fn unlink_at(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn rename_noreplace_at(
     parent: &std::fs::File,
     from_name: &std::ffi::OsStr,
@@ -607,11 +681,21 @@ fn rename_noreplace_at(
     )
 }
 
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace_at(
+    _parent: &std::fs::File,
+    _from_name: &std::ffi::OsStr,
+    _to_name: &std::ffi::OsStr,
+    _from_path: &Path,
+    _to_path: &Path,
+) -> Result<(), nix::Error> {
+    Err(nix::errno::Errno::EOPNOTSUPP)
+}
+
 fn create_object_at(
     parent: &std::fs::File,
     name: &std::ffi::OsStr,
     path: &Path,
-    is_file: bool,
 ) -> std::io::Result<(std::fs::File, ObjectId)> {
     use std::os::unix::io::AsRawFd;
 
@@ -624,42 +708,26 @@ fn create_object_at(
     let mut staging_created = false;
     let mut staging_handle = None;
     let result = (|| {
-        let handle = if is_file {
-            let handle = open_at(
-                Some(parent),
-                Path::new(&temporary),
-                nix::libc::O_RDWR | nix::libc::O_CREAT | nix::libc::O_EXCL | nix::libc::O_NOFOLLOW,
-                0o666,
-            )?;
-            staging_created = true;
-            #[cfg(test)]
-            test_control::fail_initial_staging_metadata(path)?;
-            created = Some(metadata_id(&metadata_at(parent, &temporary)?));
-            handle
-        } else {
-            let temporary_c = std::ffi::CString::new(temporary.as_encoded_bytes())
-                .map_err(|_| std::io::Error::other("staging name contains a NUL byte"))?;
-            // SAFETY: parent is open and temporary_c is NUL-terminated.
-            if unsafe { nix::libc::mkdirat(parent.as_raw_fd(), temporary_c.as_ptr(), 0o777) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            staging_created = true;
-            #[cfg(test)]
-            test_control::fail_initial_staging_metadata(path)?;
-            created = Some(metadata_id(&metadata_at(parent, &temporary)?));
-            #[cfg(test)]
-            test_control::fail_staging_open(path)?;
-            open_at(
-                Some(parent),
-                Path::new(&temporary),
-                nix::libc::O_RDONLY | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW,
-                0,
-            )?
-        };
+        let temporary_c = std::ffi::CString::new(temporary.as_encoded_bytes())
+            .map_err(|_| std::io::Error::other("staging name contains a NUL byte"))?;
+        // SAFETY: parent is open and temporary_c is NUL-terminated.
+        if unsafe { nix::libc::mkdirat(parent.as_raw_fd(), temporary_c.as_ptr(), 0o777) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        staging_created = true;
+        #[cfg(test)]
+        test_control::fail_initial_staging_metadata(path)?;
+        created = Some(metadata_id(&metadata_at(parent, &temporary)?));
+        #[cfg(test)]
+        test_control::fail_staging_open(path)?;
+        let handle = open_at(
+            Some(parent),
+            Path::new(&temporary),
+            nix::libc::O_RDONLY | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW,
+            0,
+        )?;
         staging_handle = Some(handle);
         let handle = staging_handle.as_ref().unwrap();
-        #[cfg(test)]
-        test_control::fail_staging_metadata(path)?;
         let id = metadata_id(&handle.metadata()?);
         if Some(id) != created {
             return Err(std::io::Error::other(
@@ -701,7 +769,7 @@ fn create_object_at(
         if rollback_id.is_some_and(|id| {
             metadata_at(parent, &temporary).is_ok_and(|metadata| metadata_id(&metadata) == id)
         }) {
-            let _ = unlink_at(parent, &temporary, !is_file);
+            let _ = unlink_at(parent, &temporary);
         }
         return Err(error);
     }
@@ -818,12 +886,27 @@ fn create_mount_point_locked(
         if current_relative.as_os_str().is_empty() {
             break;
         }
+        // Existing caller objects, including FIFOs, sockets, and symlinks, are
+        // valid deny targets and need no readable handle. Only our marked file
+        // or directory placeholders enter the shared-lifetime protocol.
+        if std::fs::symlink_metadata(&current).is_ok_and(|metadata| {
+            if !metadata.is_dir() {
+                return true;
+            }
+            path_has_placeholder_marker(&current).is_ok_and(|marked| !marked)
+        }) {
+            break;
+        }
         match open_object(&root, &current_relative) {
             Ok(handle) => {
-                let created_id = match handle.metadata() {
-                    Ok(metadata) => metadata_id(&metadata),
+                let metadata = match handle.metadata() {
+                    Ok(metadata) => metadata,
                     Err(error) => return Err(CreationFailure { error, created }),
                 };
+                if !metadata.is_dir() {
+                    break;
+                }
+                let created_id = metadata_id(&metadata);
                 let parent = match open_parent(&root, &current_relative) {
                     Ok(parent) => parent,
                     Err(error) => return Err(CreationFailure { error, created }),
@@ -873,6 +956,18 @@ fn create_mount_point_locked(
         current_relative = relative_parent.to_path_buf();
     }
     let deepest = missing.first().cloned();
+    if is_file && deepest.is_some() {
+        // POSIX provides no atomic "unlink only if still empty" operation that
+        // excludes writes through an already-open descriptor. Fail closed rather
+        // than creating a host-visible file we might later delete after a write.
+        return Err(CreationFailure {
+            error: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "missing file deny target requires an unsafe host file placeholder",
+            ),
+            created,
+        });
+    }
     for directory in missing.into_iter().rev() {
         // The leaf is a file when the deny mask binds /dev/null over it; every
         // level above it is always a directory.
@@ -903,12 +998,7 @@ fn create_mount_point_locked(
         // Stage and lock the file or directory before publishing it with a
         // no-replace rename in the pinned parent. The handle, not a later path
         // lookup, is the identity of the object this call created.
-        match create_object_at(
-            &parent,
-            name,
-            &directory,
-            is_file && Some(directory.as_path()) == deepest.as_deref(),
-        ) {
+        match create_object_at(&parent, name, &directory) {
             Ok((handle, created_id)) => {
                 #[cfg(test)]
                 test_control::wait_for_identity(&directory);
@@ -926,10 +1016,14 @@ fn create_mount_point_locked(
                     Ok(handle) => handle,
                     Err(error) => return Err(CreationFailure { error, created }),
                 };
-                let created_id = match handle.metadata() {
-                    Ok(metadata) => metadata_id(&metadata),
+                let metadata = match handle.metadata() {
+                    Ok(metadata) => metadata,
                     Err(error) => return Err(CreationFailure { error, created }),
                 };
+                if !metadata.is_dir() {
+                    continue;
+                }
+                let created_id = metadata_id(&metadata);
                 match borrow_existing(&directory, created_id, handle, parent) {
                     Ok(BorrowOutcome::Borrowed) => {
                         created.push((directory, created_id));
@@ -973,6 +1067,10 @@ pub(crate) mod test_control {
     static RELEASE: OnceLock<Mutex<Receiver<()>>> = OnceLock::new();
     static TARGET: OnceLock<PathBuf> = OnceLock::new();
     static CLEANUP_ENABLED: AtomicBool = AtomicBool::new(false);
+    static COMPLETION_STARTED: OnceLock<SyncSender<()>> = OnceLock::new();
+    static COMPLETION_RELEASE: OnceLock<Mutex<Receiver<()>>> = OnceLock::new();
+    static COMPLETION_TARGET: OnceLock<PathBuf> = OnceLock::new();
+    static COMPLETION_CLEANUP_ENABLED: AtomicBool = AtomicBool::new(false);
     static PATH: PathGate = OnceLock::new();
     static PATH_ENTERED: AtomicBool = AtomicBool::new(false);
     static CREATION: PathGate = OnceLock::new();
@@ -986,12 +1084,9 @@ pub(crate) mod test_control {
     static IDENTITY: PathGate = OnceLock::new();
     static REMOVAL: PathGate = OnceLock::new();
     static REMOVAL_ENTERED: AtomicBool = AtomicBool::new(false);
-    static FILE_REMOVAL: PathGate = OnceLock::new();
-    static FILE_REMOVAL_ENTERED: AtomicBool = AtomicBool::new(false);
     static FAIL_SPAWN_TARGETS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
     static FAIL_RENAME_TARGETS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
     static FAIL_STAGING_OPEN_TARGETS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-    static FAIL_STAGING_METADATA_TARGETS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
     static FAIL_INITIAL_STAGING_METADATA_TARGETS: Mutex<BTreeSet<PathBuf>> =
         Mutex::new(BTreeSet::new());
 
@@ -1006,6 +1101,22 @@ pub(crate) mod test_control {
             .set(Mutex::new(release_rx))
             .expect("cleanup barrier installed twice");
         CLEANUP_ENABLED.store(true, Ordering::Release);
+        (started_rx, release_tx)
+    }
+
+    pub(crate) fn hold_completion_cleanup(path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        COMPLETION_TARGET
+            .set(path)
+            .expect("completion cleanup barrier installed twice");
+        COMPLETION_STARTED
+            .set(started_tx)
+            .expect("completion cleanup barrier installed twice");
+        COMPLETION_RELEASE
+            .set(Mutex::new(release_rx))
+            .expect("completion cleanup barrier installed twice");
+        COMPLETION_CLEANUP_ENABLED.store(true, Ordering::Release);
         (started_rx, release_tx)
     }
 
@@ -1038,10 +1149,6 @@ pub(crate) mod test_control {
         FAIL_STAGING_OPEN_TARGETS.lock().unwrap().insert(path);
     }
 
-    pub(crate) fn fail_staging_metadata_for(path: PathBuf) {
-        FAIL_STAGING_METADATA_TARGETS.lock().unwrap().insert(path);
-    }
-
     pub(crate) fn fail_initial_staging_metadata_for(path: PathBuf) {
         FAIL_INITIAL_STAGING_METADATA_TARGETS
             .lock()
@@ -1066,14 +1173,6 @@ pub(crate) mod test_control {
     pub(super) fn fail_staging_open(path: &std::path::Path) -> std::io::Result<()> {
         if FAIL_STAGING_OPEN_TARGETS.lock().unwrap().contains(path) {
             Err(std::io::Error::other("injected staging open failure"))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn fail_staging_metadata(path: &std::path::Path) -> std::io::Result<()> {
-        if FAIL_STAGING_METADATA_TARGETS.lock().unwrap().contains(path) {
-            Err(std::io::Error::other("injected staging metadata failure"))
         } else {
             Ok(())
         }
@@ -1157,10 +1256,6 @@ pub(crate) mod test_control {
         hold_gate(&REMOVAL, path)
     }
 
-    pub(crate) fn hold_file_removal(path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
-        hold_gate(&FILE_REMOVAL, path)
-    }
-
     fn hold_gate(gate: &'static PathGate, path: PathBuf) -> (Receiver<()>, SyncSender<()>) {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -1234,13 +1329,27 @@ pub(crate) mod test_control {
         {
             wait_at(&REMOVAL, path);
         }
-        if FILE_REMOVAL
-            .get()
-            .is_some_and(|(selected, _, _)| selected == path)
-            && !FILE_REMOVAL_ENTERED.swap(true, Ordering::AcqRel)
+    }
+
+    pub(super) fn wait_for_completion_cleanup(created_levels: &[(PathBuf, (u64, u64))]) {
+        if !COMPLETION_CLEANUP_ENABLED.load(Ordering::Acquire)
+            || !created_levels
+                .iter()
+                .any(|(path, _)| Some(path) == COMPLETION_TARGET.get())
         {
-            wait_at(&FILE_REMOVAL, path);
+            return;
         }
+        let (Some(started), Some(release)) = (COMPLETION_STARTED.get(), COMPLETION_RELEASE.get())
+        else {
+            return;
+        };
+        started.send(()).expect("report completion cleanup start");
+        release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("wait for completion cleanup release");
+        COMPLETION_CLEANUP_ENABLED.store(false, Ordering::Release);
     }
 
     pub(super) fn wait(created_levels: &[(PathBuf, (u64, u64))]) {
@@ -1300,68 +1409,31 @@ fn remove_levels_with_probe(
         .first()
         .map(|(path, _)| path.display().to_string())
         .unwrap_or_else(|| "denied paths".to_string());
-    probe
-        .run(&display, move |_| {
-            let mut failures = Vec::new();
-            let mut registry = CleanupRegistry::global()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (_path, created) in &levels {
-                registry.users.entry(*created).or_insert(1);
-            }
-            // One deadline covers the whole dependent walk. If the caller stops
-            // waiting, this worker still finishes the same ordered passes, so a late
-            // child removal is always followed by another ancestor attempt.
-            loop {
-                let mut removed = false;
-                for (path, created) in levels.iter().cloned() {
-                    if !registry.begin_remove(&path, created) {
-                        continue;
-                    }
-                    let handles = registry.removal_handles(&path, created);
-                    // Do not hold the registry across filesystem IO. The removing
-                    // mark stops another run from borrowing the object meanwhile.
-                    drop(registry);
-                    let outcome = match handles {
-                        Ok((handle, parent, registered_path)) => {
-                            let operation_path = registered_path.as_deref().unwrap_or(&path);
-                            remove_level(operation_path, created, handle, parent)
-                        }
-                        Err(error) => Err(error),
-                    };
-                    registry = CleanupRegistry::global()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match outcome {
-                        Ok(removed_now) => {
-                            registry.finish_remove(&path, created, removed_now);
-                            if removed_now {
-                                removed = true;
-                            }
-                        }
-                        Err(error) => {
-                            registry.finish_remove(&path, created, false);
-                            failures.push(error.to_string());
-                        }
-                    }
-                }
-                if !removed {
-                    break;
-                }
-            }
-            for (path, created) in &levels {
-                if registry.release_if_shared(path, *created) {
+    let (submitted, result) = probe.run_with_submission(&display, move |_| {
+        let mut failures = Vec::new();
+        let mut registry = CleanupRegistry::global()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_path, created) in &levels {
+            registry.users.entry(*created).or_insert(1);
+        }
+        // One deadline covers the whole dependent walk. If the caller stops
+        // waiting, this worker still finishes the same ordered passes, so a late
+        // child removal is always followed by another ancestor attempt.
+        loop {
+            let mut removed = false;
+            for (path, created) in levels.iter().cloned() {
+                if !registry.begin_remove(&path, created) {
                     continue;
                 }
-                if !registry.begin_remove(path, *created) {
-                    continue;
-                }
-                let handles = registry.removal_handles(path, *created);
+                let handles = registry.removal_handles(&path, created);
+                // Do not hold the registry across filesystem IO. The removing
+                // mark stops another run from borrowing the object meanwhile.
                 drop(registry);
                 let outcome = match handles {
                     Ok((handle, parent, registered_path)) => {
-                        let operation_path = registered_path.as_deref().unwrap_or(path);
-                        remove_level(operation_path, *created, handle, parent)
+                        let operation_path = registered_path.as_deref().unwrap_or(&path);
+                        remove_level(operation_path, created, handle, parent)
                     }
                     Err(error) => Err(error),
                 };
@@ -1369,23 +1441,70 @@ fn remove_levels_with_probe(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match outcome {
-                    Ok(_) => registry.finish_remove(path, *created, true),
+                    Ok(removed_now) => {
+                        registry.finish_remove(&path, created, removed_now);
+                        if removed_now {
+                            removed = true;
+                        }
+                    }
                     Err(error) => {
-                        // This exited sandbox has no later cleanup attempt. End
-                        // its ownership even on failure so the retained handle
-                        // cannot strand a shared or exclusive flock.
-                        registry.finish_remove(path, *created, true);
+                        registry.finish_remove(&path, created, false);
                         failures.push(error.to_string());
                     }
                 }
             }
-            if failures.is_empty() {
-                Ok(())
-            } else {
-                Err(failures.join("; "))
+            if !removed {
+                break;
             }
-        })
-        .and_then(std::convert::identity)
+        }
+        for (path, created) in &levels {
+            if registry.release_if_shared(path, *created) {
+                continue;
+            }
+            if !registry.begin_remove(path, *created) {
+                continue;
+            }
+            let handles = registry.removal_handles(path, *created);
+            drop(registry);
+            let outcome = match handles {
+                Ok((handle, parent, registered_path)) => {
+                    let operation_path = registered_path.as_deref().unwrap_or(path);
+                    remove_level(operation_path, *created, handle, parent)
+                }
+                Err(error) => Err(error),
+            };
+            registry = CleanupRegistry::global()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match outcome {
+                Ok(_) => registry.finish_remove(path, *created, true),
+                Err(error) => {
+                    // This exited sandbox has no later cleanup attempt. End
+                    // its ownership even on failure so the retained handle
+                    // cannot strand a shared or exclusive flock.
+                    registry.finish_remove(path, *created, true);
+                    failures.push(error.to_string());
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    });
+    let result = result.and_then(std::convert::identity);
+    if !submitted {
+        // No worker owns the clone. Release this run's registry references
+        // without filesystem IO so a later borrower can become the last user.
+        let mut registry = CleanupRegistry::global()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_path, created) in created_levels {
+            registry.release_unstarted(*created);
+        }
+    }
+    result
 }
 
 /// Shared ownership of every level created during one preparation.
@@ -1546,10 +1665,10 @@ fn remove_level(
             return false;
         }
         if metadata.is_dir() {
-            unlink_at(&parent, &quarantine_name, true).is_ok()
-        } else if metadata.is_file() && metadata.len() == 0 {
-            unlink_at(&parent, &quarantine_name, false).is_ok()
+            unlink_at(&parent, &quarantine_name).is_ok()
         } else {
+            // There is no atomic unlink that excludes a concurrent write through
+            // an existing file descriptor. Files are therefore never deleted.
             false
         }
     });

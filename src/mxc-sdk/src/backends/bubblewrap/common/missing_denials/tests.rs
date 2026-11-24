@@ -68,6 +68,7 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
     assert!(!Path::new(&overlay).exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() {
     let fixture = tempfile::tempdir().unwrap();
@@ -101,6 +102,7 @@ fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() 
     assert!(root.join("tools/missing").is_dir());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_empty_directory_the_caller_already_had_is_not_a_placeholder() {
     let fixture = tempfile::tempdir().unwrap();
@@ -144,38 +146,32 @@ fn id_of(path: &Path) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn only_the_objects_this_run_created_are_removed() {
+fn missing_file_denials_fail_closed_without_leaving_partial_levels() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
     std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("planted.json");
     let mut mounts = vec![
         mount(&grant, FsIntent::ReadWrite),
         mount(&grant.join("missing/deep"), FsIntent::Denied),
-        mount(&grant.join("planted.json"), FsIntent::Denied),
+        mount(&target, FsIntent::Denied),
     ];
-    let preparation = prepare_with_files(
+    let error = prepare_with_files(
         &mut mounts,
         &[],
-        &[grant.join("planted.json").to_str().unwrap()],
+        &[target.to_str().unwrap()],
         BwrapVersion::new(0, 5, 0),
     )
-    .unwrap();
-    assert!(grant.join("missing/deep").is_dir());
-    assert!(grant.join("planted.json").is_file());
+    .expect_err("a missing file placeholder must fail closed");
 
-    remove_levels(&preparation.created_levels);
-
-    assert!(
-        !grant.join("missing").exists(),
-        "placeholder left on the host"
-    );
-    assert!(
-        !grant.join("planted.json").exists(),
-        "empty placeholder file left on the host"
-    );
+    assert!(error.message().contains("missing file deny target"));
+    assert!(!grant.join("missing").exists());
+    assert!(!target.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn caller_content_written_into_a_placeholder_stops_the_removal() {
     let fixture = tempfile::tempdir().unwrap();
@@ -201,12 +197,14 @@ fn caller_content_written_into_a_placeholder_stops_the_removal() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn caller_bytes_written_into_a_placeholder_file_stop_the_removal() {
+fn existing_denied_file_content_is_never_a_placeholder() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
     std::fs::create_dir(&grant).unwrap();
-    let target = grant.join("missing/config.json");
+    let target = grant.join("config.json");
+    std::fs::write(&target, b"caller-owned content").unwrap();
     let mut mounts = vec![
         mount(&grant, FsIntent::ReadWrite),
         mount(&target, FsIntent::Denied),
@@ -218,19 +216,18 @@ fn caller_bytes_written_into_a_placeholder_file_stop_the_removal() {
         BwrapVersion::new(0, 5, 0),
     )
     .unwrap();
-    assert!(target.is_file());
-    std::fs::write(&target, b"caller-owned content").unwrap();
+    assert!(preparation.created_levels.is_empty());
 
     remove_levels(&preparation.created_levels);
 
     assert_eq!(
         std::fs::read(&target).unwrap(),
         b"caller-owned content",
-        "a populated placeholder file is caller content, not an empty mount point"
+        "an existing caller file must survive deny preparation and cleanup"
     );
-    assert!(target.parent().unwrap().is_dir());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_object_the_caller_replaced_is_left_alone() {
     let fixture = tempfile::tempdir().unwrap();
@@ -260,6 +257,7 @@ fn an_object_the_caller_replaced_is_left_alone() {
     assert_eq!(id_of(&grant.join("missing")), replacement);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_replacement_between_check_and_removal_is_not_deleted() {
     let fixture = tempfile::tempdir().unwrap();
@@ -287,39 +285,23 @@ fn a_replacement_between_check_and_removal_is_not_deleted() {
     assert_eq!(id_of(&target), replacement_id);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn bytes_written_between_check_and_removal_are_not_deleted() {
+fn a_missing_file_mount_point_is_rejected_before_staging() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("tools");
     std::fs::create_dir(&grant).unwrap();
     let target = grant.join("missing/config.json");
-    let mut mounts = vec![
-        mount(&grant, FsIntent::ReadWrite),
-        mount(&target, FsIntent::Denied),
-    ];
-    let preparation = prepare_with_files(
-        &mut mounts,
-        &[],
-        &[target.to_str().unwrap()],
-        BwrapVersion::new(0, 5, 0),
-    )
-    .unwrap();
-    let (checking, release) = test_control::hold_file_removal(target.clone());
-    let worker = std::thread::spawn(move || {
-        let mut preparation = preparation;
-        preparation.remove_placeholders();
-    });
-    checking
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("cleanup did not reach its file-size check");
-    std::fs::write(&target, b"written after the check").unwrap();
-    release.send(()).unwrap();
-    worker.join().unwrap();
 
-    assert_eq!(
-        std::fs::read(&target).unwrap(),
-        b"written after the check",
-        "cleanup deleted content written after its zero-length check"
+    let error = create_mount_point(&grant, &target, true)
+        .expect_err("a file that disappeared after classification must not be recreated");
+
+    assert!(error.error.to_string().contains("missing file deny target"));
+    assert!(!target.exists());
+    let remaining: Vec<_> = std::fs::read_dir(&grant).unwrap().collect();
+    assert!(
+        remaining.is_empty(),
+        "rejected file creation left staging objects: {remaining:?}"
     );
 }
 
@@ -445,6 +427,7 @@ fn writable_bind_aliases_of_private_storage_are_masked() {
     }));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
     let fixture = tempfile::tempdir().unwrap();
@@ -532,6 +515,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
         .any(|args| args[0] == "--remount-ro" && args[1] == hidden));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_denied_parent_is_not_a_host_grant_to_clean_under() {
     let fixture = tempfile::tempdir().unwrap();
@@ -587,6 +571,7 @@ fn created_placeholder(grant: &Path) -> Vec<(PathBuf, (u64, u64))> {
     vec![(path, id)]
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_abandoned_preparation_takes_its_placeholders_back() {
     let fixture = tempfile::tempdir().unwrap();
@@ -604,6 +589,7 @@ fn an_abandoned_preparation_takes_its_placeholders_back() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_disarmed_preparation_leaves_cleanup_to_the_sandbox() {
     let fixture = tempfile::tempdir().unwrap();
@@ -630,6 +616,7 @@ fn a_disarmed_preparation_leaves_cleanup_to_the_sandbox() {
     owned.remove_placeholders();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_handed_off_preparation_still_cleans_up_in_the_background() {
     let fixture = tempfile::tempdir().unwrap();
@@ -654,6 +641,7 @@ fn a_handed_off_preparation_still_cleans_up_in_the_background() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn background_handoff_retains_storage_until_cleanup_finishes() {
     let fixture = tempfile::tempdir().unwrap();
@@ -692,6 +680,7 @@ fn background_handoff_retains_storage_until_cleanup_finishes() {
     assert!(!storage_path.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn background_handoff_with_only_storage_drops_it_off_thread() {
     let storage = tempfile::tempdir().unwrap();
@@ -724,6 +713,7 @@ fn background_handoff_with_only_storage_drops_it_off_thread() {
     assert!(!storage_path.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failed_handoff_returns_storage_with_its_cleanup_owner() {
     let fixture = tempfile::tempdir().unwrap();
@@ -752,6 +742,7 @@ fn a_failed_handoff_returns_storage_with_its_cleanup_owner() {
     assert!(!storage_path.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_cleanup_thread_spawn_failure_does_not_block_the_caller() {
     let fixture = tempfile::tempdir().unwrap();
@@ -779,6 +770,7 @@ fn a_cleanup_thread_spawn_failure_does_not_block_the_caller() {
     assert!(!path.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cleanup_spawn_failures_are_tracked_per_path() {
     let first = PathBuf::from("/first-cleanup-target");
@@ -790,6 +782,7 @@ fn cleanup_spawn_failures_are_tracked_per_path() {
     assert!(test_control::take_spawn_failure(&[(second, (0, 0))]));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cleanup_spawn_failure_is_scoped_to_its_placeholder() {
     let fixture = tempfile::tempdir().unwrap();
@@ -830,6 +823,7 @@ fn cleanup_spawn_failure_is_scoped_to_its_placeholder() {
     drop(intended_preparation);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn sibling_denials_share_an_ancestor_that_is_removed_once() {
     let fixture = tempfile::tempdir().unwrap();
@@ -852,6 +846,7 @@ fn sibling_denials_share_an_ancestor_that_is_removed_once() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cleanup_uses_one_deadline_for_the_whole_walk() {
     let fixture = tempfile::tempdir().unwrap();
@@ -884,6 +879,68 @@ fn cleanup_uses_one_deadline_for_the_whole_walk() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn cleanup_submission_timeout_releases_registry_ownership() {
+    use crate::mxc_common::worker_gate::WorkerGate;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("tools");
+    std::fs::create_dir(&grant).unwrap();
+    let target = grant.join("missing");
+    let levels = create_mount_point(&grant, &target, false).unwrap();
+    let created = levels[0].1;
+    let gate = WorkerGate::new(1);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let mut blocked = FilesystemProbe::for_test_with_gate(
+        std::time::Duration::from_secs(5),
+        std::sync::Arc::clone(&gate),
+    );
+    let worker = std::thread::spawn(move || {
+        blocked
+            .run("blocked", move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the blocking probe did not start");
+
+    let result = remove_levels_with_probe(
+        &levels,
+        FilesystemProbe::for_test_with_gate(std::time::Duration::from_millis(50), gate),
+    );
+    release_tx.send(()).unwrap();
+    worker.join().unwrap();
+    assert!(
+        result.is_err(),
+        "cleanup must report its submission timeout"
+    );
+
+    let registry = CleanupRegistry::global().lock().unwrap();
+    let retained = registry.users.contains_key(&created)
+        || registry.handles.contains_key(&created)
+        || registry.parents.contains_key(&created)
+        || registry.paths.contains_key(&created)
+        || registry.removing.contains(&created);
+    drop(registry);
+    let borrowed = create_mount_point(&grant, &target, false).unwrap();
+    remove_levels(&borrowed);
+
+    assert!(
+        !retained,
+        "a cleanup job that never started retained registry ownership"
+    );
+    assert!(
+        !target.exists(),
+        "a later borrower could not become the last cleanup owner"
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn an_initial_staging_metadata_failure_rolls_back_the_staging_object() {
     let fixture = tempfile::tempdir().unwrap();
@@ -901,6 +958,7 @@ fn an_initial_staging_metadata_failure_rolls_back_the_staging_object() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_staging_directory_open_failure_rolls_back_the_staging_object() {
     let fixture = tempfile::tempdir().unwrap();
@@ -918,23 +976,7 @@ fn a_staging_directory_open_failure_rolls_back_the_staging_object() {
     );
 }
 
-#[test]
-fn a_staging_file_metadata_failure_rolls_back_the_staging_object() {
-    let fixture = tempfile::tempdir().unwrap();
-    let grant = fixture.path().join("tools");
-    std::fs::create_dir(&grant).unwrap();
-    let target = grant.join("missing");
-    test_control::fail_staging_metadata_for(target.clone());
-
-    let error = create_mount_point(&grant, &target, true).unwrap_err();
-
-    let remaining: Vec<_> = std::fs::read_dir(&grant).unwrap().collect();
-    assert!(
-        remaining.is_empty(),
-        "staging survived a metadata failure: {error:?}; remaining={remaining:?}"
-    );
-}
-
+#[cfg(target_os = "linux")]
 #[test]
 fn unsupported_directory_publication_fails_preparation_and_removes_partial_levels() {
     let fixture = tempfile::tempdir().unwrap();
@@ -958,6 +1000,7 @@ fn unsupported_directory_publication_fails_preparation_and_removes_partial_level
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn unsupported_cleanup_rename_is_reported_as_a_warning() {
     let fixture = tempfile::tempdir().unwrap();
@@ -993,6 +1036,7 @@ fn unsupported_cleanup_rename_is_reported_as_a_warning() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn two_runs_release_their_shared_ancestor_after_the_last_run() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1012,6 +1056,7 @@ fn two_runs_release_their_shared_ancestor_after_the_last_run() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn aliased_paths_retry_an_ancestor_after_its_real_children_are_removed() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1056,6 +1101,7 @@ fn aliased_paths_retry_an_ancestor_after_its_real_children_are_removed() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_level_another_process_created_is_not_recorded() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1075,6 +1121,7 @@ fn a_level_another_process_created_is_not_recorded() {
     assert_eq!(id_of(&grant.join("missing/deep")), theirs);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn identity_comes_from_the_object_created_not_a_later_path_lookup() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1117,6 +1164,7 @@ fn identity_comes_from_the_object_created_not_a_later_path_lookup() {
     assert!(target.is_dir(), "the caller's replacement was deleted");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_intermediate_symlink_swap_cannot_redirect_creation() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1151,6 +1199,7 @@ fn an_intermediate_symlink_swap_cannot_redirect_creation() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_intermediate_symlink_swap_cannot_redirect_cleanup() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1181,6 +1230,7 @@ fn an_intermediate_symlink_swap_cannot_redirect_cleanup() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_existing_ancestor_does_not_skip_missing_descendants() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1214,6 +1264,7 @@ fn an_existing_ancestor_does_not_skip_missing_descendants() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_preparation_that_fails_later_takes_its_creations_back() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1233,6 +1284,7 @@ fn a_preparation_that_fails_later_takes_its_creations_back() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failed_preparation_releases_a_shared_ancestor_too() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1263,6 +1315,7 @@ fn a_failed_preparation_releases_a_shared_ancestor_too() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_creation_guard_cleans_up_whatever_it_still_owns() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1283,6 +1336,7 @@ fn a_creation_guard_cleans_up_whatever_it_still_owns() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_stalled_creation_does_not_block_an_unrelated_grant() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1325,6 +1379,7 @@ fn a_stalled_creation_does_not_block_an_unrelated_grant() {
     assert!(!second_grant.join("missing").exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn unused_path_locks_are_reclaimed_without_replacing_live_locks() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1350,6 +1405,7 @@ fn unused_path_locks_are_reclaimed_without_replacing_live_locks() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_late_creation_result_finishes_the_failed_preparations_ancestors() {
     let fixture = tempfile::tempdir().unwrap();
