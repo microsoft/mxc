@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 # Unit tests for the row classifier in run_isolation_session_network_test.ps1. They feed it
-# synthetic wxc-exec runs, so they need no VM, no isolation session and no feature keys.
+# synthetic wxc-exec runs, so they need no VM and no isolation session.
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'run_isolation_session_network_test.ps1') -ClassifierOnly
@@ -102,6 +102,24 @@ Assert-Verdict 'reached udp where denied fails even without a host control' `
     (Get-RowVerdict -Row $e08 -Run (New-ProbeRun @{ udp = 'ANSWERED' }) -HostOk @{ udp = $false; icmp = $true; v6 = $true }) 'FAIL' 'broader'
 Assert-Verdict 'allowed icmp without a host control fails' `
     (Get-RowVerdict -Row $e09 -Run (New-ProbeRun) -HostOk @{ udp = $true; icmp = $false; v6 = $true }) 'FAIL' 'no host control'
+$e08udp = @{ Id = 'E08'; Net = $deny; Allow = @('udp') }
+$noUdp = @{ udp = $false; icmp = $true; v6 = $true }
+Assert-Verdict 'allowed udp as the only judged target without a host control is not judged' `
+    (Get-RowVerdict -Row $e08udp -Run (New-ProbeRun @{ udp = 'WSA10060' }) -HostOk $noUdp) 'UNSUPPORTED' 'not judged'
+Assert-Verdict 'allowed udp reached without a host control passes' `
+    (Get-RowVerdict -Row $e08udp -Run (New-ProbeRun @{ udp = 'ANSWERED' }) -HostOk $noUdp) 'PASS'
+Assert-Verdict 'allowed udp blocked with a host control fails' `
+    (Get-RowVerdict -Row $e08udp -Run (New-ProbeRun @{ udp = 'WSA10060' }) -HostOk $allOk) 'FAIL' 'allowed target blocked'
+Assert-Verdict 'a broader result is a FAIL, not not-judged' `
+    (Get-RowVerdict -Row $e08udp -Run (New-ProbeRun @{ external = 'CONNECTED' }) -HostOk $noUdp) 'FAIL' 'broader'
+$udpDns = @{ udp = 'WSA10060'; dns = 'RESOLVED' }
+Assert-Verdict 'allowed dns that is report-only does not make udp judged' `
+    (Get-RowVerdict -Row $e08udp -Allow @('udp', 'dns') -Run (New-ProbeRun $udpDns) -HostOk $noUdp) 'UNSUPPORTED' 'not judged'
+Assert-Verdict 'allowed dns that is required and reached is judged, so the row passes' `
+    (Get-RowVerdict -Row (@{ DnsRequired = $true } + $e08udp) -Allow @('udp', 'dns') -Run (New-ProbeRun $udpDns) -HostOk $noUdp) 'PASS'
+$a01NoUdp = $a01Reach.Clone(); $a01NoUdp['udp'] = 'WSA10060'
+Assert-Verdict 'allowed udp unjudged with another judged allowed target still passes' `
+    (Get-RowVerdict -Row $a01 -Run (New-ProbeRun $a01NoUdp) -HostOk $noUdp) 'PASS' 'udp not judged'
 
 # Fixtures and run state.
 Assert-Verdict 'fixture failure after the row fails it' `

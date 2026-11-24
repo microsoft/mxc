@@ -32,7 +32,9 @@
                    network policy. The row records the capability it needs
                    and the rejection message. A rejection-surface row that
                    another rule rejected first is also UNSUPPORTED: it was
-                   not judged. Not a failure.
+                   not judged. So is an admitted row whose only judged
+                   allowed target is udp when the host gets no UDP reply
+                   (E08). Not a failure.
       FAIL         admitted but broader than requested (a target outside the
                    request was reached), admitted but narrower (an allowed
                    target was blocked), an indeterminate probe result, an
@@ -89,11 +91,13 @@
     reaches is always judged: reached where denied fails the row. Without a
     control, a target the session does not reach is report-only where the
     row denies it; where the row allows it, icmp and v6 fail the row and udp
-    is report-only.
+    is report-only. A row whose only judged allowed target is that udp is
+    UNSUPPORTED (not judged), never PASS.
     Metadata is judged on non-reachability, so a blocked probe passes either
     way; whether the host reaches the address is recorded in the row detail.
-    E13 and E14 assert this pass's requirement that the session never
-    reaches instance metadata even when the policy allows it.
+    E13 and E14 assert this pass's requirement for deny-by-default
+    policies: a rule that allows instance metadata does not open it. Where
+    the egress default is allow, metadata is report-only.
     DNS is report-only in every restricted row: the request has no field
     that governs name resolution, so the result is recorded but never fails
     a restricted row. In the all-allow row it must resolve. The inbound path
@@ -254,7 +258,8 @@ function Get-RecordText([hashtable]$Records, [string]$Name) {
 # fails the row, and no exception below applies to it. dns is report-only unless DnsRequired is
 # set; linklocal unless LinkLocalJudged is set. A target the session reaches is always judged.
 # Without a host control ($HostOk[target] false), a target it does not reach is report-only where
-# denied; where allowed, udp is report-only and icmp and v6 are unjudgeable (FAIL).
+# denied; where allowed, udp is report-only and icmp and v6 are unjudgeable (FAIL). Get-RowVerdict
+# reports a row whose only judged allowed target is that udp as not judged.
 function Get-PostureVerdict {
     param([hashtable]$Records, [string[]]$Allow = @(), [hashtable]$HostOk = @{}, [switch]$DnsRequired,
           [switch]$LinkLocalJudged)
@@ -287,9 +292,9 @@ function Get-PostureVerdict {
 }
 
 # The metadata address is judged blocked in every row whose policy denies it (egress default deny,
-# or no egress at all), and in a row that sets MetadataBlocked: there, the request allows it and the
-# row asserts this pass's requirement that the session never reaches it. Where the egress default
-# is allow, the policy permits it, so it is report-only.
+# or no egress at all), and in a row that sets MetadataBlocked: there, a rule under a
+# deny-by-default policy allows it, and the row asserts this pass's requirement that such a rule
+# does not open it. Where the egress default is allow, the policy permits it, so it is report-only.
 function Test-LinkLocalJudged([hashtable]$Row) {
     if ($Row.MetadataBlocked) { return $true }
     $egress = if ($Row.Net -is [hashtable]) { $Row.Net['egress'] } else { $null }
@@ -346,6 +351,13 @@ function Get-RowVerdict {
         $ll = Get-RecordText $records 'linklocal'
         $llNote = if (-not $llJudged) { "linklocal=$ll (report-only: the policy allows it)" }
             elseif ($ok -and $HostLinkLocal -eq $false) { 'linklocal blocked (no host control: the host cannot reach 169.254.169.254:80)' }
+        # Allowed udp with no host control is report-only, so a row whose only judged allowed target
+        # is that udp has no evidence its allow works: it is not judged, never a PASS.
+        $udpUnjudged = $Allow -contains 'udp' -and $HostOk.ContainsKey('udp') -and -not $HostOk['udp'] -and
+            (Get-RecordText $records 'udp') -ne $Reach['udp']
+        $judgedAllow = @($Allow | Where-Object {
+            $_ -ne 'udp' -and ($_ -ne 'dns' -or $Row.DnsRequired) -and ($_ -ne 'linklocal' -or $llJudged) })
+        $notJudged = $ok -and $udpUnjudged -and $judgedAllow.Count -eq 0
         $detail = @(@($why, $llNote, $Row.Note) | Where-Object { $_ })
         if (-not $Row.DnsRequired) { $detail += "dns=$(Get-RecordText $records 'dns') (report-only)" }
         foreach ($t in @('udp', 'icmp', 'v6')) {
@@ -364,6 +376,10 @@ function Get-RowVerdict {
             }
             $counted = $(if (Test-Blocked (Get-RecordText $records 'icmp')) { 'counted as blocked' } else { 'indeterminate' })
             $detail += "icmp not judged: ping failed before sending: $reason; $counted"
+        }
+        if ($notJudged) {
+            $detail = @('not judged: its only allowed target is udp, and the host gets no UDP reply') + $detail
+            return & $v "admitted: $($pv.Actual)" 'UNSUPPORTED' ($detail -join '; ')
         }
         return & $v "admitted: $($pv.Actual)" $(if ($ok) { 'PASS' } else { 'FAIL' }) ($detail -join '; ')
     }
@@ -467,7 +483,7 @@ function Add-Row {
           [string]$Expected, [string]$Actual, [string]$Verdict, [string]$Detail = '')
     $color = switch ($Verdict) { 'PASS' { 'Green' } 'FAIL' { 'Red' } default { 'Yellow' } }
     $label = if ($Verdict -ne 'UNSUPPORTED') { $Verdict }
-        elseif ($Needs -eq '-') { 'UNSUPPORTED (not judged)' }
+        elseif ($Needs -eq '-' -or $Actual -like 'admitted*') { 'UNSUPPORTED (not judged)' }
         else { "UNSUPPORTED (needs $Needs)" }
     Write-Host ("  {0,-5} {1,-46} {2}" -f $Id, $Capability, $label) -ForegroundColor $color
     if ($Verdict -eq 'FAIL' -or $Verdict -eq 'KNOWN-GAP') {
@@ -848,9 +864,10 @@ $Matrix = @(
        Net = (DenyDefault -Allow @(Rule -Cidr $X -Protocol any -Port $ExternalPort))
        Allow = @(@('external') + @($(if ($ExternalPort -eq 53) { 'udp' }))) }
     # Every row whose policy denies 169.254.169.254:80 also judges it blocked. E13 and E14 go
-    # further: the request allows it, and the row asserts this pass's requirement that the session
-    # never reaches instance metadata whatever the policy allows. Admitted, the row passes only
-    # when 169.254.169.254:80 is blocked.
+    # further: under a deny-by-default policy, a rule allows it, and the row asserts this pass's
+    # requirement that such a rule does not open instance metadata. Admitted, the row passes only
+    # when 169.254.169.254:80 is blocked. Where the egress default is allow (A01, E05, L11), the
+    # metadata result is report-only (Test-LinkLocalJudged).
     @{ Id = 'E13'; Area = 'egress'; Cap = 'link-local metadata address never reachable'; Needs = 'egressRules'
        Net = (DenyDefault -Allow @(Rule -Cidr '169.254.0.0/16' -Protocol tcp -Port 80)); Allow = @()
        MetadataBlocked = $true }
@@ -862,7 +879,12 @@ $Matrix = @(
     @{ Id = 'E15'; Area = 'egress'; Cap = 'deny wins over a matching /32 allow'; Needs = 'egressRules'
        Net = (DenyDefault -Allow @(Rule -Cidr $X -Protocol tcp -Port $ExternalPort) `
               -Deny @(Rule -Cidr $X -Protocol tcp -Port $ExternalPort)); Allow = @() }
-    # Host loopback (PC: host loopback). Declared ports only, never all ports.
+    # Host loopback. These rows test proposed IsolationSession behavior pending #1707; they are not
+    # ProcessContainer parity rows. With hostLoopback "deny", L01-L08 and L10 expect an egress.allow
+    # rule to a loopback address to open host loopback (outbound only): the declared port, or all
+    # ports in L06 (no ports named). ProcessContainer and WSLC do not tie host loopback to egress
+    # rules. #1707 proposes a dedicated field instead, so these requests will follow whatever it
+    # settles. Only the ports a request declares open; a rule that names a port never opens all.
     @{ Id = 'L01'; Area = 'loopback'; Cap = '127.0.0.1/32 exact tcp port'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port $D)); Allow = @('declared') }
     # Two runs under one policy that declares a second port. With its host listener up, the nonce
@@ -899,6 +921,8 @@ $Matrix = @(
     @{ Id = 'P02'; Area = 'proxy'; Cap = 'networkProxy with a direct rule (invalid)'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @(Rule -Cidr $Lo -Protocol tcp -Port $D)); Rc = @{ networkProxy = $proxyUrl }
        Invalid = $true }
+    # P03 expects the proxy port to be open as a declared host port, like the host loopback rows:
+    # proposed IsolationSession behavior pending #1707, not a ProcessContainer parity row.
     @{ Id = 'P03'; Area = 'proxy'; Cap = 'networkProxy port implied (no rules)'; Needs = 'loopbackPorts'
        Net = (DenyDefault -Allow @()); Rc = @{ networkProxy = $proxyUrl }; Allow = @('declared') }
     # Rejection surface (PC: rejections). Never admitted on any build.
