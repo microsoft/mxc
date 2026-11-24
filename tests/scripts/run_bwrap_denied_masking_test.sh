@@ -83,7 +83,7 @@ FIRST_STATUS=0
 OUTPUT=$("$LXC_EXEC" --experimental \
     "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1) || FIRST_STATUS=$?
 if [ "$FIRST_STATUS" -ne 0 ] \
-    && echo "$OUTPUT" | grep -qF "requires bwrap 0.11.0 or newer" \
+    && echo "$OUTPUT" | grep -qF "requires bwrap 0.12.0 or newer" \
     && [ ! -e "$BASE/missing" ] && [ ! -e "$BASE/control_write" ]; then
     echo "PASS: older Bubblewrap rejects the missing denied path without modifying the host."
     # Continue the existing-object checks with a fixture that needs no overlay.
@@ -289,7 +289,7 @@ RW_STATUS=0
 RW_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
     --config-base64 "$(printf '%s' "$rw_config" | base64 -w0)" 2>&1) || RW_STATUS=$?
 if [ "$RW_STATUS" -ne 0 ] \
-    && echo "$RW_OUT" | grep -qF "requires bwrap 0.11.0 or newer" \
+    && echo "$RW_OUT" | grep -qF "requires bwrap 0.12.0 or newer" \
     && [ ! -e "$RWTREE/missing-file.json" ] \
     && [ ! -e "$RWTREE/kept-empty/nested" ] \
     && [ ! -e "$RWTREE/workload.txt" ]; then
@@ -331,7 +331,7 @@ BIND_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
     --config-base64 "$(printf '%s' "$bind_config" | base64 -w0)" 2>&1) || BIND_STATUS=$?
 if [ "$BIND_STATUS" -ne 0 ] \
     && { echo "$BIND_OUT" | grep -qF "same mount" \
-        || echo "$BIND_OUT" | grep -qF "requires bwrap 0.11.0 or newer"; } \
+        || echo "$BIND_OUT" | grep -qF "requires bwrap 0.12.0 or newer"; } \
     && ! echo "$BIND_OUT" | grep -qF "Invalid argument" \
     && [ ! -e "$BINDROOT/real/workload" ] \
     && [ ! -e "$BINDROOT/real/missing" ] \

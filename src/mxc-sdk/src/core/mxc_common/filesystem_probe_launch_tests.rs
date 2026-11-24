@@ -8,6 +8,12 @@ use std::sync::OnceLock;
 static INJECTION: OnceLock<(String, PathBuf)> = OnceLock::new();
 static STALLED: AtomicBool = AtomicBool::new(false);
 
+pub(crate) fn inject(stage: &str, path: PathBuf) {
+    INJECTION
+        .set((stage.to_owned(), path))
+        .expect("filesystem probe injection already configured");
+}
+
 pub(crate) fn stall(stage: &str, path: impl AsRef<Path>) {
     if INJECTION
         .get()

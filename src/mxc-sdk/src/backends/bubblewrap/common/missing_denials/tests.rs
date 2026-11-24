@@ -74,7 +74,7 @@ fn missing_targets_under_writable_grants_use_private_overlays() {
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&missing, FsIntent::Denied),
     ];
-    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
+    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0))
         .unwrap()
         .unwrap();
     let parent = mounts
@@ -140,8 +140,8 @@ fn writable_missing_denials_require_overlay_support() {
         mount(&grant, FsIntent::ReadWrite),
         mount(&missing, FsIntent::Denied),
     ];
-    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 10, 0)).unwrap_err();
-    assert!(error.message().contains("requires bwrap 0.11.0"));
+    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap_err();
+    assert!(error.message().contains("requires bwrap 0.12.0"));
     assert!(error.message().contains("read-write"));
     assert!(!missing.exists());
     assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
@@ -200,9 +200,35 @@ fn writable_storage_requires_mount_identity_not_only_device() {
             mountpoint: grant.clone(),
         },
     ];
-    let error = writable_storage(&grant, &entries).unwrap_err();
+    let error = writable_storage(&grant, &[], &entries).unwrap_err();
     assert!(error.message().contains("same mount"));
     assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn writable_storage_preparation_obeys_the_probe_deadline() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    crate::mxc_common::filesystem_probe::launch_tests::inject(
+        "bwrap-writable-storage",
+        grant.clone(),
+    );
+    let missing = grant.join("missing");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut mounts = vec![
+            mount(&grant, FsIntent::ReadWrite),
+            mount(&missing, FsIntent::Denied),
+        ];
+        let result = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0));
+        let _ = sender.send(result.map(|_| ()));
+    });
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(8))
+        .expect("writable storage preparation ignored its probe deadline");
+    let error = result.expect_err("a stalled writable storage probe must reject startup");
+    assert!(error.message().contains("timed out after 5000ms"));
 }
 
 #[test]
@@ -240,7 +266,7 @@ fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
         mount(fixture.path(), FsIntent::ReadWrite),
         mount(&target, FsIntent::Denied),
     ];
-    let _storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
+    let _storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0))
         .unwrap()
         .unwrap();
     let overlay = mounts[0].writable_overlay.as_ref().unwrap();

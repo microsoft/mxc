@@ -217,7 +217,7 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
     let shim = dir.path().join("bwrap");
     std::fs::write(
         &shim,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.12.0'; exit 0; fi\n\
          if [ -e \"$MXC_TEST_MISSING_DENIAL\" ]; then echo 'test: missing denial reached the host' >&2; exit 2; fi\n\
          echo 'test: bwrap namespace refused' >&2\nexit 1\n",
     )
@@ -918,11 +918,11 @@ fn streaming_bubblewrap_missing_denials_use_writable_overlays() {
     };
 
     let version = mxc_sdk::bwrap_common::bwrap_version::probe_bwrap().expect("Bubblewrap version");
-    if version < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 11, 0) {
+    if version < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 12, 0) {
         let error = spawn(request, Default::default())
             .map(|_| ())
             .expect_err("older Bubblewrap must reject writable overlays");
-        assert!(error.message.contains("requires bwrap 0.11.0 or newer"));
+        assert!(error.message.contains("requires bwrap 0.12.0 or newer"));
         assert!(!missing_dir.exists());
         assert!(!missing_file.exists());
         assert!(!workload.exists());

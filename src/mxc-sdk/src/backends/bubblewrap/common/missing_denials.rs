@@ -22,7 +22,7 @@ const MAX_MOUNTINFO_BYTES: usize = 1_048_576;
 const MAX_MOUNTINFO_ENTRIES: usize = 4096;
 
 #[cfg(any(target_os = "linux", test))]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MountInfoEntry {
     id: u64,
     device: (u32, u32),
@@ -157,6 +157,7 @@ fn storage_is_compatible(
 
 fn writable_storage(
     source: &Path,
+    denied_paths: &[PathBuf],
     mountinfo: &[MountInfoEntry],
 ) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
     use std::os::unix::fs::MetadataExt;
@@ -181,7 +182,7 @@ fn writable_storage(
                 ))
             })?;
             if storage_is_compatible(source, &storage, source_device, mountinfo)? {
-                return Ok((directory, storage));
+                return initialize_writable_storage(directory, storage, source, denied_paths);
             }
         }
     }
@@ -208,6 +209,34 @@ fn writable_storage(
              grant a subdirectory inside that mount instead.",
             source.display()
         )));
+    }
+    initialize_writable_storage(directory, storage, source, denied_paths)
+}
+
+fn initialize_writable_storage(
+    directory: TempDir,
+    storage: PathBuf,
+    source: &Path,
+    denied_paths: &[PathBuf],
+) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
+    let layer = storage.join("lower");
+    let workdir = storage.join("work");
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-writable-storage", source);
+    std::fs::create_dir(&workdir).map_err(|error| {
+        FilesystemPolicyError::Host(format!(
+            "Bubblewrap: could not create private overlay workdir '{}': {error}",
+            workdir.display()
+        ))
+    })?;
+    for path in denied_paths {
+        std::fs::create_dir_all(layer.join(path)).map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not prepare private mountpoint for deniedPaths entry '{}': \
+                 {error}",
+                source.join(path).display()
+            ))
+        })?;
     }
     Ok((directory, storage))
 }
@@ -304,10 +333,19 @@ pub(crate) fn prepare(
             )));
         }
     }
-    if version < BwrapVersion::new(0, 11, 0) {
+    let (minimum_version, overlay_kind) = if overlays
+        .values()
+        .any(|overlay| overlay.intent == FsIntent::ReadWrite)
+    {
+        (BwrapVersion::new(0, 12, 0), "writable")
+    } else {
+        (BwrapVersion::new(0, 11, 0), "read-only")
+    };
+    if version < minimum_version {
         return Err(FilesystemPolicyError::Host(format!(
             "Bubblewrap: missing deniedPaths entry '{}' beneath {first_intent} '{}' \
-             requires bwrap 0.11.0 or newer for private overlays; found {version}.",
+             requires bwrap {minimum_version} or newer for private {overlay_kind} overlays; \
+             found {version}.",
             Path::new(&first_destination).join(first_path).display(),
             first_destination
         )));
@@ -361,31 +399,42 @@ pub(crate) fn prepare(
             }
             FsIntent::ReadWrite => {
                 #[cfg(target_os = "linux")]
-                let (directory, storage) = writable_storage(Path::new(&source), &mountinfo)?;
+                let (directory, storage) = {
+                    let display = source.clone();
+                    let worker_source = display.clone();
+                    let worker_mountinfo = mountinfo.clone();
+                    let worker_paths = overlay.paths.clone();
+                    probe
+                        .run(&display, move |_| {
+                            writable_storage(
+                                Path::new(&worker_source),
+                                &worker_paths,
+                                &worker_mountinfo,
+                            )
+                        })
+                        .map_err(FilesystemPolicyError::Host)??
+                };
                 #[cfg(not(target_os = "linux"))]
-                let (directory, storage) = writable_storage(Path::new(&source), &[])?;
+                let (directory, storage) =
+                    writable_storage(Path::new(&source), &overlay.paths, &[])?;
                 let layer = storage.join("lower");
                 let workdir = storage.join("work");
-                std::fs::create_dir(&workdir).map_err(|error| {
-                    FilesystemPolicyError::Host(format!(
-                        "Bubblewrap: could not create private overlay workdir '{}': {error}",
-                        workdir.display()
-                    ))
-                })?;
                 directories.push(OverlayStorage::writable(directory, workdir.clone()));
                 storage_roots.push(storage);
                 (layer, Some(workdir))
             }
             FsIntent::Denied => unreachable!("denied parents are not overlay grants"),
         };
-        for path in &overlay.paths {
-            std::fs::create_dir_all(layer.join(path)).map_err(|error| {
-                FilesystemPolicyError::Host(format!(
-                    "Bubblewrap: could not prepare private mountpoint for deniedPaths \
-                     entry '{}': {error}",
-                    Path::new(&destination).join(path).display()
-                ))
-            })?;
+        if overlay.intent == FsIntent::ReadOnly {
+            for path in &overlay.paths {
+                std::fs::create_dir_all(layer.join(path)).map_err(|error| {
+                    FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: could not prepare private mountpoint for deniedPaths \
+                         entry '{}': {error}",
+                        Path::new(&destination).join(path).display()
+                    ))
+                })?;
+            }
         }
         let layer = layer.into_os_string().into_string().map_err(|_| {
             FilesystemPolicyError::Host(

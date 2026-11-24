@@ -41,10 +41,12 @@ requiring root privileges or a container runtime.
   apk add bubblewrap
   ```
   The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
-  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only or
-  read-write binds additionally require **bwrap 0.11.0+** and unprivileged
-  OverlayFS support. When an overlay is needed, execution rejects a setuid
-  `bwrap` before launch.
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
+  additionally require **bwrap 0.11.0+**. Writable overlays require
+  **bwrap 0.12.0+**, which fixes setup-time absolute-symlink traversal
+  ([GHSA-pxhw-h44j-8pfx](https://github.com/containers/bubblewrap/security/advisories/GHSA-pxhw-h44j-8pfx)).
+  Both require unprivileged OverlayFS support. When an overlay is needed,
+  execution rejects a setuid `bwrap` before launch.
   If the host kernel or source filesystem does not support unprivileged
   OverlayFS, Bubblewrap can fail with an overlay-mount error such as
   `Invalid argument`; use a kernel and filesystem that support unprivileged
@@ -401,9 +403,11 @@ parent is unwritable or on another mount. `TMPDIR` is used only when it is
 outside the grant and on the same mount; comparing device numbers alone is not
 enough for bind-mounted grants. Startup fails explicitly when neither location
 is usable, including a grant that is itself the root of a bind mount whose
-parent and `TMPDIR` are on different mounts. The private lower and workdir are
-masked at their own paths and writable bind aliases, and their temporary
-directories are retained until the sandbox exits or startup fails. Existing
+parent and `TMPDIR` are on different mounts. Writable storage inspection,
+creation, and canonicalization run under the filesystem-probe deadline so an
+unreachable mount cannot block sandbox spawning indefinitely. The private lower
+and workdir are masked at their own paths and writable bind aliases, and their
+temporary directories are retained until the sandbox exits or startup fails. Existing
 denied objects continue to be masked in place; no denied host object is created,
 claimed, moved, or deleted.
 
