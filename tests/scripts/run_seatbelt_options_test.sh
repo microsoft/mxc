@@ -14,7 +14,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 require_python3_probe
 
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-opt.XXXXXX)"
-trap 'rm -rf "$TESTDIR" "$SEATBELT_TMP"' EXIT
+# keychainAccess grants writes to the per-user temp folder under /private/var/folders.
+KC_DIR="$(mktemp -d "$(cd "$(getconf DARWIN_USER_TEMP_DIR)" && pwd -P)/mxc-seatbelt-kc.XXXXXX")"
+mkdir -p "$HOME/Library/Keychains"
+KC_FILE="$HOME/Library/Keychains/mxc-seatbelt-test.$$"
+# Outside the Keychain folders: one under each read-only parent, one outside every grant.
+KC_HOME_SIBLING="$HOME/Library/mxc-seatbelt-kc-sibling.$$"
+KC_VAR_SIBLING="/private/var/tmp/mxc-seatbelt-kc-sibling.$$"
+KC_OUTSIDE="$TESTDIR/kc-outside.txt"
+trap 'rm -rf "$TESTDIR" "$KC_DIR" "$KC_FILE" "$KC_HOME_SIBLING" "$KC_VAR_SIBLING" "$SEATBELT_TMP"' EXIT
 mkdir -p "$TESTDIR/denied"
 echo "OPT_SECRET_CONTENT" >"$TESTDIR/denied/secret.txt"
 chmod -R a+rX "$TESTDIR"
@@ -37,6 +45,16 @@ expect_absent "without extraMachLookups the uid does not resolve to a name" "$(i
 run_config "$(render seatbelt_opt_mach_lookup_present.json)"
 expect_ok "extraMachLookups reaches opendirectoryd" "$(id -un)"
 
+# V1 extraMachLookups entries reach the Keychain servers without
+# keychainAccess, while the default ui.clipboard deny still wins.
+run_config "$(render seatbelt_opt_mach_lookup_settings.json)"
+expect_ok "extraMachLookups reaches SecurityServer without keychainAccess" \
+    "com.apple.SecurityServer=ALLOWED"
+expect_ok "extraMachLookups reaches com.apple.securityd.* without keychainAccess" \
+    "com.apple.securityd.xpc=ALLOWED"
+expect_ok "ui.clipboard still blocks an extraMachLookups pasteboard entry" \
+    "com.apple.pasteboard.1=BLOCKED"
+
 # keychainAccess: HOME must be set either way, or Security.framework fails for
 # an unrelated reason and both halves look identical.
 run_config "$(render seatbelt_opt_keychain_off.json HOME "$HOME")"
@@ -44,6 +62,34 @@ expect_ok "keychainAccess defaults to denying the Keychain" "KEYCHAIN_BLOCKED"
 
 run_config "$(render seatbelt_opt_keychain_on.json HOME "$HOME")"
 expect_ok "keychainAccess=true reaches the Keychain" "KEYCHAIN_OK"
+
+# A read-only parent folder doesn't block keychainAccess's folder grants, but
+# a readonlyPaths entry at a granted folder still applies. Files outside the
+# Keychain folders catch a fix that grants the whole parent instead.
+run_kc_overlap() {
+    local target="$1" readonly="$2" sibling="$3"
+    echo "KC_ORIGINAL" >"$sibling"
+    echo "KC_ORIGINAL" >"$KC_OUTSIDE"
+    run_config "$(render seatbelt_opt_keychain_readonly_overlap.json HOME "$HOME" \
+        TARGET "$target" READONLY "$readonly" SIBLING "$sibling" OUTSIDE "$KC_OUTSIDE")"
+    expect_ok "read-only $readonly: a file beside the Keychain folders can't be written" \
+        "SIBLING_WRITE_BLOCKED"
+    expect_ok "read-only $readonly: a file outside every grant can't be read" \
+        "OUTSIDE_READ_BLOCKED"
+    expect_absent "read-only $readonly: the outside file's content doesn't leak" "KC_ORIGINAL"
+    expect_ok "read-only $readonly: a file outside every grant can't be written" \
+        "OUTSIDE_WRITE_BLOCKED"
+    [ "$(cat "$sibling")" = "KC_ORIGINAL" ] && [ "$(cat "$KC_OUTSIDE")" = "KC_ORIGINAL" ] ||
+        fail "read-only $readonly: files outside the Keychain folders are unchanged" "$OUT"
+    pass "read-only $readonly: files outside the Keychain folders are unchanged"
+}
+
+run_kc_overlap "$KC_FILE" "$HOME" "$KC_HOME_SIBLING"
+expect_ok "a read-only home folder keeps ~/Library/Keychains writable" "KC_FOLDER_WRITE_OK"
+run_kc_overlap "$KC_DIR/file.txt" /private/var "$KC_VAR_SIBLING"
+expect_ok "a read-only parent keeps keychainAccess folders writable" "KC_FOLDER_WRITE_OK"
+run_kc_overlap "$KC_DIR/file.txt" /private/var/folders "$KC_HOME_SIBLING"
+expect_ok "a read-only entry at a keychainAccess folder stays read-only" "KC_FOLDER_WRITE_BLOCKED"
 
 # profileOverride replaces generation outright, so filesystem policy in the
 # same config is ignored -- including a deniedPaths entry, which is the
@@ -102,9 +148,13 @@ pass "keychainAccess grants the user keychain directory"
 
 run_config "$(render seatbelt_opt_keychain_off.json HOME "$HOME")" --debug
 KC_OFF="$(extract "$OUT")"
-grep -qF 'com.apple.SecurityServer' <<<"$KC_OFF" &&
-    fail "the Keychain services must be absent without keychainAccess" "$KC_OFF"
+grep -qF 'keychainAccess: ' <<<"$KC_OFF" &&
+    fail "the Keychain grants must be absent without keychainAccess" "$KC_OFF"
 pass "the Keychain grants are absent without keychainAccess"
+DENY="$(tr '\n' ' ' <<<"$KC_OFF" | sed 's/  */ /g')"
+grep -qF '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name-prefix "com.apple.securityd")' <<<"$DENY" ||
+    fail "the Keychain servers are denied without keychainAccess" "$KC_OFF"
+pass "the Keychain servers are denied without keychainAccess"
 
 # extraMachLookups is passed through verbatim, so every listed service must
 # appear and nothing else may be added alongside them.

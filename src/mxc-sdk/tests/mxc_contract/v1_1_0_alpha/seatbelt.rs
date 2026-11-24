@@ -217,6 +217,7 @@ fn accepts_seatbelt_capture_denials() {
 fn rejects_invalid_seatbelt_capture_denials() {
     for body in [
         r#"true"#,
+        r#"["allow"]"#,
         r#"{"mode": "audit"}"#,
         r#"{"outputPath": 1}"#,
         r#"{"retainEtl": "yes"}"#,
@@ -225,6 +226,62 @@ fn rejects_invalid_seatbelt_capture_denials() {
             r#"{{
                 "version": "1.1.0-alpha",
                 "seatbelt": {{"captureDenials": {body}}},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_invalid(&json);
+    }
+}
+
+#[test]
+fn accepts_seatbelt_custom_rules() {
+    for body in [
+        r#""customIoKits": {}"#,
+        r#""customIoKits": {"default": "deny", "allow": ["AGXDeviceUserClient", "IOSurface*"], "deny": []}"#,
+        r#""customMachLookups": {"default": "allow", "deny": ["com.example.*"]}"#,
+        r#""customMachRegisters": {}"#,
+        r#""customMachRegisters": {"global": {"allow": ["com.example.a"]}, "local": {"default": "allow"}}"#,
+        r#""customPosixShm": {}"#,
+        r#""customPosixShm": {"default": "deny", "read": ["apple.shm.*"], "readWrite": ["/app.rw"], "own": ["/app.*"], "deny": ["/app.secret"]}"#,
+        r#""customPosixShm": {"default": "readWrite", "create": ["/app.c*"]}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "seatbelt": {{{body}}},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_valid(&json);
+    }
+}
+
+#[test]
+fn rejects_invalid_seatbelt_custom_rules() {
+    for body in [
+        r#""customIoKits": true"#,
+        r#""customIoKits": ["allow"]"#,
+        r#""customMachLookups": ["allow"]"#,
+        r#""customMachRegisters": [{"default": "allow"}]"#,
+        r#""customMachRegisters": {"global": ["allow"]}"#,
+        r#""customMachRegisters": {"local": ["allow"]}"#,
+        r#""customPosixShm": ["own"]"#,
+        r#""customIoKits": {"default": "audit"}"#,
+        r#""customMachLookups": {"allow": "com.example.a"}"#,
+        r#""customMachLookups": {"extra": []}"#,
+        r#""customMachRegisters": {"global": {"default": "allow"}, "session": {}}"#,
+        r#""customMachRegisters": {"default": "allow"}"#,
+        r#""customPosixShm": true"#,
+        r#""customPosixShm": {"allow": ["/app"]}"#,
+        r#""customPosixShm": {"readWrite": "/app"}"#,
+        r#""customPosixShm": {"default": "allow"}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "seatbelt": {{{body}}},
                 "process": {{"commandLine": "echo"}}
             }}"#
         );

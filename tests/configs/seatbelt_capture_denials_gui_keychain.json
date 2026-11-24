@@ -1,0 +1,22 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "security list-keychains > /dev/null 2>&1 && echo KEYCHAIN_OK || echo KEYCHAIN_BLOCKED",
+        "timeout": 20000,
+        "env": [
+            "HOME={{HOME}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true,
+        "captureDenials": {
+            "mode": "allow",
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}

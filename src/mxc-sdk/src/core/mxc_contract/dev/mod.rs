@@ -246,8 +246,9 @@ pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, Lifecycle, Lxc, Process,
     ProcessContainer, ProcessContainerCapability, ProcessContainerFilesystem,
     ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation,
-    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, SeatbeltCaptureDenials, Telemetry,
-    Ui, UiClipboard,
+    ProcessContainerUiSystemSettings, RuntimeConfig, Seatbelt, SeatbeltCaptureDenials,
+    SeatbeltCustomDefault, SeatbeltCustomMachRegisters, SeatbeltCustomPosixShm,
+    SeatbeltCustomRules, SeatbeltPosixShmAccess, Telemetry, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

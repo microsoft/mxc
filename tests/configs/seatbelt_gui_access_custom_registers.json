@@ -1,0 +1,34 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "id -un || true",
+        "timeout": 20000
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "guiAccess": true,
+        "customIoKits": {
+            "allow": [
+                "AGXDeviceUserClient",
+                "IOSurface*"
+            ],
+            "deny": [
+                "AppleUSB*"
+            ]
+        },
+        "customMachRegisters": {
+            "global": {
+                "allow": [
+                    "com.example.mxc.*"
+                ]
+            },
+            "local": {
+                "default": "allow"
+            }
+        }
+    }
+}

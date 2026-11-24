@@ -58,7 +58,8 @@ struct Cli {
     log_file: Option<String>,
 
     /// Run with seatbelt.captureDenials in allow mode: default-denied
-    /// operations are allowed and recorded.
+    /// operations, including blocks from settings the config leaves out (such
+    /// as keychainAccess or ui.clipboard), are allowed and recorded.
     #[arg(long)]
     audit: bool,
 }

@@ -1,0 +1,22 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 {{TESTDIR}}/app/shm.py {{SHM}} </dev/null",
+        "timeout": 30000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{TESTDIR}}/app"
+        ]
+    },
+    "seatbelt": {
+        "customPosixShm": {
+            "default": "own"
+        },
+        "captureDenials": {
+            "outputPath": "{{OUTPUT}}"
+        }
+    }
+}
