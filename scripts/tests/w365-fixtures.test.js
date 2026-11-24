@@ -199,13 +199,20 @@ test("Unix fixture discovery requires the host-output regression", () => {
 test("Windows workspace suites preserve release features and run independently of packaging", () => {
   const tests = readFileSync(join(root, ".github", "workflows", "Test.Windows.Job.yml"), "utf8");
   const builds = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const shared = readFileSync(join(root, ".github", "workflows", "Build.Windows.Shared.Job.yml"), "utf8");
   const matrix = (text) => [...text.matchAll(
     /- arch: (\S+)\r?\n +runner: (\S+)\r?\n +target: (\S+)\r?\n(?: +#.*\r?\n)* +features: ([^\r\n]+)/g
   )].map(([, arch, runner, target, features]) => ({ arch, runner, target, features }));
   assert.equal(matrix(tests).length, 2);
   assert.deepEqual(matrix(tests), matrix(builds));
+  assert.deepEqual(matrix(tests), matrix(shared));
   assert.match(tests, /MXC_W365_TEST_OPENSSL=\$openssl/);
-  assert.match(tests, /Force hyperlight-host rebuild/);
+  assert.match(shared, /Force hyperlight-host rebuild/);
+  for (const consumer of [tests, builds]) {
+    assert.match(consumer, /name: windows-build-snapshot-\$\{\{ matrix.target \}\}/);
+    assert.match(consumer, /cargo-build-snapshot\.ps1 -Mode Restore/);
+    assert.doesNotMatch(consumer, /cargo clean/);
+  }
   const commands = [...tests.matchAll(
     /      - name: (Build|Build module lifetime regression fixture|Test)\r?\n        run: ([\s\S]*?)(?=\r?\n\r?\n|$)/g
   )].map(([, name, command]) => [name, command.replace(/\s+/g, " ").trim()]);
@@ -222,8 +229,9 @@ test("Windows workspace suites preserve release features and run independently o
     const text = readFileSync(join(root, ".github", "workflows", entry), "utf8");
     const caller = text.match(/^  windows-workspace-tests:\r?\n((?:    [^\r\n]*(?:\r?\n|$))+)/m);
     assert.ok(caller, `${entry} must run both Windows workspace suites`);
-    assert.match(caller[1], /needs: dependency-feed-check/);
+    assert.match(caller[1], /needs: windows-build/);
     assert.match(caller[1], /uses: \.\/\.github\/workflows\/Test\.Windows\.Job\.yml/);
     assert.doesNotMatch(text, /needs:[^\r\n]*windows-workspace-tests/);
+    assert.match(text, /windows-build:\r?\n +needs: dependency-feed-check\r?\n +uses: \.\/\.github\/workflows\/Build\.Windows\.Shared\.Job\.yml/);
   }
 });

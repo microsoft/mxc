@@ -21,8 +21,15 @@ does not depend on it. See the [fixture coverage and required-check rollout
 instructions](ci-validation-infrastructure.md#offline-tls-fixtures).
 
 Windows release workspace suites run independently through
-`Test.Windows.Job.yml` on native x64 and ARM64 hosts. Each lane builds the same
-executor and sidecars, builds the module-lifetime example, and runs the full
+`Test.Windows.Job.yml` on native x64 and ARM64 hosts. `Build.Windows.Shared.Job.yml`
+first builds the production executor and sidecars once per architecture.
+Artifact validation and workspace tests download that same-run Cargo snapshot,
+including source timestamps and build-script outputs, so compatible compilation
+can be reused rather than repeated. Snapshots are kept for one day.
+Make `windows-build / Shared Windows build` a required status check when
+rolling out shared compilation, so failed producers block merging even when
+their consumers cannot start.
+Each workspace lane builds the module-lifetime example and runs the full
 unfiltered workspace tests with its existing release features. The suites
 retain their release W365 cases as well as the separate debug fixture coverage.
 Packaging does not wait for workspace tests; make
@@ -30,6 +37,12 @@ Packaging does not wait for workspace tests; make
 before merging the job extraction. The NVX module-lifetime gate follows its
 example into the workspace suite. The existing Windows build checks retain
 their focused telemetry, filesystem-probe, NVX artifact, and package validation.
+
+Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check snapshot
+reuse locally. The regression builds a small crate with a build script,
+deletes its output, changes its source timestamp to simulate a fresh checkout,
+restores the snapshot, and requires Cargo to reuse the existing compilation.
+Repository-consistency CI runs the same check.
 
 Windows builds first run host-only regression checks for loopback command
 quoting and native-process output capture. These verify direct and

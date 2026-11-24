@@ -102,7 +102,7 @@ jobs:
         run: node --test scripts/tests/build-rs-inputs.test.js
 
       - name: Test W365 fixture CI wiring and result gates
-        run: node --test scripts/tests/w365-fixtures.test.js
+        run: node --test scripts/tests/w365-fixtures.test.js scripts/tests/cargo-build-snapshot.test.js
 
       - name: Check C# bindings codegen (regenerates and asserts entry points)
         run: node scripts/check-dotnet-bindings-codegen.js

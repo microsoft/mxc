@@ -38,12 +38,16 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Lint.Job.yml
 
-  windows:
+  windows-build:
     needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Shared.Job.yml
+
+  windows:
+    needs: windows-build
     uses: ./.github/workflows/Build.Windows.Job.yml
 
   windows-workspace-tests:
-    needs: dependency-feed-check
+    needs: windows-build
     uses: ./.github/workflows/Test.Windows.Job.yml
 
   linux:
