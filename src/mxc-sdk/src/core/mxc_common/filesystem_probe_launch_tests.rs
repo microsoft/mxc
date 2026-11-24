@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 static INJECTION: OnceLock<(String, PathBuf)> = OnceLock::new();
 static STALLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "linux")]
 pub(crate) fn inject(stage: &str, path: PathBuf) {
     INJECTION
         .set((stage.to_owned(), path))

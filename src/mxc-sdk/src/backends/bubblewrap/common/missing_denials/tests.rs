@@ -226,6 +226,7 @@ fn writable_storage_requires_mount_identity_not_only_device() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn writable_storage_preparation_obeys_the_probe_deadline() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("grant");
