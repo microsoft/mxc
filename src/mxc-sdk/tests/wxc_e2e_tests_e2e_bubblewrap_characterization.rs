@@ -572,3 +572,39 @@ print("IO_URING_ERRNOS=" + json.dumps(errors))"#,
         println!("{name}: host errno {}, sandbox ENOSYS", host_errors[name]);
     }
 }
+
+/// Locks in that SIGHUP, SIGINT and SIGTERM reach the workload.
+///
+/// `lxc-exec` blocks all three for its cleanup watchdog, and a blocked signal
+/// survives `fork` and `execve`. Unless the spawn undoes that, the workload
+/// never receives them, so Ctrl-C, `kill` and `timeout(1)` cannot stop it and
+/// its `trap`s for them never run.
+#[test]
+fn bubblewrap_workload_receives_termination_signals() {
+    if !ready() {
+        return;
+    }
+    // The shell signals itself, so delivery happens before `kill` returns and
+    // nothing races. A trap rather than the default action, because the shell
+    // may be PID 1 in its namespace, where unhandled signals are discarded.
+    let result = run_platform_config_value(
+        "bwrap signals",
+        &config(
+            "signals",
+            "for sig in HUP INT TERM; do \
+                 trap \"echo CAUGHT_$sig\" \"$sig\"; \
+                 kill -s \"$sig\" $$; \
+             done",
+        ),
+        &[],
+        None,
+    );
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let out = result.combined_output();
+    for sig in ["HUP", "INT", "TERM"] {
+        assert!(
+            out.lines().any(|line| line == format!("CAUGHT_{sig}")),
+            "SIG{sig} sent to the workload never reached its trap. Output:\n{out}"
+        );
+    }
+}

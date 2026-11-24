@@ -14,6 +14,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod termination_signals_contract;
 mod unix_pty_contract;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -163,6 +164,29 @@ fn lxc_pty_transfers_native_stdio() {
         LIVE_TIMEOUT_MS,
     ));
     assert_container_released(&name);
+}
+
+#[test]
+fn streaming_lxc_delivers_termination_signals_despite_host_mask() {
+    if !lxc_ready() {
+        return;
+    }
+    let _guard = exclusive();
+    // Named in the child process, which is the one that creates the container.
+    let name = container_name("termination-signals");
+    let ran_here = termination_signals_contract::assert_delivered_despite_host_mask(
+        "streaming_lxc_delivers_termination_signals_despite_host_mask",
+        || {
+            lxc_request(
+                termination_signals_contract::COMMAND,
+                &name,
+                LIVE_TIMEOUT_MS,
+            )
+        },
+    );
+    if ran_here {
+        assert_container_released(&name);
+    }
 }
 
 #[test]

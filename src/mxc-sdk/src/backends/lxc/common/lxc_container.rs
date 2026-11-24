@@ -3,8 +3,7 @@
 
 #[cfg(target_os = "linux")]
 use super::{
-    build_attach_args_with_env_control, joined_capture, read_to_end_on_thread,
-    unblock_fatal_signals, wait_for_drain,
+    build_attach_args_with_env_control, joined_capture, read_to_end_on_thread, wait_for_drain,
 };
 use super::{resolve_default_lxcpath, StartNetwork, MANAGED_MOUNTS_BEGIN, MANAGED_MOUNTS_END};
 
@@ -569,7 +568,7 @@ impl LxcContainer {
             cmd.args(network.to_start_args(self.configured_interface_count()));
 
             #[cfg(target_os = "linux")]
-            unblock_fatal_signals(&mut cmd);
+            crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
             #[cfg(target_os = "linux")]
             {
@@ -642,11 +641,8 @@ impl LxcContainer {
         force_clear_env: bool,
         timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
-        use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
-
-        // This process blocks these for its cleanup watchdog; left blocked, the
-        // inner shell would ignore Ctrl-C.
-        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
+        use crate::mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
 
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
@@ -657,7 +653,8 @@ impl LxcContainer {
         ));
 
         let options = PtyOptions {
-            unblock_signals: UNBLOCK,
+            // Left blocked, the inner shell would ignore Ctrl-C.
+            unblock_signals: TERMINATION_SIGNALS,
             timeout,
             ..PtyOptions::default()
         };
@@ -713,7 +710,7 @@ impl LxcContainer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        unblock_fatal_signals(&mut cmd);
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         let mut child = cmd
             .spawn()
@@ -780,9 +777,6 @@ impl LxcContainer {
 
     /// Launch a command in the container on pipes the caller owns, and hand
     /// back the handle without waiting for it.
-    ///
-    /// The child's signal mask is left alone: in a host application it belongs
-    /// to the application, not to `lxc-exec`'s watchdog.
     #[cfg(target_os = "linux")]
     pub fn attach_spawn(
         &self,
@@ -797,6 +791,7 @@ impl LxcContainer {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::mxc_common::termination_signals::unblock_in_child(&mut cmd);
 
         cmd.spawn()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))
@@ -812,12 +807,10 @@ impl LxcContainer {
         force_clear_env: bool,
         size: crate::mxc_pty::PtySize,
     ) -> Result<(std::process::Child, crate::mxc_pty::LivePty), String> {
-        use crate::mxc_pty::Signal;
-
-        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
+        use crate::mxc_common::termination_signals::TERMINATION_SIGNALS;
 
         let mut cmd = self.attach_command(command, working_directory, env, force_clear_env);
-        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
+        let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, TERMINATION_SIGNALS)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
             .spawn()

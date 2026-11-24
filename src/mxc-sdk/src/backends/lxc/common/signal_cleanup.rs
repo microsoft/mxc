@@ -42,6 +42,8 @@ use crate::lxc_common::network_iptables::CreatedResources;
 use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 #[cfg(target_os = "linux")]
 use crate::mxc_common::logger::{Logger, Mode};
+#[cfg(target_os = "linux")]
+use crate::mxc_common::termination_signals;
 
 #[derive(Default)]
 struct ActiveSandbox {
@@ -233,10 +235,10 @@ fn read_startup_output(file: std::fs::File) -> Vec<u8> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Result<Output, String> {
-    use crate::lxc_common::lxc_bindings::unblock_fatal_signals;
     use std::os::unix::process::CommandExt;
 
     let tool = command.get_program().to_string_lossy().into_owned();
+    termination_signals::unblock_in_child(&mut command);
     if !watchdog_installed() {
         return command
             .output()
@@ -250,7 +252,6 @@ pub(crate) fn run_startup_tool(mut command: Command, timeout: Duration) -> Resul
         .stdin(Stdio::null())
         .stdout(stdout.try_clone().map_err(|error| error.to_string())?)
         .stderr(stderr.try_clone().map_err(|error| error.to_string())?);
-    unblock_fatal_signals(&mut command);
     let deadline = Instant::now() + timeout.min(startup_time_remaining().unwrap_or(timeout));
     {
         let mut slot = lock_slot();
@@ -702,15 +703,15 @@ fn clear_active() {
 /// `pthread_sigmask` changes only the calling thread's mask, and new threads
 /// inherit their creator's mask.  Call this before spawning any thread that
 /// should leave signal delivery to the watchdog.
+///
+/// Child processes inherit the mask as well; spawns undo it with
+/// [`termination_signals::unblock_in_child`].
 #[cfg(target_os = "linux")]
 pub fn install() -> Result<(), String> {
     if watchdog_installed() {
         return Ok(());
     }
-    let mut mask = SigSet::empty();
-    mask.add(Signal::SIGHUP);
-    mask.add(Signal::SIGTERM);
-    mask.add(Signal::SIGINT);
+    let mask = termination_signals::mask();
     mask.thread_block()
         .map_err(|e| format!("pthread_sigmask: {}", e))?;
 
@@ -1001,5 +1002,44 @@ mod tests {
              it, so taking the ownership record would aim the removal at whichever LXC \
              container registered last"
         );
+    }
+
+    /// A library host that blocks the termination signals itself must not
+    /// pass them on blocked to startup tools such as the address-reservation
+    /// shell.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_tools_run_with_the_hosts_blocked_signals_unblocked() {
+        let _watchdog = Watchdog::uninstalled();
+
+        struct Restore(SigSet);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = self.0.thread_set_mask();
+            }
+        }
+        let _restore = Restore(
+            termination_signals::mask()
+                .thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK)
+                .expect("block the termination signals"),
+        );
+
+        let mut command = Command::new("cat");
+        command.arg("/proc/self/status");
+        let output = run_startup_tool(command, Duration::from_secs(10)).expect("run cat");
+        assert!(output.status.success(), "{}", output.status);
+        let status = String::from_utf8(output.stdout).expect("utf-8");
+        let blocked = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigBlk:"))
+            .map(|hex| u64::from_str_radix(hex.trim(), 16).expect("hex signal set"))
+            .unwrap_or_else(|| panic!("SigBlk missing from:\n{status}"));
+        for signal in termination_signals::TERMINATION_SIGNALS {
+            assert_eq!(
+                blocked & (1u64 << (*signal as u32 - 1)),
+                0,
+                "{signal} still blocked in the startup tool"
+            );
+        }
     }
 }

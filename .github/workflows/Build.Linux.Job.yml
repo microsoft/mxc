@@ -239,7 +239,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in wxc_e2e_tests_e2e_lxc_network_capability wxc_e2e_tests_e2e_lxc_static_network; do
+          for name in wxc_e2e_tests_e2e_lxc_network_capability wxc_e2e_tests_e2e_lxc_static_network streaming_lxc; do
             payload="$(cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --test "$name" --no-run --message-format=json |
               python3 -c 'import json,sys; items=[json.loads(line) for line in sys.stdin]; paths=[m["executable"] for m in items if m.get("reason")=="compiler-artifact" and m["target"]["name"]==sys.argv[1] and m["profile"]["test"] and m.get("executable")]; assert len(paths)==1, paths; print(paths[0])' "$name")"
@@ -389,5 +389,6 @@ jobs:
             src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests
             src/target/${{ matrix.target }}/release/wxc_e2e_tests_e2e_lxc_network_capability
             src/target/${{ matrix.target }}/release/wxc_e2e_tests_e2e_lxc_static_network
+            src/target/${{ matrix.target }}/release/streaming_lxc
           if-no-files-found: error
           retention-days: 1
