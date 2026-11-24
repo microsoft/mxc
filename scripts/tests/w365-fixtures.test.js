@@ -400,6 +400,20 @@ test("shared Windows builds and every consumer select the same pinned linker bef
   }
 });
 
+test("Windows .NET native builds select pinned LLVM without changing validation commands", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "SDK.Dotnet.Test.Job.yml"), "utf8");
+  const setup = workflow.indexOf("uses: actions-rust-lang/setup-rust-toolchain@");
+  const linker = workflow.indexOf("name: Select the pinned Windows Rust linker");
+  const build = workflow.indexOf("name: Build .NET SDK\n");
+  assert.ok(setup >= 0 && linker > setup && build > linker);
+  assert.match(workflow.slice(linker, build), /if: matrix.os_label == 'windows'\r?\n +uses: \.\/\.github\/actions\/setup-windows-linker\r?\n +with:\r?\n +target: x86_64-pc-windows-msvc/);
+  assert.match(workflow, /run: dotnet build Microsoft\.Mxc\.Sdk\.slnx\r?\n/);
+  assert.match(workflow, /run: dotnet build Microsoft\.Mxc\.Sdk\.slnx -p:MxcWithWslc=true -p:MxcWithIsolationSession=true/);
+  assert.equal((workflow.match(/foreach \(\$framework in @\('net8\.0', 'net10\.0'\)\)/g) || []).length, 4);
+  assert.match(workflow, /dotnet publish Microsoft\.Mxc\.Sdk\.AotSmokeTest -c Release -f \$framework/);
+  assert.match(workflow, /test-dotnet-package\.ps1/);
+});
+
 test("cached Windows Hyperlight producers regenerate surrogate assets after restore and before build", () => {
   for (const [file, buildName] of [
     ["Build.Windows.Shared.Job.yml", "Build"],

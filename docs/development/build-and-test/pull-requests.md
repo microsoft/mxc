@@ -211,6 +211,10 @@ The .NET SDK job builds and tests both frameworks on Windows, Linux, and macOS.
 The Linux LXC and Bubblewrap regression checks and Windows optional-backend
 checks run separately for each framework and reject empty test selections.
 It installs the pinned Rust toolchain before building either framework.
+On Windows, its native Cargo builds use that toolchain's LLVM linker, as
+the shipping and workspace jobs do. Default and optional-backend builds,
+both test frameworks, Native AOT publishing, and package validation retain
+their existing configurations and test selections.
 It publishes and runs the reflection-free JSON Native AOT smoke test for
 both .NET 8 and .NET 10, then packs the SDK and installs it into separate
 temporary .NET 8 and .NET 10 applications outside the checkout. Each application
