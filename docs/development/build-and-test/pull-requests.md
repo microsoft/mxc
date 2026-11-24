@@ -26,6 +26,10 @@ first builds the production executor and sidecars once per architecture.
 Artifact validation and workspace tests download that same-run Cargo snapshot,
 including source timestamps and build-script outputs, so compatible compilation
 can be reused rather than repeated. Snapshots are kept for one day.
+Version-resource build scripts also watch Git HEAD and its referenced ref.
+Snapshots record hashes and timestamps for those inputs, not their contents.
+Restore rejects mismatched Git inputs and restores timestamps only after
+checking the existing files, without replacing Git references or configuration.
 Make `windows-build / Shared Windows build` a required status check when
 rolling out shared compilation, so failed producers block merging even when
 their consumers cannot start.
@@ -41,7 +45,9 @@ their focused telemetry, filesystem-probe, NVX artifact, and package validation.
 Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check snapshot
 reuse locally. The regression builds a small crate with a build script,
 deletes its output, changes its source timestamp to simulate a fresh checkout,
-restores the snapshot, and requires Cargo to reuse the existing compilation.
+changes Git HEAD's timestamp, restores the snapshot, and requires Cargo to
+reuse the existing compilation. It also checks that a mismatched checkout is
+rejected without overwriting its Git references.
 Repository-consistency CI runs the same check.
 
 Windows builds first run host-only regression checks for loopback command
