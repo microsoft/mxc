@@ -350,7 +350,11 @@ backend-specific config block is needed.
 ### Process environment
 
 The host environment is never inherited — the sandbox is built with
-`--clearenv`, so host secrets can't leak into untrusted code.
+`--clearenv`, so host secrets can't leak into untrusted code. `bwrap` itself is
+also started with an empty environment, so the host environment can't be read
+from `/proc/<pid>/environ` (for example `/proc/1/environ`) inside the sandbox.
+The command's environment is passed to `bwrap` as `--clearenv` and `--setenv`
+arguments.
 
 **From schema 0.9** the child gets a default block of `PATH`
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `TERM`
