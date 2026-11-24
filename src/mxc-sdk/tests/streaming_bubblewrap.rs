@@ -917,6 +917,19 @@ fn streaming_bubblewrap_missing_denials_use_writable_overlays() {
         ))
     };
 
+    let version = mxc_sdk::bwrap_common::bwrap_version::probe_bwrap().expect("Bubblewrap version");
+    if version < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 11, 0) {
+        let error = spawn(request, Default::default())
+            .map(|_| ())
+            .expect_err("older Bubblewrap must reject writable overlays");
+        assert!(error.message.contains("requires bwrap 0.11.0 or newer"));
+        assert!(!missing_dir.exists());
+        assert!(!missing_file.exists());
+        assert!(!workload.exists());
+        assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+        return;
+    }
+
     let mut process = spawn(request, Default::default()).expect("spawn writable overlay");
     let outcome = process.wait().expect("wait");
     drop(process);

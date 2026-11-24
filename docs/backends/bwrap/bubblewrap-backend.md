@@ -50,9 +50,9 @@ requiring root privileges or a container runtime.
   `Invalid argument`; use a kernel and filesystem that support unprivileged
   OverlayFS. A missing denied target beneath a source with nested host mounts is
   rejected before launch because the overlay cannot preserve those mounts.
-  A writable overlay also needs private workdir storage outside and on the same
-  filesystem as its grant; the executor tries the grant's parent and then
-  `TMPDIR`. Platform detection probes `bwrap --version`
+  A writable overlay also needs private workdir storage outside the upper layer
+  and on the same mount as its grant; the executor tries the grant's parent and
+  then `TMPDIR`. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -395,15 +395,17 @@ the subsequent masks operate on the overlay view without creating those paths
 on the host. Ordinary writes copy up to the host grant and remain after exit.
 
 The overlay workdir stays outside the grant's upper layer because OverlayFS
-requires an empty workdir on the same filesystem as the upper. The executor
-first tries a private directory beside the grant, then one under `TMPDIR` when
-the parent is unwritable or on another filesystem. `TMPDIR` is used only when it
-is outside the grant and on the same filesystem. Startup fails explicitly when
-neither location is usable. The private lower and workdir are masked at their
-own paths and writable bind aliases, and their temporary directories are
-retained until the sandbox exits or startup fails. Existing denied objects
-continue to be masked in place; no denied host object is created, claimed,
-moved, or deleted.
+requires an empty workdir on the same mount as the upper. The executor first
+tries a private directory beside the grant, then one under `TMPDIR` when the
+parent is unwritable or on another mount. `TMPDIR` is used only when it is
+outside the grant and on the same mount; comparing device numbers alone is not
+enough for bind-mounted grants. Startup fails explicitly when neither location
+is usable, including a grant that is itself the root of a bind mount whose
+parent and `TMPDIR` are on different mounts. The private lower and workdir are
+masked at their own paths and writable bind aliases, and their temporary
+directories are retained until the sandbox exits or startup fails. Existing
+denied objects continue to be masked in place; no denied host object is created,
+claimed, moved, or deleted.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

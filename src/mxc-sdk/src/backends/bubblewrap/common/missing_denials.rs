@@ -24,6 +24,7 @@ const MAX_MOUNTINFO_ENTRIES: usize = 4096;
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 struct MountInfoEntry {
+    id: u64,
     device: (u32, u32),
     root: PathBuf,
     mountpoint: PathBuf,
@@ -119,7 +120,45 @@ impl Drop for OverlayStorage {
     }
 }
 
-fn writable_storage(source: &Path) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
+fn same_mount(source: &Path, storage: &Path, entries: &[MountInfoEntry]) -> bool {
+    if entries.is_empty() {
+        return cfg!(not(target_os = "linux"));
+    }
+    let Some(source_mount) = containing_mount(source, entries) else {
+        return false;
+    };
+    let Some(storage_mount) = containing_mount(storage, entries) else {
+        return false;
+    };
+    source_mount.id == storage_mount.id
+}
+
+fn storage_is_compatible(
+    source: &Path,
+    storage: &Path,
+    source_device: u64,
+    mountinfo: &[MountInfoEntry],
+) -> Result<bool, FilesystemPolicyError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if storage.starts_with(source) || source.starts_with(storage) {
+        return Ok(false);
+    }
+    let device = std::fs::metadata(storage)
+        .map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not inspect private overlay storage '{}': {error}",
+                storage.display()
+            ))
+        })?
+        .dev();
+    Ok(device == source_device && same_mount(source, storage, mountinfo))
+}
+
+fn writable_storage(
+    source: &Path,
+    mountinfo: &[MountInfoEntry],
+) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
     use std::os::unix::fs::MetadataExt;
 
     let source_device = std::fs::metadata(source)
@@ -141,23 +180,14 @@ fn writable_storage(source: &Path) -> Result<(TempDir, PathBuf), FilesystemPolic
                     source.display()
                 ))
             })?;
-            if std::fs::metadata(&storage)
-                .map_err(|error| {
-                    FilesystemPolicyError::Host(format!(
-                        "Bubblewrap: could not inspect private overlay storage '{}': {error}",
-                        storage.display()
-                    ))
-                })?
-                .dev()
-                == source_device
-            {
+            if storage_is_compatible(source, &storage, source_device, mountinfo)? {
                 return Ok((directory, storage));
             }
         }
     }
 
-    // A writable grant does not imply a writable parent. TMPDIR is safe only
-    // when it is outside both the upper and lower layers on the same filesystem.
+    // A writable grant does not imply a writable parent. Both upperdir and
+    // workdir must be on the same mount, not merely the same device.
     let directory = tempfile::tempdir().map_err(|error| {
         FilesystemPolicyError::Host(format!(
             "Bubblewrap: could not create private overlay storage in TMPDIR for '{}': {error}",
@@ -170,21 +200,12 @@ fn writable_storage(source: &Path) -> Result<(TempDir, PathBuf), FilesystemPolic
             source.display()
         ))
     })?;
-    let compatible = !storage.starts_with(source)
-        && !source.starts_with(&storage)
-        && std::fs::metadata(&storage)
-            .map_err(|error| {
-                FilesystemPolicyError::Host(format!(
-                    "Bubblewrap: could not inspect private overlay storage '{}': {error}",
-                    storage.display()
-                ))
-            })?
-            .dev()
-            == source_device;
-    if !compatible {
+    if !storage_is_compatible(source, &storage, source_device, mountinfo)? {
         return Err(FilesystemPolicyError::Host(format!(
             "Bubblewrap: cannot prepare writable overlay storage for '{}': neither its parent \
-             nor TMPDIR provides a writable directory outside the grant on the same filesystem.",
+             nor TMPDIR provides a writable directory outside the grant on the same mount and \
+             filesystem. Bind-mounted grants at a mount root cannot use their parent or TMPDIR; \
+             grant a subdirectory inside that mount instead.",
             source.display()
         )));
     }
@@ -339,7 +360,10 @@ pub(crate) fn prepare(
                 (storage.join(index.to_string()), None)
             }
             FsIntent::ReadWrite => {
-                let (directory, storage) = writable_storage(Path::new(&source))?;
+                #[cfg(target_os = "linux")]
+                let (directory, storage) = writable_storage(Path::new(&source), &mountinfo)?;
+                #[cfg(not(target_os = "linux"))]
+                let (directory, storage) = writable_storage(Path::new(&source), &[])?;
                 let layer = storage.join("lower");
                 let workdir = storage.join("work");
                 std::fs::create_dir(&workdir).map_err(|error| {
@@ -524,6 +548,12 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
             ));
         }
         entries.push(MountInfoEntry {
+            id: fields[0].parse::<u64>().map_err(|_| {
+                format!(
+                    "mount information entry {} has an invalid mount identifier",
+                    index + 1
+                )
+            })?,
             device,
             root,
             mountpoint,
@@ -568,17 +598,21 @@ fn nested_mountpoint<'a>(source: &Path, entries: &'a [MountInfoEntry]) -> Option
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn mount_aliases(path: &Path, entries: &[MountInfoEntry]) -> Result<BTreeSet<PathBuf>, String> {
-    let containing = entries
+fn containing_mount<'a>(path: &Path, entries: &'a [MountInfoEntry]) -> Option<&'a MountInfoEntry> {
+    entries
         .iter()
         .filter(|entry| path.starts_with(&entry.mountpoint))
         .max_by_key(|entry| entry.mountpoint.components().count())
-        .ok_or_else(|| {
-            format!(
-                "private temporary storage '{}' is not listed in mount information",
-                path.display()
-            )
-        })?;
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn mount_aliases(path: &Path, entries: &[MountInfoEntry]) -> Result<BTreeSet<PathBuf>, String> {
+    let containing = containing_mount(path, entries).ok_or_else(|| {
+        format!(
+            "private temporary storage '{}' is not listed in mount information",
+            path.display()
+        )
+    })?;
     let root = containing
         .root
         .join(path.strip_prefix(&containing.mountpoint).map_err(|error| {

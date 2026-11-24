@@ -182,6 +182,30 @@ fn mountinfo_decodes_nested_mountpoints() {
 }
 
 #[test]
+fn writable_storage_requires_mount_identity_not_only_device() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let entries = vec![
+        MountInfoEntry {
+            id: 1,
+            device: (8, 1),
+            root: PathBuf::from("/"),
+            mountpoint: PathBuf::from("/"),
+        },
+        MountInfoEntry {
+            id: 2,
+            device: (8, 1),
+            root: PathBuf::from("/real"),
+            mountpoint: grant.clone(),
+        },
+    ];
+    let error = writable_storage(&grant, &entries).unwrap_err();
+    assert!(error.message().contains("same mount"));
+    assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn malformed_or_oversized_mountinfo_is_rejected() {
     assert!(parse_mountinfo("not mount information").is_err());
     assert!(parse_mountinfo("1 0 8:1 /bad\\999 / rw - ext4 /dev/root rw").is_err());
