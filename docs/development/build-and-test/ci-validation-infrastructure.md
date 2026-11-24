@@ -273,7 +273,10 @@ discoverable, and missing prerequisites fail the job.
 Reservation activation coverage delays DHCP confirmation past three probes,
 requires eventual workload execution, and rejects persistent address or lease
 duration mismatches within the activation deadline. PR LXC E2E failures also
-upload the recent `lxc-net` and dnsmasq journals.
+upload the recent `lxc-net` and dnsmasq journals. While one reservation keeps
+receiving a wrong lease duration, the regression requires another container to
+reserve an address, run its workload, and release its reservation without
+waiting for the first reservation's activation deadline.
 
 Bubblewrap's build and scheduled validation run
 `run_bwrap_capabilities_test.sh` as both root and an unprivileged user. The

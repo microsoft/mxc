@@ -25,6 +25,30 @@ fail()
     exit 1
 }
 
+monotonic_seconds()
+{
+    IFS=' ' read -r uptime idle < /proc/uptime
+    printf '%s\n' "${uptime%%.*}"
+}
+
+# Leave room for timeout escalation before the executor's 60-second startup deadline.
+operation_deadline=$(($(monotonic_seconds) + 55))
+
+time_remaining()
+{
+    now=$(monotonic_seconds)
+    remaining=$((operation_deadline - now))
+    test "$remaining" -gt 0 ||
+        fail "LXC address reservation exceeded its 55s operation budget"
+    printf '%s\n' "$remaining"
+}
+
+wait_for_lock()
+{
+    remaining=$(time_remaining) || return 1
+    flock -x -w "$remaining" "$1" || fail "Timed out waiting for $2"
+}
+
 case "$config" in
     *'
 '*) fail "LXC reservation config paths must not contain a newline" ;;
@@ -46,9 +70,18 @@ protect_directory()
 
 test "$(id -u)" = 0 || fail "LXC address reservation requires root"
 protect_directory "$state"
+protect_directory "$state/locks"
+test ! -L "$state/locks/$identity" ||
+    fail "LXC container reservation lock must not be a symbolic link"
+# Keep lock files after release so existing waiters retain the same lock inode.
+exec 8>"$state/locks/$identity"
+wait_for_lock 8 "the container's LXC address reservation lock"
+if [ "$action" = release ] && [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
+    exit 0
+fi
 test ! -L "$state/lock" || fail "LXC reservation lock must not be a symbolic link"
 exec 9>"$state/lock"
-flock -x -w 30 9 || fail "Timed out waiting for the LXC address reservation lock"
+wait_for_lock 9 "the LXC address reservation lock"
 protect_directory "$reservations"
 
 USE_LXC_BRIDGE=true
@@ -261,7 +294,11 @@ if [ "$server_config" != "$LXC_DHCP_CONFILE" ] ||
     initialization_state=restart_pending
 
     # Main dnsmasq configuration is not reloaded by SIGHUP.
-    timeout --foreground --signal=TERM --kill-after=2 30 systemctl restart lxc-net ||
+    restart_limit=$(time_remaining)
+    if [ "$restart_limit" -gt 30 ]; then
+        restart_limit=30
+    fi
+    timeout --foreground --signal=TERM --kill-after=2 "$restart_limit" systemctl restart lxc-net ||
         fail "Failed to enable the LXC reservation directory in local lxc-net"
     server=$(
         server_config=$LXC_DHCP_CONFILE
@@ -338,21 +375,20 @@ ip link set dev "$veth_peer" up
 
 acquire()
 {
+    limit=${1:-30}
+    remaining=$(time_remaining) || return 1
+    if [ "$limit" -gt "$remaining" ]; then
+        limit=$remaining
+    fi
     # Leave the finite lease active while the reservation is being installed.
-    if ! timeout --foreground --signal=TERM --kill-after=2 "${1:-30}" busybox udhcpc \
+    if ! timeout --foreground --signal=TERM --kill-after=2 "$limit" busybox udhcpc \
         -i "$veth_peer" -f -q -n -t 3 -T 2 -a -B -O search \
         -s "$directory/dhcp-event.sh" > "$directory/client.log" 2>&1 ||
         ! test -s "$directory/address"; then
         cat "$directory/client.log" >&2
-        echo "Failed to acquire an LXC address from local lxc-net (limit ${1:-30}s)" >&2
+        echo "Failed to acquire an LXC address from local lxc-net (limit ${limit}s)" >&2
         return 1
     fi
-}
-
-monotonic_seconds()
-{
-    IFS=' ' read -r uptime idle < /proc/uptime
-    printf '%s\n' "${uptime%%.*}"
 }
 
 acquire
@@ -391,8 +427,13 @@ chmod 644 "$pending_file"
 mv -f -- "$pending_file" "$reservation"
 pending_file=
 server=$(server_pid)
+# Verification is private to this reservation; keep its lock, not the global lock.
+flock -u 9
 now=$(monotonic_seconds)
 activation_deadline=$((now + 30))
+if [ "$activation_deadline" -gt "$operation_deadline" ]; then
+    activation_deadline=$operation_deadline
+fi
 attempt=0
 
 while :; do

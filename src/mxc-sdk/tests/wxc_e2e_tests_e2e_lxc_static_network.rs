@@ -157,22 +157,29 @@ fn address_reservation_retries_activation_without_accepting_mismatches() {
             .expect("fixture name")
             .to_str()
             .expect("UTF-8 fixture name");
-        let definition = format!("/var/lib/lxc/{name}/config");
-        assert!(
-            !std::path::Path::new(&definition).exists(),
-            "fixture would overwrite an existing container: {name}"
-        );
+        let peer_name = format!("{name}-peer");
+        let containers: Vec<_> = std::iter::once(name)
+            .chain((mode == "wrong-lease").then_some(peer_name.as_str()))
+            .collect();
+        for name in &containers {
+            assert!(
+                !std::path::Path::new(&format!("/var/lib/lxc/{name}/config")).exists(),
+                "fixture would overwrite an existing container: {name}"
+            );
+        }
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let created = Command::new("/usr/bin/timeout")
-                .args(["--kill-after=1", "120", "lxc-create"])
-                .args([
-                    "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
-                    LXC_ARCH,
-                ])
-                .output()
-                .expect("create addressless container");
-            assert!(created.status.success(), "create fixture: {created:?}");
+            for name in &containers {
+                let created = Command::new("/usr/bin/timeout")
+                    .args(["--kill-after=1", "120", "lxc-create"])
+                    .args([
+                        "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
+                        LXC_ARCH,
+                    ])
+                    .output()
+                    .expect("create addressless container");
+                assert!(created.status.success(), "create fixture: {created:?}");
+            }
 
             let located = Command::new("sh")
                 .args(["-c", "command -v busybox"])
@@ -221,6 +228,7 @@ if [ "$count" -gt 1 ]; then
         wrong-address) printf '192.0.2.1/24\n' > "$directory/address" ;;
         *) echo "Unknown reservation fixture mode" >&2; exit 97 ;;
     esac
+    : > "$MXC_E2E_FIXTURE/activation-started"
 fi
 "#,
             )
@@ -243,7 +251,7 @@ fi
             let mut command = Command::new("/usr/bin/timeout");
             command
                 .args(["--foreground", "--signal=INT", "--kill-after=125", "90"])
-                .arg(executor)
+                .arg(&executor)
                 .arg("--config-base64")
                 .arg(STANDARD.encode(config.to_string()))
                 .env("MXC_E2E_FIXTURE", &directory)
@@ -274,9 +282,66 @@ fi
                 });
             }
             let started = Instant::now();
-            let status = command
-                .status()
-                .expect("run reservation activation fixture");
+            let status = std::thread::scope(|scope| {
+                let peer = (mode == "wrong-lease").then(|| {
+                    scope.spawn(|| {
+                        let waiting = Instant::now();
+                        while !directory
+                            .join("activation-started")
+                            .try_exists()
+                            .expect("observe primary activation")
+                        {
+                            assert!(
+                                waiting.elapsed() < Duration::from_secs(15),
+                                "primary reservation did not reach activation\n{}",
+                                fs::read_to_string(&output_path)
+                                    .expect("read primary executor diagnostics")
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+
+                        let mut peer_config = config.clone();
+                        peer_config["containerId"] = json!(peer_name);
+                        peer_config["process"]["commandLine"] =
+                            json!("echo MXC_RESERVATION_PEER_RAN");
+                        peer_config["lifecycle"]["destroyOnExit"] = json!(true);
+                        let peer_output_path = directory.join("peer-output");
+                        let peer_output =
+                            fs::File::create(&peer_output_path).expect("capture peer output");
+                        let peer_started = Instant::now();
+                        let peer_status = Command::new("/usr/bin/timeout")
+                            .args(["--foreground", "--signal=INT", "--kill-after=125", "15"])
+                            .arg(&executor)
+                            .arg("--config-base64")
+                            .arg(STANDARD.encode(peer_config.to_string()))
+                            .stdin(Stdio::null())
+                            .stdout(peer_output.try_clone().expect("capture peer stdout"))
+                            .stderr(peer_output)
+                            .status()
+                            .expect("run concurrent reservation and release");
+                        let diagnostics =
+                            fs::read_to_string(peer_output_path).expect("read peer output");
+                        assert!(
+                            peer_status.success()
+                                && diagnostics.contains("MXC_RESERVATION_PEER_RAN")
+                                && peer_started.elapsed() < Duration::from_secs(15)
+                                && !std::path::Path::new(&format!(
+                                    "/var/lib/lxc/{peer_name}/config"
+                                ))
+                                .exists(),
+                            "an unrelated container must reserve, run, and release while the \
+                             primary activation keeps retrying: {peer_status:?}\n{diagnostics}"
+                        );
+                    })
+                });
+                let status = command
+                    .status()
+                    .expect("run reservation activation fixture");
+                if let Some(peer) = peer {
+                    peer.join().expect("concurrent reservation fixture failed");
+                }
+                status
+            });
             let elapsed = started.elapsed();
             let diagnostics = fs::read_to_string(&output_path).expect("read executor output");
             let acquisitions: u32 = fs::read_to_string(directory.join("acquisitions"))
@@ -317,22 +382,34 @@ fi
             }
         }));
 
-        let destroyed = Command::new("/usr/bin/timeout")
-            .args(["--kill-after=1", "120", "lxc-destroy", "-n", name, "-f"])
-            .output()
-            .expect("remove reservation fixture container");
-        let released = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(include_str!(
-                "../src/backends/lxc/common/reserve-address.sh"
-            ))
-            .args(["mxc-lxc-address", "release", &definition])
-            .output()
-            .expect("release fixture reservation");
+        let mut cleanup_errors = Vec::new();
+        for name in containers {
+            let definition = format!("/var/lib/lxc/{name}/config");
+            if std::path::Path::new(&definition).exists() {
+                let destroyed = Command::new("/usr/bin/timeout")
+                    .args(["--kill-after=1", "120", "lxc-destroy", "-n", name, "-f"])
+                    .output()
+                    .expect("remove reservation fixture container");
+                if !destroyed.status.success() {
+                    cleanup_errors.push(format!("destroy {name}: {destroyed:?}"));
+                }
+            }
+            let released = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(include_str!(
+                    "../src/backends/lxc/common/reserve-address.sh"
+                ))
+                .args(["mxc-lxc-address", "release", &definition])
+                .output()
+                .expect("release fixture reservation");
+            if !released.status.success() {
+                cleanup_errors.push(format!("release {name}: {released:?}"));
+            }
+        }
         outcome.expect("reservation activation fixture failed");
         assert!(
-            destroyed.status.success() && released.status.success(),
-            "reservation fixture cleanup failed: container={destroyed:?}, reservation={released:?}"
+            cleanup_errors.is_empty(),
+            "reservation fixture cleanup failed: {cleanup_errors:?}"
         );
     }
 }
