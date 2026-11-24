@@ -52,6 +52,10 @@ The Windows release workspace suites also execute their existing W365 cases.
 Those suites run in `Test.Windows.Job.yml`, independently of artifact
 production, while the standalone fixture workflow retains the complete debug
 suite including fresh-executor cases.
+The workspace suites restore compiled external dependencies from a separate
+per-architecture cache before restoring the same-run production snapshot.
+This retains dependency variants used only by tests or minimal-feature checks
+between runs, without changing their features, profiles, or test selection.
 
 GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
