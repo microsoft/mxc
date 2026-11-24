@@ -69,8 +69,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src -> target
-          key: ${{ matrix.target }}-v2
-          cache-targets: false
+          key: windows-validation-${{ matrix.target }}-v1
+          cache-targets: true
           cache-on-failure: false
 
       - name: Download shared Windows build
