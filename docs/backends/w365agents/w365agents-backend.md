@@ -286,6 +286,8 @@ binary I/O, backpressure, timeouts and cleanup against loopback TLS services.
 The fixture services accept IPv4 and IPv6 loopback connections at the same
 port, with certificate and hostname verification enabled for both.
 It needs no live tenant. Separate .NET and Node fixtures cover Dev JSON APIs.
+The Node fixture also verifies TLS on both loopback families before running
+its lifecycle and execution scenarios, using one port and shared handlers.
 For CI hosts and job wiring, see the
 [validation runbook](../../development/build-and-test/ci-validation-infrastructure.md#offline-tls-fixtures).
 

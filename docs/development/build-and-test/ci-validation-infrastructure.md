@@ -61,6 +61,11 @@ The Rust fixture services listen on both IPv4 and IPv6 loopback at the same
 port. This avoids a refused-address retry when `localhost` resolves to the
 other family. A required TLS regression sends an HTTP request through each
 family while retaining certificate and hostname verification.
+The Node Dev JSON fixture also binds both loopback families on one port and
+verifies a trusted TLS request through each before exercising the SDK.
+Both listeners share the same service handlers and are closed after the test;
+port collisions retry with a new pair, up to ten attempts. Existing lifecycle,
+streaming, timeout, and response-count assertions remain unchanged.
 
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and
