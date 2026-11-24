@@ -353,16 +353,17 @@ test("Windows consumers retain compiled dependencies under separate test-variant
   }
 });
 
-test("shared Windows builds and every consumer select the same pinned linker before caching", () => {
+test("shared Windows builds and every consumer retain the MSVC target's default linker", () => {
   for (const name of ["Build.Windows.Shared.Job.yml", "Build.Windows.Fixtures.Job.yml", "Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
     const workflow = readFileSync(join(root, ".github", "workflows", name), "utf8");
     const jobs = name === "Build.Windows.Job.yml"
       ? workflow.split("\n  telemetry-component-check:") : [workflow];
     for (const job of jobs) {
-      const setup = job.indexOf("uses: ./.github/actions/setup-windows-linker");
+      const setup = job.indexOf("uses: actions-rust-lang/setup-rust-toolchain@");
       const cache = job.indexOf("uses: Swatinem/rust-cache");
-      assert.ok(setup >= 0 && cache > setup, `${name} must configure its linker before cache selection`);
-      assert.match(job.slice(setup), /target: \$\{\{ matrix.target \}\}/);
+      assert.ok(setup >= 0 && cache > setup, `${name} must install the pinned toolchain before cache selection`);
+      assert.doesNotMatch(job, /setup-windows-linker|rust-lld|lld-link|CARGO_TARGET_[A-Z0-9_]+_LINKER/);
+      assert.match(job, /target: (?:x86_64|aarch64)-pc-windows-msvc/);
     }
   }
 });

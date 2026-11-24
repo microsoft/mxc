@@ -81,18 +81,17 @@ rejected without overwriting its Git references or source files, and that
 archive corruption is rejected before extraction.
 Repository-consistency CI runs the same check.
 
-The shared Windows build, artifact validation, workspace tests, and telemetry
-component jobs select `rust-lld.exe` from the toolchain pinned in
-`src/rust-toolchain.toml`. The job-scoped
-`CARGO_TARGET_<TRIPLE>_LINKER` setting is applied before cache selection and
-matches between the producer and consumers. Optimization, debug information,
-features, and test selection retain their existing settings.
+The shared Windows build, module-lifetime fixture builds, artifact validation,
+workspace tests, and telemetry component jobs use the MSVC target's default
+`link.exe` selected by the Rust toolchain pinned in `src/rust-toolchain.toml`.
+Producer and consumer jobs retain the same linker selection. Optimization,
+debug information, features, and test selection retain their existing settings.
 
 Both shared-build hosts run `node --test scripts/tests/windows-linker.test.js`
 before the workspace build. It links an optimized DLL and executable for the
 selected architecture, calls an exported function through the DLL's import
-library, requires PDBs for both outputs, and verifies that setup uses the pinned
-toolchain even when invoked from the repository root.
+library, requires PDBs for both outputs, and verifies that both linker
+invocations use MSVC rather than LLVM.
 
 Windows builds first run host-only regression checks for loopback command
 quoting and native-process output capture. These verify direct and

@@ -58,11 +58,6 @@ jobs:
           rustflags: ''
           cache: false
 
-      - name: Select the pinned Windows Rust linker
-        uses: ./.github/actions/setup-windows-linker
-        with:
-          target: ${{ matrix.target }}
-
       - name: Point cargo at the MxcDependencies feed
         uses: ./.github/actions/setup-cargo-feed
 
@@ -234,11 +229,6 @@ jobs:
 
       - name: Point cargo at the MxcDependencies feed
         uses: ./.github/actions/setup-cargo-feed
-
-      - name: Select the pinned Windows Rust linker
-        uses: ./.github/actions/setup-windows-linker
-        with:
-          target: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

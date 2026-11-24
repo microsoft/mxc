@@ -37,11 +37,6 @@ jobs:
           rustflags: ''
           cache: false
 
-      - name: Select the pinned Windows Rust linker
-        uses: ./.github/actions/setup-windows-linker
-        with:
-          target: ${{ matrix.target }}
-
       - name: Test Windows linker DLL interoperability and debug symbols
         working-directory: ${{ github.workspace }}
         env:
