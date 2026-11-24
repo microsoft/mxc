@@ -41,15 +41,18 @@ requiring root privileges or a container runtime.
   apk add bubblewrap
   ```
   The baseline uses `--ro-bind-try`, `--clearenv` and `--seccomp FD`:
-  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only binds
-  additionally require **bwrap 0.11.0+** and unprivileged OverlayFS support.
-  When an overlay is needed, execution rejects a setuid `bwrap` before launch.
+  **bwrap 0.5.0+** is required. Missing deny targets beneath read-only or
+  read-write binds additionally require **bwrap 0.11.0+** and unprivileged
+  OverlayFS support. When an overlay is needed, execution rejects a setuid
+  `bwrap` before launch.
   If the host kernel or source filesystem does not support unprivileged
   OverlayFS, Bubblewrap can fail with an overlay-mount error such as
   `Invalid argument`; use a kernel and filesystem that support unprivileged
-  OverlayFS. A missing denied target beneath a read-only source with nested
-  host mounts is rejected before launch because the overlay cannot preserve
-  those mounts. Platform detection probes `bwrap --version`
+  OverlayFS. A missing denied target beneath a source with nested host mounts is
+  rejected before launch because the overlay cannot preserve those mounts.
+  A writable overlay also needs private workdir storage outside and on the same
+  filesystem as its grant; the executor tries the grant's parent and then
+  `TMPDIR`. Platform detection probes `bwrap --version`
   and reports the backend as unavailable — with the detected version — when
   the host is below that floor. The probe has a 5-second deadline and retains
   at most 64 KB from each output stream. On timeout, its process group is
@@ -361,7 +364,7 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
-| `readwritePaths` | `--bind <real path> <real path>` | Read-write bind mount (overrides base RO) |
+| `readwritePaths` | `--bind` or `--overlay` | Read-write; a private lower layer supplies missing deny mountpoints while ordinary writes reach the host upper |
 | `readonlyPaths` | `--ro-bind` or `--ro-overlay` | Read-only; private missing deny mountpoints require `TMPDIR` outside the source |
 | `deniedPaths` (directory or missing path) | `--tmpfs <real path>`, then `--remount-ro <real path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <real path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
@@ -378,20 +381,29 @@ When a missing denied path needs a private overlay, the executor masks the
 overlay backing directory at its normal path and at any writable bind-mount
 alias found in `/proc/self/mountinfo`. The mount list is read with the
 filesystem-probe deadline and bounded to 1 MiB and 4096 entries; startup fails
-closed if it cannot be read or parsed. If the read-only source contains a
-nested host mount, startup also fails before the workload starts rather than
-exposing the directory underneath that mount.
+closed if it cannot be read or parsed. If the source contains a nested host
+mount, startup also fails before the workload starts rather than exposing the
+directory underneath that mount.
 
-**A missing denied path under a writable grant leaves nothing behind.** A
-read-write grant is bound from the host as it is, so bwrap needs a real mount
-point inside the caller's directory for its deny mask. Without preparation,
-bwrap creates that mount point and never removes it: a denied directory would
-come back as an empty directory, and a denied file masked with `/dev/null` as an
-empty file. The executor therefore rejects a missing denied path beneath a
-read-write grant before launching the workload. Removing a host-visible
-placeholder cannot be made atomic with respect to replacement, newly written
-content, open file descriptors, and pathname recreation, so no host placeholder
-is created or claimed. Existing denied objects continue to be masked in place.
+**A missing denied path under a writable grant leaves nothing behind.** Without
+preparation, bwrap creates a real mount point inside the caller's directory for
+its deny mask and never removes it: a denied directory comes back as an empty
+directory, and a denied file masked with `/dev/null` as an empty file. The
+executor instead mounts a writable overlay whose upper layer is the caller's
+grant. A private lower layer supplies only the missing denied mountpoints, so
+the subsequent masks operate on the overlay view without creating those paths
+on the host. Ordinary writes copy up to the host grant and remain after exit.
+
+The overlay workdir stays outside the grant's upper layer because OverlayFS
+requires an empty workdir on the same filesystem as the upper. The executor
+first tries a private directory beside the grant, then one under `TMPDIR` when
+the parent is unwritable or on another filesystem. `TMPDIR` is used only when it
+is outside the grant and on the same filesystem. Startup fails explicitly when
+neither location is usable. The private lower and workdir are masked at their
+own paths and writable bind aliases, and their temporary directories are
+retained until the sandbox exits or startup fails. Existing denied objects
+continue to be masked in place; no denied host object is created, claimed,
+moved, or deleted.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

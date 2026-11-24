@@ -888,7 +888,7 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
-    _deny_mountpoints: Option<tempfile::TempDir>,
+    _deny_mountpoints: Option<Vec<missing_denials::OverlayStorage>>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -1632,7 +1632,7 @@ mod tests {
     }
 
     fn exited_process(
-        deny_mountpoints: Option<tempfile::TempDir>,
+        deny_mountpoints: Option<Vec<missing_denials::OverlayStorage>>,
         monitor: Option<ProviderMonitor>,
         child: Arc<Mutex<Child>>,
     ) -> BubblewrapSandboxProcess {

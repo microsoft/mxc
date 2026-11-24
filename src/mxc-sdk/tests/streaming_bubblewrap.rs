@@ -200,8 +200,8 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
                 "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
             );
             assert!(
-                denied.is_dir(),
-                "post-preparation startup failure removed an existing denied directory (pty={pty})"
+                !denied.exists(),
+                "post-preparation startup failure created a host denied path (pty={pty})"
             );
         }
         return;
@@ -213,13 +213,12 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
 
     let missing_fixture = tempfile::tempdir().expect("missing-denial fixture");
     let denied = missing_fixture.path().join("missing/deep");
-    std::fs::create_dir_all(&denied).expect("create existing denied directory");
     let dir = tempfile::tempdir().expect("shim directory");
     let shim = dir.path().join("bwrap");
     std::fs::write(
         &shim,
         "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
-         if [ ! -d \"$MXC_TEST_MISSING_DENIAL\" ]; then echo 'test: missing denial was not prepared' >&2; exit 2; fi\n\
+         if [ -e \"$MXC_TEST_MISSING_DENIAL\" ]; then echo 'test: missing denial reached the host' >&2; exit 2; fi\n\
          echo 'test: bwrap namespace refused' >&2\nexit 1\n",
     )
     .expect("write bwrap shim");
@@ -248,8 +247,8 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        denied.is_dir(),
-        "startup failure fixture removed an existing denied directory"
+        !denied.exists(),
+        "startup failure fixture created a host denied path"
     );
 }
 
@@ -885,17 +884,19 @@ fn streaming_bubblewrap_kill_reaps_the_child() {
 }
 
 #[test]
-fn streaming_bubblewrap_rejects_missing_denials_under_writable_grants() {
+fn streaming_bubblewrap_missing_denials_use_writable_overlays() {
     if !bwrap_available() {
         return;
     }
-    let fixture = tempfile::tempdir().expect("missing-denial rejection fixture");
-    let missing_dir = fixture.path().join("missing-dir");
-    let missing_file = fixture.path().join("missing-file.json");
-    let workload = fixture.path().join("workload-ran");
+    let fixture = tempfile::tempdir().expect("writable overlay fixture");
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).expect("create writable grant");
+    let missing_dir = grant.join("missing-dir");
+    let missing_file = grant.join("missing-file.json");
+    let workload = grant.join("workload-ran");
     let request = ContainerRequest {
         filesystem: Some(FilesystemPolicy {
-            readwrite_paths: vec![fixture.path().to_str().unwrap().to_string()],
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
             readonly_paths: vec![],
             denied_paths: vec![
                 missing_dir.to_str().unwrap().to_string(),
@@ -904,20 +905,30 @@ fn streaming_bubblewrap_rejects_missing_denials_under_writable_grants() {
             clear_policy_on_exit: None,
         }),
         timeout_ms: Some(5_000),
-        ..ContainerRequest::new(format!("printf ran > '{}'", workload.display()))
+        ..ContainerRequest::new(format!(
+            "set -eu; test -d '{0}'; test -d '{1}'; \
+             test -z \"$(ls -A '{0}')\"; test -z \"$(ls -A '{1}')\"; \
+             if printf denied > '{0}/write' 2>/dev/null; then exit 11; fi; \
+             if printf denied > '{1}/write' 2>/dev/null; then exit 12; fi; \
+             printf ran > '{2}'",
+            missing_dir.display(),
+            missing_file.display(),
+            workload.display()
+        ))
     };
 
-    let error = match spawn(request, Default::default()) {
-        Ok(_) => panic!("a missing deny beneath a writable grant must fail closed"),
-        Err(error) => error,
-    };
-    assert!(error.message.contains("read-write"), "{error:?}");
+    let mut process = spawn(request, Default::default()).expect("spawn writable overlay");
+    let outcome = process.wait().expect("wait");
+    drop(process);
+    assert_eq!(outcome, WaitResult::Exited(0));
     assert!(!missing_dir.exists());
     assert!(!missing_file.exists());
-    assert!(
-        !workload.exists(),
-        "the workload ran after policy rejection"
-    );
+    assert_eq!(std::fs::read_to_string(&workload).unwrap(), "ran");
+    let remaining = std::fs::read_dir(fixture.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [std::ffi::OsString::from("grant")]);
 }
 
 #[test]

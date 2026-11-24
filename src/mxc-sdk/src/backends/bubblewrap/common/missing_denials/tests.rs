@@ -9,7 +9,7 @@ fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
-) -> Result<Option<tempfile::TempDir>, FilesystemPolicyError> {
+) -> Result<Option<Vec<OverlayStorage>>, FilesystemPolicyError> {
     super::prepare(mounts, baseline_links, version, false)
 }
 
@@ -20,6 +20,7 @@ fn mount(path: &Path, intent: FsIntent) -> PolicyMount {
         destination: path,
         intent,
         readonly_overlay: None,
+        writable_overlay: None,
     }
 }
 
@@ -59,7 +60,9 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
 }
 
 #[test]
-fn missing_targets_under_writable_grants_fail_closed() {
+fn missing_targets_under_writable_grants_use_private_overlays() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     std::fs::write(root.join("existing"), "secret").unwrap();
@@ -71,15 +74,34 @@ fn missing_targets_under_writable_grants_fail_closed() {
         mount(&root.join("tools"), FsIntent::ReadWrite),
         mount(&missing, FsIntent::Denied),
     ];
-    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .expect_err("a missing deny beneath a writable grant must be rejected");
-    assert!(error.message().contains("read-write"));
+    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
+        .unwrap()
+        .unwrap();
+    let parent = mounts
+        .iter()
+        .find(|mount| mount.intent == FsIntent::ReadWrite)
+        .unwrap();
+    let overlay = parent.writable_overlay.as_ref().unwrap();
+    assert!(Path::new(&overlay.lower).join("missing").is_dir());
+    assert!(Path::new(&overlay.workdir).is_dir());
+    assert_eq!(
+        std::fs::metadata(&overlay.workdir).unwrap().dev(),
+        std::fs::metadata(&parent.source).unwrap().dev()
+    );
     assert!(!missing.exists());
     assert_eq!(
         std::fs::read_to_string(root.join("existing")).unwrap(),
         "secret"
     );
     assert!(mounts.iter().all(|mount| mount.readonly_overlay.is_none()));
+    let lower = overlay.lower.clone();
+    let workdir = overlay.workdir.clone();
+    let internal = Path::new(&workdir).join("work");
+    std::fs::create_dir(&internal).unwrap();
+    std::fs::set_permissions(&internal, std::fs::Permissions::from_mode(0o000)).unwrap();
+    drop(storage);
+    assert!(!Path::new(&lower).exists());
+    assert!(!Path::new(&workdir).exists());
 }
 
 #[test]
@@ -106,6 +128,23 @@ fn missing_denials_require_overlay_support_only_when_needed() {
         .message()
         .contains(root.join("missing").to_str().unwrap()));
     assert!(!root.join("missing").exists());
+}
+
+#[test]
+fn writable_missing_denials_require_overlay_support() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let missing = grant.join("missing");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&missing, FsIntent::Denied),
+    ];
+    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 10, 0)).unwrap_err();
+    assert!(error.message().contains("requires bwrap 0.11.0"));
+    assert!(error.message().contains("read-write"));
+    assert!(!missing.exists());
+    assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -177,9 +216,11 @@ fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
         mount(fixture.path(), FsIntent::ReadWrite),
         mount(&target, FsIntent::Denied),
     ];
-    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
-        .expect_err("the writable policy parent must win and reject the missing target");
-    assert!(error.message().contains("read-write"));
+    let _storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0))
+        .unwrap()
+        .unwrap();
+    let overlay = mounts[0].writable_overlay.as_ref().unwrap();
+    assert!(Path::new(&overlay.lower).join("missing").is_dir());
     assert!(!target.exists());
 }
 
@@ -240,7 +281,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
             ]),
         "the host source must be the top layer so shared directories keep host metadata: {args:?}"
     );
-    let hidden = std::fs::canonicalize(storage.path()).unwrap();
+    let hidden = std::fs::canonicalize(storage[0].path()).unwrap();
     let hidden = hidden.to_str().unwrap();
     assert!(args
         .windows(2)
