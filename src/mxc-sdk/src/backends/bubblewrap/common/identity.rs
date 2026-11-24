@@ -857,8 +857,13 @@ unsafe fn enter_identity(operation: &ChildOperation, parent: libc::pid_t) -> Res
         return Err(*libc::__errno_location());
     }
 
-    // The watchdog outlives MXC so that it can stop the sandbox after MXC exits.
-    if !matches!(operation, ChildOperation::Watch { .. }) {
+    // The watchdog outlives MXC, even when MXC's whole process group is killed, so that it
+    // can stop the sandbox after MXC exits.
+    if matches!(operation, ChildOperation::Watch { .. }) {
+        if libc::setsid() < 0 {
+            return Err(*libc::__errno_location());
+        }
+    } else {
         arm_parent_death(parent)?;
 
         // Root without CAP_KILL cannot signal this helper, so a stalled check must end it.

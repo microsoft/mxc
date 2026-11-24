@@ -181,14 +181,15 @@ Linux does not deliver Bubblewrap's parent-death signal to a sandbox running
 as another host UID. MXC therefore starts a helper process for each root
 launch, running as the mapped host UID/GID with no capabilities. The helper
 stops the sandbox when Bubblewrap exits, when MXC tears the run down, or when
-the MXC process exits. The launch fails before the workload starts if the
-helper cannot open or signal the sandbox, for example because host policy
-blocks `pidfd_open` or `pidfd_send_signal`. When the run ends, MXC waits for
-the helper to confirm that the sandbox has exited, and reports an error naming
-the mapped host UID if it cannot. As with unprivileged callers, processes the
-workload leaves running in the background stop when the workload exits. On
-kernels before 5.3, which lack `pidfd_open`, root launches fail before the
-workload starts.
+the MXC process exits. It runs in its own session, so it still stops the
+sandbox when MXC's whole process group is killed. The launch fails before the
+workload starts if the helper cannot open or signal the sandbox, for example
+because host policy blocks `pidfd_open` or `pidfd_send_signal`. When the run
+ends, MXC waits for the helper to confirm that the sandbox has exited, and
+reports an error naming the mapped host UID if it cannot. As with unprivileged
+callers, processes the workload leaves running in the background stop when the
+workload exits. On kernels before 5.3, which lack `pidfd_open`, root launches
+fail before the workload starts.
 
 Unprivileged callers keep their existing UID/GID behavior and do not require
 subordinate allocations.

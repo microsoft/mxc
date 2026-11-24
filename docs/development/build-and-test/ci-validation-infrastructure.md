@@ -301,9 +301,10 @@ as root; any nonzero exit, including a prerequisite skip, fails the job. The
 resolver fixture copies root's allocation files into its private `/etc`,
 launches once to learn the mapped workload owner, and gives that owner the
 fixtures its cases write. The lifetime test ends root workloads in isolated
-and firewall modes four ways: a normal exit that leaves a process running in
-the background, the process timeout, and `SIGTERM` and `SIGKILL` of
-`lxc-exec`. Each case runs as PID 1 of its own PID namespace. Afterwards no
+and firewall modes five ways: a normal exit that leaves a process running in
+the background, the process timeout, `SIGTERM` and `SIGKILL` of `lxc-exec`,
+and `SIGKILL` of `lxc-exec`'s whole process group. Each case runs as PID 1 of
+its own PID namespace. Afterwards no
 process in that namespace may still run as the workload's mapped host UID;
 the kernel ends any that remain when the case exits, so the check never
 touches other workloads that share that UID. Each case is repeated without

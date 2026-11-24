@@ -44,6 +44,7 @@ ENDINGS = {
     "timeout": ("sleep 300", 2000),
     "SIGTERM": ("sleep 300", 30000),
     "SIGKILL": ("sleep 300", 30000),
+    "process-group SIGKILL": ("sleep 300", 30000),
 }
 
 
@@ -98,14 +99,16 @@ def run(lxc_exec, directory, mode, ending, caller):
     with log_path.open("wb") as log:
         executor = subprocess.Popen(
             [*prefix, lxc_exec, "--experimental", str(config_path)],
-            stdout=log, stderr=subprocess.STDOUT,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
     problem = None
     uid = host_uid(executor, log_path)
     if uid is None:
         problem = "the workload did not report its host UID"
     else:
-        if ending.startswith("SIG"):
+        if ending == "process-group SIGKILL":
+            os.killpg(executor.pid, signal.SIGKILL)
+        elif ending.startswith("SIG"):
             executor.send_signal(getattr(signal, ending))
         try:
             executor.wait(timeout=60)
