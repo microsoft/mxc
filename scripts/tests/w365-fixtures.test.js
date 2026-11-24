@@ -236,3 +236,27 @@ test("Windows workspace suites preserve release features and run independently o
     assert.match(text, /windows-build:\r?\n +needs: dependency-feed-check\r?\n +uses: \.\/\.github\/workflows\/Build\.Windows\.Shared\.Job\.yml/);
   }
 });
+
+test("default release telemetry tests run once per architecture off the artifact path", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const [artifact, telemetry] = workflow.split("\n  telemetry-component-check:");
+  assert.ok(telemetry, "the native telemetry lanes must exist");
+  assert.doesNotMatch(artifact, /--lib mxc_common::telemetry::(?:consent|policy)/);
+  const step = telemetry.match(
+    /      - name: Test telemetry consent and policy in release mode\r?\n([\s\S]*?)(?=\r?\n  result:)/
+  );
+  assert.ok(step, "both default-feature release checks must remain required");
+  assert.match(step[1], /working-directory: src/);
+  assert.match(step[1], /CARGO_TARGET_DIR: target\/telemetry-component-check/);
+  for (const module of ["consent", "policy"]) {
+    const command = "cargo test --locked --release --target " +
+      "${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::" + module;
+    assert.equal(workflow.split(command).length - 1, 1, `${module} must run exactly once per matrix host`);
+  }
+  assert.doesNotMatch(step[1], /--features|--all-features|--no-default-features/);
+  assert.match(telemetry, /runner: windows-2025\r?\n +target: x86_64-pc-windows-msvc/);
+  assert.match(telemetry, /runner: windows-11-arm\r?\n +target: aarch64-pc-windows-msvc/);
+  assert.match(workflow, /needs: \[build, telemetry-component-check\]\r?\n +if: \$\{\{ always\(\) \}\}/);
+  assert.match(workflow, /test "\$ARTIFACT_RESULT" = success/);
+  assert.match(workflow, /test "\$TELEMETRY_RESULT" = success/);
+});

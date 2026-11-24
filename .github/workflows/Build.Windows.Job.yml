@@ -81,11 +81,6 @@ jobs:
             -Archive (Join-Path $env:RUNNER_TEMP 'windows-build\windows-build.tar') `
             -Target '${{ matrix.target }}'
 
-      - name: Test telemetry consent and policy in release mode
-        run: |
-          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::consent
-          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::policy
-
       - name: Test and stage filesystem probe request deadlines
         shell: pwsh
         run: |
@@ -215,8 +210,10 @@ jobs:
         include:
           - arch: x64
             runner: windows-2025
+            target: x86_64-pc-windows-msvc
           - arch: arm64
             runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -242,3 +239,27 @@ jobs:
       - name: Verify telemetry component build checks
         shell: pwsh
         run: .\scripts\ci\check-telemetry-component.ps1
+
+      - name: Test telemetry consent and policy in release mode
+        working-directory: src
+        env:
+          CARGO_TARGET_DIR: target/telemetry-component-check
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::consent
+          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::policy
+
+  result:
+    name: Windows validation
+    needs: [build, telemetry-component-check]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm artifact and telemetry validation passed
+        env:
+          ARTIFACT_RESULT: ${{ needs.build.result }}
+          TELEMETRY_RESULT: ${{ needs.telemetry-component-check.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ARTIFACT_RESULT" = success
+          test "$TELEMETRY_RESULT" = success

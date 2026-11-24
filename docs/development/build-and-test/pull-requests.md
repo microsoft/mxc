@@ -64,6 +64,15 @@ The Windows workflow also runs a separate `Telemetry component` check on native
 x64 and arm64 hosts. It checks that the default release build loads the bundled
 signed DLL, an empty component path builds without routing, and a tampered DLL
 fails Authenticode verification. Each failure fails the check.
+These jobs also run the consent and policy unit suites in release mode with
+default features, once per architecture, using their existing Cargo target
+directory. The commands retain the same profile and feature configuration as
+the artifact lane; moving them avoids blocking artifact publication on this
+separate test compilation.
+
+Make `windows / Windows validation` a required status check when rolling out
+this split. It fails unless both artifact validation and both telemetry host
+lanes succeed. Existing artifact and workspace check names stay unchanged.
 
 Run locally on Windows from the repository root:
 
