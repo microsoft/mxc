@@ -92,6 +92,13 @@ regressions also reject empty selections and skipped SDK streaming cases.
 These checks do not require PSEC; scheduled ProcessContainer hosts execute the
 prebuilt public SDK streaming tests from the Windows SDK test bundle.
 
+The MicroVM infrastructure suite also packs real npm fixture archives and
+checks their file lists and contents. It invokes the configured npm CLI
+directly, resolving the Windows shim's prefix once rather than for every pack.
+Each pack retains a 30-second subprocess budget, including initial resolution,
+and failures report npm timing output. The watchdog owns the npm process,
+not an intermediate command shell.
+
 ### Telemetry component build checks
 
 The Windows workflow also runs a separate `Telemetry component` check on native
