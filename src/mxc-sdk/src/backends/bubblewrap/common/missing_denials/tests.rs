@@ -182,6 +182,26 @@ fn mountinfo_decodes_nested_mountpoints() {
 }
 
 #[test]
+fn mountinfo_accepts_namespace_roots_only_for_nsfs() {
+    let mountinfo = concat!(
+        "1 0 8:1 / / rw - ext4 /dev/root rw\n",
+        "2 1 0:44 net:[4026533000] /run/netns/persisted rw - nsfs nsfs rw\n"
+    );
+    let entries = parse_mountinfo(mountinfo).unwrap();
+    assert_eq!(entries[1].root, PathBuf::from("net:[4026533000]"));
+    assert_eq!(entries[1].mountpoint, PathBuf::from("/run/netns/persisted"));
+
+    assert!(parse_mountinfo(
+        "2 1 0:44 net:[4026533000] /run/netns/persisted rw - tmpfs tmpfs rw\n"
+    )
+    .is_err());
+    assert!(
+        parse_mountinfo("2 1 0:44 not-a-namespace /run/netns/persisted rw - nsfs nsfs rw\n")
+            .is_err()
+    );
+}
+
+#[test]
 fn writable_storage_requires_mount_identity_not_only_device() {
     let fixture = tempfile::tempdir().unwrap();
     let grant = fixture.path().join("grant");

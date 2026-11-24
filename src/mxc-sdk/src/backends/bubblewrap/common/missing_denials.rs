@@ -213,6 +213,91 @@ fn writable_storage(
     initialize_writable_storage(directory, storage, source, denied_paths)
 }
 
+#[cfg(target_os = "linux")]
+fn upper_directory_is_opaque(path: &Path) -> io::Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "overlay upper directory contains a NUL byte",
+        )
+    })?;
+    let name = CString::new("user.overlay.opaque").unwrap();
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    let mut value = vec![0; size as usize];
+    let read = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(value[..read as usize] == *b"y")
+}
+
+#[cfg(target_os = "linux")]
+fn reject_opaque_upper_directories(
+    source: &Path,
+    denied_paths: &[PathBuf],
+) -> Result<(), FilesystemPolicyError> {
+    for denied_path in denied_paths {
+        let mut current = source.to_path_buf();
+        let components = denied_path.components().collect::<Vec<_>>();
+        for index in 0..=components.len() {
+            if index > 0 {
+                current.push(components[index - 1].as_os_str());
+            }
+            match upper_directory_is_opaque(&current) {
+                Ok(true) => {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: opaque upper-layer directory '{}' hides the private \
+                         mountpoint for deniedPaths entry '{}'; remove the opaque directory \
+                         or choose a different read-write grant",
+                        current.display(),
+                        source.join(denied_path).display()
+                    )))
+                }
+                Ok(false) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: could not inspect overlay upper-layer directory '{}' for \
+                         deniedPaths entry '{}': {error}",
+                        current.display(),
+                        source.join(denied_path).display()
+                    )))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reject_opaque_upper_directories(
+    _source: &Path,
+    _denied_paths: &[PathBuf],
+) -> Result<(), FilesystemPolicyError> {
+    Ok(())
+}
+
 fn initialize_writable_storage(
     directory: TempDir,
     storage: PathBuf,
@@ -223,6 +308,7 @@ fn initialize_writable_storage(
     let workdir = storage.join("work");
     #[cfg(test)]
     crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-writable-storage", source);
+    reject_opaque_upper_directories(source, denied_paths)?;
     std::fs::create_dir(&workdir).map_err(|error| {
         FilesystemPolicyError::Host(format!(
             "Bubblewrap: could not create private overlay workdir '{}': {error}",
@@ -557,8 +643,9 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
             ));
         };
         let fields = fields.split_whitespace().collect::<Vec<_>>();
+        let filesystem_fields = filesystem_fields.split_whitespace().collect::<Vec<_>>();
         if fields.len() < 6
-            || filesystem_fields.split_whitespace().count() < 3
+            || filesystem_fields.len() < 3
             || fields[0].parse::<u64>().is_err()
             || fields[1].parse::<u64>().is_err()
         {
@@ -590,7 +677,8 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
                 index + 1
             )
         })?);
-        if !root.is_absolute() || !mountpoint.is_absolute() {
+        let namespace_root = filesystem_fields[0] == "nsfs" && is_namespace_identifier(&root);
+        if (!root.is_absolute() && !namespace_root) || !mountpoint.is_absolute() {
             return Err(format!(
                 "mount information entry {} contains a non-absolute path",
                 index + 1
@@ -612,6 +700,23 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
         return Err("mount information contains no entries".to_owned());
     }
     Ok(entries)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_namespace_identifier(root: &Path) -> bool {
+    let Some(root) = root.to_str() else {
+        return false;
+    };
+    let Some((namespace, inode)) = root.split_once(":[") else {
+        return false;
+    };
+    !namespace.is_empty()
+        && namespace
+            .chars()
+            .all(|character| character.is_ascii_alphabetic() || character == '_')
+        && inode.strip_suffix(']').is_some_and(|inode| {
+            !inode.is_empty() && inode.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 #[cfg(any(target_os = "linux", test))]

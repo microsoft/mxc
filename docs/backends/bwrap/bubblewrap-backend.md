@@ -421,7 +421,10 @@ When a missing denied path needs a private overlay, the executor masks the
 overlay backing directory at its normal path and at any writable bind-mount
 alias found in `/proc/self/mountinfo`. The mount list is read with the
 filesystem-probe deadline and bounded to 1 MiB and 4096 entries; startup fails
-closed if it cannot be read or parsed. If the source contains a nested host
+closed if it cannot be read or parsed. Namespace filesystem (`nsfs`) entries
+may use namespace identifiers such as `net:[4026533000]` as their roots, but
+their mountpoints must remain absolute; filesystem-backed mounts retain the
+absolute-root requirement. If the source contains a nested host
 mount, startup also fails before the workload starts rather than exposing the
 directory underneath that mount.
 
@@ -433,6 +436,9 @@ executor instead mounts a writable overlay whose upper layer is the caller's
 grant. A private lower layer supplies only the missing denied mountpoints, so
 the subsequent masks operate on the overlay view without creating those paths
 on the host. Ordinary writes copy up to the host grant and remain after exit.
+An existing upper-layer directory marked `user.overlay.opaque=y` would hide
+lower-layer placeholders beneath it, so preparation rejects a denied path below
+such a directory before launch without changing the host attribute.
 
 The overlay workdir stays outside the grant's upper layer because OverlayFS
 requires an empty workdir on the same mount as the upper. The executor first

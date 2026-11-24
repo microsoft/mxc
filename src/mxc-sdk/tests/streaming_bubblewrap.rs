@@ -1010,6 +1010,86 @@ fn streaming_bubblewrap_missing_denials_use_writable_overlays() {
 }
 
 #[test]
+fn streaming_bubblewrap_rejects_opaque_upper_directories() {
+    if !bwrap_available()
+        || mxc_sdk::bwrap_common::bwrap_version::probe_bwrap().expect("Bubblewrap version")
+            < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 12, 0)
+    {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("opaque upper fixture");
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).expect("create writable grant");
+    let opaque = grant.join("newdir");
+    let first_workload = grant.join("first-workload");
+    let (first, first_denied) = bwrap_request_with_missing_denial(
+        &format!(
+            "set -eu; mkdir '{0}'; printf first > '{1}'",
+            opaque.display(),
+            first_workload.display()
+        ),
+        5_000,
+        &grant,
+    );
+    let mut process = spawn(first, Default::default()).expect("spawn first overlay");
+    assert_eq!(
+        process.wait().expect("wait first overlay"),
+        WaitResult::Exited(0)
+    );
+    drop(process);
+    assert!(!first_denied.exists());
+    assert!(opaque.is_dir());
+    // Model the opaque metadata an earlier overlay run can leave on an upper
+    // directory. Setting the fixture attribute does not modify SDK behavior.
+    let opaque_path = std::ffi::CString::new(opaque.as_os_str().as_encoded_bytes()).unwrap();
+    let opaque_name = std::ffi::CString::new("user.overlay.opaque").unwrap();
+    let attribute_result = unsafe {
+        libc::setxattr(
+            opaque_path.as_ptr(),
+            opaque_name.as_ptr(),
+            b"y".as_ptr().cast(),
+            1,
+            0,
+        )
+    };
+    assert_eq!(
+        attribute_result,
+        0,
+        "set opaque fixture attribute: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let denied = opaque.join("config.json");
+    let workload = opaque.join("second-workload");
+    let second = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![denied.to_str().unwrap().to_string()],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(5_000),
+        ..ContainerRequest::new(format!("printf should-not-run > '{}'", workload.display()))
+    };
+    let error = match spawn(second, Default::default()) {
+        Ok(mut process) => {
+            let outcome = process.wait().expect("wait opaque upper workload");
+            drop(process);
+            assert!(
+                !denied.exists(),
+                "opaque upper hid the lower placeholder and created a host mountpoint: {outcome:?}"
+            );
+            panic!("an opaque upper directory was accepted: {outcome:?}");
+        }
+        Err(error) => error,
+    };
+    assert!(error.message.contains("opaque upper-layer directory"));
+    assert!(!denied.exists());
+    assert!(!workload.exists());
+    assert_eq!(std::fs::read_to_string(first_workload).unwrap(), "first");
+}
+
+#[test]
 fn streaming_bubblewrap_masks_existing_fifo_and_socket() {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::UnixListener;
