@@ -1,0 +1,14 @@
+name: Setup Windows Rust linker
+description: Select the LLVM linker bundled with the pinned Rust toolchain.
+inputs:
+  target:
+    description: Native Windows MSVC target.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      env:
+        MXC_RUST_LINK_TARGET: ${{ inputs.target }}
+      run: |
+        & '${{ github.action_path }}\setup.ps1' -Target $env:MXC_RUST_LINK_TARGET

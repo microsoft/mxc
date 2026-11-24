@@ -37,6 +37,17 @@ jobs:
           rustflags: ''
           cache: false
 
+      - name: Select the pinned Windows Rust linker
+        uses: ./.github/actions/setup-windows-linker
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Test Windows linker DLL interoperability and debug symbols
+        working-directory: ${{ github.workspace }}
+        env:
+          MXC_RUST_TEST_TARGET: ${{ matrix.target }}
+        run: node --test scripts/tests/windows-linker.test.js
+
       - name: Point cargo at the MxcDependencies feed
         uses: ./.github/actions/setup-cargo-feed
 

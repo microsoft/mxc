@@ -260,3 +260,17 @@ test("default release telemetry tests run once per architecture off the artifact
   assert.match(workflow, /test "\$ARTIFACT_RESULT" = success/);
   assert.match(workflow, /test "\$TELEMETRY_RESULT" = success/);
 });
+
+test("shared Windows builds and every consumer select the same pinned linker before caching", () => {
+  for (const name of ["Build.Windows.Shared.Job.yml", "Test.Windows.Job.yml", "Build.Windows.Job.yml"]) {
+    const workflow = readFileSync(join(root, ".github", "workflows", name), "utf8");
+    const jobs = name === "Build.Windows.Job.yml"
+      ? workflow.split("\n  telemetry-component-check:") : [workflow];
+    for (const job of jobs) {
+      const setup = job.indexOf("uses: ./.github/actions/setup-windows-linker");
+      const cache = job.indexOf("uses: Swatinem/rust-cache");
+      assert.ok(setup >= 0 && cache > setup, `${name} must configure its linker before cache selection`);
+      assert.match(job.slice(setup), /target: \$\{\{ matrix.target \}\}/);
+    }
+  }
+});

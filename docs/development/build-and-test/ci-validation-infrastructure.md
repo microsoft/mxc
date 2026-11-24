@@ -94,6 +94,7 @@ for coverage, local commands and prerequisites.
 | `.github/workflows/W365.Fixture.Test.Job.yml` | `workflow_call`-only. Runs native W365 loopback TLS fixtures independently of binary production and aggregates the host results. |
 | `.github/workflows/Test.Windows.Job.yml` | `workflow_call`-only. Builds and runs the unfiltered Windows release workspace suites on x64 and ARM64 independently of artifact production. Called by PR and scheduled workflows. |
 | `.github/workflows/Build.Windows.Shared.Job.yml` | Builds the production Windows workspace once per architecture and publishes a same-run Cargo snapshot consumed by Windows artifact validation and workspace tests. |
+| `.github/actions/setup-windows-linker/action.yml` | Selects the Windows LLVM linker bundled with the pinned Rust toolchain, consistently across the shared build and its native consumers, before cache selection. |
 | `scripts/ci/cargo-build-snapshot.ps1` | Transfers tracked sources, native/host release outputs, and Cargo fingerprints. Restores watched Git input timestamps only when their existing contents match the recorded hashes, without copying Git references or configuration. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
