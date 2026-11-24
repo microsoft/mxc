@@ -10,12 +10,13 @@ const {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { delimiter, join, resolve } = require("node:path");
+const { delimiter, dirname, join, resolve } = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
@@ -37,6 +38,7 @@ const microvmFixtures = [
 let scratch;
 let fixture;
 let tools;
+let npmCommand;
 
 function fixtureEnvironment(overrides = {}) {
   return {
@@ -46,6 +48,50 @@ function fixtureEnvironment(overrides = {}) {
     npm_config_cache: join(scratch, "npm-cache"),
     ...overrides,
   };
+}
+
+function packFixture(directory) {
+  const deadline = performance.now() + 30_000;
+  const options = () => ({
+    cwd: directory,
+    env: fixtureEnvironment(),
+    encoding: "utf8",
+    timeout: Math.max(1, Math.floor(deadline - performance.now())),
+  });
+  if (!npmCommand) {
+    const name = process.platform === "win32" ? "npm.cmd" : "npm";
+    assert.ok(process.env.PATH, "npm packaging fixtures require PATH");
+    const executable = process.env.PATH.split(delimiter)
+      .map((directory) => join(directory.replaceAll('"', ""), name))
+      .find(existsSync);
+    assert.ok(executable, `${name} must be installed on PATH`);
+    if (process.platform === "win32") {
+      const base = dirname(executable);
+      const bundledNode = join(base, "node.exe");
+      const node = existsSync(bundledNode) ? bundledNode : process.execPath;
+      const prefixScript = join(base, "node_modules", "npm", "bin", "npm-prefix.js");
+      let cli = join(base, "node_modules", "npm", "bin", "npm-cli.js");
+      if (existsSync(prefixScript)) {
+        const prefix = spawnSync(node, [prefixScript], options());
+        assert.ifError(prefix.error);
+        assert.equal(prefix.status, 0, prefix.stdout + prefix.stderr);
+        const configured = join(prefix.stdout.trim(), "node_modules", "npm", "bin", "npm-cli.js");
+        if (existsSync(configured)) cli = configured;
+      }
+      assert.ok(existsSync(cli), `npm CLI not found beside ${executable}`);
+      npmCommand = [node, cli];
+    } else {
+      npmCommand = [process.execPath, realpathSync(executable)];
+    }
+  }
+  const result = spawnSync(npmCommand[0], [
+    npmCommand[1], "pack", "--ignore-scripts", "--offline", "--json", "--timing",
+  ], options());
+  if (result.error || result.status !== 0) {
+    console.error(`npm pack in ${directory} using ${npmCommand.join(" ")}\n` +
+      `${result.stdout || ""}\n${result.stderr || ""}`);
+  }
+  return result;
 }
 
 function runScript(script, args, env) {
@@ -522,13 +568,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   ].join("\n"));
   const copied = runScript(script, [], {});
   assert.equal(copied.status, 0, copied.output);
-  const packed = spawnSync("npm pack --ignore-scripts --offline --json", {
-    cwd: packageRoot,
-    env: fixtureEnvironment(),
-    shell: true,
-    encoding: "utf8",
-    timeout: 30_000,
-  });
+  const packed = packFixture(packageRoot);
   assert.ifError(packed.error);
   assert.equal(packed.status, 0, packed.stdout + packed.stderr);
   const packedInfo = JSON.parse(packed.stdout)[0];
@@ -551,13 +591,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   }
 
   rmSync(join(binaryRoot, ".npmignore"));
-  const unfiltered = spawnSync("npm pack --ignore-scripts --offline --json", {
-    cwd: packageRoot,
-    env: fixtureEnvironment(),
-    shell: true,
-    encoding: "utf8",
-    timeout: 30_000,
-  });
+  const unfiltered = packFixture(packageRoot);
   assert.ifError(unfiltered.error);
   assert.equal(unfiltered.status, 0, unfiltered.stdout + unfiltered.stderr);
   const unfilteredFiles = JSON.parse(unfiltered.stdout)[0].files.map(({ path }) => path);
@@ -575,9 +609,7 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   copyFileSync(join(root, "sdk", "node-nvx-runtime", "README.md"), join(runtimeRoot, "README.md"));
   renameSync(join(x64, "aci-edge-sandboxes"), join(runtimeRoot, "aci-edge-sandboxes"));
   assert.deepEqual(fileDigests(join(runtimeRoot, "aci-edge-sandboxes")), expected);
-  const runtimePack = spawnSync("npm pack --ignore-scripts --offline --json", {
-    cwd: runtimeRoot, shell: true, encoding: "utf8", timeout: 30_000,
-  });
+  const runtimePack = packFixture(runtimeRoot);
   assert.ifError(runtimePack.error);
   assert.equal(runtimePack.status, 0, runtimePack.stdout + runtimePack.stderr);
   const runtimeFiles = JSON.parse(runtimePack.stdout)[0].files.map(({ path }) => path);
