@@ -13,6 +13,80 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+`W365.Node.Fixture.Build.Job.yml` compiles the isolated Windows Node fixture
+library once on `windows-latest` alongside shipping builds. Node 24 and 26
+integration jobs download the same DLL rather than repeating Cargo setup and
+compilation after packaging. Both versions still run the complete fixture.
+The caller forwards the producer result, and Windows consumers fail before
+testing if it did not succeed, including when a previous run attempt left an
+artifact behind. Unix integration jobs retain their existing native builds.
+
+Native W365 loopback TLS fixtures run in parallel through
+`W365.Fixture.Test.Job.yml`, not in the binary build jobs. They retain the same
+Windows, Linux and macOS host coverage and require every named scenario to
+pass. The aggregate check is `w365-fixture-tests / W365 fixtures`; packaging
+does not depend on it. See the [fixture coverage and required-check rollout
+instructions](ci-validation-infrastructure.md#offline-tls-fixtures).
+
+Windows release workspace suites run independently through
+`Test.Windows.Job.yml` on native x64 and ARM64 hosts. `Build.Windows.Shared.Job.yml`
+first builds the production executor and sidecars once per architecture.
+Alongside it, `Build.Windows.Fixtures.Job.yml` runs the existing standalone
+module-lifetime example build with the same release profile, features, hosts
+and linker. Workspace lanes download its same-run DLL and PDB instead of
+repeating that build after production finishes. The fixture producer uses a
+dedicated dependency cache, seeded read-only from the existing workspace-test
+cache when cold. Both the consumer and the read-only seed use the complete
+shared namespace `windows-tests-<target>-v2-test`, preserving the existing
+cache identity independently of the job name.
+The x64 production and fixture producers regenerate `hyperlight-host`
+surrogate assets after cache restoration and before building. Those generated
+files are absent from dependency caches, so restoring compiled metadata alone
+is insufficient.
+Artifact validation and workspace tests download that same-run Cargo snapshot,
+including source timestamps and build-script outputs, so compatible compilation
+can be reused rather than repeated. Snapshots are kept for one day.
+Workspace and artifact-validation consumers keep separate architecture-specific
+caches of compiled external dependencies. These cover example, workspace-test,
+minimal-feature, filesystem-probe, NVX-staging, and debug-executor builds.
+They complement the production snapshot: registry-only caching would download
+source archives but still recompile these dependency variants.
+Workspace crates and test executables are not added to that dependency cache.
+The transfer contains a Zstandard-compressed PAX archive and a JSON metadata
+sidecar bound to the archive's SHA-256 checksum. Upload stores the compressed
+bytes without compressing them again. Restore validates the metadata and
+checksum before extracting once; it does not scan the compressed archive to
+find metadata.
+Version-resource build scripts also watch Git HEAD and its referenced ref.
+Snapshots record hashes and timestamps for those inputs, not their contents.
+Restore rejects mismatched Git inputs and restores timestamps only after
+checking the existing files, without replacing Git references or configuration.
+Make `windows-build / Shared Windows build` a required status check when
+rolling out shared compilation, so failed producers block merging even when
+their consumers cannot start.
+Each workspace lane checks that both producers succeeded, downloads the
+module-lifetime example, and runs the full unfiltered workspace tests with
+its existing release features. Failed, skipped or cancelled producer results
+fail the workspace aggregate even if an earlier run attempt left artifacts.
+Cargo's normal example compilation in that full suite is unchanged, as is the
+minimal-feature NVX gate that runs afterward. The suites
+retain their release W365 cases as well as the separate debug fixture coverage.
+Packaging does not wait for workspace tests; make
+`windows-workspace-tests / Windows workspace tests` a required status check
+before merging the job extraction. The NVX module-lifetime gate follows its
+example into the workspace suite. The existing Windows build checks retain
+their focused telemetry, filesystem-probe, NVX artifact, and package validation.
+
+Run `node --test scripts/tests/cargo-build-snapshot.test.js` to check raw and
+compressed snapshot reuse locally; `tar` must support Zstandard compression.
+The regression builds a small crate with a build script,
+deletes its output, changes its source timestamp to simulate a fresh checkout,
+changes Git HEAD's timestamp, restores the snapshot, and requires Cargo to
+reuse the existing compilation. It also checks that a mismatched checkout is
+rejected without overwriting its Git references or source files, and that
+archive corruption is rejected before extraction.
+Repository-consistency CI runs the same check.
+
 Windows builds first run host-only regression checks for loopback command
 quoting and native-process output capture. These verify direct and
 shell-wrapped launches, normal stdout/stderr capture, and prompt failure when
@@ -21,12 +95,28 @@ regressions also reject empty selections and skipped SDK streaming cases.
 These checks do not require PSEC; scheduled ProcessContainer hosts execute the
 prebuilt public SDK streaming tests from the Windows SDK test bundle.
 
+The MicroVM infrastructure suite also packs real npm fixture archives and
+checks their file lists and contents. It invokes the configured npm CLI
+directly, resolving the Windows shim's prefix once rather than for every pack.
+Each pack retains a 30-second subprocess budget, including initial resolution,
+and failures report npm timing output. The watchdog owns the npm process,
+not an intermediate command shell.
+
 ### Telemetry component build checks
 
 The Windows workflow also runs a separate `Telemetry component` check on native
 x64 and arm64 hosts. It checks that the default release build loads the bundled
 signed DLL, an empty component path builds without routing, and a tampered DLL
 fails Authenticode verification. Each failure fails the check.
+These jobs also run the consent and policy unit suites in release mode with
+default features, once per architecture, using their existing Cargo target
+directory. The commands retain the same profile and feature configuration as
+the artifact lane; moving them avoids blocking artifact publication on this
+separate test compilation.
+
+Make `windows / Windows validation` a required status check when rolling out
+this split. It fails unless both artifact validation and both telemetry host
+lanes succeed. Existing artifact and workspace check names stay unchanged.
 
 Run locally on Windows from the repository root:
 
@@ -51,7 +141,9 @@ then closes its library handle, releases the blocked operation, and checks that
 the worker can finish. Removing the probe's module pin must fail this regression.
 It runs in a subprocess so an unload
 regression cannot crash the test runner. The full native Cargo test suites also
-build the fixture example and run this test on Windows and macOS. Both Linux
+run this test in the independent Windows workspace suites and the macOS build.
+Windows builds the standalone fixture in its early producer; macOS builds it
+before its suite. Both Linux
 matrix lanes explicitly build the fixture and run the test in their release
 profile with the lane's target.
 
