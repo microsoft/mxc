@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{PSID, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows::Win32::Storage::FileSystem::{GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -185,6 +185,7 @@ unsafe impl Sync for CancelablePipe {}
 /// pipe (all write ends closed) still reads as EOF as usual. `Send` so it can
 /// be handed to a reader thread. Single-reader: at most one thread may `read` it
 /// at a time (any number of cancellers may fire concurrently).
+/// Empty pipe messages are skipped rather than reported as EOF.
 ///
 /// Cancelling can discard data that a read has received but has not yet returned
 /// to the caller. When collecting remaining output, allow it to drain before
@@ -208,6 +209,12 @@ impl InterruptiblePipeReader {
         PipeReadCanceller(Arc::downgrade(&self.0))
     }
 
+    /// Whether cancellation has been requested for this reader.
+    #[cfg(feature = "isolation_session")]
+    pub(crate) fn was_cancelled(&self) -> bool {
+        self.0.lock().cancelled
+    }
+
     pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
         self.0.handle.try_clone_owned_handle()
     }
@@ -216,38 +223,50 @@ impl InterruptiblePipeReader {
 impl std::io::Read for InterruptiblePipeReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED};
-        // Announce the read under the gate: a `close` that already fired makes us
-        // EOF without touching the pipe; otherwise mark `reading` so a `close`
-        // racing us keeps issuing `CancelIoEx` until our `ReadFile` is aborted.
-        {
-            let mut gate = self.0.lock();
-            if gate.cancelled {
-                return Ok(0);
-            }
-            gate.reading = true;
-        }
-        let mut read: u32 = 0;
-        // SAFETY: the `Arc` keeps the pipe handle valid for this call;
-        // `buf`/`read` are valid local out-params.
-        let result = unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) };
-        let cancelled = {
-            let mut gate = self.0.lock();
-            gate.reading = false;
-            gate.cancelled
-        };
-        // If `close` fired while this read was in flight, drop any
-        // completed-but-undelivered chunk and report EOF — matching the Unix
-        // reader, which never delivers data once cancelled.
-        if cancelled {
+        if buf.is_empty() {
             return Ok(0);
         }
-        match result {
-            Ok(()) => Ok(read as usize),
-            // Write ends all closed: normal end-of-stream, report EOF.
-            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
-            // A canceller's `CancelIoEx` aborted this read: report EOF.
-            Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
-            Err(e) => Err(std::io::Error::other(e)),
+        loop {
+            // Announce the read under the gate: a `close` that already fired makes us
+            // EOF without touching the pipe; otherwise mark `reading` so a `close`
+            // racing us keeps issuing `CancelIoEx` until our `ReadFile` is aborted.
+            {
+                let mut gate = self.0.lock();
+                if gate.cancelled {
+                    return Ok(0);
+                }
+                gate.reading = true;
+            }
+            let mut read: u32 = 0;
+            // SAFETY: the `Arc` keeps the pipe handle valid for this call;
+            // `buf`/`read` are valid local out-params.
+            let result = unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) };
+            let cancelled = {
+                let mut gate = self.0.lock();
+                gate.reading = false;
+                gate.cancelled
+            };
+            // If `close` fired while this read was in flight, drop any
+            // completed-but-undelivered chunk and report EOF — matching the Unix
+            // reader, which never delivers data once cancelled.
+            if cancelled {
+                return Ok(0);
+            }
+            return match result {
+                Ok(()) => {
+                    // A successful empty pipe read is an empty write, not EOF.
+                    // SAFETY: the Arc still owns the handle during the type query.
+                    if read == 0 && unsafe { GetFileType(self.0.handle.get()) } == FILE_TYPE_PIPE {
+                        continue;
+                    }
+                    Ok(read as usize)
+                }
+                // Write ends all closed: normal end-of-stream, report EOF.
+                Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
+                // A canceller's `CancelIoEx` aborted this read: report EOF.
+                Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
+                Err(e) => Err(std::io::Error::other(e)),
+            };
         }
     }
 }

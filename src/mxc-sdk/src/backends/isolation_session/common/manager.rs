@@ -6,7 +6,8 @@
 //! `create_process` also drives the ConPTY relay setup + shutdown ladder
 //! against the local console.
 
-use std::sync::Arc;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
@@ -38,8 +39,9 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_stop, drain_output_relays_within,
-    duplicate_handle, OutputRelayDrain, PipeRelay, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stdin_closer, create_relay_thread_with_stop,
+    drain_output_relays_within, duplicate_handle, OutputRelayDrain, PipeRelay,
+    PipeRelayWithStopParams, StdinCloser,
 };
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
@@ -65,6 +67,19 @@ fn classify_stdin_handle(handle: HANDLE) -> StdinHandleKind {
     StdinHandleKind::PipeOrFile
 }
 
+fn stdin_closer_with_diagnostics(
+    callback: impl FnOnce() -> Result<(), IsolationSessionError> + Send + 'static,
+    mut diagnostics: Logger,
+) -> StdinCloser {
+    Box::new(move || match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            diagnostics.log_diagnostic_line(&format!("Closing stdin at EOF failed: {error}"))
+        }
+        Err(_) => diagnostics.log_diagnostic_line("Closing stdin at EOF panicked"),
+    })
+}
+
 /// # Safety
 /// Handles must be valid during setup. Console input is borrowed and must
 /// remain valid until the relay exits; the other handles are duplicated.
@@ -73,13 +88,16 @@ unsafe fn create_stdin_relay(
     destination: HANDLE,
     stop_event: HANDLE,
     interactive: bool,
+    stdin_closer: Option<StdinCloser>,
     resize_callback: impl Fn(u16, u16) + Send + 'static,
 ) -> Result<(OwnedHandle, Option<PipeReadCanceller>), IsolationSessionError> {
     // Choose the relay from stdin itself; `interactive` describes stdout.
     if classify_stdin_handle(stdin) == StdinHandleKind::PipeOrFile {
-        let (thread, canceller) = unsafe { create_relay_thread(stdin, destination) }
-            .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?
-            .into_thread_and_canceller();
+        let stdin_closer = if !interactive { stdin_closer } else { None };
+        let (thread, canceller) =
+            unsafe { create_relay_thread_with_stdin_closer(stdin, destination, stdin_closer) }
+                .map_err(|e| lifecycle_err(format!("create stdin relay: {e}")))?
+                .into_thread_and_canceller();
         return Ok((thread, Some(canceller)));
     }
 
@@ -453,6 +471,7 @@ impl IsolationSessionManager {
 
         Ok(StartedProcess {
             process,
+            close_lock: Arc::new(Mutex::new(())),
             stdout,
             stderr,
             stdin,
@@ -527,7 +546,7 @@ impl IsolationSessionManager {
             let stderr_handle_val = started.stderr;
             let stdin_handle_val = started.stdin;
 
-            let mut scope = RelayScope::new(process, stdin_stop_owned.get());
+            let mut scope = RelayScope::new(&started, stdin_stop_owned.get());
 
             // In interactive mode, switch the calling process's console to raw VT
             // so only the agent's ConPTY echoes and renders; otherwise both do.
@@ -590,6 +609,32 @@ impl IsolationSessionManager {
                 None
             };
             if stdin_handle_val != 0 {
+                // Callback used to close stdin on end of input.
+                let stdin_closer = {
+                    let process = process.clone();
+                    let impersonation = self.impersonation.clone();
+                    let close_lock = Arc::clone(&started.close_lock);
+                    stdin_closer_with_diagnostics(
+                        move || {
+                            owned_thread::call(&impersonation, || {
+                                let _close =
+                                    close_lock.lock().unwrap_or_else(PoisonError::into_inner);
+                                process.CloseStandardInput().map_err(|error| {
+                                    transport_err(
+                                        op::RUN_PROCESS,
+                                        "CloseStandardInput failed",
+                                        &error,
+                                    )
+                                })
+                            })
+                        },
+                        logger
+                            .as_deref()
+                            .map(Logger::clone_diagnostic_sink)
+                            .unwrap_or_else(Logger::inherit_thread_diagnostic_sink),
+                    )
+                };
+
                 // The console relay needs its own process reference for resize calls.
                 let process_for_resize = process.clone();
                 let impersonation = self.impersonation.clone();
@@ -601,6 +646,7 @@ impl IsolationSessionManager {
                         HANDLE(stdin_handle_val as *mut core::ffi::c_void),
                         stdin_stop_owned.get(),
                         options.interactive,
+                        Some(stdin_closer),
                         move |cols, rows| {
                             let _ = owned_thread::call(&impersonation, || {
                                 let _ = process_for_resize.ResizeConsole(cols, rows);
@@ -770,6 +816,7 @@ pub fn log_sandbox_torn_down(logger: &mut Logger, phase: &str, outcome: Teardown
 /// rather than coercing them.
 pub(super) struct StartedProcess {
     pub(super) process: IsoSessionProcess,
+    pub(super) close_lock: Arc<Mutex<()>>,
     pub(super) stdout: u64,
     pub(super) stderr: u64,
     pub(super) stdin: u64,
@@ -917,7 +964,7 @@ impl StartedProcess {
     /// process. An exited process therefore returns its code directly.
     ///
     /// `before_shutdown` stops caller-owned input copying after a timeout.
-    /// Returning false skips the stdin-close step because a writer remains open.
+    /// Returning false skips the stdin-close grace period.
     pub(super) fn wait(
         &self,
         timeout_ms: u32,
@@ -959,7 +1006,7 @@ impl StartedProcess {
 
         self.record_timed_out(timeout_ms);
         let stdin_released = before_shutdown()?;
-        let (_, terminate_error) = wait_with_graceful_shutdown(&self.process, stdin_released)?;
+        let (_, terminate_error) = wait_with_graceful_shutdown(self, stdin_released)?;
         if let Some(error_code) = terminate_error {
             self.record_kill_failed(error_code);
         }
@@ -1056,6 +1103,7 @@ impl StartedProcess {
 /// Every join is bounded; cancellation does not interrupt destination writes.
 struct RelayScope<'a> {
     process: &'a IsoSessionProcess,
+    close_lock: &'a Mutex<()>,
     stop_event: HANDLE,
     stdout: Option<PipeRelay>,
     stderr: Option<PipeRelay>,
@@ -1074,9 +1122,10 @@ impl<'a> RelayScope<'a> {
     /// Overall cap so a pathological one-byte-forever trickle still returns.
     const ABSOLUTE_CAP_MS: u64 = 60_000;
 
-    fn new(process: &'a IsoSessionProcess, stop_event: HANDLE) -> Self {
+    fn new(started: &'a StartedProcess, stop_event: HANDLE) -> Self {
         Self {
-            process,
+            process: &started.process,
+            close_lock: &started.close_lock,
             stop_event,
             stdout: None,
             stderr: None,
@@ -1115,9 +1164,13 @@ impl<'a> RelayScope<'a> {
             .collect()
     }
 
-    /// Release the process's handles. A still-running relay owns its duplicates
-    /// until it exits.
+    /// Release the process's handles. Surviving relays own their duplicates
+    /// independently.
     fn close_handles(&self) {
+        let _close = self
+            .close_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _ = self.process.Close();
     }
 
@@ -1388,9 +1441,10 @@ fn wait_for_relay(
 /// [`StartedProcess::wait`] does, which is why it only calls this once it has
 /// independently determined the process was still running.
 fn wait_with_graceful_shutdown(
-    process: &IsoSessionProcess,
+    started: &StartedProcess,
     stdin_released: bool,
 ) -> Result<(i32, Option<i32>), IsolationSessionError> {
+    let process = &started.process;
     let mut exit_code = process
         .ExitCode()
         .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
@@ -1401,7 +1455,13 @@ fn wait_with_graceful_shutdown(
     // A live relay can still hold a writer, so closing platform stdin alone
     // cannot deliver EOF. Skip that grace period if the relay did not stop.
     if stdin_released {
-        let _ = process.CloseStandardInput();
+        {
+            let _close = started
+                .close_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let _ = process.CloseStandardInput();
+        }
         let _ = process.WaitForExit(5000);
         exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
         if exit_code != STILL_ACTIVE {
@@ -1428,6 +1488,47 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::logger::Mode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting_stdin_closer(calls: Arc<AtomicUsize>) -> StdinCloser {
+        Box::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    #[test]
+    fn stdin_closer_reports_errors_and_panics() {
+        for panic in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stdin.log");
+            let mut logger = Logger::new(Mode::Buffer);
+            logger.enable_file_sink(&path).unwrap();
+            let closer = stdin_closer_with_diagnostics(
+                move || {
+                    if panic {
+                        panic!("injected stdin close panic");
+                    }
+                    Err(lifecycle_err("injected stdin close error"))
+                },
+                logger,
+            );
+            closer();
+            let logged = std::fs::read_to_string(path).unwrap();
+            assert_eq!(logged.lines().count(), 1, "{logged}");
+            assert!(
+                logged.contains(if panic {
+                    "Closing stdin at EOF panicked"
+                } else {
+                    "Closing stdin at EOF failed:"
+                }),
+                "{logged}"
+            );
+            if !panic {
+                assert!(logged.contains("injected stdin close error"), "{logged}");
+            }
+        }
+    }
 
     fn read_stdin_test_payload(handle: HANDLE, size: usize) -> Vec<u8> {
         use std::time::{Duration, Instant};
@@ -1461,13 +1562,14 @@ mod tests {
         use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
         use windows::Win32::System::Pipes::PeekNamedPipe;
 
-        for interactive in [true, false] {
+        for (interactive, cancel) in [(true, true), (true, false), (false, true), (false, false)] {
             let (source_read, source_write) = create_local_pipe().unwrap();
             let mut source_write = PipeWriter::new(source_write);
             let (dest_read, dest_write) = create_local_pipe().unwrap();
             let stop = OwnedHandle::new(unsafe {
                 CreateEventW(None, true, false, PCWSTR::null()).unwrap()
             });
+            let calls = Arc::new(AtomicUsize::new(0));
             // SAFETY: all handles remain valid until the relay has exited.
             let (relay, canceller) = unsafe {
                 create_stdin_relay(
@@ -1475,6 +1577,7 @@ mod tests {
                     dest_write.get(),
                     stop.get(),
                     interactive,
+                    Some(counting_stdin_closer(Arc::clone(&calls))),
                     |_, _| panic!("pipe input must not handle console resize"),
                 )
             }
@@ -1484,13 +1587,20 @@ mod tests {
             source_write.write_all(payload).unwrap();
             let received = read_stdin_test_payload(dest_read.get(), payload.len());
             assert!(!wait_for_relay(Some(&relay), 0).unwrap());
-            canceller
-                .expect("pipe input must have a read canceller")
-                .close();
+            if cancel {
+                canceller
+                    .expect("pipe input must have a read canceller")
+                    .close();
+            } else {
+                drop(source_write);
+            }
             assert!(wait_for_relay(Some(&relay), 5000).unwrap());
             assert_eq!(received, payload);
 
-            // Keep the caller's source open; close only the platform's writer.
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if !interactive && !cancel { 1 } else { 0 }
+            );
             drop(dest_write);
             let error = unsafe { PeekNamedPipe(dest_read.get(), None, 0, None, None, None) }
                 .expect_err("the selected relay must release its write duplicate");
@@ -1513,6 +1623,7 @@ mod tests {
             let stop = OwnedHandle::new(unsafe {
                 CreateEventW(None, true, false, PCWSTR::null()).unwrap()
             });
+            let calls = Arc::new(AtomicUsize::new(0));
             // SAFETY: all handles remain valid until the relay has exited.
             let (relay, canceller) = unsafe {
                 create_stdin_relay(
@@ -1520,6 +1631,7 @@ mod tests {
                     dest_write.get(),
                     stop.get(),
                     interactive,
+                    Some(counting_stdin_closer(Arc::clone(&calls))),
                     |_, _| panic!("file input must not handle console resize"),
                 )
             }
@@ -1531,6 +1643,10 @@ mod tests {
                 "file input must select the cancellable relay"
             );
             assert_eq!(received, payload);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if interactive { 0 } else { 1 }
+            );
         }
     }
 
@@ -1598,6 +1714,7 @@ mod tests {
             let stop = OwnedHandle::new(unsafe {
                 CreateEventW(None, true, false, PCWSTR::null()).unwrap()
             });
+            let calls = Arc::new(AtomicUsize::new(0));
             // SAFETY: the private console and pipes outlive the relay.
             let (relay, canceller) = unsafe {
                 create_stdin_relay(
@@ -1605,6 +1722,7 @@ mod tests {
                     dest_write.get(),
                     stop.get(),
                     interactive,
+                    Some(counting_stdin_closer(Arc::clone(&calls))),
                     |_, _| {},
                 )
             }
@@ -1612,6 +1730,7 @@ mod tests {
             assert!(canceller.is_none(), "console input must use the stop event");
             unsafe { SetEvent(stop.get()).unwrap() };
             assert!(wait_for_relay(Some(&relay), 5000).unwrap());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     }
 

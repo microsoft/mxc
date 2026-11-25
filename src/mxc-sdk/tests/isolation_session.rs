@@ -105,6 +105,20 @@ macro_rules! skip_unless_supported {
     };
 }
 
+macro_rules! skip_unless_stdin_eof_supported {
+    () => {
+        skip_unless_supported!();
+        enter_sta();
+        let version = mxc_sdk::isolation_session_bindings::bindings::IsoSessionOps::new()
+            .and_then(|ops| ops.BehaviorVersion())
+            .expect("query IsolationSession BehaviorVersion");
+        if version < 2 {
+            eprintln!("SKIPPED: stdin EOF requires BehaviorVersion >= 2; host reports {version}");
+            return;
+        }
+    };
+}
+
 #[test]
 #[serial_test::serial(isolation_session)]
 fn a_single_threaded_apartment_drives_the_full_lifecycle() {
@@ -1191,17 +1205,139 @@ fn state_aware_exec_can_be_killed() {
     let _ = outcome;
 }
 
+fn run_relayed_stdin_eof_child(json: &str) {
+    use mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json;
+    use mxc_sdk::mxc_common::logger::{Logger, Mode};
+    use mxc_sdk::mxc_common::state_aware_dispatch::DispatchOutcome;
+    use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
+    use std::io::Write;
+
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = load_mxc_request_from_json(json, &mut logger).expect("parse EOF request");
+    println!("\nMXC_EOF_BEGIN");
+    std::io::stdout().flush().unwrap();
+    match request {
+        MxcRequest::OneShot(request) => {
+            let result = mxc_sdk::mxc_engine::run(&request, &mut logger)
+                .expect("run create-and-run EOF workload");
+            assert_eq!(result.exit_code, 0, "{result:?}");
+        }
+        MxcRequest::StateAware(request) => {
+            let result = mxc_sdk::mxc_engine::run_state_aware(request, false)
+                .expect("run lifecycle Relayed EOF workload");
+            assert!(
+                matches!(result, DispatchOutcome::ExecCompleted { exit_code: 0 }),
+                "{result:?}"
+            );
+        }
+    }
+    println!("MXC_EOF_END");
+}
+
+/// `sort.exe` must finish when pipe/file input ends and stdout is a file.
+/// Child processes give the engine real standard handles. Hosts below
+/// BehaviorVersion 2 skip the test.
+#[test]
+#[serial_test::serial(isolation_session)]
+fn relayed_pipe_and_file_stdin_reach_eof_with_redirected_stdout() {
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    skip_unless_stdin_eof_supported!();
+
+    const CHILD_REQUEST: &str = "MXC_ISO_STDIN_EOF_CHILD_REQUEST";
+    if let Ok(json) = std::env::var(CHILD_REQUEST) {
+        run_relayed_stdin_eof_child(&json);
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.txt");
+    const INPUT: &[u8] = b"pear\r\napple\r\nbanana\r\napple\r\n";
+    fs::write(&input, INPUT).unwrap();
+    for existing_container in [false, true] {
+        let started = existing_container.then(provision_and_start);
+        let mut request = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "process": { "commandLine": "sort.exe", "timeout": 15000 }
+        });
+        if let Some(started) = &started {
+            request["phase"] = "exec".into();
+            request["sandboxId"] = started.sandbox_id.clone().into();
+        } else {
+            request["containment"] = "isolation_session".into();
+            request["network"] = serde_json::json!({
+                "egress": { "default": "allow" },
+                "ingress": { "default": "allow", "hostLoopback": "allow" }
+            });
+        }
+        for piped_input in [true, false] {
+            let case =
+                format!("existing_container={existing_container}, piped_input={piped_input}");
+            let stdout_path = directory.path().join("stdout.txt");
+            let stderr_path = directory.path().join("stderr.txt");
+            let stdin = if piped_input {
+                Stdio::piped()
+            } else {
+                File::open(&input).unwrap().into()
+            };
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "relayed_pipe_and_file_stdin_reach_eof_with_redirected_stdout",
+                    "--nocapture",
+                ])
+                .env(CHILD_REQUEST, request.to_string())
+                .stdin(stdin)
+                .stdout(File::create(&stdout_path).unwrap())
+                .stderr(File::create(&stderr_path).unwrap())
+                .spawn()
+                .unwrap();
+            let written = if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(INPUT)
+            } else {
+                Ok(())
+            };
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!(
+                        "{case}: EOF subprocess exceeded 120 seconds\n{}",
+                        fs::read_to_string(&stderr_path).unwrap()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let stdout = fs::read_to_string(&stdout_path)
+                .unwrap()
+                .replace("\r\n", "\n");
+            let stderr = fs::read_to_string(&stderr_path).unwrap();
+            assert!(status.success(), "{case}: {status}\n{stdout}\n{stderr}");
+            written.expect("write all finite input");
+            let output = stdout
+                .split_once("MXC_EOF_BEGIN\n")
+                .and_then(|(_, rest)| rest.split_once("MXC_EOF_END"))
+                .map(|(output, _)| output)
+                .unwrap_or_else(|| panic!("{case}: missing execution markers\n{stdout}\n{stderr}"));
+            assert_eq!(output, "apple\napple\nbanana\npear\n", "{case}");
+        }
+    }
+}
+
 /// A workload that reads stdin to EOF must terminate once the caller drops its
 /// writer. The caller holds a duplicate, so this only works if dropping it also
 /// closes the end the session process itself holds.
-///
-/// Ignored: the platform keeps a stdin write handle open that this crate cannot
-/// reach, so the workload never sees EOF. Tracked as an OS bug.
 #[test]
 #[serial_test::serial(isolation_session)]
-#[ignore = "blocked on an OS fix: a platform-held stdin write handle prevents EOF"]
 fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
-    skip_unless_supported!();
+    skip_unless_stdin_eof_supported!();
     let started = provision_and_start();
 
     // `more` reads stdin to EOF and exits. Without EOF it runs until the
