@@ -166,6 +166,8 @@ flag when `wxc-exec`'s stdout is a TTY.
 When stdin is a pipe or file and stdout is not a console, MXC closes the
 workload's stdin when the input ends, so programs such as `sort.exe` can
 finish instead of timing out. Console input and ConPTY behavior are unchanged.
+An empty pipe message does not end input; the relay waits for further data or
+for the writer to close.
 Errors reported by this close operation go to configured diagnostic logs.
 EOF delivery requires `IsoSessionOps::BehaviorVersion()` to return 2 or higher.
 

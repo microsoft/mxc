@@ -559,6 +559,144 @@ mod tests {
     }
 
     #[test]
+    fn stdin_empty_pipe_message_does_not_close_the_workload_input() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+        use windows::Win32::System::Pipes::{
+            CreateNamedPipeW, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+        };
+
+        for cancel in [false, true] {
+            let name = format!(
+                r"\\.\pipe\mxc-stdin-eof-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            );
+            let wide = string_util::to_wide(&name);
+            // SAFETY: the name is NUL-terminated; neither handle is inherited.
+            let source_read = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide.as_ptr()),
+                    PIPE_ACCESS_INBOUND,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    1,
+                    BUFFER_SIZE,
+                    BUFFER_SIZE,
+                    0,
+                    None,
+                )
+            };
+            assert!(
+                !source_read.is_invalid(),
+                "{}",
+                windows::core::Error::from_thread()
+            );
+            let source_read = OwnedHandle::new(source_read);
+            let source_write = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+            const PAYLOAD: &[u8] = b"data after an empty message";
+            for message in [b"".as_slice(), PAYLOAD] {
+                let mut written = 0;
+                // SAFETY: the file owns the connected writer; the buffer is live.
+                unsafe {
+                    WriteFile(
+                        HANDLE(source_write.as_raw_handle()),
+                        Some(message),
+                        Some(&mut written),
+                        None,
+                    )
+                }
+                .unwrap();
+                assert_eq!(written as usize, message.len());
+            }
+
+            let (dest_read, dest_write) = create_test_pipes();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let callback_calls = Arc::clone(&calls);
+            let relay = unsafe {
+                create_relay_thread_with_stdin_closer(
+                    source_read.get(),
+                    dest_write.get(),
+                    Some(Box::new(move || {
+                        callback_calls.fetch_add(1, Ordering::SeqCst);
+                    })),
+                )
+            }
+            .unwrap();
+            drop(dest_write);
+            let mut reader = std::fs::File::from(dest_read.try_into_std_owned_handle().unwrap());
+            let (sent, received) = std::sync::mpsc::channel();
+            let reader_thread = std::thread::spawn(move || {
+                let mut output = [0; PAYLOAD.len()];
+                let result = reader.read_exact(&mut output).map(|()| output);
+                sent.send(result).unwrap();
+            });
+            let output = received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("relay stalled");
+            reader_thread.join().unwrap();
+            assert_eq!(
+                output.expect("data after the empty message must arrive"),
+                PAYLOAD
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                unsafe { WaitForSingleObject(relay.thread().get(), 0) },
+                WAIT_TIMEOUT
+            );
+
+            if cancel {
+                relay.cancel_read();
+            } else {
+                drop(source_write);
+            }
+            assert_eq!(
+                unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+                WAIT_OBJECT_0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(!cancel));
+        }
+    }
+
+    #[test]
+    fn stdin_file_and_nul_eof_call_the_closer() {
+        use std::io::{Seek, Write};
+        use std::os::windows::io::AsRawHandle;
+
+        let payload = b"finite file input";
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(payload).unwrap();
+        file.rewind().unwrap();
+        for (source, expected) in [
+            (file, payload.as_slice()),
+            (tempfile::tempfile().unwrap(), b"".as_slice()),
+            (std::fs::File::open("NUL").unwrap(), b"".as_slice()),
+        ] {
+            let mut destination = tempfile::tempfile().unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let callback_calls = Arc::clone(&calls);
+            let relay = unsafe {
+                create_relay_thread_with_stdin_closer(
+                    HANDLE(source.as_raw_handle()),
+                    HANDLE(destination.as_raw_handle()),
+                    Some(Box::new(move || {
+                        callback_calls.fetch_add(1, Ordering::SeqCst);
+                    })),
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
+                WAIT_OBJECT_0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            destination.rewind().unwrap();
+            let mut output = Vec::new();
+            destination.read_to_end(&mut output).unwrap();
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
     fn stdin_closer_is_not_called_on_copy_errors() {
         for fail_read in [true, false] {
             let (source_read, source_write) = create_test_pipes();
