@@ -10,6 +10,8 @@ use std::fs;
 use std::process::Command;
 use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value, LXC_ARCH};
 
+static ADDRESS_ACQUISITION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn existing_containers_keep_their_static_network_configuration() {
     if !has_platform_exec() || !has_lxc_host() {
@@ -128,6 +130,291 @@ fn existing_containers_keep_their_static_network_configuration() {
 }
 
 #[test]
+fn address_reservation_retries_activation_without_accepting_mismatches() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use nix::mount::{mount, MsFlags};
+    use nix::sched::{unshare, CloneFlags};
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    if !has_platform_exec() || !has_lxc_host() {
+        return;
+    }
+    let _guard = ADDRESS_ACQUISITION_LOCK
+        .lock()
+        .expect("serialize address acquisition fixtures");
+
+    for mode in ["delayed", "wrong-lease", "wrong-address"] {
+        let fixture = tempfile::Builder::new()
+            .prefix("lxc-reservation-")
+            .tempdir_in(".")
+            .expect("create reservation activation fixture");
+        let directory = fixture.path().canonicalize().expect("resolve fixture path");
+        let name = directory
+            .file_name()
+            .expect("fixture name")
+            .to_str()
+            .expect("UTF-8 fixture name");
+        let peer_name = format!("{name}-peer");
+        let containers: Vec<_> = std::iter::once(name)
+            .chain((mode == "wrong-lease").then_some(peer_name.as_str()))
+            .collect();
+        for name in &containers {
+            assert!(
+                !std::path::Path::new(&format!("/var/lib/lxc/{name}/config")).exists(),
+                "fixture would overwrite an existing container: {name}"
+            );
+        }
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            for name in &containers {
+                let created = Command::new("/usr/bin/timeout")
+                    .args(["--kill-after=1", "120", "lxc-create"])
+                    .args([
+                        "-n", name, "-t", "download", "--", "-d", "alpine", "-r", "3.23", "-a",
+                        LXC_ARCH,
+                    ])
+                    .output()
+                    .expect("create addressless container");
+                assert!(created.status.success(), "create fixture: {created:?}");
+            }
+
+            let located = Command::new("sh")
+                .args(["-c", "command -v busybox"])
+                .output()
+                .expect("locate BusyBox");
+            assert!(located.status.success(), "locate BusyBox: {located:?}");
+            let busybox = fs::canonicalize(String::from_utf8_lossy(&located.stdout).trim())
+                .expect("resolve BusyBox");
+            fs::create_dir(directory.join("original")).expect("create BusyBox backup directory");
+            fs::copy(&busybox, directory.join("original/busybox")).expect("copy original BusyBox");
+            let gate = directory.join("busybox-gate");
+            fs::write(
+                &gate,
+                r#"#!/bin/sh
+set -eu
+original=$MXC_E2E_FIXTURE/original/busybox
+if [ "$1" != udhcpc ]; then
+    exec "$original" "$@"
+fi
+previous=
+callback=
+for argument do
+    if [ "$previous" = -s ]; then
+        callback=$argument
+    fi
+    previous=$argument
+done
+test -n "$callback"
+"$original" "$@"
+directory=${callback%/*}
+count=0
+if [ -f "$MXC_E2E_FIXTURE/acquisitions" ]; then
+    read -r count < "$MXC_E2E_FIXTURE/acquisitions"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$MXC_E2E_FIXTURE/acquisitions"
+echo "reservation fixture acquisition $count"
+if [ "$count" -gt 1 ]; then
+    case "$MXC_E2E_MODE" in
+        delayed)
+            if [ "$count" -le 4 ]; then
+                printf '1\n' > "$directory/lease"
+            fi
+            ;;
+        wrong-lease) printf '1\n' > "$directory/lease" ;;
+        wrong-address) printf '192.0.2.1/24\n' > "$directory/address" ;;
+        *) echo "Unknown reservation fixture mode" >&2; exit 97 ;;
+    esac
+    : > "$MXC_E2E_FIXTURE/activation-started"
+fi
+"#,
+            )
+            .expect("write DHCP observation fixture");
+            fs::set_permissions(&gate, fs::Permissions::from_mode(0o700))
+                .expect("make DHCP fixture executable");
+
+            let config = json!({
+                "version": "0.9.0-alpha",
+                "containerId": name,
+                "containment": "lxc",
+                "process": { "commandLine": "echo MXC_RESERVATION_WORKLOAD_RAN" },
+                "lifecycle": { "destroyOnExit": false },
+                "lxc": { "distribution": "alpine", "release": "3.23" },
+                "network": { "egress": { "default": "allow" } }
+            });
+            let executor = wxc_e2e_tests::find_platform_exec().expect("find lxc-exec");
+            let output_path = directory.join("executor-output");
+            let output = fs::File::create(&output_path).expect("capture executor output");
+            let mut command = Command::new("/usr/bin/timeout");
+            command
+                .args(["--foreground", "--signal=INT", "--kill-after=125", "90"])
+                .arg(&executor)
+                .arg("--config-base64")
+                .arg(STANDARD.encode(config.to_string()))
+                .env("MXC_E2E_FIXTURE", &directory)
+                .env("MXC_E2E_MODE", mode)
+                .stdin(Stdio::null())
+                .stdout(output.try_clone().expect("capture executor stdout"))
+                .stderr(output);
+            // SAFETY: Only namespace and mount syscalls run before exec.
+            unsafe {
+                command.pre_exec(move || {
+                    unshare(CloneFlags::CLONE_NEWNS).map_err(std::io::Error::from)?;
+                    mount(
+                        None::<&str>,
+                        "/",
+                        None::<&str>,
+                        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+                        None::<&str>,
+                    )
+                    .map_err(std::io::Error::from)?;
+                    mount(
+                        Some(gate.as_path()),
+                        busybox.as_path(),
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .map_err(std::io::Error::from)
+                });
+            }
+            let started = Instant::now();
+            let status = std::thread::scope(|scope| {
+                let peer = (mode == "wrong-lease").then(|| {
+                    scope.spawn(|| {
+                        let waiting = Instant::now();
+                        while !directory
+                            .join("activation-started")
+                            .try_exists()
+                            .expect("observe primary activation")
+                        {
+                            assert!(
+                                waiting.elapsed() < Duration::from_secs(15),
+                                "primary reservation did not reach activation\n{}",
+                                fs::read_to_string(&output_path)
+                                    .expect("read primary executor diagnostics")
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+
+                        let mut peer_config = config.clone();
+                        peer_config["containerId"] = json!(peer_name);
+                        peer_config["process"]["commandLine"] =
+                            json!("echo MXC_RESERVATION_PEER_RAN");
+                        peer_config["lifecycle"]["destroyOnExit"] = json!(true);
+                        let peer_output_path = directory.join("peer-output");
+                        let peer_output =
+                            fs::File::create(&peer_output_path).expect("capture peer output");
+                        let peer_started = Instant::now();
+                        let peer_status = Command::new("/usr/bin/timeout")
+                            .args(["--foreground", "--signal=INT", "--kill-after=125", "15"])
+                            .arg(&executor)
+                            .arg("--config-base64")
+                            .arg(STANDARD.encode(peer_config.to_string()))
+                            .stdin(Stdio::null())
+                            .stdout(peer_output.try_clone().expect("capture peer stdout"))
+                            .stderr(peer_output)
+                            .status()
+                            .expect("run concurrent reservation and release");
+                        let diagnostics =
+                            fs::read_to_string(peer_output_path).expect("read peer output");
+                        assert!(
+                            peer_status.success()
+                                && diagnostics.contains("MXC_RESERVATION_PEER_RAN")
+                                && peer_started.elapsed() < Duration::from_secs(15)
+                                && !std::path::Path::new(&format!(
+                                    "/var/lib/lxc/{peer_name}/config"
+                                ))
+                                .exists(),
+                            "an unrelated container must reserve, run, and release while the \
+                             primary activation keeps retrying: {peer_status:?}\n{diagnostics}"
+                        );
+                    })
+                });
+                let status = command
+                    .status()
+                    .expect("run reservation activation fixture");
+                if let Some(peer) = peer {
+                    peer.join().expect("concurrent reservation fixture failed");
+                }
+                status
+            });
+            let elapsed = started.elapsed();
+            let diagnostics = fs::read_to_string(&output_path).expect("read executor output");
+            let acquisitions: u32 = fs::read_to_string(directory.join("acquisitions"))
+                .expect("read acquisition count")
+                .trim()
+                .parse()
+                .expect("parse acquisition count");
+            if mode == "delayed" {
+                assert!(
+                    status.success()
+                        && diagnostics.contains("MXC_RESERVATION_WORKLOAD_RAN")
+                        && acquisitions >= 5,
+                    "delayed activation did not recover: acquisitions={acquisitions}\n{diagnostics}"
+                );
+            } else {
+                assert!(
+                    !status.success()
+                        && !diagnostics.contains("MXC_RESERVATION_WORKLOAD_RAN")
+                        && diagnostics.contains("LXC reservation activation attempt")
+                        && diagnostics.contains("expected address=")
+                        && diagnostics.contains("observed address=")
+                        && diagnostics.contains("reservation fixture acquisition")
+                        && diagnostics.contains(
+                            "Local lxc-net did not activate the LXC address reservation within 30s",
+                        )
+                        && diagnostics.contains(if mode == "wrong-lease" {
+                            "lease=1s"
+                        } else {
+                            "observed address=192.0.2.1/24"
+                        })
+                        && acquisitions >= 3,
+                    "{mode} must fail with DHCP observations and no workload execution\n{diagnostics}"
+                );
+                assert!(
+                    (Duration::from_secs(25)..Duration::from_secs(50)).contains(&elapsed),
+                    "{mode} did not exhaust the activation budget: {elapsed:?}\n{diagnostics}"
+                );
+            }
+        }));
+
+        let mut cleanup_errors = Vec::new();
+        for name in containers {
+            let definition = format!("/var/lib/lxc/{name}/config");
+            if std::path::Path::new(&definition).exists() {
+                let destroyed = Command::new("/usr/bin/timeout")
+                    .args(["--kill-after=1", "120", "lxc-destroy", "-n", name, "-f"])
+                    .output()
+                    .expect("remove reservation fixture container");
+                if !destroyed.status.success() {
+                    cleanup_errors.push(format!("destroy {name}: {destroyed:?}"));
+                }
+            }
+            let released = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(include_str!(
+                    "../src/backends/lxc/common/reserve-address.sh"
+                ))
+                .args(["mxc-lxc-address", "release", &definition])
+                .output()
+                .expect("release fixture reservation");
+            if !released.status.success() {
+                cleanup_errors.push(format!("release {name}: {released:?}"));
+            }
+        }
+        outcome.expect("reservation activation fixture failed");
+        assert!(
+            cleanup_errors.is_empty(),
+            "reservation fixture cleanup failed: {cleanup_errors:?}"
+        );
+    }
+}
+
+#[test]
 fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use nix::errno::Errno;
@@ -146,6 +433,9 @@ fn ctrl_c_during_address_acquisition_removes_temporary_host_networking() {
     if !has_platform_exec() || !has_lxc_host() {
         return;
     }
+    let _guard = ADDRESS_ACQUISITION_LOCK
+        .lock()
+        .expect("serialize address acquisition fixtures");
 
     let fixture = tempfile::Builder::new()
         .prefix("lxc-cancel-address-")
@@ -398,8 +688,20 @@ exec /bin/sleep 300
                  client={client_link}, before={before:?}, during={during:?}"
             );
         }
+        // Leave headroom before the 30-second acquisition timeout can cause an ordinary failure.
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "DHCP fixture setup left insufficient time to distinguish cancellation from timeout\n{}",
+            fs::read_to_string(&output_path).expect("read executor diagnostics")
+        );
+        let interrupted = Instant::now();
+        let cancellation_deadline =
+            (interrupted + Duration::from_secs(10)).min(started + Duration::from_secs(25));
         kill(group, Signal::SIGINT).expect("send Ctrl+C to executor during address acquisition");
         let status = loop {
+            if Instant::now() >= cancellation_deadline {
+                break None;
+            }
             match waitid(Id::Pid(group), wait_options)
                 .expect("observe cancellation exit without reaping")
             {
@@ -408,10 +710,6 @@ exec /bin/sleep 300
                 status => panic!("unexpected executor state during cancellation: {status:?}"),
             }
 
-            // Finish before the documented one-minute startup timeout can cancel the run.
-            if started.elapsed() >= Duration::from_secs(45) {
-                break None;
-            }
             std::thread::sleep(Duration::from_millis(10));
         };
         let remaining_group_helpers: Vec<_> = fs::read_dir("/proc")
@@ -445,10 +743,11 @@ exec /bin/sleep 300
             helpers_reaped,
             remaining,
             format!(
-                "{}\nhelpers at acquisition={owned_helpers:?}\n\
+                "{}\nelapsed since SIGINT={:?}\nhelpers at acquisition={owned_helpers:?}\n\
                  remaining group helpers={remaining_group_helpers:?}\n\
                  links before={before:?}\nlinks during={during:?}\nlinks after={after:?}",
-                fs::read_to_string(output_path).expect("read executor output")
+                fs::read_to_string(output_path).expect("read executor output"),
+                interrupted.elapsed()
             ),
         )
     }));
@@ -523,8 +822,8 @@ exec /bin/sleep 300
 
     assert!(
         cancelled && helpers_reaped && remaining.is_empty(),
-        "Ctrl+C during address acquisition must remove temporary host networking and reap \
-         helper processes before the executor exits; exit={status:?}, \
+        "Ctrl+C during address acquisition must exit within 10 seconds, removing temporary \
+         host networking and reaping helper processes before exit; exit={status:?}, \
          helpers_reaped={helpers_reaped}, remaining_links={remaining:?}\n{output}"
     );
 }
