@@ -146,8 +146,10 @@ sandboxes have no network at all.
   so keep services that sandboxes use out of `10.231.0.0/16`.
 
 - **Cleanup.** `deprovision`, an exec quarantine, and daemon shutdown delete
-  the network after the container. Before creating a network, the daemon
-  records it in
+  the network after the container. If `deprovision` or a quarantine can't
+  delete the network, the sandbox stays and accepts only `deprovision`, which
+  retries the network and fails with `backend_error` until it succeeds. Before
+  creating a network, the daemon records it in
   `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.network.json`,
   or under `%TEMP%` when `LOCALAPPDATA` isn't set. A network it can't delete
   stays recorded. The next daemon session that opens that image store deletes
@@ -199,8 +201,10 @@ for create-and-run execution.
 
 - **Cleanup.** The daemon records the proxy in
   `%LOCALAPPDATA%\Microsoft\MXC\wslc\stores\<store fingerprint>\<key>.json`
-  before creating it. A proxy it can't delete stays recorded, and the next
-  session on that image store deletes it when it boots, logging
+  before creating it. A sandbox whose proxy can't be deleted stays for another
+  `deprovision`, as with a [bridged network](#bridged-networking). A proxy it
+  can't delete stays recorded, and the next session on that image store
+  deletes it when it boots, logging
   `Removed the built-in proxy left by an earlier run`.
 
 - **Proxy container exits.** The workload loses network access. MXC doesn't

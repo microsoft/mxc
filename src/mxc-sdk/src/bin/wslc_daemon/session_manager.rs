@@ -1013,6 +1013,10 @@ struct ContainerEntry {
     /// Kept in the map rather than dropped so [`Worker::shutdown`] still stops
     /// and deletes the container.
     retired: bool,
+
+    /// Set once the container is deleted but its network isn't, so the entry
+    /// stays only for a deprovision that retries the network.
+    container_deleted: bool,
     container: WslcContainerGuard,
 
     /// Which session's utility VM this container lives in.
@@ -1070,7 +1074,7 @@ impl SandboxNetworking {
     /// session the network was created in, and COM must be initialized on the
     /// calling thread.
     unsafe fn delete(
-        self,
+        &self,
         sdk: &WslcSdk,
         session: WslcSession,
         logger: &mut Logger,
@@ -1162,22 +1166,28 @@ type RunStarter = fn(
 ) -> Result<(), WorkerError>;
 
 /// Injected so a worker with no SDK loaded can still be tested.
-type NetworkDeleter = fn(&mut Worker, &str, SandboxNetworking);
+type NetworkDeleter = fn(&mut Worker, &str, &SandboxNetworking) -> Result<(), String>;
 
 /// A network that can't be deleted stays recorded for the store's next session.
-fn delete_network_on_sdk(state: &mut Worker, session_ref: &str, network: SandboxNetworking) {
+fn delete_network_on_sdk(
+    state: &mut Worker,
+    session_ref: &str,
+    network: &SandboxNetworking,
+) -> Result<(), String> {
     let (Some(sdk), Some(entry)) = (state.sdk.as_ref(), state.sessions.get(session_ref)) else {
-        return;
+        return Err(format!("session {session_ref} is no longer loaded"));
     };
 
     // SAFETY: `sdk` is valid, and the session stays registered until nothing
     // holds it.
-    let deleted = unsafe { network.delete(sdk, entry.session.as_raw(), &mut state.logger) };
-    if let Err(e) = deleted {
-        state.logger.log_line(&format!(
-            "could not delete a sandbox network in session {session_ref}: {e}"
-        ));
-    }
+    unsafe { network.delete(sdk, entry.session.as_raw(), &mut state.logger) }
+}
+
+fn unfinished_deprovision(sandbox_id: &str) -> WorkerError {
+    WorkerError::backend(anyhow::anyhow!(
+        "the container of sandbox {sandbox_id} is deleted but its network isn't; deprovision it \
+         again"
+    ))
 }
 
 /// Hand a claimed run to its own MTA thread using the SDK this worker loaded.
@@ -2597,6 +2607,7 @@ impl Worker {
                 started: false,
                 quarantined: false,
                 retired: false,
+                container_deleted: false,
                 container,
                 session_ref: session_ref.to_string(),
                 exec_slot: None,
@@ -2612,6 +2623,9 @@ impl Worker {
         // SDK (keeps the no-WSL unit tests self-contained).
         if !self.containers.contains_key(&config.sandbox_id) {
             return Err(WorkerError::NotProvisioned(config.sandbox_id));
+        }
+        if self.containers[&config.sandbox_id].container_deleted {
+            return Err(unfinished_deprovision(&config.sandbox_id));
         }
         let sdk = self
             .sdk
@@ -2648,6 +2662,7 @@ impl Worker {
     fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
         match self.containers.get(sandbox_id) {
             None => Err(WorkerError::NotProvisioned(sandbox_id.to_string())),
+            Some(entry) if entry.container_deleted => Err(unfinished_deprovision(sandbox_id)),
             Some(entry) if entry.quarantined => Err(WorkerError::backend(anyhow::anyhow!(
                 "sandbox {sandbox_id} is quarantined after an exec whose termination could not \
                  be confirmed; deprovision it before reuse"
@@ -2871,14 +2886,13 @@ impl Worker {
                 // Deleting the container ends anything still running inside it,
                 // so this exec stops counting against capacity.
                 drop(slot);
-                if let Some(entry) = self.containers.remove(sandbox_id) {
-                    if let Some(network) = entry.network {
-                        self.delete_network(&entry.session_ref, network);
-                    }
-                }
+                let unfinished = match self.finish_delete(sandbox_id) {
+                    Ok(()) => String::new(),
+                    Err(e) => format!(", but not its network ({e}); deprovision it to finish"),
+                };
                 let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
-                     the container was quarantined and deleted"
+                     the container was quarantined and deleted{unfinished}"
                 );
                 WorkerError::backend_with_api_failure(error, api_failure)
             }
@@ -2916,6 +2930,9 @@ impl Worker {
         if !self.containers.contains_key(&config.sandbox_id) {
             return Err(WorkerError::NotProvisioned(config.sandbox_id));
         }
+        if self.containers[&config.sandbox_id].container_deleted {
+            return Err(unfinished_deprovision(&config.sandbox_id));
+        }
         let sdk = self
             .sdk
             .as_ref()
@@ -2950,37 +2967,61 @@ impl Worker {
     }
 
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
-        let container_raw = match self.containers.get(&config.sandbox_id) {
-            Some(e) => e.container.as_raw(),
+        let (container_raw, container_deleted) = match self.containers.get(&config.sandbox_id) {
+            Some(e) => (e.container.as_raw(), e.container_deleted),
             None => return Err(WorkerError::NotProvisioned(config.sandbox_id)),
         };
 
-        if let Some(sdk) = self.sdk.as_ref() {
-            // SAFETY: `sdk` is valid and `container_raw` is a live handle.
-            unsafe {
-                container_steps::delete_daemon_container(sdk, container_raw, &mut self.logger)
+        if !container_deleted {
+            if let Some(sdk) = self.sdk.as_ref() {
+                // SAFETY: `sdk` is valid and `container_raw` is a live handle.
+                unsafe {
+                    container_steps::delete_daemon_container(sdk, container_raw, &mut self.logger)
+                }
+                .map_err(sr_err)?;
             }
-            .map_err(sr_err)?;
         }
 
-        // Delete succeeded (or no SDK loaded): drop the handle now. Keeping the
-        // entry on failure above leaves it retryable.
-        let entry = self
-            .containers
-            .remove(&config.sandbox_id)
-            .expect("checked above");
-        if let Some(network) = entry.network {
-            self.delete_network(&entry.session_ref, network);
-        }
+        // A failed delete, of the container above or of its network here, keeps
+        // the entry so another deprovision retries it.
+        self.finish_delete(&config.sandbox_id).map_err(|e| {
+            WorkerError::backend(anyhow::anyhow!(
+                "deleted the container of sandbox {}, but not its network: {e}; deprovision it \
+                 again to retry",
+                config.sandbox_id
+            ))
+        })?;
 
         // The session and SDK stay loaded so a subsequent provision reuses the
         // already-booted WSL2 VM.
         Ok(())
     }
 
-    fn delete_network(&mut self, session_ref: &str, network: SandboxNetworking) {
+    fn finish_delete(&mut self, sandbox_id: &str) -> Result<(), String> {
+        let Some(entry) = self.containers.get_mut(sandbox_id) else {
+            return Ok(());
+        };
+        entry.container_deleted = true;
+        let session_ref = entry.session_ref.clone();
+        if let Some(network) = entry.network.take() {
+            if let Err(e) = self.delete_network(&session_ref, &network) {
+                if let Some(entry) = self.containers.get_mut(sandbox_id) {
+                    entry.network = Some(network);
+                }
+                return Err(e);
+            }
+        }
+        self.containers.remove(sandbox_id);
+        Ok(())
+    }
+
+    fn delete_network(
+        &mut self,
+        session_ref: &str,
+        network: &SandboxNetworking,
+    ) -> Result<(), String> {
         let delete = self.delete_network;
-        delete(self, session_ref, network);
+        delete(self, session_ref, network)
     }
 
     /// Give up the SDK handles rather than release them, when an off-worker
@@ -3177,20 +3218,24 @@ impl Worker {
             for (_, entry) in std::mem::take(&mut self.containers) {
                 let sdk = self.sdk.as_ref().expect("checked above");
 
-                // SAFETY: `sdk` is valid and `entry.container` is a live handle.
-                let deleted = unsafe {
-                    if entry.started {
-                        let _ = container_steps::stop_daemon_container(
+                let deleted = if entry.container_deleted {
+                    Ok(())
+                } else {
+                    // SAFETY: `sdk` is valid and `entry.container` is a live handle.
+                    unsafe {
+                        if entry.started {
+                            let _ = container_steps::stop_daemon_container(
+                                sdk,
+                                entry.container.as_raw(),
+                                &mut self.logger,
+                            );
+                        }
+                        container_steps::delete_daemon_container(
                             sdk,
                             entry.container.as_raw(),
                             &mut self.logger,
-                        );
+                        )
                     }
-                    container_steps::delete_daemon_container(
-                        sdk,
-                        entry.container.as_raw(),
-                        &mut self.logger,
-                    )
                 };
                 self.finish_shutdown_delete(&entry.session_ref, entry.network, deleted);
                 // entry (WslcContainerGuard) drops here, releasing the handle.
@@ -3209,7 +3254,11 @@ impl Worker {
         deleted: Result<(), WslcStepError>,
     ) {
         if let (Ok(()), Some(network)) = (deleted, network) {
-            self.delete_network(session_ref, network);
+            if let Err(e) = self.delete_network(session_ref, &network) {
+                self.logger.log_line(&format!(
+                    "could not delete a sandbox network in session {session_ref}: {e}"
+                ));
+            }
         }
     }
 
@@ -3595,6 +3644,7 @@ mod tests {
             started: false,
             quarantined: false,
             retired,
+            container_deleted: false,
             // SAFETY: `release_noop` never dereferences the handle, so the guard
             // owns a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
@@ -5906,6 +5956,7 @@ mod tests {
             started: false,
             quarantined: false,
             retired: false,
+            container_deleted: false,
 
             // SAFETY: `release` never dereferences the handle, so the guard owns
             // a value it can release without touching memory.
@@ -6640,16 +6691,30 @@ mod tests {
     thread_local! {
         static DELETED_NETWORKS: std::cell::RefCell<Vec<String>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        static NETWORK_DELETION_FAILS: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
     }
 
     const PROXY_DELETION: &str = "built-in proxy";
 
-    fn record_deleted_network(_: &mut Worker, session_ref: &str, network: SandboxNetworking) {
+    fn record_deleted_network(
+        _: &mut Worker,
+        session_ref: &str,
+        network: &SandboxNetworking,
+    ) -> Result<(), String> {
+        if NETWORK_DELETION_FAILS.with(|fails| fails.get()) {
+            return Err("the network is busy".to_string());
+        }
         let name = match network {
             SandboxNetworking::Bridged(network) => network.name().to_string_lossy().into_owned(),
             SandboxNetworking::Proxied(_) => PROXY_DELETION.to_string(),
         };
         DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().push(format!("{session_ref} {name}")));
+        Ok(())
+    }
+
+    fn fail_network_deletion(fails: bool) {
+        NETWORK_DELETION_FAILS.with(|fail| fail.set(fails));
     }
 
     fn deleted_networks() -> Vec<String> {
@@ -6686,6 +6751,7 @@ mod tests {
 
     fn worker_recording_deleted_networks() -> Worker {
         DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().clear());
+        fail_network_deletion(false);
         let mut worker = Worker::new();
         worker.delete_network = record_deleted_network;
         worker
@@ -6757,6 +6823,72 @@ mod tests {
             );
 
             worker.finish_shutdown_delete(TEST_SESSION, Some(network), Ok(()));
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+    }
+
+    #[test]
+    fn a_deprovision_that_cannot_delete_the_network_fails_until_a_retry_does() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            let id = || "wslc:networked".to_string();
+
+            fail_network_deletion(true);
+            let error = worker
+                .deprovision(DeprovisionConfig { sandbox_id: id() })
+                .expect_err("the network is still there");
+            assert!(
+                error.to_string().contains("deprovision it again"),
+                "{error}"
+            );
+            assert!(deleted_networks().is_empty());
+
+            for refused in [
+                worker.start(StartConfig { sandbox_id: id() }).err(),
+                worker.stop(StopConfig { sandbox_id: id() }).err(),
+                worker.validate_exec(&id()).err(),
+            ] {
+                let refused =
+                    refused.expect("a sandbox with no container accepts only deprovision");
+                assert!(
+                    refused.to_string().contains("deprovision it again"),
+                    "{refused}"
+                );
+            }
+
+            fail_network_deletion(false);
+            worker
+                .deprovision(DeprovisionConfig { sandbox_id: id() })
+                .unwrap();
+            assert_eq!(deleted_networks(), [expected_deletion]);
+            assert!(!worker.containers.contains_key(&id()));
+        }
+    }
+
+    #[test]
+    fn a_quarantine_that_cannot_delete_the_network_leaves_it_to_deprovision() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+
+            fail_network_deletion(true);
+            let error = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Ok(())),
+            );
+            assert!(
+                error.to_string().contains("deprovision it to finish"),
+                "{error}"
+            );
+
+            fail_network_deletion(false);
+            worker
+                .deprovision(DeprovisionConfig {
+                    sandbox_id: "wslc:networked".to_string(),
+                })
+                .unwrap();
             assert_eq!(deleted_networks(), [expected_deletion]);
         }
     }

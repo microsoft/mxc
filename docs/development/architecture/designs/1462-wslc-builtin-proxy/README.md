@@ -640,9 +640,11 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **Create-and-run:** the per-run session is terminated on exit.
 
 - **Daemon:** `ContainerEntry` tracks the controller and networks.
-  Deprovision, exec quarantine and `Worker::shutdown` share one cleanup that
-  deletes them after the workload. A resource it can't delete stays recorded,
-  and the next session on that store deletes it when it boots.
+  Deprovision, exec quarantine and `Worker::shutdown` delete them after the
+  workload. If deprovision or quarantine can't, the entry stays with its
+  workload marked deleted, and only another deprovision, which retries them,
+  removes it. A resource it can't delete stays recorded, and the next session
+  on that store deletes it when it boots.
 
 - **Leftovers:** a crash leaves the workload, controller and networks in the
   store. A store admits one live session, so when MXC opens a session on a

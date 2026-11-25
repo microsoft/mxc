@@ -52,9 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hostLoopback` defaults, TCP egress CIDR and port rules, and port mappings on
   an otherwise isolated sandbox. Provisioning one creates the proxy and returns
   its policy warnings in `ProvisionResult.Warnings`, and deprovisioning deletes
-  it. Bridged containers, in create-and-run execution and container lifecycle
-  operations, now reach TCP services on Windows `127.0.0.1` at
-  `host.wslc.internal` on WSL 3.0.5 or later. See
+  it. Deprovisioning a sandbox whose proxy or network can't be deleted fails
+  with `backend_error` and can be retried. Bridged containers, in create-and-run
+  execution and container lifecycle operations, now reach TCP services on
+  Windows `127.0.0.1` at `host.wslc.internal` on WSL 3.0.5 or later. See
   [built-in proxy](../../docs/backends/wslc/wslc-state-aware.md#built-in-proxy).
 
 - `MxcProcess.Kill`, `Dispose`, `Warnings`, and `OutputMetadata` return at once
