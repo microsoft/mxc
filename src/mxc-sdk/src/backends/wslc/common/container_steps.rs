@@ -275,6 +275,7 @@ pub struct IoContext {
     /// `Arc<IoContext>` is released on the same schedule as those buffers, so
     /// on the deliberate kill-path leak the sink (and its sender) is leaked too.
     sink: Option<OutputSink>,
+    capture: Capture,
 }
 
 /// Per-stream cap on captured stdout/stderr, in bytes. The WSLc SDK streams
@@ -304,6 +305,34 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Capture {
+    Head,
+    Tail(usize),
+}
+
+impl Capture {
+    fn append(self, buf: &mut Vec<u8>, bytes: &[u8]) {
+        match self {
+            Capture::Head => append_capped(buf, bytes),
+            Capture::Tail(limit) => append_newest(buf, bytes, limit),
+        }
+    }
+}
+
+fn append_newest(buf: &mut Vec<u8>, bytes: &[u8], limit: usize) {
+    buf.extend_from_slice(bytes);
+    if buf.len() <= limit {
+        return;
+    }
+    let excess = buf.len() - limit;
+    let first_whole_line = buf[excess - 1..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(excess, |offset| excess + offset);
+    buf.drain(..first_whole_line);
+}
+
 /// Callback invoked by the WSLc SDK for stdout/stderr data.
 ///
 /// # Safety
@@ -328,14 +357,14 @@ unsafe extern "C" fn io_callback(
             Some(sink) => sink(OutStream::Stdout, bytes),
             None => {
                 let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
-                append_capped(&mut buf, bytes);
+                ctx.capture.append(&mut buf, bytes);
             }
         },
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => match ctx.sink.as_ref() {
             Some(sink) => sink(OutStream::Stderr, bytes),
             None => {
                 let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
-                append_capped(&mut buf, bytes);
+                ctx.capture.append(&mut buf, bytes);
             }
         },
         _ => {}
@@ -519,6 +548,7 @@ impl ProcessSettings {
             working_directory,
             true,
             sink,
+            Capture::Head,
         )
     }
 
@@ -542,6 +572,7 @@ impl ProcessSettings {
             working_directory,
             false,
             None,
+            Capture::Head,
         )
     }
 
@@ -554,8 +585,9 @@ impl ProcessSettings {
         sdk: &WslcSdk,
         argv: &[String],
         env: &[String],
+        capture: Capture,
     ) -> Result<Self, WslcStepError> {
-        Self::build_inner(sdk, argv, env, "", true, None)
+        Self::build_inner(sdk, argv, env, "", true, None, capture)
     }
 
     unsafe fn build_inner(
@@ -565,6 +597,7 @@ impl ProcessSettings {
         working_directory: &str,
         register_callbacks: bool,
         sink: Option<OutputSink>,
+        capture: Capture,
     ) -> Result<Self, WslcStepError> {
         let mut raw = std::mem::zeroed::<WslcProcessSettings>();
         let hr = sdk.WslcInitProcessSettings(&mut raw);
@@ -577,6 +610,7 @@ impl ProcessSettings {
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(false), Condvar::new())),
             sink,
+            capture,
         });
 
         // Callbacks are registered only for the streamed path; a detached init
@@ -1007,7 +1041,7 @@ pub(crate) unsafe fn create_session(
     session_name: &str,
     storage_path: &str,
     sizing: SessionSizing,
-    host_loopback: HostLoopback,
+    mut host_loopback: HostLoopback,
     logger: &mut Logger,
 ) -> Result<(WslcSessionGuard, bool), WslcStepError> {
     // The SDK reads these when the session is created.
@@ -1016,7 +1050,6 @@ pub(crate) unsafe fn create_session(
     let host_loopback_name = CString::new(crate::wslc_gateway_policy::HOST_LOOPBACK_NAME)
         .expect("the host loopback name has no NUL");
 
-    let mut with_host_loopback = host_loopback != HostLoopback::Off;
     loop {
         let mut settings = std::mem::zeroed::<WslcSessionSettings>();
         let hr =
@@ -1025,6 +1058,7 @@ pub(crate) unsafe fn create_session(
             return Err(sdk_step_error("WslcInitSessionSettings", hr, ""));
         }
         apply_session_sizing(sdk, &mut settings, sizing)?;
+        let with_host_loopback = host_loopback != HostLoopback::Off;
         if with_host_loopback {
             let hr =
                 sdk.WslcSetSessionSettingsHostLoopback(&mut settings, host_loopback_name.as_ptr());
@@ -1036,25 +1070,14 @@ pub(crate) unsafe fn create_session(
         let mut session: WslcSession = ptr::null_mut();
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
-        if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && with_host_loopback {
-            if host_loopback == HostLoopback::Required {
-                return Err(host_loopback_unsupported()
-                    .with_api_failure(sdk_api_failure("WslcCreateSession", hr)));
-            }
+        if hr != S_OK {
+            host_loopback = host_loopback_for_retry(hr, host_loopback, &err_msg.to_string_lossy())?;
             let _ = writeln!(
                 logger,
                 "[WSLC] This WSL can't map Windows loopback into session '{session_name}'; \
                  creating it without"
             );
-            with_host_loopback = false;
             continue;
-        }
-        if hr != S_OK {
-            return Err(sdk_step_error(
-                "WslcCreateSession",
-                hr,
-                &err_msg.to_string_lossy(),
-            ));
         }
         if with_host_loopback {
             let _ = writeln!(
@@ -1069,6 +1092,21 @@ pub(crate) unsafe fn create_session(
             sdk.release_session_fn(),
         );
         return Ok((guard, with_host_loopback));
+    }
+}
+
+fn host_loopback_for_retry(
+    hr: HRESULT,
+    host_loopback: HostLoopback,
+    sdk_msg: &str,
+) -> Result<HostLoopback, WslcStepError> {
+    match host_loopback {
+        HostLoopback::IfSupported if hr == WSLC_E_RUNTIME_UPDATE_NEEDED => Ok(HostLoopback::Off),
+        HostLoopback::Required if hr == WSLC_E_RUNTIME_UPDATE_NEEDED => {
+            Err(host_loopback_unsupported()
+                .with_api_failure(sdk_api_failure("WslcCreateSession", hr)))
+        }
+        _ => Err(sdk_step_error("WslcCreateSession", hr, sdk_msg)),
     }
 }
 
@@ -2375,6 +2413,7 @@ mod tests {
             sink: Some(Box::new(move |kind, bytes| {
                 seen.lock().unwrap().push((kind, bytes.to_vec()));
             })),
+            capture: Capture::Head,
         });
 
         let payload = b"streamed-not-captured";
@@ -2408,6 +2447,7 @@ mod tests {
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(false), Condvar::new())),
             sink: None,
+            capture: Capture::Head,
         };
         let cancellation = AtomicBool::new(true);
 
@@ -2423,11 +2463,101 @@ mod tests {
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(true), Condvar::new())),
             sink: None,
+            capture: Capture::Head,
         };
         let cancellation = AtomicBool::new(false);
 
         let result = unsafe { wait_for_exit_event(ptr::null_mut(), &io_ctx, None, &cancellation) };
 
         assert_eq!(result, ExitWait::NoEvent);
+    }
+
+    #[test]
+    fn an_older_wsl_gets_one_retry_without_host_loopback_only_when_it_is_optional() {
+        let old_wsl = WSLC_E_RUNTIME_UPDATE_NEEDED;
+        let refused = sdk_api_failure("WslcCreateSession", old_wsl);
+
+        let retry = host_loopback_for_retry(old_wsl, HostLoopback::IfSupported, "")
+            .expect("an optional host loopback is dropped for an older WSL");
+        assert_eq!(retry, HostLoopback::Off);
+        let refused_again = host_loopback_for_retry(old_wsl, retry, "")
+            .expect_err("the retry without host loopback is the last attempt");
+        assert_eq!(refused_again.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(refused_again.api_failure.as_deref(), Some(&refused));
+
+        let required = host_loopback_for_retry(old_wsl, HostLoopback::Required, "")
+            .expect_err("a required host loopback is never dropped");
+        assert_eq!(required.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(
+            required.error_message.contains("wsl --update"),
+            "{}",
+            required.error_message
+        );
+        assert_eq!(required.api_failure.as_deref(), Some(&refused));
+    }
+
+    #[test]
+    fn other_session_failures_are_returned_whatever_host_loopback_asks() {
+        for host_loopback in [
+            HostLoopback::Off,
+            HostLoopback::IfSupported,
+            HostLoopback::Required,
+        ] {
+            let error = host_loopback_for_retry(E_FAIL, host_loopback, "no VM")
+                .expect_err("only an older WSL is retried");
+            assert_eq!(
+                error.failure_phase,
+                FailurePhase::LaunchFailed,
+                "{host_loopback:?}"
+            );
+            assert!(
+                error.error_message.contains("no VM"),
+                "{}",
+                error.error_message
+            );
+            assert_eq!(
+                error.api_failure.as_deref(),
+                Some(&sdk_api_failure("WslcCreateSession", E_FAIL))
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_output_keeps_only_the_newest_whole_lines_under_a_tail_capture() {
+        let io_ctx = Arc::new(IoContext {
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            exited: Arc::new((Mutex::new(false), Condvar::new())),
+            sink: None,
+            capture: Capture::Tail(64),
+        });
+        let raw = Arc::into_raw(Arc::clone(&io_ctx));
+        // SAFETY: `raw` is a live `Arc<IoContext>` pointer and each line is
+        // valid for its full length, matching what the SDK passes.
+        unsafe {
+            for i in 0..1000 {
+                let line = format!("DENY  request {i}\n");
+                io_callback(
+                    WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT,
+                    line.as_ptr(),
+                    line.len() as u32,
+                    raw as *mut c_void,
+                );
+                let kept = io_ctx.stdout.lock().unwrap().len();
+                assert!(kept <= 64, "{kept} bytes kept after line {i}");
+            }
+            drop(Arc::from_raw(raw));
+        }
+
+        let kept = String::from_utf8(io_ctx.stdout.lock().unwrap().clone()).unwrap();
+        assert!(kept.starts_with("DENY  "), "{kept:?}");
+        assert!(kept.ends_with("DENY  request 999\n"), "{kept:?}");
+    }
+
+    #[test]
+    fn a_tail_capture_keeps_the_newest_bytes_of_a_line_longer_than_its_limit() {
+        let mut buf = Vec::new();
+        Capture::Tail(4).append(&mut buf, b"abcdefgh");
+        assert_eq!(buf, b"efgh");
     }
 }

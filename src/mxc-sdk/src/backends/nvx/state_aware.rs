@@ -226,6 +226,7 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
         Ok(ProvisionResult {
             sandbox_id: provisioned.sandbox_id.to_mxc_string(),
             metadata: provisioned.metadata.map(Value::Object),
+            warnings: Vec::new(),
         })
     }
 

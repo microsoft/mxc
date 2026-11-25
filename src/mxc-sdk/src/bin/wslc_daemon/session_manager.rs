@@ -2494,9 +2494,6 @@ impl Worker {
                 {
                     return Err(sr_err(container_steps::host_loopback_unsupported()));
                 }
-                for warning in &egress.warnings {
-                    self.logger.log_line(&format!("WARNING: WSLc: {warning}"));
-                }
                 let custom_proxy = egress_gateway::resolve_custom_proxy(egress).map_err(sr_err)?;
 
                 // SAFETY: `sdk`/`session` are valid, and the container entry

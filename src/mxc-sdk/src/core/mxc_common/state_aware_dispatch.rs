@@ -581,13 +581,15 @@ fn pump_stream<R: std::io::Read, W: std::io::Write>(mut src: R, mut dst: W, mute
 
 // ---------- Wire-format envelope construction ----------
 
-/// `{ "result": { "sandboxId": "...", "metadata": {...}? } }`
+/// `{ "result": { "sandboxId": "...", "metadata": {...}?, "warnings": [...]? } }`
 #[derive(Serialize)]
 struct ProvisionWireBody<M: Serialize> {
     #[serde(rename = "sandboxId")]
     sandbox_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<M>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 /// `{ "metadata": {...}? }` — used by start / stop / deprovision phases.
@@ -608,6 +610,7 @@ fn provision_envelope<M: Serialize>(r: ProvisionResult<M>) -> Result<Value, MxcE
     let body = ProvisionWireBody {
         sandbox_id: r.sandbox_id,
         metadata: r.metadata,
+        warnings: r.warnings,
     };
     let envelope = ResponseEnvelope::Result(body);
     serde_json::to_value(&envelope).map_err(|e| {
@@ -753,6 +756,7 @@ mod tests {
             Ok(ProvisionResult {
                 sandbox_id: format!("{}:fixed-token", Self::ID_PREFIX),
                 metadata: None,
+                warnings: Vec::new(),
             })
         }
         fn start(
@@ -1064,6 +1068,23 @@ mod tests {
         assert_eq!(b.validate_provision_calls.get(), 1);
         assert_eq!(b.provision_calls.get(), 1);
         assert_eq!(env, json!({"result": {"sandboxId": "stubd:fixed-token"}}));
+    }
+
+    #[test]
+    fn provision_warnings_reach_the_envelope() {
+        let env = provision_envelope(ProvisionResult::<()> {
+            sandbox_id: "stubd:fixed-token".to_string(),
+            metadata: None,
+            warnings: vec!["ingress has no effect".to_string()],
+        })
+        .unwrap();
+        assert_eq!(
+            env,
+            json!({"result": {
+                "sandboxId": "stubd:fixed-token",
+                "warnings": ["ingress has no effect"],
+            }})
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::mxc_common::models::{PortMapping, ScriptResponse};
 use crate::mxc_common::proxy_env;
 use crate::mxc_common::string_util::CoTaskMemPWSTR;
 use crate::wslc_common::container_steps::{
-    self, cstr_bytes, sdk_error, ContainerNetworking, ProcessSettings,
+    self, cstr_bytes, sdk_error, Capture, ContainerNetworking, ProcessSettings,
 };
 use crate::wslc_common::error::{WslcError, WslcStepError};
 use crate::wslc_common::image;
@@ -99,6 +99,9 @@ const IMAGE_TAR: &str = "mxc-wslc-gateway.tar";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+// A gateway runs as long as its sandbox, so it keeps only its newest output.
+const KEPT_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// One proxy's two networks, each a free /24 of the session's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,7 +193,7 @@ impl Gateway {
         let records = StoreRecords::open(store_path).map_err(host_error)?;
         let names = ProxyNames::for_owner(owner);
         let networks = session_resources::list_networks(sdk_ref, session)
-            .map_err(|e| host_error(e.to_string()))?;
+            .map_err(|e| network_failure(e, "WslcListSessionNetworks"))?;
         refuse_unrecorded(sdk_ref, session, &records, &names, &networks)?;
         let subnets = Subnets::allocate(&networks)?;
 
@@ -247,8 +250,10 @@ impl Gateway {
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<(WslcContainerGuard, ProcessSettings, tempfile::TempPath), ScriptResponse> {
-        create_network(sdk, session, &names.egress, subnets.egress, false)?;
-        create_network(sdk, session, &names.internal, subnets.internal, true)?;
+        create_network(sdk, session, &names.egress, subnets.egress, false)
+            .map_err(|e| network_failure(e, "WslcCreateSessionNetwork"))?;
+        create_network(sdk, session, &names.internal, subnets.internal, true)
+            .map_err(|e| network_failure(e, "WslcCreateSessionNetwork"))?;
 
         let tag = image_tag();
         ensure_image(sdk, session, &tag, logger)?;
@@ -320,6 +325,7 @@ impl Gateway {
             sdk,
             &["/gateway".to_string()],
             &[format!("{}={policy}", gateway::POLICY_ENV)],
+            Capture::Tail(KEPT_OUTPUT_BYTES),
         )?;
         let hr = sdk.WslcSetContainerSettingsInitProcess(&mut settings, process.raw_mut());
         if hr != S_OK {
@@ -641,15 +647,38 @@ pub unsafe fn sweep_leftovers(
     logger: &mut Logger,
 ) -> Result<(), String> {
     let records = StoreRecords::open(store_path)?;
-    let removed = session_resources::remove_all_recorded::<ProxyNames>(sdk, session, &records)
-        .map_err(|e| format!("could not remove the built-in proxy left by an earlier run: {e}"))?;
-    if removed {
-        let _ = writeln!(logger, "[WSLC] {LEFTOVERS_REMOVED}");
-        logger.warning_line(&format!("WARNING: WSLc: {LEFTOVERS_REMOVED}"));
-    }
-    sandbox_network::remove_leftovers(sdk, session, &records, logger).map_err(|e| {
+    sweep_both(
+        || session_resources::remove_all_recorded::<ProxyNames>(sdk, session, &records),
+        |logger| sandbox_network::remove_leftovers(sdk, session, &records, logger),
+        logger,
+    )
+}
+
+fn sweep_both(
+    remove_proxies: impl FnOnce() -> Result<bool, String>,
+    remove_networks: impl FnOnce(&mut Logger) -> Result<(), String>,
+    logger: &mut Logger,
+) -> Result<(), String> {
+    let proxies = match remove_proxies() {
+        Ok(removed) => {
+            if removed {
+                let _ = writeln!(logger, "[WSLC] {LEFTOVERS_REMOVED}");
+                logger.warning_line(&format!("WARNING: WSLc: {LEFTOVERS_REMOVED}"));
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "could not remove the built-in proxy left by an earlier run: {e}"
+        )),
+    };
+    let networks = remove_networks(logger).map_err(|e| {
         format!("could not remove the sandbox networks left by an earlier daemon: {e}")
-    })
+    });
+    match (proxies, networks) {
+        (Err(proxies), Err(networks)) => Err(format!("{proxies}; {networks}")),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// Refuse proxy names that exist without a record. They're from a lost
@@ -694,6 +723,10 @@ unsafe fn refuse_unrecorded(
         }
     }
     Ok(())
+}
+
+fn network_failure(error: WslcError, operation: &str) -> WslcStepError {
+    session_resources::session_network_failure(error, operation, "the built-in proxy")
 }
 
 fn create_container_error(hr: HRESULT, sdk_msg: &str) -> WslcError {
@@ -1070,5 +1103,38 @@ mod tests {
 
         let full: Vec<_> = (0..=255).map(|c| held("n", [10, 231, c, 0])).collect();
         assert!(Subnets::allocate(&full[1..]).is_err());
+    }
+
+    #[test]
+    fn a_failed_proxy_sweep_still_removes_sandbox_networks() {
+        let mut networks_swept = false;
+        let error = sweep_both(
+            || Err("a malformed record".to_string()),
+            |_| {
+                networks_swept = true;
+                Ok(())
+            },
+            &mut Logger::new(Mode::Buffer),
+        )
+        .expect_err("the proxy failure is reported");
+        assert!(
+            networks_swept,
+            "the network sweep ran after the proxy sweep failed"
+        );
+        assert!(error.contains("a malformed record"), "{error}");
+    }
+
+    #[test]
+    fn both_failed_sweeps_are_reported() {
+        let error = sweep_both(
+            || Err("proxy busy".to_string()),
+            |_| Err("network busy".to_string()),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .expect_err("both failures are reported");
+        assert!(
+            error.contains("proxy busy") && error.contains("network busy"),
+            "{error}"
+        );
     }
 }

@@ -981,8 +981,8 @@ impl WSLContainerRunner {
 
         let gateway = match &network_mode {
             policy::NetworkMode::Proxied(egress) => {
-                for warning in &egress.warnings {
-                    logger.warning_line(&format!("WARNING: WSLc: {warning}"));
+                for warning in egress.warning_lines() {
+                    logger.warning_line(&warning);
                 }
                 let storage_path = self.storage_path();
                 egress_gateway::sweep_leftovers(sdk, session_guard.as_raw(), &storage_path, logger)

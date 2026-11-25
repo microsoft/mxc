@@ -42,7 +42,8 @@ use crate::wslc_common::daemon_protocol::{
     ProvisionSessionConfig as DaemonProvisionSessionConfig, StartConfig, StopConfig, VolumeMount,
 };
 use crate::wslc_common::policy::{
-    exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
+    exec_proxy_url, validate_exec_policy, validate_post_provision_policy,
+    validate_provision_policy, NetworkMode,
 };
 use crate::wslc_common::process_env::EnvScope;
 #[cfg(windows)]
@@ -115,6 +116,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         config: Option<WslcProvisionConfig>,
     ) -> Result<ProvisionResult<()>, MxcError> {
         let provision_config = build_provision_config(request, config)?;
+        let warnings = match &provision_config.network {
+            NetworkMode::Proxied(egress) => egress.warning_lines().collect(),
+            NetworkMode::None | NetworkMode::Bridged => Vec::new(),
+        };
 
         let client = connect_daemon()?;
         let sandbox_id = client
@@ -124,6 +129,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         Ok(ProvisionResult {
             sandbox_id,
             metadata: None,
+            warnings,
         })
     }
 

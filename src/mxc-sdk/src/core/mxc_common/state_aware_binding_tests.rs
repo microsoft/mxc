@@ -280,6 +280,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
         Ok(ProvisionResult {
             sandbox_id: format!("{}:created", C::PREFIX),
             metadata: None,
+            warnings: Vec::new(),
         })
     }
     fn provision_session(

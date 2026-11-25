@@ -151,8 +151,16 @@ pub struct ProxiedEgress {
     pub host_loopback: bool,
     /// Where the built-in proxy relays instead of filtering itself.
     pub custom_proxy: Option<CustomProxy>,
-    /// Deny entries the proxy has nothing to apply to.
+    /// Parts of the policy that have no effect behind the proxy.
     pub warnings: Vec<String>,
+}
+
+impl ProxiedEgress {
+    pub(crate) fn warning_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.warnings
+            .iter()
+            .map(|warning| format!("WARNING: WSLc: {warning}"))
+    }
 }
 
 /// A `runtimeConfig.networkProxy` behind the built-in proxy.

@@ -11,8 +11,9 @@
 #   1. Parser accepts the `wslc` backend with a runtime proxy URL.
 #   2. The runner injects HTTP_PROXY/HTTPS_PROXY from runtimeConfig.networkProxy,
 #      scrubs the attacker-supplied proxy env vars in the config's process.env,
-#      and neutralizes NO_PROXY/no_proxy to empty (so a caller- or image-baked
-#      exemption like NO_PROXY=* cannot defeat the cooperative proxy).
+#      and neutralizes NO_PROXY/no_proxy (so a caller- or image-baked exemption
+#      like NO_PROXY=* cannot defeat the cooperative proxy), exempting only
+#      host.wslc.internal when the container can resolve it.
 #   3. A cooperating client (busybox wget) routes through the proxy.
 #
 # The proxy is an in-container marker server on 127.0.0.1 (a WSLC container
@@ -118,11 +119,18 @@ if ($pass -and (($childLine -cnotmatch 'FTP_PROXY=\[http://127\.0\.0\.1:8888\]')
 }
 
 # NO_PROXY / no_proxy must be neutralized so an image-baked or caller-supplied
-# exemption (e.g. NO_PROXY=*) cannot disable the proxy. Only host loopback
-# (WSL 3.0.5 or later) stays exempt.
-if ($pass -and (($childLine -notmatch 'NO_PROXY=\[(host\.wslc\.internal)?\]') -or ($childLine -notmatch 'no_proxy=\[(host\.wslc\.internal)?\]'))) {
+# exemption (e.g. NO_PROXY=*) cannot disable the proxy. Only host.wslc.internal
+# stays exempt, and only when the container can resolve it, which needs WSL
+# 3.0.5 or later.
+if ($pass -and ($childLine -cnotmatch 'HOST_LOOPBACK=\[(on|off)\]')) {
     $pass = $false
-    $reason = "runner did not neutralize NO_PROXY/no_proxy"
+    $reason = "child did not report whether it resolves host.wslc.internal"
+}
+$exempt = if ($childLine -cmatch 'HOST_LOOPBACK=\[on\]') { 'host.wslc.internal' } else { '' }
+$exemptPattern = [regex]::Escape($exempt)
+if ($pass -and (($childLine -cnotmatch "NO_PROXY=\[$exemptPattern\]") -or ($childLine -cnotmatch "no_proxy=\[$exemptPattern\]"))) {
+    $pass = $false
+    $reason = "runner did not set NO_PROXY/no_proxy to [$exempt]"
 }
 
 # The cooperating client must have routed through the marker proxy.

@@ -131,6 +131,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 agent_user_sid: provisioned.agent_user_sid,
                 ephemeral_workspace_path: provisioned.ephemeral_workspace_path,
             }),
+            warnings: Vec::new(),
         })
     }
 

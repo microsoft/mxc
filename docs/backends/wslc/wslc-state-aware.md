@@ -163,8 +163,10 @@ sandboxes have no network at all.
   separate from `windowsPort`. Another container in the session can connect to
   that VM port through a VM address and reach the mapped container. Container
   ports that aren't mapped stay unreachable. Sandboxes in other sessions can't
-  reach the VM port, so to keep a mapped service away from other sandboxes,
-  provision it in a session of its own; see [Sessions](#sessions).
+  reach the VM port, so a session of its own keeps other sandboxes off a mapped
+  service's VM port; see [Sessions](#sessions). It doesn't protect the
+  `windowsPort`: bridged sandboxes, and proxied ones with
+  `hostLoopback: "allow"`, reach that on Windows `127.0.0.1` from any session.
 
 ### Built-in proxy
 
@@ -734,7 +736,8 @@ The network posture picks one of three modes at provision (see
 Bridged sandboxes aren't filtered. With the built-in proxy, egress rules and
 the custom proxy follow the create-and-run
 [filtering rules](wsl-container-getting-started.md#filtering), and
-`ingress.default: "allow"` has no effect and logs a warning.
+`ingress.default: "allow"` has no effect. Provision returns the warnings these
+rules produce in its result's `warnings`, as create-and-run execution does.
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|
@@ -950,8 +953,9 @@ configuration rather than routing. Exercise these fixtures **through the harness
   sandbox has its own networks, but WSLC publishes mapped ports on every
   address of the session VM, and a proxied sandbox whose egress allows VM
   addresses reaches them through its proxy. Give a mapped service that other
-  sandboxes must not reach a session of its own. See
-  [Bridged networking](#bridged-networking).
+  sandboxes must not reach a session of its own. That keeps them off its VM
+  ports, but not off its `windowsPort`, which any sandbox with host loopback
+  reaches (see the next item). See [Bridged networking](#bridged-networking).
 
 - **Host loopback covers every Windows loopback port.** A bridged sandbox, or a
   proxied one with `hostLoopback: "allow"`, reaches every TCP service on

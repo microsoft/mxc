@@ -16,7 +16,7 @@ use crate::mxc_common::filesystem_security::{
 };
 use crate::mxc_common::models::ScriptResponse;
 use crate::mxc_common::string_util::CoTaskMemPWSTR;
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::wslc_bindings::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,6 +335,25 @@ pub(crate) fn host_error(message: String) -> ScriptResponse {
     WslcError::Host(message).into_response()
 }
 
+pub(crate) fn session_network_failure(
+    error: WslcError,
+    operation: &str,
+    feature: &str,
+) -> WslcStepError {
+    let WslcError::Sdk { hr, .. } = error else {
+        return error.into_step_error();
+    };
+    let failure = sdk_api_failure(operation, hr);
+    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED {
+        return WslcError::Unavailable(format!(
+            "WSLc: {feature} needs WSL 3.0.5 or later. Run `wsl --update`"
+        ))
+        .into_step_error()
+        .with_api_failure(failure);
+    }
+    error.into_step_error().with_api_failure(failure)
+}
+
 pub(crate) struct StoreRecords {
     store: String,
     dir: Option<LockedDirectoryPath>,
@@ -616,5 +635,38 @@ mod tests {
             used.push((subnet, SUBNET_PREFIX_LENGTH));
         }
         assert_eq!(used.len(), 256);
+    }
+
+    #[test]
+    fn an_older_wsl_without_session_networks_is_unavailable() {
+        use crate::mxc_common::models::FailurePhase;
+        let failure = |hr| {
+            session_network_failure(
+                WslcError::sdk("could not list networks", hr, ""),
+                "WslcListSessionNetworks",
+                "the built-in proxy",
+            )
+        };
+
+        let old_wsl = failure(WSLC_E_RUNTIME_UPDATE_NEEDED);
+        assert_eq!(old_wsl.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            old_wsl.error_message,
+            "WSLc: the built-in proxy needs WSL 3.0.5 or later. Run `wsl --update`"
+        );
+        assert_eq!(
+            old_wsl.api_failure.as_deref(),
+            Some(&sdk_api_failure(
+                "WslcListSessionNetworks",
+                WSLC_E_RUNTIME_UPDATE_NEEDED
+            ))
+        );
+
+        let other = failure(E_FAIL);
+        assert_eq!(other.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            other.api_failure.as_deref(),
+            Some(&sdk_api_failure("WslcListSessionNetworks", E_FAIL))
+        );
     }
 }

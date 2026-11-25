@@ -395,6 +395,27 @@ This security-servicing exception applies within V1 and does not require a new
 versioned API surface. The daemon control protocol moved to version 12, so a
 client refuses a daemon that would still use the shared network.
 
+### Approved behavior change: WSLc bridged host loopback
+
+On WSL 3.0.5 or later, bridged WSLc containers reach TCP services on Windows
+`127.0.0.1` at `host.wslc.internal`, in create-and-run execution and container
+lifecycle operations. A container is bridged when `network.egress.default`,
+`network.ingress.default`, and `network.ingress.hostLoopback` are all `allow`
+and it has no egress rules. Before, those containers couldn't reach Windows
+loopback. Now they reach every TCP port on Windows `127.0.0.1`, including other
+sandboxes' mapped ports. See
+[Network configuration](../../backends/wslc/wsl-container-getting-started.md#network-configuration).
+
+On older WSL, MXC creates the session without host loopback, so a bridged
+create-and-run container behaves as before. Bridged container lifecycle
+sandboxes already need WSL 3.0.5; see the previous section. No other policy
+gains host loopback: an isolated container has no network, and a container
+behind the built-in proxy reaches Windows loopback only with
+`hostLoopback: "allow"`.
+
+This approved behavior change applies within V1 and does not require a new
+versioned API surface.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the
