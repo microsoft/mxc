@@ -2587,17 +2587,7 @@ impl Worker {
         };
         let container = match created {
             Ok(container) => container,
-            Err(mut e) => {
-                if let Some(network) = network {
-                    // SAFETY: `sdk`/`session` are valid.
-                    let deleted = unsafe { network.delete(sdk, session, &mut self.logger) };
-                    if let Err(cleanup) = deleted {
-                        e.error_message =
-                            format!("{}; cleanup also failed: {cleanup}", e.error_message);
-                    }
-                }
-                return Err(sr_err(e));
-            }
+            Err(e) => return Err(self.finish_failed_create(session_ref, network, e)),
         };
 
         self.touch_session(session_ref);
@@ -2616,6 +2606,21 @@ impl Worker {
             },
         );
         Ok(sandbox_id)
+    }
+
+    fn finish_failed_create(
+        &mut self,
+        session_ref: &str,
+        network: Option<SandboxNetworking>,
+        mut error: WslcStepError,
+    ) -> WorkerError {
+        if let Some(network) = network {
+            if let Err(cleanup) = self.delete_network(session_ref, &network) {
+                error.error_message =
+                    format!("{}; cleanup also failed: {cleanup}", error.error_message);
+            }
+        }
+        sr_err(error)
     }
 
     fn start(&mut self, config: StartConfig) -> Result<(), WorkerError> {
@@ -6862,6 +6867,32 @@ mod tests {
                 .unwrap();
             assert_eq!(deleted_networks(), [expected_deletion]);
             assert!(!worker.containers.contains_key(&id()));
+        }
+    }
+
+    #[test]
+    fn a_failed_create_deletes_its_network_and_reports_a_failed_cleanup() {
+        let create_failure = || WslcStepError {
+            failure_phase: FailurePhase::LaunchFailed,
+            error_message: "could not create the workload".to_string(),
+            api_failure: None,
+        };
+
+        for (network, expected_deletion) in sandbox_networks("wslc:unborn") {
+            let mut worker = worker_recording_deleted_networks();
+            let error = worker.finish_failed_create(TEST_SESSION, Some(network), create_failure());
+            assert_eq!(error.to_string(), "could not create the workload");
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+
+        for (network, _) in sandbox_networks("wslc:unborn") {
+            let mut worker = worker_recording_deleted_networks();
+            fail_network_deletion(true);
+            let error = worker.finish_failed_create(TEST_SESSION, Some(network), create_failure());
+            assert_eq!(
+                error.to_string(),
+                "could not create the workload; cleanup also failed: the network is busy"
+            );
         }
     }
 
