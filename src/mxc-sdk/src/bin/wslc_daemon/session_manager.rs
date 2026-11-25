@@ -1035,8 +1035,30 @@ struct ContainerEntry {
 /// The network resources a sandbox owns beyond its container.
 enum SandboxNetworking {
     Bridged(SandboxNetwork),
-    /// Boxed: a gateway is far larger than a network name.
-    Proxied(Box<Gateway>),
+    Proxied(Box<dyn BuiltInProxy>),
+}
+
+/// Lets worker tests hold a proxied sandbox without starting a [`Gateway`].
+trait BuiltInProxy {
+    fn workload_networking(&self) -> ContainerNetworking<'_>;
+
+    fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String>;
+
+    fn teardown(&self, logger: &mut Logger) -> Result<(), String>;
+}
+
+impl BuiltInProxy for Gateway {
+    fn workload_networking(&self) -> ContainerNetworking<'_> {
+        Gateway::workload_networking(self)
+    }
+
+    fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
+        Gateway::workload_env(self, caller_env, scope)
+    }
+
+    fn teardown(&self, logger: &mut Logger) -> Result<(), String> {
+        Gateway::teardown(self, logger)
+    }
 }
 
 impl SandboxNetworking {
@@ -3170,9 +3192,7 @@ impl Worker {
                         &mut self.logger,
                     )
                 };
-                if let (Ok(()), Some(network)) = (deleted, entry.network) {
-                    self.delete_network(&entry.session_ref, network);
-                }
+                self.finish_shutdown_delete(&entry.session_ref, entry.network, deleted);
                 // entry (WslcContainerGuard) drops here, releasing the handle.
             }
         } else {
@@ -3180,6 +3200,17 @@ impl Worker {
         }
 
         self.release_sessions_for_shutdown(rx, deadline, drain_budget, left_running);
+    }
+
+    fn finish_shutdown_delete(
+        &mut self,
+        session_ref: &str,
+        network: Option<SandboxNetworking>,
+        deleted: Result<(), WslcStepError>,
+    ) {
+        if let (Ok(()), Some(network)) = (deleted, network) {
+            self.delete_network(session_ref, network);
+        }
     }
 
     /// Release a session whose boot landed after teardown had begun, returning
@@ -6611,73 +6642,123 @@ mod tests {
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
+    const PROXY_DELETION: &str = "built-in proxy";
+
     fn record_deleted_network(_: &mut Worker, session_ref: &str, network: SandboxNetworking) {
-        let SandboxNetworking::Bridged(network) = network else {
-            panic!("only bridged sandboxes are built without an SDK");
+        let name = match network {
+            SandboxNetworking::Bridged(network) => network.name().to_string_lossy().into_owned(),
+            SandboxNetworking::Proxied(_) => PROXY_DELETION.to_string(),
         };
-        DELETED_NETWORKS.with(|deleted| {
-            deleted.borrow_mut().push(format!(
-                "{session_ref} {}",
-                network.name().to_string_lossy()
-            ))
-        });
+        DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().push(format!("{session_ref} {name}")));
     }
 
     fn deleted_networks() -> Vec<String> {
         DELETED_NETWORKS.with(|deleted| deleted.borrow().clone())
     }
 
-    fn worker_with_bridged_sandbox(sandbox_id: &str) -> (Worker, String) {
+    struct FakeProxy;
+
+    impl BuiltInProxy for FakeProxy {
+        fn workload_networking(&self) -> ContainerNetworking<'_> {
+            unreachable!("no test provisions behind a fake proxy")
+        }
+
+        fn workload_env(&self, _: &[String], _: EnvScope) -> Vec<String> {
+            unreachable!("no test execs behind a fake proxy")
+        }
+
+        fn teardown(&self, _: &mut Logger) -> Result<(), String> {
+            unreachable!("tests delete through record_deleted_network")
+        }
+    }
+
+    fn sandbox_networks(sandbox_id: &str) -> [(SandboxNetworking, String); 2] {
+        let bridged = SandboxNetwork::named(sandbox_id, r"C:\store");
+        let bridged_deletion = format!("{TEST_SESSION} {}", bridged.name().to_string_lossy());
+        [
+            (SandboxNetworking::Bridged(bridged), bridged_deletion),
+            (
+                SandboxNetworking::Proxied(Box::new(FakeProxy)),
+                format!("{TEST_SESSION} {PROXY_DELETION}"),
+            ),
+        ]
+    }
+
+    fn worker_recording_deleted_networks() -> Worker {
         DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().clear());
         let mut worker = Worker::new();
         worker.delete_network = record_deleted_network;
-        let network = SandboxNetwork::named(sandbox_id, r"C:\store");
-        let expected_deletion = format!("{TEST_SESSION} {}", network.name().to_string_lossy());
+        worker
+    }
+
+    fn worker_with_sandbox(sandbox_id: &str, network: SandboxNetworking) -> Worker {
+        let mut worker = worker_recording_deleted_networks();
         worker.containers.insert(
             sandbox_id.to_string(),
             ContainerEntry {
-                network: Some(SandboxNetworking::Bridged(network)),
+                network: Some(network),
                 ..started_entry()
             },
         );
-        (worker, expected_deletion)
+        worker
     }
 
     #[test]
-    fn deprovisioning_a_bridged_sandbox_deletes_its_network() {
-        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
-        worker
-            .deprovision(DeprovisionConfig {
-                sandbox_id: "wslc:bridged".to_string(),
-            })
-            .unwrap();
-        assert_eq!(deleted_networks(), [expected_deletion]);
+    fn deprovisioning_a_sandbox_deletes_its_network() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            worker
+                .deprovision(DeprovisionConfig {
+                    sandbox_id: "wslc:networked".to_string(),
+                })
+                .unwrap();
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
     }
 
     #[test]
     fn a_quarantine_deletes_the_network_only_once_its_container_is_gone() {
-        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
-        let _ = worker.finish_quarantine(
-            "wslc:bridged",
-            "the exit event was unavailable",
-            None,
-            None,
-            Some(Err(delete_failure())),
-        );
-        assert!(
-            deleted_networks().is_empty(),
-            "a container that may still run keeps its network"
-        );
-        assert!(worker.containers["wslc:bridged"].network.is_some());
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            let _ = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Err(delete_failure())),
+            );
+            assert!(
+                deleted_networks().is_empty(),
+                "a container that may still run keeps its network ({expected_deletion})"
+            );
+            assert!(worker.containers["wslc:networked"].network.is_some());
 
-        let _ = worker.finish_quarantine(
-            "wslc:bridged",
-            "the exit event was unavailable",
-            None,
-            None,
-            Some(Ok(())),
-        );
-        assert_eq!(deleted_networks(), [expected_deletion]);
+            let _ = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Ok(())),
+            );
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+    }
+
+    #[test]
+    fn shutdown_deletes_a_network_only_once_its_container_is_gone() {
+        let undeleted = sandbox_networks("wslc:undeleted");
+        let deleted = sandbox_networks("wslc:deleted");
+        for ((left, _), (network, expected_deletion)) in undeleted.into_iter().zip(deleted) {
+            let mut worker = worker_recording_deleted_networks();
+            worker.finish_shutdown_delete(TEST_SESSION, Some(left), Err(delete_failure()));
+            assert!(
+                deleted_networks().is_empty(),
+                "shutdown leaves the network of a container it couldn't delete ({expected_deletion})"
+            );
+
+            worker.finish_shutdown_delete(TEST_SESSION, Some(network), Ok(()));
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
     }
 
     fn kill_failure() -> ApiFailure {
