@@ -1117,7 +1117,6 @@ struct PendingProvision {
     _retire_deadline: std::sync::mpsc::Sender<()>,
 }
 
-/// A proxied provision whose built-in proxy is starting on a thread of its own.
 struct GatewayStart {
     sandbox_id: String,
     config: ProvisionConfig,
@@ -1126,14 +1125,13 @@ struct GatewayStart {
     /// reports.
     reply: Option<oneshot::Sender<Result<String, WorkerError>>>,
 
-    /// Later work for the same session, held so nothing else in the session
-    /// allocates a subnet or creates a container while the proxy starts.
+    /// Later work for the same session, held so the proxy start is the only
+    /// network or container operation in the session.
     parked: Vec<SessionWork>,
 }
 
 impl GatewayStart {
-    /// The provisions waiting on this start, its own included.
-    fn provisions(&self) -> usize {
+    fn waiting_provisions(&self) -> usize {
         1 + self
             .parked
             .iter()
@@ -1304,8 +1302,6 @@ fn start_run_on_sdk(
     })
 }
 
-/// Start the built-in proxy recorded for `session_ref` on its own MTA thread,
-/// using the SDK this worker loaded.
 fn start_gateway_on_sdk(
     state: &Worker,
     session_ref: &str,
@@ -1843,7 +1839,7 @@ impl Worker {
         let starting = self
             .gateway_starts
             .get(session_ref)
-            .map_or(0, GatewayStart::provisions);
+            .map_or(0, GatewayStart::waiting_provisions);
 
         containers + pending + execs + pulls + starting
     }
@@ -2443,7 +2439,7 @@ impl Worker {
         }
         for (session_ref, start) in &self.gateway_starts {
             if let Some(hold) = holds.get_mut(session_ref) {
-                *hold += start.provisions();
+                *hold += start.waiting_provisions();
             }
         }
 
@@ -2673,8 +2669,7 @@ impl Worker {
         self.provision_container(config, session_ref, reply, worker);
     }
 
-    /// Create a provision's container once its image is in the store, or park
-    /// it while its session is starting a built-in proxy.
+    /// Carry on with a provision once its image is in the store.
     fn provision_container(
         &mut self,
         config: ProvisionConfig,
@@ -2771,8 +2766,6 @@ impl Worker {
         self.touch_session(&session_ref);
     }
 
-    /// Create the workload of a provision whose built-in proxy reported, then
-    /// replay the work that waited for it.
     fn finish_gateway_start(
         &mut self,
         session_ref: &str,
@@ -3270,7 +3263,7 @@ impl Worker {
             + self
                 .gateway_starts
                 .values()
-                .map(GatewayStart::provisions)
+                .map(GatewayStart::waiting_provisions)
                 .sum::<usize>()
     }
 
@@ -3290,8 +3283,7 @@ impl Worker {
             }
         }
 
-        // A failed delete, of the container above or of its network here, keeps
-        // the entry so another deprovision retries it.
+        // A failed delete keeps the entry, so another deprovision retries it.
         self.finish_delete(&config.sandbox_id).map_err(|e| {
             WorkerError::backend(anyhow::anyhow!(
                 "deleted the container of sandbox {}, but not its network: {e}; deprovision it \
@@ -3348,16 +3340,16 @@ impl Worker {
         // nothing reads as in flight.
         let boot_reports_possible = !self.pending_sessions.is_empty();
 
-        // A start's entry stays until its report, which holds a live proxy, is
-        // handled.
-        let gateway_reports_possible = !self.gateway_starts.is_empty();
+        // A start's thread may still be using the session, or its report may be
+        // holding a live proxy.
+        let gateway_start_pending = !self.gateway_starts.is_empty();
 
         if execs_in_flight > 0
             || sessions_in_flight > 0
             || releases_in_flight > 0
             || pull_outstanding
             || boot_reports_possible
-            || gateway_reports_possible
+            || gateway_start_pending
         {
             std::mem::forget(std::mem::take(&mut self.containers));
 
@@ -3427,8 +3419,8 @@ impl Worker {
             // The provision this would resume was already answered above.
             WorkerCommand::PullFinished { .. } => {}
 
-            // Every drain runs before any session is released, so this proxy's
-            // session is still loaded.
+            // No workload exists yet, and every drain runs before any session is
+            // released, so the proxy can be deleted now.
             WorkerCommand::GatewayStarted {
                 session_ref,
                 outcome,
@@ -3674,7 +3666,8 @@ impl Worker {
                  session rather than releasing a handle the start is using"
             ));
 
-            // Forgets the store lease with the session, so the slot stays held.
+            // The leaked session keeps its store mounted, so its slot must stay
+            // held too.
             if let Some(entry) = self.sessions.remove(&session_ref) {
                 std::mem::forget(entry);
             }
@@ -7305,8 +7298,6 @@ mod tests {
     const SESSION_A: &str = "wslcsess:a";
     const SESSION_B: &str = "wslcsess:b";
 
-    /// A worker holding the named sessions, whose built-in proxies and runs
-    /// never start.
     fn worker_with_sessions(session_refs: &[&str]) -> (tempfile::TempDir, Worker) {
         fn start_no_gateway(
             _: &Worker,

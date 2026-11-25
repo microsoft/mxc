@@ -51,7 +51,6 @@ pub fn null_pipe_handle() -> PipeHandle {
     -1
 }
 
-/// Provision-phase result.
 #[derive(Debug)]
 pub struct ProvisionResult<M> {
     pub sandbox_id: String,

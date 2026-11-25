@@ -624,7 +624,7 @@ probes used direct TCP connections, ignoring the proxy variables.
   and starting containers with volumes concurrently in one session sometimes
   fails with `E_UNEXPECTED`, and every proxied workload has a `resolv.conf`
   volume. Create-and-run has its own session. In the daemon, `provision`
-  starts the controller on a thread of its own, as a pull runs, and later
+  starts the controller on a thread of its own, like an image pull, and later
   commands for the same session wait until it is ready or has failed; other
   sessions' commands don't wait.
 
@@ -641,10 +641,10 @@ probes used direct TCP connections, ignoring the proxy variables.
 
 - **Daemon:** `ContainerEntry` tracks the controller and networks.
   Deprovision, exec quarantine and `Worker::shutdown` delete them after the
-  workload. If deprovision or quarantine can't, the entry stays with its
-  workload marked deleted, and only another deprovision, which retries them,
-  removes it. A resource it can't delete stays recorded, and the next session
-  on that store deletes it when it boots.
+  workload. If deprovision or quarantine can't delete them, the entry stays,
+  with its workload marked deleted, until a later deprovision deletes them. A
+  resource it can't delete stays recorded, and the next session on that store
+  deletes it when it boots.
 
 - **Leftovers:** a crash leaves the workload, controller and networks in the
   store. A store admits one live session, so when MXC opens a session on a

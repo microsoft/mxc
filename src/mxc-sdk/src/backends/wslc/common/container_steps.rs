@@ -2532,8 +2532,9 @@ mod tests {
             capture: Capture::Tail(64),
         });
         let raw = Arc::into_raw(Arc::clone(&io_ctx));
+
         // SAFETY: `raw` is a live `Arc<IoContext>` pointer and each line is
-        // valid for its full length, matching what the SDK passes.
+        // valid for its full length.
         unsafe {
             for i in 0..1000 {
                 let line = format!("DENY  request {i}\n");

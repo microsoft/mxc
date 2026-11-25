@@ -675,28 +675,36 @@ function Get-TcpResponse {
 }
 
 # Provision and start a sandbox with a mapped host port, retrying when another
-# process takes the port first. WSLC installs the forward at container start
-# rather than at provision, so a port claimed in between fails the start phase
-# with HRESULT 0x80072740.
+# process takes the port first. WSLC installs a bridged sandbox's forward when
+# its container starts and a proxied sandbox's when its built-in proxy starts
+# at provision, so a port claimed in between fails that phase with HRESULT
+# 0x80072740.
 function New-PortMappedSandbox {
-    param([int]$MaxAttempts = 3)
+    param(
+        [int]$MaxAttempts = 3,
+        [scriptblock]$ProvisionOnPort = {
+            param([int]$Port)
+            Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $Port
+        }
+    )
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         $port = Get-FreeTcpPort
-        $provision = Invoke-StateAware `
-            -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $port
+        $provision = & $ProvisionOnPort $port
         $provisionEnv = Parse-Envelope -Stdout $provision.Stdout
         if ((Envelope-Arm $provisionEnv) -ne 'result') {
-            return @{ Port = $port; SandboxId = $null; Provision = $provision; Start = $null }
+            if (-not (Test-PortTaken $provisionEnv) -or $attempt -eq $MaxAttempts) {
+                return @{ Port = $port; SandboxId = $null; Provision = $provision; Start = $null }
+            }
+            Write-Host "  host port $port was taken before provision; retrying" -ForegroundColor DarkGray
+            continue
         }
 
         $sandboxId = [string]$provisionEnv.result.sandboxId
         $start = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $sandboxId
         $startEnv = Parse-Envelope -Stdout $start.Stdout
-        $portTaken = (Envelope-Arm $startEnv) -eq 'error' -and
-            "$($startEnv.error.message)" -match '0x80072740'
 
-        if (-not $portTaken -or $attempt -eq $MaxAttempts) {
+        if (-not (Test-PortTaken $startEnv) -or $attempt -eq $MaxAttempts) {
             return @{ Port = $port; SandboxId = $sandboxId; Provision = $provision; Start = $start }
         }
 
@@ -706,6 +714,11 @@ function New-PortMappedSandbox {
                 -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $sandboxId
         } catch { }
     }
+}
+
+function Test-PortTaken {
+    param($Envelope)
+    (Envelope-Arm $Envelope) -eq 'error' -and "$($Envelope.error.message)" -match '0x80072740'
 }
 
 $script:TestResults = @()
@@ -2116,13 +2129,14 @@ d() { nc -z -w 3 "$1" "$2" && echo REACHED || echo BLOCKED; }
 '@
 
 function Invoke-PProbes {
-    param([string]$SandboxId, [string[]]$Probes, [hashtable]$Request = @{})
+    param([string]$SandboxId, [string[]]$Probes, [hashtable]$Request = @{}, [string[]]$ProcessEnv)
 
     $req = @{
         phase = 'exec'
         sandboxId = $SandboxId
         process = @{ commandLine = ($pProbeHelpers + "`n" + ($Probes -join "`n")); timeout = 60000 }
     }
+    if ($ProcessEnv) { $req.process.env = $ProcessEnv }
     foreach ($key in $Request.Keys) { $req[$key] = $Request[$key] }
     $r = Invoke-StateAware -Request $req
     $values = @{}
@@ -2145,7 +2159,7 @@ function Assert-PProbes {
     }
 }
 
-function New-PSandbox {
+function New-PProvisionRequest {
     param([hashtable]$Network, [string]$Image = 'alpine:latest', [hashtable]$Provision = @{}, [string]$Proxy)
 
     $provisionConfig = @{ image = $Image }
@@ -2158,30 +2172,82 @@ function New-PSandbox {
         wslc = @{ provision = $provisionConfig }
     }
     if ($Proxy) { $req.runtimeConfig = @{ networkProxy = $Proxy } }
+    $req
+}
+
+function New-PSandbox {
+    param(
+        [hashtable]$Network,
+        [string]$Image = 'alpine:latest',
+        [hashtable]$Provision = @{},
+        [string]$Proxy,
+        [string]$ExpectWarning
+    )
+
+    $req = New-PProvisionRequest -Network $Network -Image $Image -Provision $Provision -Proxy $Proxy
     $envObj = Assert-ResultEnvelope (Invoke-StateAware -Request $req) "provision"
     if (-not $envObj) { return $null }
     $id = [string]$envObj.result.sandboxId
     $script:pIds += $id
+    if ($ExpectWarning) {
+        $warnings = @($envObj.result.warnings | Where-Object { $_ })
+        Assert-True (@($warnings | Where-Object { $_ -match $ExpectWarning }).Count -eq 1) `
+            "provision returned the warning '$ExpectWarning' (got '$($warnings -join '; ')')"
+    }
     $null = Assert-ResultEnvelope (Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $id) "start"
     $id
 }
 
+function Get-ProxyRecordCount {
+    $stores = Join-Path $env:LOCALAPPDATA 'Microsoft\MXC\wslc\stores'
+    @(Get-ChildItem -Path $stores -Filter '*.json' -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike '*.network.json' }).Count
+}
+
+$pEgressProbes = @(
+    'echo PROXY_ENV=$HTTPS_PROXY'
+    'echo ALLOWED=$(p 1.1.1.1:443)'
+    'echo WRONG_PORT=$(p 1.1.1.1:80)'
+    'echo DENIED=$(p 8.8.8.8:443)'
+    'echo DIRECT=$(d 1.1.1.1 443)'
+)
+$pEgressExpected = [ordered]@{
+    PROXY_ENV = 'http://10\.231\.\d+\.254:3128'; ALLOWED = '200'; WRONG_PORT = '403'
+    DENIED = '403'; DIRECT = 'BLOCKED'
+}
+$pHostProbes = @(
+    "echo HOST_DIRECT=`$(h host.wslc.internal $pHostPort)"
+    "echo HOST_VIA_PROXY=`$(p host.wslc.internal:$pHostPort)"
+    "echo LOOPBACK=`$(p 127.0.0.1:$pHostPort)"
+)
+$pHostExpected = [ordered]@{ HOST_DIRECT = '200'; HOST_VIA_PROXY = '200'; LOOPBACK = '403' }
+
 $script:pIds = @()
 $script:pFilteredId = $null
 $script:pFilteredIp = $null
-$pMappedPort = Get-FreeTcpPort
+$script:pLoopbackDeniedId = $null
+$script:pHostAddress = $null
 try {
-    $pFilteredReady = Run-StateAwareTest "P: an allow-list sandbox with host loopback and a port mapping starts" {
-        $script:pFilteredId = New-PSandbox -Image 'python:3.12-alpine' -Network @{
+    $pFiltered = New-PortMappedSandbox -ProvisionOnPort {
+        param([int]$Port)
+        Invoke-StateAware -Request (New-PProvisionRequest -Image 'python:3.12-alpine' -Network @{
             egress = @{
                 default = 'deny'
                 allow = @(@{ to = @(@{ cidr = '1.1.1.1/32' }); ports = @(@{ port = 443; protocol = 'tcp' }) })
             }
             ingress = @{ default = 'deny'; hostLoopback = 'allow' }
         } -Provision @{
-            portMappings = @(@{ windowsPort = $pMappedPort; containerPort = 8080; protocol = 'tcp' })
-        }
-        if ($script:pFilteredId -and -not $script:PreExistingDaemon) {
+            portMappings = @(@{ windowsPort = $Port; containerPort = 8080; protocol = 'tcp' })
+        })
+    }
+    $pMappedPort = $pFiltered.Port
+    $script:pFilteredId = $pFiltered.SandboxId
+    if ($script:pFilteredId) { $script:pIds += $script:pFilteredId }
+
+    $pFilteredReady = Run-StateAwareTest "P: an allow-list sandbox with host loopback and a port mapping starts" {
+        if (-not (Assert-ResultEnvelope $pFiltered.Provision "provision")) { return }
+        if (-not (Assert-ResultEnvelope $pFiltered.Start "start")) { return }
+        if (-not $script:PreExistingDaemon) {
             $count = @(Get-SandboxNetworkRecord $script:pFilteredId -Proxy).Count
             Assert-True ($count -eq 1) "the built-in proxy is recorded (found $count)"
         }
@@ -2189,34 +2255,57 @@ try {
 
     if ($pFilteredReady) {
         Run-StateAwareTest "P: egress passes only the allowed CIDR and port" {
+            Assert-PProbes (Invoke-PProbes $script:pFilteredId $pEgressProbes) $pEgressExpected
+        } | Out-Null
+
+        Run-StateAwareTest "P: an exec that replaces its environment still goes through the proxy" {
+            # python3 is in /usr/local/bin, which isn't on busybox's default PATH.
+            # Some networks drop TLS with no server name, so the request names
+            # one.one.one.one, which the proxy resolves to the allowed 1.1.1.1.
             $values = Invoke-PProbes $script:pFilteredId @(
                 'echo PROXY_ENV=$HTTPS_PROXY'
-                'echo ALLOWED=$(p 1.1.1.1:443)'
-                'echo WRONG_PORT=$(p 1.1.1.1:80)'
-                'echo DENIED=$(p 8.8.8.8:443)'
-                'echo DIRECT=$(d 1.1.1.1 443)'
-            )
+                'echo NO_PROXY=$NO_PROXY'
+                'echo NODE_USE_ENV_PROXY=[$NODE_USE_ENV_PROXY]'
+                'echo FOO=$FOO'
+                "python3 -c `"import urllib.request as u; print('HTTPS=' + str(u.urlopen('https://one.one.one.one/cdn-cgi/trace', timeout=10).status))`" 2>/dev/null || echo HTTPS=ERROR"
+            ) -ProcessEnv @('FOO=bar', 'PATH=/usr/local/bin:/usr/bin:/bin', 'HTTPS_PROXY=http://caller.invalid:1', 'NO_PROXY=*')
             Assert-PProbes $values ([ordered]@{
-                PROXY_ENV = 'http://10\.231\.\d+\.254:3128'; ALLOWED = '200'; WRONG_PORT = '403'
-                DENIED = '403'; DIRECT = 'BLOCKED'
+                PROXY_ENV = 'http://10\.231\.\d+\.254:3128'; NO_PROXY = 'host\.wslc\.internal'
+                NODE_USE_ENV_PROXY = '\[\]'; FOO = 'bar'; HTTPS = '200'
             })
         } | Out-Null
 
         Run-StateAwareTest "P: the workload reaches Windows loopback as host.wslc.internal" {
-            $values = Invoke-PProbes $script:pFilteredId @(
-                "echo HOST_DIRECT=`$(h host.wslc.internal $pHostPort)"
-                "echo HOST_VIA_PROXY=`$(p host.wslc.internal:$pHostPort)"
-                "echo LOOPBACK=`$(p 127.0.0.1:$pHostPort)"
-            )
-            Assert-PProbes $values ([ordered]@{ HOST_DIRECT = '200'; HOST_VIA_PROXY = '200'; LOOPBACK = '403' })
+            Assert-PProbes (Invoke-PProbes $script:pFilteredId $pHostProbes) $pHostExpected
         } | Out-Null
 
-        Run-StateAwareTest "P: the mapped port reaches the workload through the proxy ($pMappedPort -> 8080)" {
+        $pForwarding = Run-StateAwareTest "P: the mapped port reaches the workload through the proxy ($pMappedPort -> 8080)" {
             $script:pFilteredIp = Start-NwListener -SandboxId $script:pFilteredId
             $response = Get-TcpResponse -Port $pMappedPort
             Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
                 "host read the listener's sentinel through the forward (got '$response')"
-        } | Out-Null
+        }
+
+        if ($pForwarding) {
+            Run-StateAwareTest "P: a second sandbox can't take the mapped port at provision, and the first keeps it" {
+                $before = Get-ProxyRecordCount
+                $r = Invoke-StateAware -Request (New-PProvisionRequest -Network @{ egress = @{ default = 'deny' } } -Provision @{
+                    portMappings = @(@{ windowsPort = $pMappedPort; containerPort = 8080; protocol = 'tcp' })
+                })
+                $envObj = Assert-ErrorEnvelope $r 'backend_error' "a second provision mapping Windows port $pMappedPort"
+                if ((Envelope-Arm $envObj) -eq 'result') { $script:pIds += [string]$envObj.result.sandboxId }
+                Assert-True ("$($envObj.error.message)" -match '0x80072740') `
+                    "the refusal carries the address-in-use HRESULT (got '$($envObj.error.message)')"
+                if (-not $script:PreExistingDaemon) {
+                    $after = Get-ProxyRecordCount
+                    Assert-True ($after -eq $before) `
+                        "the refused provision left no built-in proxy recorded ($before records before, $after after)"
+                }
+                $response = Get-TcpResponse -Port $pMappedPort
+                Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
+                    "the first sandbox still answers on Windows port $pMappedPort (got '$response')"
+            } | Out-Null
+        }
     }
 
     Run-StateAwareTest "P: a deny-list sibling gets its own filter and no host loopback" {
@@ -2251,10 +2340,11 @@ try {
     } | Out-Null
 
     Run-StateAwareTest "P: an allow/allow/deny sandbox goes through the proxy without host loopback" {
-        $id = New-PSandbox -Network @{
+        $script:pLoopbackDeniedId = New-PSandbox -ExpectWarning "ingress\.default 'allow' has no effect" -Network @{
             egress = @{ default = 'allow' }
             ingress = @{ default = 'allow'; hostLoopback = 'deny' }
         }
+        $id = $script:pLoopbackDeniedId
         if (-not $id) { return }
         if (-not $script:PreExistingDaemon) {
             $count = @(Get-SandboxNetworkRecord $id -Proxy).Count
@@ -2313,14 +2403,45 @@ try {
             'echo NO_PROXY=$NO_PROXY'
             "echo HOST_DIRECT=`$(h host.wslc.internal $pHostPort)"
             "python3 -c `"import urllib.request as u; print('HOST_CLIENT=' + str(u.urlopen('http://host.wslc.internal:$pHostPort/', timeout=10).status))`" 2>/dev/null || echo HOST_CLIENT=ERROR"
+            "python3 -c `"import socket; print('HOST_ADDRESS=' + socket.gethostbyname('host.wslc.internal'))`" 2>/dev/null || echo HOST_ADDRESS=UNRESOLVED"
         )
         Assert-PProbes $values ([ordered]@{
             PROXY_ENV = 'http://proxy\.example:8080'; NO_PROXY = 'host\.wslc\.internal'; HOST_DIRECT = '200'; HOST_CLIENT = '200'
+            HOST_ADDRESS = '\d{1,3}(\.\d{1,3}){3}'
         })
+        if ("$($values.HOST_ADDRESS)" -match '^\d{1,3}(\.\d{1,3}){3}$') { $script:pHostAddress = $values.HOST_ADDRESS }
     } | Out-Null
 
+    # Every daemon session enables host loopback, so this address relays to
+    # Windows loopback for any container that can reach it.
+    if ($script:pLoopbackDeniedId -and $script:pHostAddress) {
+        Run-StateAwareTest "P: a sandbox without host loopback can't reach the address host.wslc.internal resolves to ($($script:pHostAddress))" {
+            $values = Invoke-PProbes $script:pLoopbackDeniedId @(
+                "echo VIA_PROXY=`$(p $($script:pHostAddress):$pHostPort)"
+                "echo DIRECT=`$(d $($script:pHostAddress) $pHostPort)"
+            )
+            Assert-PProbes $values ([ordered]@{ VIA_PROXY = '403'; DIRECT = 'BLOCKED' })
+        } | Out-Null
+    }
+
     if ($pFilteredReady) {
-        Run-StateAwareTest "P: deprovision removes the built-in proxy and frees its port" {
+        Run-StateAwareTest "P: after a stop and start, the proxy still filters, relays host loopback and forwards the mapped port" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:pFilteredId
+            if (-not (Assert-ResultEnvelope $r "stop")) { return }
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:pFilteredId
+            if (-not (Assert-ResultEnvelope $r "start")) { return }
+            $values = Invoke-PProbes $script:pFilteredId ($pEgressProbes + $pHostProbes)
+            Assert-PProbes $values $pEgressExpected
+            Assert-PProbes $values $pHostExpected
+            $ip = Start-NwListener -SandboxId $script:pFilteredId
+            Assert-True ($ip -eq $script:pFilteredIp) `
+                "the workload kept its address (got '$ip', had '$($script:pFilteredIp)')"
+            $response = Get-TcpResponse -Port $pMappedPort
+            Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
+                "host read the listener's sentinel through the forward again (got '$response')"
+        } | Out-Null
+
+        Run-StateAwareTest "P: deprovision removes the built-in proxy and frees its port for another sandbox" {
             $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:pFilteredId
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:pFilteredId
             if (-not (Assert-ResultEnvelope $r "deprovision")) { return }
@@ -2329,13 +2450,14 @@ try {
                 $count = @(Get-SandboxNetworkRecord $script:pFilteredId -Proxy).Count
                 Assert-True ($count -eq 0) "the built-in proxy's record is gone (found $count)"
             }
-            $client = [System.Net.Sockets.TcpClient]::new()
-            try {
-                $connected = try { $client.ConnectAsync('127.0.0.1', $pMappedPort).Wait(3000) } catch { $false }
-            } finally {
-                $client.Dispose()
+            $id = New-PSandbox -Image 'python:3.12-alpine' -Network @{ egress = @{ default = 'deny' } } -Provision @{
+                portMappings = @(@{ windowsPort = $pMappedPort; containerPort = 8080; protocol = 'tcp' })
             }
-            Assert-True (-not $connected) "nothing listens on Windows 127.0.0.1:$pMappedPort any more"
+            if (-not $id) { return }
+            $null = Start-NwListener -SandboxId $id
+            $response = Get-TcpResponse -Port $pMappedPort
+            Assert-True ($response -match 'PER_SANDBOX_NETWORK_LISTENER') `
+                "a new sandbox forwards Windows port $pMappedPort again (got '$response')"
         } | Out-Null
     }
 } finally {
