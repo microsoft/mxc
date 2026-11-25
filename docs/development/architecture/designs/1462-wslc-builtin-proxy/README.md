@@ -623,10 +623,10 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **One container operation at a time per session:** on WSL 3.0.5, creating
   and starting containers with volumes concurrently in one session sometimes
   fails with `E_UNEXPECTED`, and every proxied workload has a `resolv.conf`
-  volume. Create-and-run has its own session. In the daemon, the worker
-  thread creates the controller during `provision`, so other sessions'
-  operations wait for its image import and readiness (up to 20s). Moving
-  this to a helper thread, as pulls are, is a later change.
+  volume. Create-and-run has its own session. In the daemon, `provision`
+  starts the controller on a thread of its own, as a pull runs, and later
+  commands for the same session wait until it is ready or has failed; other
+  sessions' commands don't wait.
 
 - **Delete order:** workload, then controller, then networks. Deleting a
   network fails while containers are attached.

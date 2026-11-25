@@ -42,11 +42,11 @@ Sandbox daemon pattern.
 
 The daemon owns the live SDK handles on a **single apartment-affine worker thread**, which services
 every lifecycle command. Any thread that has joined the MTA may use those handles, so an image
-pull and an `exec` each run on an MTA thread of their own and post their outcome back to the
-worker, leaving it free to serve other sandboxes for the duration of a run. A second `exec` on a
-container with a run in flight is refused as `busy`; a lifecycle command naming that container
-waits for the run, because deleting the container would free a handle the run is using. See
-[Known limitations](#known-limitations).
+pull, a [built-in proxy](#built-in-proxy) start, and an `exec` each run on an MTA thread of their
+own and post their outcome back to the worker, leaving it free to serve other sandboxes for the
+duration of a run. A second `exec` on a container with a run in flight is refused as `busy`; a
+lifecycle command naming that container waits for the run, because deleting the container would
+free a handle the run is using. See [Known limitations](#known-limitations).
 
 One daemon holds several sessions — several utility VMs — and places sandboxes
 in them. Sandboxes that name no session share one VM, but each networked
@@ -181,9 +181,10 @@ Filtering, host loopback, the custom proxy, and port mappings behave as they do
 for create-and-run execution.
 
 - **Lifetime.** `provision` creates the proxy's networks and starts the proxy
-  container, then creates the workload on the internal network. `stop` stops
-  only the workload; `deprovision` deletes the workload, the proxy container,
-  and the networks.
+  container, then creates the workload on the internal network. Until the
+  proxy is ready, later commands for the same session wait; other sessions'
+  commands don't. `stop` stops only the workload; `deprovision` deletes the
+  workload, the proxy container, and the networks.
 
 - **Names and subnets.** Resources are named `mxc-wslc-gw-<key>-<role>`, with
   `<key>` derived from the sandbox ID. Each proxied sandbox takes two free
@@ -856,14 +857,15 @@ whatever the first of these resolves to — see
 poll, and never waits for anything: a session still in use is simply left for
 the next poll, so one busy session cannot stall the others' requests.
 
-Teardown waits at most **60s** for off-worker execs and every session's
-outstanding pulls, then at most another **60s** for the VMs it is stopping. The
-first budget is shared across every session rather than spent once per session,
-so a daemon holding four sessions does not take four times as long to exit as a
-daemon holding one. Whatever is still running when a budget expires is abandoned
-rather than released, since freeing memory the SDK is still using is the worse
-failure: an abandoned session keeps its store slot leased, because its store's
-VHDX may still be mounted, and the SDK stays loaded under a VM still stopping.
+Teardown waits at most **60s** for off-worker execs, built-in proxy starts, and
+every session's outstanding pulls, then at most another **60s** for the VMs it
+is stopping. The first budget is shared across every session rather than spent
+once per session, so a daemon holding four sessions does not take four times as
+long to exit as a daemon holding one. Whatever is still running when a budget
+expires is abandoned rather than released, since freeing memory the SDK is
+still using is the worse failure: an abandoned session keeps its store slot
+leased, because its store's VHDX may still be mounted, and the SDK stays loaded
+under a VM still stopping.
 
 The lifecycle end-to-end test script (`tests/scripts/run_wslc_state_aware_tests.ps1`) uses short overrides so
 it can observe idle-teardown within seconds.

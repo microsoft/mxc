@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, oneshot};
 
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
@@ -316,6 +316,12 @@ pub enum WorkerCommand {
     PullFinished {
         token: u64,
         outcome: Result<(), WslcStepError>,
+    },
+
+    /// Report a built-in proxy start, from its thread.
+    GatewayStarted {
+        session_ref: String,
+        outcome: Result<Box<dyn BuiltInProxy>, WorkerError>,
     },
     /// Report an off-worker exec, from its run thread.
     ExecFinished {
@@ -1043,7 +1049,9 @@ enum SandboxNetworking {
 }
 
 /// Lets worker tests hold a proxied sandbox without starting a [`Gateway`].
-trait BuiltInProxy {
+pub(crate) trait BuiltInProxy: Send {
+    fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount;
+
     fn workload_networking(&self) -> ContainerNetworking<'_>;
 
     fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String>;
@@ -1051,17 +1059,27 @@ trait BuiltInProxy {
     fn teardown(&self, logger: &mut Logger) -> Result<(), String>;
 }
 
-impl BuiltInProxy for Gateway {
+struct StartedGateway(Gateway);
+
+// SAFETY: as for `SessionJob`. The gateway is moved, never shared, so only one
+// thread owns it at a time.
+unsafe impl Send for StartedGateway {}
+
+impl BuiltInProxy for StartedGateway {
+    fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount {
+        self.0.resolv_conf_mount()
+    }
+
     fn workload_networking(&self) -> ContainerNetworking<'_> {
-        Gateway::workload_networking(self)
+        self.0.workload_networking()
     }
 
     fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
-        Gateway::workload_env(self, caller_env, scope)
+        self.0.workload_env(caller_env, scope)
     }
 
     fn teardown(&self, logger: &mut Logger) -> Result<(), String> {
-        Gateway::teardown(self, logger)
+        self.0.teardown(logger)
     }
 }
 
@@ -1097,6 +1115,59 @@ struct PendingProvision {
 
     /// Held only so dropping this entry retires the deadline thread.
     _retire_deadline: std::sync::mpsc::Sender<()>,
+}
+
+/// A proxied provision whose built-in proxy is starting on a thread of its own.
+struct GatewayStart {
+    sandbox_id: String,
+    config: ProvisionConfig,
+
+    /// Taken when the daemon shuts down, which answers it before the start
+    /// reports.
+    reply: Option<oneshot::Sender<Result<String, WorkerError>>>,
+
+    /// Later work for the same session, held so nothing else in the session
+    /// allocates a subnet or creates a container while the proxy starts.
+    parked: Vec<SessionWork>,
+}
+
+impl GatewayStart {
+    /// The provisions waiting on this start, its own included.
+    fn provisions(&self) -> usize {
+        1 + self
+            .parked
+            .iter()
+            .filter(|work| matches!(work, SessionWork::Provision(..)))
+            .count()
+    }
+
+    fn refuse(&mut self, message: &str) {
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(WorkerError::backend(anyhow::anyhow!("{message}"))));
+        }
+        for work in std::mem::take(&mut self.parked) {
+            work.refuse(message);
+        }
+    }
+}
+
+enum SessionWork {
+    Provision(
+        Box<ProvisionConfig>,
+        oneshot::Sender<Result<String, WorkerError>>,
+    ),
+    Container(ContainerWork),
+}
+
+impl SessionWork {
+    fn refuse(self, message: &str) {
+        match self {
+            SessionWork::Provision(_, reply) => {
+                let _ = reply.send(Err(WorkerError::backend(anyhow::anyhow!("{message}"))));
+            }
+            SessionWork::Container(work) => work.refuse(message),
+        }
+    }
 }
 
 /// A command addressed to one container, either about to run or parked behind
@@ -1168,6 +1239,14 @@ type RunStarter = fn(
 /// Injected so a worker with no SDK loaded can still be tested.
 type NetworkDeleter = fn(&mut Worker, &str, &SandboxNetworking) -> Result<(), String>;
 
+/// Injected so a worker with no SDK loaded can still be tested.
+type GatewayStarter = fn(
+    &Worker,
+    &str,
+    &policy::ProxiedEgress,
+    &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError>;
+
 /// A network that can't be deleted stays recorded for the store's next session.
 fn delete_network_on_sdk(
     state: &mut Worker,
@@ -1221,6 +1300,40 @@ fn start_run_on_sdk(
     start_exec(job, worker.clone(), &state.execs_in_flight).map_err(|e| {
         WorkerError::backend(anyhow::anyhow!(
             "could not start a thread to run exec on sandbox {sandbox_id}: {e}"
+        ))
+    })
+}
+
+/// Start the built-in proxy recorded for `session_ref` on its own MTA thread,
+/// using the SDK this worker loaded.
+fn start_gateway_on_sdk(
+    state: &Worker,
+    session_ref: &str,
+    egress: &policy::ProxiedEgress,
+    worker: &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError> {
+    let (Some(sdk), Some(session), Some(start)) = (
+        state.sdk.as_ref(),
+        state.sessions.get(session_ref),
+        state.gateway_starts.get(session_ref),
+    ) else {
+        return Err(WorkerError::backend(anyhow::anyhow!(
+            "no active WSLc session"
+        )));
+    };
+
+    let job = GatewayJob {
+        sdk: &**sdk as *const WslcSdk,
+        session: session.session.as_raw(),
+        store: session.store.path().to_string_lossy().into_owned(),
+        sandbox_id: start.sandbox_id.clone(),
+        egress: egress.clone(),
+        port_mappings: to_model_port_mappings(&start.config.port_mappings),
+    };
+
+    start_gateway_thread(job, session_ref.to_string(), worker.clone()).map_err(|e| {
+        WorkerError::backend(anyhow::anyhow!(
+            "could not start a thread for the built-in proxy: {e}"
         ))
     })
 }
@@ -1364,6 +1477,66 @@ fn start_session_boot(
             };
 
             let _ = worker.send(WorkerCommand::SessionBooted {
+                session_ref,
+                outcome,
+            });
+        });
+
+    spawned.map(|_| ())
+}
+
+struct GatewayJob {
+    sdk: *const WslcSdk,
+    session: WslcSession,
+    store: String,
+    sandbox_id: String,
+    egress: policy::ProxiedEgress,
+    port_mappings: Vec<mxc_sdk::mxc_common::models::PortMapping>,
+}
+
+// SAFETY: as for `SessionJob`, with teardown leaking the session and the SDK
+// rather than releasing them while this start has not reported.
+unsafe impl Send for GatewayJob {}
+
+fn start_gateway_thread(
+    job: GatewayJob,
+    session_ref: String,
+    worker: mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), std::io::Error> {
+    let spawned = std::thread::Builder::new()
+        .name("wslc-gateway-start".to_string())
+        .spawn(move || {
+            let job = job;
+
+            let outcome = match ComApartment::enter() {
+                Err(e) => Err(WorkerError::backend(e)),
+                Ok(_apartment) => {
+                    let mut log = Logger::new(Mode::Console);
+                    egress_gateway::resolve_custom_proxy(&job.egress)
+                        .map_err(sr_err)
+                        .and_then(|custom_proxy| {
+                            // SAFETY: `sdk` and `session` stay loaded while
+                            // this start is recorded and for as long as the
+                            // gateway lives, and this thread is in the MTA.
+                            unsafe {
+                                Gateway::start(
+                                    job.sdk,
+                                    job.session,
+                                    &job.store,
+                                    &job.sandbox_id,
+                                    &job.egress,
+                                    custom_proxy,
+                                    &job.port_mappings,
+                                    &mut log,
+                                )
+                            }
+                            .map_err(sr_err)
+                        })
+                        .map(|gateway| Box::new(StartedGateway(gateway)) as Box<dyn BuiltInProxy>)
+                }
+            };
+
+            let _ = worker.send(WorkerCommand::GatewayStarted {
                 session_ref,
                 outcome,
             });
@@ -1572,7 +1745,11 @@ struct Worker {
     logger: Logger,
     start_run: RunStarter,
     delete_network: NetworkDeleter,
+    start_gateway: GatewayStarter,
     pending: HashMap<u64, PendingProvision>,
+
+    /// Keyed by session, since a session starts one built-in proxy at a time.
+    gateway_starts: HashMap<String, GatewayStart>,
     exec_in_flight: HashMap<String, InFlightExec>,
 
     /// Runs this worker started that have not reported back. Shared with the run
@@ -1615,7 +1792,9 @@ impl Worker {
             logger: Logger::new(Mode::Console),
             start_run: start_run_on_sdk,
             delete_network: delete_network_on_sdk,
+            start_gateway: start_gateway_on_sdk,
             pending: HashMap::new(),
+            gateway_starts: HashMap::new(),
             exec_in_flight: HashMap::new(),
             execs_in_flight: Arc::new(AtomicUsize::new(0)),
             sessions_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1661,8 +1840,12 @@ impl Worker {
             .sessions
             .get(session_ref)
             .map_or(0, |entry| entry.pulls_in_flight.load(Ordering::SeqCst));
+        let starting = self
+            .gateway_starts
+            .get(session_ref)
+            .map_or(0, GatewayStart::provisions);
 
-        containers + pending + execs + pulls
+        containers + pending + execs + pulls + starting
     }
 
     /// Lazily load the SDK. Idempotent.
@@ -2258,6 +2441,11 @@ impl Worker {
                 *hold += entry.pulls_in_flight.load(Ordering::SeqCst);
             }
         }
+        for (session_ref, start) in &self.gateway_starts {
+            if let Some(hold) = holds.get_mut(session_ref) {
+                *hold += start.provisions();
+            }
+        }
 
         holds
     }
@@ -2361,9 +2549,7 @@ impl Worker {
         };
 
         match step {
-            image::ImageStep::Ready => {
-                let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
-            }
+            image::ImageStep::Ready => self.provision_container(config, session_ref, reply, worker),
             image::ImageStep::Pull => {
                 let token = self.next_pull_token;
                 self.next_pull_token += 1;
@@ -2442,7 +2628,12 @@ impl Worker {
     /// Resume a parked provision once its pull reported, or its deadline did.
     ///
     /// An unknown token is the loser of that race, and has nothing left to do.
-    fn finish_provision(&mut self, token: u64, outcome: Result<(), WslcStepError>) {
+    fn finish_provision(
+        &mut self,
+        token: u64,
+        outcome: Result<(), WslcStepError>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
         let Some(PendingProvision {
             config,
             reply,
@@ -2479,24 +2670,157 @@ impl Worker {
             return;
         }
 
-        let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
+        self.provision_container(config, session_ref, reply, worker);
     }
 
-    /// Everything after the image is in the store: create the container and
-    /// register it under a fresh sandbox id.
+    /// Create a provision's container once its image is in the store, or park
+    /// it while its session is starting a built-in proxy.
+    fn provision_container(
+        &mut self,
+        config: ProvisionConfig,
+        session_ref: String,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if let Some(start) = self.gateway_starts.get_mut(&session_ref) {
+            start
+                .parked
+                .push(SessionWork::Provision(Box::new(config), reply));
+            return;
+        }
+
+        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
+        let network = match &config.network {
+            NetworkMode::None => None,
+            NetworkMode::Bridged => {
+                let sdk = self.sdk.as_ref().expect("session ensured");
+                let entry = &self.sessions[&session_ref];
+                let store = entry.store.path().to_string_lossy().into_owned();
+
+                // SAFETY: `sdk`/`session` are valid.
+                let created = unsafe {
+                    SandboxNetwork::create(
+                        sdk,
+                        entry.session.as_raw(),
+                        &store,
+                        &sandbox_id,
+                        &mut self.logger,
+                    )
+                };
+                match created {
+                    Ok(network) => Some(SandboxNetworking::Bridged(network)),
+                    Err(e) => {
+                        let _ = reply.send(Err(sr_err(e)));
+                        return;
+                    }
+                }
+            }
+            NetworkMode::Proxied(egress) => {
+                let egress = egress.clone();
+                self.begin_gateway_start(config, &egress, session_ref, sandbox_id, reply, worker);
+                return;
+            }
+        };
+
+        let _ = reply.send(self.create_provisioned_container(
+            &config,
+            &session_ref,
+            sandbox_id,
+            network,
+        ));
+    }
+
+    /// Start a proxied provision's built-in proxy off this thread, since
+    /// resolving a custom proxy, importing the proxy's image and waiting for
+    /// it to listen would stall every other session.
+    fn begin_gateway_start(
+        &mut self,
+        config: ProvisionConfig,
+        egress: &policy::ProxiedEgress,
+        session_ref: String,
+        sandbox_id: String,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if config.network.session_host_loopback() && !self.sessions[&session_ref].host_loopback {
+            let _ = reply.send(Err(sr_err(container_steps::host_loopback_unsupported())));
+            return;
+        }
+
+        // Recorded before the thread starts, so nothing releases the session or
+        // the SDK while the thread could be using them.
+        self.gateway_starts.insert(
+            session_ref.clone(),
+            GatewayStart {
+                sandbox_id,
+                config,
+                reply: Some(reply),
+                parked: Vec::new(),
+            },
+        );
+        let start_gateway = self.start_gateway;
+        if let Err(e) = start_gateway(self, &session_ref, egress, worker) {
+            if let Some(GatewayStart {
+                reply: Some(reply), ..
+            }) = self.gateway_starts.remove(&session_ref)
+            {
+                let _ = reply.send(Err(e));
+            }
+            return;
+        }
+        self.touch_session(&session_ref);
+    }
+
+    /// Create the workload of a provision whose built-in proxy reported, then
+    /// replay the work that waited for it.
+    fn finish_gateway_start(
+        &mut self,
+        session_ref: &str,
+        outcome: Result<Box<dyn BuiltInProxy>, WorkerError>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let Some(GatewayStart {
+            sandbox_id,
+            config,
+            reply: Some(reply),
+            parked,
+        }) = self.gateway_starts.remove(session_ref)
+        else {
+            return;
+        };
+
+        let created = outcome.and_then(|gateway| {
+            self.create_provisioned_container(
+                &config,
+                session_ref,
+                sandbox_id,
+                Some(SandboxNetworking::Proxied(gateway)),
+            )
+        });
+        let _ = reply.send(created);
+
+        for work in parked {
+            match work {
+                SessionWork::Provision(config, reply) => {
+                    self.provision_container(*config, session_ref.to_string(), reply, worker);
+                }
+                SessionWork::Container(work) => self.dispatch(work, worker),
+            }
+        }
+    }
+
+    /// Everything after the image and network are ready: create the container
+    /// and register it under `sandbox_id`.
     fn create_provisioned_container(
         &mut self,
         config: &ProvisionConfig,
         session_ref: &str,
+        sandbox_id: String,
+        network: Option<SandboxNetworking>,
     ) -> Result<String, WorkerError> {
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.sessions[session_ref].session.as_raw();
         let gpu = self.sessions[session_ref].sizing.gpu;
-        let store = self.sessions[session_ref]
-            .store
-            .path()
-            .to_string_lossy()
-            .into_owned();
 
         let mut mounts: Vec<policy_mapping::VolumeMount> = config
             .volumes
@@ -2508,54 +2832,18 @@ impl Worker {
             })
             .collect();
         let mut port_mappings = to_model_port_mappings(&config.port_mappings);
-        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
-
-        let network = match &config.network {
-            NetworkMode::None => None,
-
-            // SAFETY: `sdk`/`session` are valid.
-            NetworkMode::Bridged => Some(SandboxNetworking::Bridged(
-                unsafe {
-                    SandboxNetwork::create(sdk, session, &store, &sandbox_id, &mut self.logger)
-                }
-                .map_err(sr_err)?,
-            )),
-            NetworkMode::Proxied(egress) => {
-                if config.network.session_host_loopback()
-                    && !self.sessions[session_ref].host_loopback
-                {
-                    return Err(sr_err(container_steps::host_loopback_unsupported()));
-                }
-                let custom_proxy = egress_gateway::resolve_custom_proxy(egress).map_err(sr_err)?;
-
-                // SAFETY: `sdk`/`session` are valid, and the container entry
-                // holding the gateway is dropped before either.
-                let gateway = unsafe {
-                    Gateway::start(
-                        &**sdk,
-                        session,
-                        &store,
-                        &sandbox_id,
-                        egress,
-                        custom_proxy,
-                        &port_mappings,
-                        &mut self.logger,
-                    )
-                }
-                .map_err(sr_err)?;
-                mounts.push(gateway.resolv_conf_mount());
-
-                // The gateway publishes the ports and relays them.
-                port_mappings.clear();
-                Some(SandboxNetworking::Proxied(Box::new(gateway)))
-            }
-        };
         let networking = match &network {
             None => ContainerNetworking::None,
             Some(SandboxNetworking::Bridged(network)) => {
                 ContainerNetworking::Network(network.name())
             }
-            Some(SandboxNetworking::Proxied(gateway)) => gateway.workload_networking(),
+            Some(SandboxNetworking::Proxied(gateway)) => {
+                mounts.push(gateway.resolv_conf_mount());
+
+                // The gateway publishes the ports and relays them.
+                port_mappings.clear();
+                gateway.workload_networking()
+            }
         };
 
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
@@ -2688,6 +2976,15 @@ impl Worker {
                 }
                 lifecycle => in_flight.parked.push(lifecycle),
             }
+            return;
+        }
+
+        let start = self
+            .containers
+            .get(work.sandbox_id())
+            .and_then(|entry| self.gateway_starts.get_mut(&entry.session_ref));
+        if let Some(start) = start {
+            start.parked.push(SessionWork::Container(work));
             return;
         }
 
@@ -2966,9 +3263,15 @@ impl Worker {
     ///
     /// Drives the idle watchdog, which shuts the daemon down only at zero. A
     /// parked provision has no container yet, so counting it keeps the daemon
-    /// alive for the client still waiting on its pull.
+    /// alive for the client still waiting on its pull or built-in proxy.
     fn live_container_count(&self) -> usize {
-        self.containers.values().filter(|e| !e.retired).count() + self.pending.len()
+        self.containers.values().filter(|e| !e.retired).count()
+            + self.pending.len()
+            + self
+                .gateway_starts
+                .values()
+                .map(GatewayStart::provisions)
+                .sum::<usize>()
     }
 
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
@@ -3045,11 +3348,16 @@ impl Worker {
         // nothing reads as in flight.
         let boot_reports_possible = !self.pending_sessions.is_empty();
 
+        // A start's entry stays until its report, which holds a live proxy, is
+        // handled.
+        let gateway_reports_possible = !self.gateway_starts.is_empty();
+
         if execs_in_flight > 0
             || sessions_in_flight > 0
             || releases_in_flight > 0
             || pull_outstanding
             || boot_reports_possible
+            || gateway_reports_possible
         {
             std::mem::forget(std::mem::take(&mut self.containers));
 
@@ -3078,7 +3386,7 @@ impl Worker {
     ///
     /// [`WorkerCommand::ExecFinished`] is the one the drain is looking for and
     /// is handled by its caller.
-    fn refuse_while_shutting_down(&self, cmd: WorkerCommand) {
+    fn refuse_while_shutting_down(&mut self, cmd: WorkerCommand) {
         const SHUTTING_DOWN: &str = "the WSLc daemon is shutting down";
 
         match cmd {
@@ -3118,6 +3426,17 @@ impl Worker {
 
             // The provision this would resume was already answered above.
             WorkerCommand::PullFinished { .. } => {}
+
+            // Every drain runs before any session is released, so this proxy's
+            // session is still loaded.
+            WorkerCommand::GatewayStarted {
+                session_ref,
+                outcome,
+            } => {
+                self.gateway_starts.remove(&session_ref);
+                let network = outcome.ok().map(SandboxNetworking::Proxied);
+                self.finish_shutdown_delete(&session_ref, network, Ok(()));
+            }
             WorkerCommand::ExecFinished { .. } => {}
         }
     }
@@ -3154,6 +3473,15 @@ impl Worker {
                     "the WSLc daemon shut down while session {session_ref} was booting"
                 ))));
             }
+        }
+
+        // Each entry stays until its thread reports, since that thread is
+        // still using the entry's session.
+        for (session_ref, start) in self.gateway_starts.iter_mut() {
+            start.refuse(&format!(
+                "the WSLc daemon shut down while session {session_ref} was starting a built-in \
+                 proxy"
+            ));
         }
 
         // An off-worker exec is still using its container handle, so nothing
@@ -3324,6 +3652,37 @@ impl Worker {
         .is_err()
     }
 
+    /// Delete the proxies of the starts that report by `deadline`, and leak
+    /// the sessions of those that don't, returning whether any was leaked.
+    fn drain_gateway_starts(
+        &mut self,
+        rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
+        deadline: Instant,
+    ) -> bool {
+        while !self.gateway_starts.is_empty() && Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(cmd) => self.refuse_while_shutting_down(cmd),
+                Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(50)),
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        let mut leaked = false;
+        for session_ref in std::mem::take(&mut self.gateway_starts).into_keys() {
+            self.logger.log_line(&format!(
+                "a WSLC built-in proxy is still starting in session {session_ref}; leaking the \
+                 session rather than releasing a handle the start is using"
+            ));
+
+            // Forgets the store lease with the session, so the slot stays held.
+            if let Some(entry) = self.sessions.remove(&session_ref) {
+                std::mem::forget(entry);
+            }
+            leaked = true;
+        }
+        leaked
+    }
+
     /// Release the sessions nothing is still using and abandon the rest.
     ///
     /// Runs while the SDK is still loaded, since a session handle's `Drop`
@@ -3368,6 +3727,8 @@ impl Worker {
             // slot and dropping the entry returns it.
             self.pending_sessions.clear();
         }
+
+        abandoned |= self.drain_gateway_starts(rx, deadline);
 
         // Waiting first, so one session's stuck pull cannot spend the budget the
         // terminates below need.
@@ -3498,7 +3859,13 @@ pub fn spawn() -> Result<SessionHandle> {
                             worker.begin_provision(*config, reply, &worker_tx);
                         }
                         WorkerCommand::PullFinished { token, outcome } => {
-                            worker.finish_provision(token, outcome);
+                            worker.finish_provision(token, outcome, &worker_tx);
+                        }
+                        WorkerCommand::GatewayStarted {
+                            session_ref,
+                            outcome,
+                        } => {
+                            worker.finish_gateway_start(&session_ref, outcome, &worker_tx);
                         }
                         WorkerCommand::Container(work) => {
                             worker.dispatch(work, &worker_tx);
@@ -3745,11 +4112,12 @@ mod tests {
         worker.finish_provision(
             3,
             Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
+            &unread_queue(),
         );
         assert!(rx.try_recv().is_ok(), "the first report answers the client");
 
         // The loser of the race: nothing left to answer, and no panic.
-        worker.finish_provision(3, Ok(()));
+        worker.finish_provision(3, Ok(()), &unread_queue());
         assert_eq!(worker.live_container_count(), 0);
     }
 
@@ -3764,6 +4132,7 @@ mod tests {
         worker.finish_provision(
             1,
             Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
+            &unread_queue(),
         );
         worker.finish_provision(
             2,
@@ -3772,6 +4141,7 @@ mod tests {
                 error_message: "WSLC image 'nope:1' could not be pulled".to_string(),
                 api_failure: Some(Box::new(image_not_found.clone())),
             }),
+            &unread_queue(),
         );
 
         let timed_out = timed_out.try_recv().unwrap().unwrap_err();
@@ -6729,6 +7099,10 @@ mod tests {
     struct FakeProxy;
 
     impl BuiltInProxy for FakeProxy {
+        fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount {
+            unreachable!("no test provisions behind a fake proxy")
+        }
+
         fn workload_networking(&self) -> ContainerNetworking<'_> {
             unreachable!("no test provisions behind a fake proxy")
         }
@@ -6754,11 +7128,15 @@ mod tests {
         ]
     }
 
-    fn worker_recording_deleted_networks() -> Worker {
+    fn record_deleted_networks(worker: &mut Worker) {
         DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().clear());
         fail_network_deletion(false);
-        let mut worker = Worker::new();
         worker.delete_network = record_deleted_network;
+    }
+
+    fn worker_recording_deleted_networks() -> Worker {
+        let mut worker = Worker::new();
+        record_deleted_networks(&mut worker);
         worker
     }
 
@@ -6922,6 +7300,292 @@ mod tests {
                 .unwrap();
             assert_eq!(deleted_networks(), [expected_deletion]);
         }
+    }
+
+    const SESSION_A: &str = "wslcsess:a";
+    const SESSION_B: &str = "wslcsess:b";
+
+    /// A worker holding the named sessions, whose built-in proxies and runs
+    /// never start.
+    fn worker_with_sessions(session_refs: &[&str]) -> (tempfile::TempDir, Worker) {
+        fn start_no_gateway(
+            _: &Worker,
+            _: &str,
+            _: &policy::ProxiedEgress,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Ok(())
+        }
+
+        fn start_no_run(
+            _: &Worker,
+            _: ExecConfig,
+            _: WslcContainer,
+            _: OutputSink,
+            _: Arc<AtomicBool>,
+            _: Option<StdinSource>,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Ok(())
+        }
+
+        let (root, mut worker) = worker_with_scratch_pool();
+        record_deleted_networks(&mut worker);
+        worker.start_gateway = start_no_gateway;
+        worker.start_run = start_no_run;
+        for session_ref in session_refs {
+            register_test_session(&mut worker, session_ref);
+        }
+        (root, worker)
+    }
+
+    fn sandbox_in(session_ref: &str) -> ContainerEntry {
+        ContainerEntry {
+            session_ref: session_ref.to_string(),
+            ..started_entry()
+        }
+    }
+
+    fn provision_proxied(
+        worker: &mut Worker,
+        session_ref: &str,
+    ) -> oneshot::Receiver<Result<String, WorkerError>> {
+        let config = ProvisionConfig {
+            network: NetworkMode::Proxied(policy::ProxiedEgress {
+                egress: mxc_sdk::wslc_gateway_policy::Egress {
+                    default: mxc_sdk::wslc_gateway_policy::Action::Allow,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+                host_loopback: false,
+                custom_proxy: None,
+                warnings: Vec::new(),
+            }),
+            session_ref: Some(session_ref.to_string()),
+            ..test_provision_config()
+        };
+        let (reply, provisioned) = oneshot::channel();
+        worker.provision_container(config, session_ref.to_string(), reply, &unread_queue());
+        provisioned
+    }
+
+    fn proxy_did_not_start() -> Result<Box<dyn BuiltInProxy>, WorkerError> {
+        Err(WorkerError::backend(anyhow::anyhow!(
+            "the built-in proxy did not start"
+        )))
+    }
+
+    fn waiting<T>(receiver: &mut oneshot::Receiver<T>) -> bool {
+        matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        )
+    }
+
+    #[test]
+    fn a_session_starting_a_built_in_proxy_does_not_hold_up_another() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A, SESSION_B]);
+        worker
+            .containers
+            .insert("wslc:b-run".to_string(), sandbox_in(SESSION_B));
+        worker
+            .containers
+            .insert("wslc:b-done".to_string(), sandbox_in(SESSION_B));
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        let mut exec = exec_work("wslc:b-run", "exec-b");
+        worker.dispatch(exec.work, &unread_queue());
+        let (deprovision, mut deprovisioned) = deprovision_work("wslc:b-done");
+        worker.dispatch(deprovision, &unread_queue());
+
+        assert!(
+            matches!(exec.admit.try_recv(), Ok(Ok(()))),
+            "an exec in another session must be admitted while the proxy starts"
+        );
+        assert!(
+            matches!(deprovisioned.try_recv(), Ok(Ok(()))),
+            "a lifecycle command in another session must complete while the proxy starts"
+        );
+        assert!(
+            waiting(&mut provisioned),
+            "the proxied provision is answered only once its proxy reports"
+        );
+    }
+
+    #[test]
+    fn work_in_a_session_starting_a_built_in_proxy_waits_for_it_in_order() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker
+            .containers
+            .insert("wslc:a".to_string(), sandbox_in(SESSION_A));
+        let mut first = provision_proxied(&mut worker, SESSION_A);
+        let mut second = provision_proxied(&mut worker, SESSION_A);
+        let mut exec = exec_work("wslc:a", "exec-a");
+        worker.dispatch(exec.work, &unread_queue());
+        assert!(
+            waiting(&mut exec.admit),
+            "an exec in the session waits for the proxy"
+        );
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        let error = first.try_recv().unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "the built-in proxy did not start");
+        assert!(
+            waiting(&mut second),
+            "the second provision starts its own proxy"
+        );
+        assert!(
+            waiting(&mut exec.admit),
+            "the exec arrived after the second provision, so it waits for that proxy too"
+        );
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert!(second.try_recv().unwrap().is_err());
+        assert!(matches!(exec.admit.try_recv(), Ok(Ok(()))));
+        assert!(worker.gateway_starts.is_empty());
+    }
+
+    #[test]
+    fn a_built_in_proxy_start_holds_its_session_and_the_daemon_until_it_reports() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        let _first = provision_proxied(&mut worker, SESSION_A);
+        let _second = provision_proxied(&mut worker, SESSION_A);
+
+        assert_eq!(worker.session_hold(SESSION_A), 2);
+        assert_eq!(worker.live_container_count(), 2);
+        age_out(&mut worker, SESSION_A);
+        worker.reap_idle_sessions_at(past_grace(), &unread_queue());
+        assert!(
+            worker.sessions.contains_key(SESSION_A),
+            "the start's thread is using the session, so it must not be reaped"
+        );
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert_eq!(worker.session_hold(SESSION_A), 1);
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert_eq!(worker.session_hold(SESSION_A), 0);
+        assert_eq!(worker.live_container_count(), 0);
+    }
+
+    #[test]
+    fn a_built_in_proxy_whose_thread_cannot_start_fails_its_provision() {
+        fn fail_to_start(
+            _: &Worker,
+            _: &str,
+            _: &policy::ProxiedEgress,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Err(WorkerError::backend(anyhow::anyhow!(
+                "could not start a thread for the built-in proxy"
+            )))
+        }
+
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker.start_gateway = fail_to_start;
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        let error = provisioned.try_recv().unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("could not start a thread"),
+            "{error}"
+        );
+        assert_eq!(
+            worker.session_hold(SESSION_A),
+            0,
+            "a start that never ran must not hold its session, or later work would wait forever"
+        );
+    }
+
+    #[test]
+    fn shutdown_deletes_a_built_in_proxy_that_finished_starting() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker
+            .containers
+            .insert("wslc:a".to_string(), sandbox_in(SESSION_A));
+        let held = worker.sessions[SESSION_A].store.path().to_path_buf();
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+        let mut exec = exec_work("wslc:a", "exec-a");
+        worker.dispatch(exec.work, &tx);
+        tx.send(WorkerCommand::GatewayStarted {
+            session_ref: SESSION_A.to_string(),
+            outcome: Ok(Box::new(FakeProxy)),
+        })
+        .unwrap();
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        for answer in [
+            provisioned.try_recv().unwrap().unwrap_err(),
+            exec.admit.try_recv().unwrap().unwrap_err(),
+        ] {
+            assert!(answer.to_string().contains("shut down"), "{answer}");
+        }
+        assert_eq!(
+            deleted_networks(),
+            [format!("{SESSION_A} {PROXY_DELETION}")]
+        );
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_eq!(
+            relet.path(),
+            held,
+            "once its proxy is deleted, the session is released"
+        );
+    }
+
+    #[test]
+    fn shutdown_keeps_the_session_of_a_built_in_proxy_still_starting() {
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        let held = worker.sessions[SESSION_A].store.path().to_path_buf();
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        assert!(provisioned.try_recv().unwrap().is_err());
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the pool still has a free slot");
+        assert_ne!(
+            relet.path(),
+            held,
+            "the start is still using the session, so its slot must stay leased"
+        );
+    }
+
+    #[test]
+    fn an_unwind_with_a_built_in_proxy_starting_keeps_container_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:idle".to_string(), flagged_entry(release));
+        worker.gateway_starts.insert(
+            TEST_SESSION.to_string(),
+            GatewayStart {
+                sandbox_id: "wslc:starting".to_string(),
+                config: test_provision_config(),
+                reply: None,
+                parked: Vec::new(),
+            },
+        );
+
+        worker.abandon_if_borrowed(0, 0, 0, false);
+
+        assert!(
+            !RELEASED.load(Ordering::SeqCst),
+            "a start still borrows the SDK and session, so the handles must be kept"
+        );
     }
 
     fn kill_failure() -> ApiFailure {
