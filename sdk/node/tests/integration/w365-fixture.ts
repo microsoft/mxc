@@ -5,11 +5,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:https';
+import type { IncomingMessage, RequestListener } from 'node:http';
+import { createServer, get } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
-import type { Readable } from 'node:stream';
+import type { Duplex, Readable } from 'node:stream';
 import koffi from 'koffi';
 
 const pool = '11111111-1111-1111-1111-111111111111';
@@ -48,7 +49,16 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
     const requests: { method: string | undefined; url: string | undefined;
       authorization: string | undefined; userType: string | string[] | undefined;
       clientRequestId: string | string[] | undefined }[] = [];
-    let server: ReturnType<typeof createServer> | undefined;
+    const servers: ReturnType<typeof createServer>[] = [];
+    const closeServers = async () => {
+      await Promise.all(servers.splice(0).map(async server => {
+        if (server.listening) {
+          server.closeAllConnections();
+          await new Promise<void>((resolve, reject) =>
+            server.close(error => error ? reject(error) : resolve()));
+        }
+      }));
+    };
     const reply = (status: number, body: object | undefined = undefined) =>
       replies.push({ status, body: body === undefined ? '' : JSON.stringify(body) });
     const options = { experimental: true };
@@ -93,23 +103,26 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
         '-subj', '/CN=localhost',
         '-keyout', key, '-out', certificate,
       ], { stdio: 'pipe' });
-      server = createServer({ cert: readFileSync(certificate), key: readFileSync(key) },
-        (incoming, response) => {
-          requests.push({
-            method: incoming.method, url: incoming.url,
-            authorization: incoming.headers.authorization,
-            userType: incoming.headers['user-type'],
-            clientRequestId: incoming.headers['x-ms-client-request-id'],
-          });
-          const next = replies.shift();
-          assert.ok(next, 'unexpected W365 service request');
-          response.writeHead(next.status, {
-            'Content-Length': Buffer.byteLength(next.body), Connection: 'close',
-            'x-ms-request-id': 'fixture-request',
-          });
-          response.end(next.body);
+      const handleRequest: RequestListener = (incoming, response) => {
+        if (incoming.url === '/fixture-loopback') {
+          response.end(incoming.socket.localAddress);
+          return;
+        }
+        requests.push({
+          method: incoming.method, url: incoming.url,
+          authorization: incoming.headers.authorization,
+          userType: incoming.headers['user-type'],
+          clientRequestId: incoming.headers['x-ms-client-request-id'],
         });
-      server.on('upgrade', (incoming, socket, head) => {
+        const next = replies.shift();
+        assert.ok(next, 'unexpected W365 service request');
+        response.writeHead(next.status, {
+          'Content-Length': Buffer.byteLength(next.body), Connection: 'close',
+          'x-ms-request-id': 'fixture-request',
+        });
+        response.end(next.body);
+      };
+      const handleUpgrade = (incoming: IncomingMessage, socket: Duplex, head: Buffer) => {
         const execute = async () => {
           requests.push({
             method: incoming.method, url: incoming.url,
@@ -158,17 +171,58 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
           fixtureErrors.push(error);
           socket.destroy();
         });
-      });
-      server.listen(0, '127.0.0.1');
-      await once(server, 'listening');
-      const address = server.address();
-      assert.ok(address && typeof address !== 'string');
+      };
+      let port = 0;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          port = 0;
+          for (const host of ['127.0.0.1', '::1']) {
+            const server = createServer({
+              cert: readFileSync(certificate), key: readFileSync(key),
+            }, handleRequest);
+            server.on('upgrade', handleUpgrade);
+            servers.push(server);
+            const listening = once(server, 'listening');
+            server.listen(port, host);
+            await listening;
+            const address = server.address();
+            assert.ok(address && typeof address !== 'string');
+            port = address.port;
+          }
+          break;
+        } catch (error) {
+          await closeServers();
+          if (!(error instanceof Error && 'code' in error && error.code === 'EADDRINUSE')
+            || attempt === 9) throw error;
+        }
+      }
+      for (const host of ['127.0.0.1', '::1']) {
+        await new Promise<void>((resolve, reject) => {
+          const probe = get({
+            host, port, path: '/fixture-loopback', servername: 'localhost',
+            ca: readFileSync(certificate), agent: false,
+          }, response => {
+            let body = '';
+            response.setEncoding('utf8');
+            response.on('data', chunk => { body += chunk; });
+            response.on('error', reject);
+            response.on('end', () => {
+              try {
+                assert.equal(response.statusCode, 200);
+                assert.equal(body, host);
+                resolve();
+              } catch (error) { reject(error); }
+            });
+          });
+          probe.on('error', reject);
+        });
+      }
       process.env.W365A_CONTROLPLANE_URL = 'localhost';
       process.env.W365A_CP_TOKEN = 'fixture-token';
       process.env.W365A_DP_SUFFIX = 'localhost';
       process.env.W365A_DP_TOKEN = 'synthetic-data-plane-token';
       process.env.MXC_W365_TEST_CA = certificate;
-      process.env.MXC_W365_TEST_PORT = String(address.port);
+      process.env.MXC_W365_TEST_PORT = String(port);
       await assert.rejects(provisionContainerJson(provision),
         (error: unknown) => error instanceof MxcError && error.code === 'backend_unavailable');
       await validateProvisionJson(provision, options);
@@ -373,11 +427,7 @@ it('W365 Dev JSON preserves lifecycle recovery, readiness and captured/live exec
       }
     } finally {
       library.unload();
-      if (server?.listening) {
-        server.closeAllConnections();
-        await new Promise<void>((resolve, reject) =>
-          server!.close(error => error ? reject(error) : resolve()));
-      }
+      await closeServers();
       for (const [name, value] of environment) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

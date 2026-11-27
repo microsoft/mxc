@@ -11,7 +11,7 @@ use mxc_sdk::mxc_common::{
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,87 @@ static ENV: Mutex<()> = Mutex::new(());
 
 #[path = "w365_lifecycle/execution.rs"]
 mod execution;
+
+fn loopback_listeners() -> std::io::Result<([TcpListener; 2], u16)> {
+    for _ in 0..10 {
+        let ipv4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = ipv4.local_addr()?.port();
+        let ipv6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, port)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error),
+        };
+        ipv4.set_nonblocking(true)?;
+        ipv6.set_nonblocking(true)?;
+        return Ok(([ipv4, ipv6], port));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        "could not reserve the same loopback port for IPv4 and IPv6",
+    ))
+}
+
+fn accept_loopback(listeners: &[TcpListener; 2]) -> std::io::Result<Option<TcpStream>> {
+    for listener in listeners {
+        match listener.accept() {
+            Ok((socket, _)) => return Ok(Some(socket)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+#[test]
+fn loopback_tls_fixture_serves_both_address_families() {
+    use std::io::BufRead;
+
+    let fixture = Fixture::new();
+    let certificate =
+        native_tls::Certificate::from_pem(&std::fs::read(fixture.ca.path()).unwrap()).unwrap();
+    let tls = native_tls::TlsConnector::builder()
+        .disable_built_in_roots(true)
+        .add_root_certificate(certificate)
+        .build()
+        .unwrap();
+    for address in [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ] {
+        fixture.reply(200, "loopback-ready");
+        let socket = TcpStream::connect_timeout(
+            &SocketAddr::new(address, fixture.port),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut stream = tls.connect("localhost", socket).unwrap();
+        stream
+            .write_all(b"GET /fixture HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("HTTP/1.1 200 "));
+        loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut body = [0; 14];
+        reader.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"loopback-ready");
+    }
+    assert_eq!(fixture.count(), 2);
+}
 
 #[test]
 fn readiness_contract_fixture() {
@@ -383,18 +464,17 @@ impl Fixture {
         let (tls, key) = fixture_tls(&cert);
         #[cfg(not(target_os = "windows"))]
         let tls = fixture_tls(&cert);
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
+        // localhost may resolve to either family; avoid a refused-address retry.
+        let (listeners, port) = loopback_listeners().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replies = Arc::new(Mutex::new(std::collections::VecDeque::<FixtureReply>::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (seen, responses, stopping) = (requests.clone(), replies.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
             while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
-                let socket = match listener.accept() {
-                    Ok((socket, _)) => socket,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let socket = match accept_loopback(&listeners) {
+                    Ok(Some(socket)) => socket,
+                    Ok(None) => {
                         std::thread::sleep(Duration::from_millis(5));
                         continue;
                     }

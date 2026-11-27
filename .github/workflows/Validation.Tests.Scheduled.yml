@@ -27,9 +27,25 @@ jobs:
   dependency-feed-check:
     uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
 
-  windows:
+  windows-build:
     needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Shared.Job.yml
+
+  windows-fixture-build:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Fixtures.Job.yml
+
+  windows:
+    needs: windows-build
     uses: ./.github/workflows/Build.Windows.Job.yml
+
+  windows-workspace-tests:
+    needs: [windows-build, windows-fixture-build]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/Test.Windows.Job.yml
+    with:
+      production-build-result: ${{ needs.windows-build.result }}
+      fixture-build-result: ${{ needs.windows-fixture-build.result }}
 
   linux:
     needs: dependency-feed-check
@@ -38,6 +54,10 @@ jobs:
   macos:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
+
+  w365-fixture-tests:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/W365.Fixture.Test.Job.yml
 
   windows-sdk-bundle:
     needs: dependency-feed-check

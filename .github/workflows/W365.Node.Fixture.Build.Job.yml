@@ -1,0 +1,39 @@
+name: W365 Node Fixture Build
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: Windows native fixture
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+          cache: false
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target/w365-sdk-fixture
+          key: windows-node-fixture-v1
+          cache-on-failure: false
+
+      - name: Build the isolated Windows native fixture once
+        shell: pwsh
+        run: ./scripts/ci/run-w365-node-fixture.ps1 -BuildOnly
+
+      - name: Upload the isolated Windows native fixture
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: w365-node-fixture-windows
+          path: src/target/w365-sdk-fixture/debug/mxc_ffi.dll
+          if-no-files-found: error
+          retention-days: 1

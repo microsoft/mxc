@@ -37,21 +37,90 @@ preserve compatibility with the older supported host.
 
 ### Offline TLS fixtures
 
-W365 fixtures run against loopback TLS services in GitHub Actions and Azure
-build/SDK jobs. Native engine and execution-example coverage runs on Windows,
-Linux and macOS; Windows also tests fresh executor processes and console input.
-The .NET and Node suites cover the public Dev JSON APIs. The scheduled workflow
-reuses these build jobs.
+W365 fixtures run against loopback TLS services. In GitHub Actions,
+`W365.Fixture.Test.Job.yml` runs native engine and execution-example coverage
+independently of binary production on Windows x64/ARM64, Ubuntu 24.04 and 26.04
+x64/ARM64, and macOS 15 ARM64. Both `Build.yml` and the scheduled validation
+workflow call it after the dependency-feed check. Packaging and backend
+validation do not wait for these fixture jobs.
 
-GitHub Actions requires nine native fixtures on Windows and eight on Linux/macOS.
+Windows also tests fresh executor processes and console input. Azure retains
+its native fixtures in the build jobs. The .NET and Node suites cover the
+public Dev JSON APIs in their existing SDK jobs.
+
+The Windows release workspace suites also execute their existing W365 cases.
+Those suites run in `Test.Windows.Job.yml`, independently of artifact
+production, while the standalone fixture workflow retains the complete debug
+suite including fresh-executor cases.
+The workspace suites restore compiled external dependencies from a separate
+per-architecture cache before restoring the same-run production snapshot.
+This retains dependency variants used only by tests or minimal-feature checks
+between runs, without changing their features, profiles, or test selection.
+Artifact validation uses its own compiled-dependency cache for filesystem
+probes, NVX staging, and the isolated debug executor. It restores before the
+same production snapshot and does not cache workspace crates. Packaged-crate
+verification extracts source into a temporary directory while Cargo outputs
+use the helper's existing workspace target directory.
+
+`Build.Windows.Fixtures.Job.yml` moves the standalone module-lifetime example
+build off the serial workspace path. It runs once per Windows architecture,
+alongside production, with the original command, features and release profile.
+Consumers download its DLL and PDB before their unchanged full suite and
+subsequent minimal-feature NVX gate. Both producer results must succeed for
+the workspace aggregate to pass, including after a rerun with retained
+artifacts. A dedicated fixture dependency cache uses the existing workspace
+cache as a read-only cold seed; it does not add another production build.
+The consumer and seed use one complete shared cache namespace, preserving the
+existing workspace cache identity across job names. Both x64 producers run
+the targeted `hyperlight-host` regeneration after restoring dependencies and
+before compiling, so missing surrogate assets are recreated on warm restores.
+
+GitHub Actions requires ten native fixtures on Windows and nine on Linux/macOS.
 Azure executes them on native Windows/Linux x64 and macOS arm64 hosts, not
 cross-compiled Windows/Linux ARM64 jobs.
 
+The Rust fixture services listen on both IPv4 and IPv6 loopback at the same
+port. This avoids a refused-address retry when `localhost` resolves to the
+other family. A required TLS regression sends an HTTP request through each
+family while retaining certificate and hostname verification.
+The Node Dev JSON fixture also binds both loopback families on one port and
+verifies a trusted TLS request through each before exercising the SDK.
+Both listeners share the same service handlers and are closed after the test;
+port collisions retry with a new pair, up to ten attempts. Existing lifecycle,
+streaming, timeout, and response-count assertions remain unchanged.
+The .NET Dev JSON fixture uses the same dual-family layout. Its TLS regression
+connects to each address with `localhost` hostname verification and the fixture
+certificate as a custom trust root. Both .NET target frameworks execute it
+alongside the existing public SDK scenarios, including Windows optional-backend
+validation.
+
 The `w365_lifecycle` integration target requires `test-support`. Fixture native
 libraries, executors and examples use isolated Cargo target directories and
-never replace shipping artifacts. Node selects its fixture library through
+never replace shipping artifacts. The standalone native jobs cache their build
+output under `src/target/w365-fixture`, separately from shipping output. Each
+required scenario must be discovered and pass, including the explicitly
+included ignored scenarios. Their aggregate check fails if any host lane fails,
+is cancelled, or is skipped.
+
+When rolling out the standalone workflow, add
+`w365-fixture-tests / W365 fixtures` to the repository ruleset's required status
+checks. Existing required build check names stay unchanged. Until that ruleset
+entry is added, a W365 failure fails the workflow but is not independently
+merge-blocking.
+
+Run `node --test scripts/tests/w365-fixtures.test.js` for the offline workflow
+and result-gate regressions; repository-consistency CI runs them as well.
+Node selects its fixture library through
 `scripts/ci/run-w365-node-fixture.ps1`; packaged-artifact tests still use shipping
-libraries. Fixtures retain TLS verification and need no live tenant, but do not
+libraries. In the PR Build workflow, `W365.Node.Fixture.Build.Job.yml` builds
+the Windows Debug `test-support` library once on `windows-latest`, in parallel
+with shipping builds. Both Windows Node versions download that same-run DLL
+and pass `-NativeDirectory` to the helper. Missing artifacts or libraries fail
+the job; consumers do not rebuild. Linux and macOS retain native compilation
+on their respective integration host images. `-BuildOnly` builds the isolated
+library without running Node; the default helper invocation still builds and
+runs the fixture locally and in Azure. Neither mode replaces shipping outputs.
+Fixtures retain TLS verification and need no live tenant, but do not
 establish live-service compatibility. See the
 [W365 backend guide](../../backends/w365agents/w365agents-backend.md#offline-functional-fixtures)
 for coverage, local commands and prerequisites.
@@ -62,6 +131,11 @@ for coverage, local commands and prerequisites.
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
+| `.github/workflows/W365.Fixture.Test.Job.yml` | `workflow_call`-only. Runs native W365 loopback TLS fixtures independently of binary production and aggregates the host results. |
+| `.github/workflows/Test.Windows.Job.yml` | `workflow_call`-only. Builds and runs the unfiltered Windows release workspace suites on x64 and ARM64 independently of artifact production. Called by PR and scheduled workflows. |
+| `.github/workflows/Build.Windows.Shared.Job.yml` | Builds the production Windows workspace once per architecture and publishes a same-run Cargo snapshot consumed by Windows artifact validation and workspace tests. |
+| `.github/workflows/Build.Windows.Fixtures.Job.yml` | Builds the standalone Windows module-lifetime example on each native architecture alongside production and publishes its test-only DLL and PDB for workspace consumers. |
+| `scripts/ci/cargo-build-snapshot.ps1` | Transfers tracked sources, native/host release outputs, and Cargo fingerprints in a compressed PAX archive with checksum-bound metadata. Validates before a single extraction and restores watched Git timestamps only when their contents match, without copying Git references or configuration. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
 | `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
@@ -81,7 +155,12 @@ for coverage, local commands and prerequisites.
 ```
 Validation.Tests.Scheduled.yml
   └─ dependency-feed-check
-      ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
+      ├─ windows-build             →  Build.Windows.Shared.Job.yml (shared Cargo snapshot)
+      │    ├─ windows              →  Build.Windows.Job.yml (validate and upload artifacts)
+      │    └─ windows-workspace-tests → Test.Windows.Job.yml (parallel release suites)
+      ├─ windows-fixture-build      →  Build.Windows.Fixtures.Job.yml (DLL/PDB; also required by workspace suites)
+      ├─ linux / macos             →  Build.*.Job.yml (upload artifacts)
+      ├─ w365-fixture-tests        →  W365.Fixture.Test.Job.yml (parallel debug suites)
       ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
@@ -100,7 +179,10 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
+| `windows-build` | `Build.Windows.Shared.Job.yml` — x64 + arm64 production builds and same-run Cargo snapshots. Downstream jobs restore tracked source timestamps and release outputs before invoking Cargo. |
+| `windows` | `Build.Windows.Job.yml` — restores shared builds, runs filesystem-probe tests and telemetry smoke tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. Parallel telemetry-component jobs run default-feature release consent/policy tests. The `Windows validation` aggregate requires both groups to pass. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle staged by `aci_edge_sandboxes`. |
+| `windows-fixture-build` | `Build.Windows.Fixtures.Job.yml` — the original standalone module-lifetime example build on x64 + arm64, independent of production. Uploads the DLL and PDB. |
+| `windows-workspace-tests` | `Test.Windows.Job.yml` — requires both production and fixture producers, downloads the fixture, and runs parallel x64 + arm64 unfiltered release workspace suites with the existing required minimal-feature NVX module-lifetime scenario afterward. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, native Bubblewrap filesystem-policy and denied-path masking suites, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, Bubblewrap proxy-networking, workload-capability, and user-namespace-denial CLI tests, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |

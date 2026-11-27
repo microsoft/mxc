@@ -1,0 +1,124 @@
+name: W365 Fixture Tests
+
+on:
+  workflow_call:
+
+jobs:
+  fixture-tests:
+    name: ${{ matrix.runner }} (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: src
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Expose OpenSSL for Windows TLS fixtures
+        if: runner.os == 'Windows'
+        run: |
+          $openssl = Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'
+          if (-not (Test-Path $openssl)) {
+            throw 'Windows TLS fixtures require OpenSSL from Git for Windows'
+          }
+          "MXC_W365_TEST_OPENSSL=$openssl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Linux TLS build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config openssl
+
+      - name: Surface toolchain file at repo root
+        working-directory: ${{ github.workspace }}
+        run: Copy-Item src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: ${{ matrix.target }}
+          override: false
+          rustflags: ''
+          cache: false
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target/w365-fixture
+          key: w365-fixture-${{ matrix.runner }}-${{ matrix.target }}
+          cache-on-failure: false
+
+      - name: Test W365 lifecycle and execution with trusted TLS fixtures
+        run: |
+          $target = '${{ matrix.target }}'
+          $fixtureDirectory = 'target/w365-fixture'
+          $windows = $target.EndsWith('-windows-msvc')
+          if ($windows) {
+            cargo build --locked -p wxc --target $target --target-dir $fixtureDirectory --features test-support
+            if ($LASTEXITCODE -ne 0) { throw 'Building the W365 fixture executor failed' }
+            $env:MXC_W365_TEST_EXECUTOR = (Resolve-Path "$fixtureDirectory/$target/debug/wxc-exec.exe").Path
+          }
+          cargo build --locked -p mxc-sdk --example w365_execution --target $target --target-dir $fixtureDirectory --features test-support
+          if ($LASTEXITCODE -ne 0) { throw 'Building the W365 execution example failed' }
+
+          $required = @(
+            'loopback_tls_fixture_serves_both_address_families',
+            'lifecycle_contract_and_recovery_fixture', 'transport_deadlines_fixture',
+            'readiness_contract_fixture', 'execution::native_execution_streams_fixture',
+            'execution::native_execution_backpressure_fixture',
+            'execution::native_execution_failure_and_disposal_fixture',
+            'execution::execution_upgrade_validation_fixture'
+          )
+          if ($windows) {
+            $required += 'lifecycle_fresh_executor_fixture', 'execution::execution_fresh_executor_fixture'
+          } else {
+            $required += 'execution::execution_host_output_fixture'
+          }
+          $names = @(cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target $target --target-dir $fixtureDirectory -- --list)
+          if ($LASTEXITCODE -ne 0) { throw 'Listing W365 fixtures failed' }
+          foreach ($case in $required) {
+            if ($names -notcontains "${case}: test") {
+              throw "Missing required W365 fixture: $case"
+            }
+          }
+          cargo test --locked -p mxc-sdk --test w365_lifecycle --features test-support --target $target --target-dir $fixtureDirectory -- --include-ignored --format pretty --color never 2>&1 |
+            Tee-Object -Variable output
+          if ($LASTEXITCODE -ne 0) { throw 'W365 fixtures failed' }
+          foreach ($case in $required) {
+            if ($output -notcontains "test $case ... ok") {
+              throw "Required W365 fixture did not pass: $case"
+            }
+          }
+
+  result:
+    name: W365 fixtures
+    needs: fixture-tests
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm every W365 fixture lane passed
+        env:
+          FIXTURE_RESULT: ${{ needs.fixture-tests.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FIXTURE_RESULT" = success

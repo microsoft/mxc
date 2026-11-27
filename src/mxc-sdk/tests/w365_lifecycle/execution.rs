@@ -28,9 +28,7 @@ impl ExecFixture {
         let (tls, key) = fixture_tls(&cert);
         #[cfg(not(windows))]
         let tls = fixture_tls(&cert);
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
+        let (listeners, port) = loopback_listeners().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let scripts = Arc::new(Mutex::new(VecDeque::<Script>::new()));
@@ -38,9 +36,9 @@ impl ExecFixture {
         let (work, seen, stop_worker) = (scripts.clone(), requests.clone(), stop.clone());
         let worker = std::thread::spawn(move || {
             while !stop_worker.load(std::sync::atomic::Ordering::Relaxed) {
-                let socket = match listener.accept() {
-                    Ok((socket, _)) => socket,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let socket = match accept_loopback(&listeners) {
+                    Ok(Some(socket)) => socket,
+                    Ok(None) => {
                         std::thread::sleep(Duration::from_millis(5));
                         continue;
                     }
@@ -1071,23 +1069,19 @@ fn fragmented_tls_deadline(env: &Environment) {
     let (tls, _key) = fixture_tls(&cert);
     #[cfg(not(windows))]
     let tls = fixture_tls(&cert);
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let (listeners, port) = loopback_listeners().unwrap();
     env.set("MXC_W365_TEST_CA", ca.path().to_str().unwrap());
-    env.set(
-        "MXC_W365_TEST_PORT",
-        &listener.local_addr().unwrap().port().to_string(),
-    );
+    env.set("MXC_W365_TEST_PORT", &port.to_string());
     env.set("MXC_W365_TEST_TIMEOUT_MS", "5000");
     let (accepted, accepted_rx) = mpsc::channel();
     let (flight, flight_rx) = mpsc::channel();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped = stop.clone();
-    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
         let socket = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            match accept_loopback(&listeners) {
+                Ok(Some(socket)) => break socket,
+                Ok(None) => {
                     if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
