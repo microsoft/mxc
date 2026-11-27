@@ -185,9 +185,11 @@ expose Kata.
 ```
 
 The sandbox is found again from its `kata:<token>` id alone, so a later call can
-come from another process. State is kept in `MXC_KATA_STATE_DIR`. Calls on one
-sandbox run one at a time. A restart reuses the sandbox's writable layer; a
-sandbox is gone after `deprovision` or a host restart.
+come from another process. State is kept in `MXC_KATA_STATE_DIR`. State changes
+and `exec` launches on one sandbox run one at a time, but the lock is released
+once an exec is running, so another caller's `stop` can end it. Coordinate `stop`
+with active execs. A restart reuses the sandbox's writable layer; a sandbox is
+gone after `deprovision` or a host restart.
 
 ## Cleanup
 
