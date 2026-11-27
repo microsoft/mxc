@@ -303,6 +303,7 @@ impl Client {
                 session_id: identity.session_id.clone(),
                 computer_id: identity.session_id.clone(),
             }),
+            warnings: Vec::new(),
         })
     }
 

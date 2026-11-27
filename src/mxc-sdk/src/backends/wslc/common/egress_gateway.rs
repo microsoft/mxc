@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Built-in proxy for create-and-run containers.
+//! Built-in proxy for WSLc containers.
 //!
 //! WSLc networking is either none or unfiltered NAT, so to filter egress the
 //! workload joins an internal network whose only way out is a gateway
@@ -9,9 +9,10 @@
 //! HTTP proxy that applies the egress rules, and reaches out through its own
 //! NAT network.
 //!
-//! Each proxy's networks and containers are named from its session name and
-//! recorded in [`session_resources`] before they are created, and a session
-//! that opens a store deletes the proxies recorded there.
+//! Each proxy's networks and containers are named from its owner (the session
+//! name for create-and-run, the sandbox id for container lifecycle operations)
+//! and recorded in [`session_resources`] before they are created, and a
+//! session that opens a store deletes the proxies recorded there.
 
 use std::ffi::{CStr, CString};
 use std::fmt::Write as _;
@@ -25,16 +26,18 @@ use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{PortMapping, ScriptResponse};
 use crate::mxc_common::proxy_env;
 use crate::mxc_common::string_util::CoTaskMemPWSTR;
-use crate::wslc_common::container_steps::{self, cstr_bytes, sdk_error, ProcessSettings};
-use crate::wslc_common::error::WslcError;
+use crate::wslc_common::container_steps::{
+    self, cstr_bytes, sdk_error, Capture, ContainerNetworking, ProcessSettings,
+};
+use crate::wslc_common::error::{WslcError, WslcStepError};
 use crate::wslc_common::image;
 use crate::wslc_common::policy::{self, CustomProxy, CustomProxyHost, ProxiedEgress};
 use crate::wslc_common::policy_mapping::VolumeMount;
-use crate::wslc_common::process_env::EnvScope;
+use crate::wslc_common::process_env::{self, EnvScope};
 use crate::wslc_common::sandbox_network;
 use crate::wslc_common::session_resources::{
     self, create_network, fingerprint, host_error, in_addr_of, network, open_container,
-    remove_recorded, Kind, OwnedNames, StoreRecords, SUBNET_PREFIX_LENGTH,
+    remove_recorded, Kind, OwnedNames, SessionNetwork, StoreRecords, SUBNET_PREFIX_LENGTH,
 };
 use crate::wslc_common::wslc_bindings::*;
 use crate::wslc_gateway_policy as gateway;
@@ -43,7 +46,7 @@ const NAME_PREFIX: &str = "mxc-wslc-gw-";
 const LEFTOVERS_REMOVED: &str = "Removed the built-in proxy left by an earlier run";
 
 /// One proxy's container and network names: `mxc-wslc-gw-<key>-<role>`,
-/// where the key is a fingerprint of the session name.
+/// where the key is a fingerprint of the proxy's owner.
 pub(crate) struct ProxyNames {
     key: String,
     workload: CString,
@@ -53,8 +56,8 @@ pub(crate) struct ProxyNames {
 }
 
 impl ProxyNames {
-    fn for_session(session_name: &str) -> Self {
-        Self::from_key(fingerprint(session_name))
+    fn for_owner(owner: &str) -> Self {
+        Self::from_key(fingerprint(owner))
     }
 }
 
@@ -88,21 +91,8 @@ impl OwnedNames for ProxyNames {
     }
 }
 
-const EGRESS_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 0);
-const INTERNAL_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 0);
-const GATEWAY_EGRESS_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 0, 2);
-const GATEWAY_WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 254);
-/// Pinned so the gateway knows where to relay port mappings.
-const WORKLOAD_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 2);
-/// The address the workload reaches Windows loopback through.
-const HOST_LOOPBACK_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 231, 1, 3);
 const PROXY_PORT: u16 = 3128;
 const NODE_USE_ENV_PROXY: &str = "NODE_USE_ENV_PROXY";
-
-// The SDK reads these through pointers when the container is created.
-static GATEWAY_EGRESS_IN_ADDR: IN_ADDR = in_addr_of(GATEWAY_EGRESS_ADDRESS);
-static GATEWAY_WORKLOAD_IN_ADDR: IN_ADDR = in_addr_of(GATEWAY_WORKLOAD_ADDRESS);
-static WORKLOAD_IN_ADDR: IN_ADDR = in_addr_of(WORKLOAD_ADDRESS);
 
 const IMAGE_ID: &str = env!("MXC_WSLC_GATEWAY_IMAGE_ID");
 const IMAGE_TAR: &str = "mxc-wslc-gateway.tar";
@@ -110,9 +100,61 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
+// A gateway runs as long as its sandbox, so it keeps only its newest output.
+const KEPT_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// One proxy's two networks, each a free /24 of the session's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Subnets {
+    egress: Ipv4Addr,
+    internal: Ipv4Addr,
+}
+
+impl Subnets {
+    fn allocate(networks: &[SessionNetwork]) -> Result<Self, ScriptResponse> {
+        let mut used: Vec<_> = networks.iter().filter_map(|n| n.ipv4_subnet).collect();
+        let mut next = || {
+            let subnet = session_resources::first_free_subnet(&used)?;
+            used.push((subnet, SUBNET_PREFIX_LENGTH));
+            Some(subnet)
+        };
+        match (next(), next()) {
+            (Some(egress), Some(internal)) => Ok(Self { egress, internal }),
+            _ => Err(host_error(format!(
+                "this session has no two free subnets in {} left for another built-in proxy; \
+                 deprovision a sandbox in it, or place this one in a session of its own",
+                gateway::GATEWAY_SUBNETS
+            ))),
+        }
+    }
+
+    fn gateway_egress(&self) -> Ipv4Addr {
+        with_host(self.egress, 2)
+    }
+
+    fn gateway_workload(&self) -> Ipv4Addr {
+        with_host(self.internal, 254)
+    }
+
+    /// Pinned so the gateway knows where to relay port mappings.
+    fn workload(&self) -> Ipv4Addr {
+        with_host(self.internal, 2)
+    }
+
+    /// The address the workload reaches Windows loopback through.
+    fn host_loopback_relay(&self) -> Ipv4Addr {
+        with_host(self.internal, 3)
+    }
+}
+
+fn with_host(subnet: Ipv4Addr, host: u8) -> Ipv4Addr {
+    let [a, b, c, _] = subnet.octets();
+    Ipv4Addr::new(a, b, c, host)
+}
+
 /// A running gateway and the networks it serves. Torn down on drop.
-pub(crate) struct Gateway {
-    sdk: &'static WslcSdk,
+pub struct Gateway {
+    sdk: *const WslcSdk,
     /// Owned by the caller, which must drop this before ending the session.
     session: WslcSession,
     // Releasing the handle stops the output callbacks.
@@ -121,38 +163,54 @@ pub(crate) struct Gateway {
     resolv_conf: tempfile::TempPath,
     records: StoreRecords,
     names: ProxyNames,
+    subnets: Subnets,
     proxy_url: String,
     host_loopback: bool,
     torn_down: AtomicBool,
 }
 
 impl Gateway {
-    /// Create this session's networks and start its gateway. Call
+    /// Create the networks and start the gateway for `owner`. Call
     /// [`sweep_leftovers`] on the session first, and pass the custom proxy
     /// from [`resolve_custom_proxy`].
     ///
     /// # Safety
-    /// `sdk` must hold valid function pointers, `session` must outlive the
-    /// returned value, and COM must be initialized on the calling thread.
+    /// `sdk` must hold valid function pointers, `sdk` and `session` must
+    /// outlive the returned value, and COM must be initialized on the calling
+    /// thread.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) unsafe fn start(
-        sdk: &'static WslcSdk,
+    pub unsafe fn start(
+        sdk: *const WslcSdk,
         session: WslcSession,
         store_path: &str,
-        session_name: &str,
+        owner: &str,
         egress: &ProxiedEgress,
         custom_proxy: Option<gateway::CustomProxy>,
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<Self, ScriptResponse> {
-        let proxy_url = workload_proxy_url(egress.custom_proxy.as_ref()).map_err(host_error)?;
-        let policy = render_policy(egress, custom_proxy, port_mappings);
-
+        let sdk_ref = &*sdk;
         let records = StoreRecords::open(store_path).map_err(host_error)?;
-        let names = ProxyNames::for_session(session_name);
-        refuse_unrecorded(sdk, session, &records, &names)?;
+        let names = ProxyNames::for_owner(owner);
+        let networks = session_resources::list_networks(sdk_ref, session)
+            .map_err(|e| network_failure(e, "WslcListSessionNetworks"))?;
+        refuse_unrecorded(sdk_ref, session, &records, &names, &networks)?;
+        let subnets = Subnets::allocate(&networks)?;
+
+        let proxy_url =
+            workload_proxy_url(egress.custom_proxy.as_ref(), subnets).map_err(host_error)?;
+        let policy = render_policy(egress, custom_proxy, port_mappings, subnets);
+
         records.write(&names, &names.all()).map_err(host_error)?;
-        match Self::start_inner(sdk, session, &names, &policy, port_mappings, logger) {
+        match Self::start_inner(
+            sdk_ref,
+            session,
+            &names,
+            subnets,
+            &policy,
+            port_mappings,
+            logger,
+        ) {
             Ok((container, process, resolv_conf)) => {
                 let _ = writeln!(
                     logger,
@@ -167,13 +225,14 @@ impl Gateway {
                     resolv_conf,
                     records,
                     names,
+                    subnets,
                     proxy_url,
                     host_loopback: egress.host_loopback,
                     torn_down: AtomicBool::new(false),
                 })
             }
             Err(mut e) => {
-                if let Err(cleanup) = remove_recorded(sdk, session, &records, &names) {
+                if let Err(cleanup) = remove_recorded(sdk_ref, session, &records, &names) {
                     e.error_message =
                         format!("{}; cleanup also failed: {cleanup}", e.error_message);
                 }
@@ -183,15 +242,18 @@ impl Gateway {
     }
 
     unsafe fn start_inner(
-        sdk: &'static WslcSdk,
+        sdk: &WslcSdk,
         session: WslcSession,
         names: &ProxyNames,
+        subnets: Subnets,
         policy: &gateway::Policy,
         port_mappings: &[PortMapping],
         logger: &mut Logger,
     ) -> Result<(WslcContainerGuard, ProcessSettings, tempfile::TempPath), ScriptResponse> {
-        create_network(sdk, session, &names.egress, EGRESS_SUBNET, false)?;
-        create_network(sdk, session, &names.internal, INTERNAL_SUBNET, true)?;
+        create_network(sdk, session, &names.egress, subnets.egress, false)
+            .map_err(|e| network_failure(e, "WslcCreateSessionNetwork"))?;
+        create_network(sdk, session, &names.internal, subnets.internal, true)
+            .map_err(|e| network_failure(e, "WslcCreateSessionNetwork"))?;
 
         let tag = image_tag();
         ensure_image(sdk, session, &tag, logger)?;
@@ -206,9 +268,12 @@ impl Gateway {
             return Err(sdk_error("WslcSetContainerSettingsName failed", hr, ""));
         }
         // The first network is primary, so the default route leaves through NAT.
+        // The SDK reads the addresses when the container is created.
+        let egress_address = in_addr_of(subnets.gateway_egress());
+        let workload_address = in_addr_of(subnets.gateway_workload());
         let networks = [
-            network(&names.egress, &GATEWAY_EGRESS_IN_ADDR),
-            network(&names.internal, &GATEWAY_WORKLOAD_IN_ADDR),
+            network(&names.egress, &egress_address),
+            network(&names.internal, &workload_address),
         ];
         let hr = sdk.WslcSetContainerSettingsNetworks(
             &mut settings,
@@ -260,6 +325,7 @@ impl Gateway {
             sdk,
             &["/gateway".to_string()],
             &[format!("{}={policy}", gateway::POLICY_ENV)],
+            Capture::Tail(KEPT_OUTPUT_BYTES),
         )?;
         let hr = sdk.WslcSetContainerSettingsInitProcess(&mut settings, process.raw_mut());
         if hr != S_OK {
@@ -300,7 +366,7 @@ impl Gateway {
             .into_response());
         }
 
-        let resolv_conf = write_resolv_conf().map_err(|e| {
+        let resolv_conf = write_resolv_conf(subnets).map_err(|e| {
             WslcError::Host(format!(
                 "could not write the built-in proxy's resolv.conf: {e}"
             ))
@@ -310,7 +376,7 @@ impl Gateway {
     }
 
     /// The workload's mount of the gateway's DNS settings.
-    pub(crate) fn resolv_conf_mount(&self) -> VolumeMount {
+    pub fn resolv_conf_mount(&self) -> VolumeMount {
         VolumeMount {
             windows_path: self.resolv_conf.to_string_lossy().into_owned(),
             container_path: RESOLV_CONF.to_string(),
@@ -318,26 +384,24 @@ impl Gateway {
         }
     }
 
-    pub(crate) fn workload_name(&self) -> &CStr {
-        &self.names.workload
-    }
-
-    /// The workload's only network. The SDK reads it when the container is
-    /// created.
-    pub(crate) fn workload_networks(&self) -> [WslcContainerNetwork; 1] {
-        [network(&self.names.internal, &WORKLOAD_IN_ADDR)]
+    pub fn workload_networking(&self) -> ContainerNetworking<'_> {
+        ContainerNetworking::Proxied {
+            name: &self.names.workload,
+            network: &self.names.internal,
+            address: self.subnets.workload(),
+        }
     }
 
     /// Delete the gateway, the workload, and their networks, then log the
     /// gateway's output. Call after the workload has stopped.
-    pub(crate) fn teardown(&self, logger: &mut Logger) -> Result<(), String> {
+    pub fn teardown(&self, logger: &mut Logger) -> Result<(), String> {
         if self.torn_down.load(Ordering::Acquire) {
             return Ok(());
         }
         let _com = ComApartment::enter()?;
-        // SAFETY: `session` outlives `self`, and `sdk` is valid while it lives.
+        // SAFETY: `sdk` and `session` outlive `self`.
         let removed =
-            unsafe { remove_recorded(self.sdk, self.session, &self.records, &self.names) };
+            unsafe { remove_recorded(&*self.sdk, self.session, &self.records, &self.names) };
 
         let io = self.process.io_ctx();
         let (exited, signal) = &*io.exited;
@@ -357,7 +421,7 @@ impl Gateway {
     }
 
     /// The workload's environment: the caller's, pointed at the proxy.
-    pub(crate) fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
+    pub fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
         workload_env(caller_env, scope, &self.proxy_url, self.host_loopback)
     }
 }
@@ -368,18 +432,7 @@ fn workload_env(
     proxy_url: &str,
     host_loopback: bool,
 ) -> Vec<String> {
-    let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, proxy_url);
-    // Windows loopback is reached directly; a custom proxy couldn't reach it.
-    if host_loopback {
-        for entry in env.iter_mut() {
-            if let Some(key) = proxy_env::PROXY_NEUTRALIZE_KEYS
-                .iter()
-                .find(|key| entry.strip_suffix('=') == Some(**key))
-            {
-                *entry = format!("{key}={}", gateway::HOST_LOOPBACK_NAME);
-            }
-        }
-    }
+    let mut env = process_env::with_proxy(caller_env, proxy_url, host_loopback);
     // Node.js ignores HTTP(S)_PROXY unless this is set. It joins the default
     // environment, so a replacing request doesn't get it.
     if scope == EnvScope::Merge
@@ -400,33 +453,34 @@ impl Drop for Gateway {
 
 /// The proxy URL the workload is pointed at. A custom proxy's IP or loopback
 /// host is unreachable from the workload, so it becomes the gateway's address.
-fn workload_proxy_url(custom: Option<&CustomProxy>) -> Result<String, String> {
+fn workload_proxy_url(custom: Option<&CustomProxy>, subnets: Subnets) -> Result<String, String> {
+    let gateway = subnets.gateway_workload();
     let Some(custom) = custom else {
-        return Ok(format!("http://{GATEWAY_WORKLOAD_ADDRESS}:{PROXY_PORT}"));
+        return Ok(format!("http://{gateway}:{PROXY_PORT}"));
     };
     if let CustomProxyHost::Name(_) = custom.host {
         return Ok(custom.url.clone());
     }
     let mut url = url::Url::parse(&custom.url)
         .map_err(|_| "runtimeConfig.networkProxy is not a valid URL".to_string())?;
-    url.set_host(Some(&GATEWAY_WORKLOAD_ADDRESS.to_string()))
-        .map_err(|e| {
-            format!("could not point runtimeConfig.networkProxy at the built-in proxy: {e}")
-        })?;
+    url.set_host(Some(&gateway.to_string())).map_err(|e| {
+        format!("could not point runtimeConfig.networkProxy at the built-in proxy: {e}")
+    })?;
     Ok(url.into())
 }
 
 /// Resolves a custom proxy hostname on Windows and checks the address it
 /// resolves to, so the gateway never resolves it. Each call looks the name up
 /// and checks it again.
-pub(crate) fn resolve_custom_proxy(
+pub fn resolve_custom_proxy(
     egress: &ProxiedEgress,
-) -> Result<Option<gateway::CustomProxy>, WslcError> {
+) -> Result<Option<gateway::CustomProxy>, WslcStepError> {
     egress
         .custom_proxy
         .as_ref()
         .map(|proxy| {
             resolve_custom_proxy_with_lookup(proxy, |host, port| (host, port).to_socket_addrs())
+                .map_err(WslcError::into_step_error)
         })
         .transpose()
 }
@@ -478,6 +532,7 @@ fn render_policy(
     egress: &ProxiedEgress,
     custom_proxy: Option<gateway::CustomProxy>,
     port_mappings: &[PortMapping],
+    subnets: Subnets,
 ) -> gateway::Policy {
     let host_loopback = egress.host_loopback;
     let egress = egress.egress.clone();
@@ -489,20 +544,20 @@ fn render_policy(
         {
             relayed.push(gateway::PortMapping {
                 listen_port: mapping.container_port,
-                workload_address: WORKLOAD_ADDRESS,
+                workload_address: subnets.workload(),
                 workload_port: mapping.container_port,
             });
         }
     }
     gateway::Policy {
-        workload_address: GATEWAY_WORKLOAD_ADDRESS,
-        egress_address: GATEWAY_EGRESS_ADDRESS,
+        workload_address: subnets.gateway_workload(),
+        egress_address: subnets.gateway_egress(),
         // The workload keeps the custom proxy's port.
         proxy_port: custom_proxy.as_ref().map_or(PROXY_PORT, |proxy| proxy.port),
         forward_dns: egress.default == gateway::Action::Allow || !egress.allow.is_empty(),
         egress,
         host_loopback: host_loopback.then_some(gateway::HostLoopback {
-            relay_address: HOST_LOOPBACK_RELAY_ADDRESS,
+            relay_address: subnets.host_loopback_relay(),
             prefix_length: SUBNET_PREFIX_LENGTH,
         }),
         custom_proxy,
@@ -577,38 +632,53 @@ unsafe fn image_present(
     }))
 }
 
-/// Delete every proxy recorded for the store. Call once a session has
-/// opened the store and before starting a proxy: a store admits one live
-/// session, so anything recorded then was left by a run that ended without
-/// cleanup.
+/// Delete every proxy and sandbox network recorded for the store. Call once
+/// a session has opened the store and before creating either: a store admits
+/// one live session, so anything recorded then was left by a run that ended
+/// without cleanup.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers, `session` must be live, and COM
 /// must be initialized on the calling thread.
-pub(crate) unsafe fn sweep_leftovers(
+pub unsafe fn sweep_leftovers(
     sdk: &WslcSdk,
     session: WslcSession,
     store_path: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
-    let records = StoreRecords::open(store_path).map_err(host_error)?;
-    let removed = session_resources::remove_all_recorded::<ProxyNames>(sdk, session, &records)
-        .map_err(|e| {
-            host_error(format!(
-                "could not remove the built-in proxy left by an earlier run: {e}"
-            ))
-        })?;
-    if removed {
-        let _ = writeln!(logger, "[WSLC] {LEFTOVERS_REMOVED}");
-        logger.warning_line(&format!("WARNING: WSLc: {LEFTOVERS_REMOVED}"));
-    }
+) -> Result<(), String> {
+    let records = StoreRecords::open(store_path)?;
+    sweep_both(
+        || session_resources::remove_all_recorded::<ProxyNames>(sdk, session, &records),
+        |logger| sandbox_network::remove_leftovers(sdk, session, &records, logger),
+        logger,
+    )
+}
 
-    // A daemon's leftover sandbox network can hold one of the proxy's subnets.
-    sandbox_network::remove_leftovers(sdk, session, &records, logger).map_err(|e| {
-        host_error(format!(
-            "could not remove the sandbox networks left by an earlier daemon: {e}"
-        ))
-    })
+fn sweep_both(
+    remove_proxies: impl FnOnce() -> Result<bool, String>,
+    remove_networks: impl FnOnce(&mut Logger) -> Result<(), String>,
+    logger: &mut Logger,
+) -> Result<(), String> {
+    let proxies = match remove_proxies() {
+        Ok(removed) => {
+            if removed {
+                let _ = writeln!(logger, "[WSLC] {LEFTOVERS_REMOVED}");
+                logger.warning_line(&format!("WARNING: WSLc: {LEFTOVERS_REMOVED}"));
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "could not remove the built-in proxy left by an earlier run: {e}"
+        )),
+    };
+    let networks = remove_networks(logger).map_err(|e| {
+        format!("could not remove the sandbox networks left by an earlier daemon: {e}")
+    });
+    match (proxies, networks) {
+        (Err(proxies), Err(networks)) => Err(format!("{proxies}; {networks}")),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// Refuse proxy names that exist without a record. They're from a lost
@@ -618,11 +688,12 @@ unsafe fn refuse_unrecorded(
     session: WslcSession,
     records: &StoreRecords,
     names: &ProxyNames,
+    networks: &[SessionNetwork],
 ) -> Result<(), ScriptResponse> {
     let record = records.path(names);
     if record.exists() {
         return Err(host_error(format!(
-            "the image store at {} already has a built-in proxy for this session, \
+            "the image store at {} already has a built-in proxy with these names, \
              recorded in {}",
             records.store(),
             record.display()
@@ -637,9 +708,7 @@ unsafe fn refuse_unrecorded(
             records.store()
         ))
     };
-    for network in
-        session_resources::list_networks(sdk, session).map_err(|e| host_error(e.to_string()))?
-    {
+    for network in networks {
         if network.name.starts_with(NAME_PREFIX) && !recorded.contains(&network.name) {
             return Err(unrecorded("network", &network.name));
         }
@@ -654,6 +723,10 @@ unsafe fn refuse_unrecorded(
         }
     }
     Ok(())
+}
+
+fn network_failure(error: WslcError, operation: &str) -> WslcStepError {
+    session_resources::session_network_failure(error, operation, "the built-in proxy")
 }
 
 fn create_container_error(hr: HRESULT, sdk_msg: &str) -> WslcError {
@@ -698,14 +771,18 @@ fn await_ready(process: &ProcessSettings) -> Result<(), String> {
     }
 }
 
-fn write_resolv_conf() -> std::io::Result<tempfile::TempPath> {
+fn write_resolv_conf(subnets: Subnets) -> std::io::Result<tempfile::TempPath> {
     let mut file = tempfile::Builder::new()
         .prefix("mxc-wslc-gw-")
         .suffix("-resolv.conf")
         .tempfile()?;
     std::io::Write::write_all(
         &mut file,
-        format!("nameserver {GATEWAY_WORKLOAD_ADDRESS}\noptions ndots:0\n").as_bytes(),
+        format!(
+            "nameserver {}\noptions ndots:0\n",
+            subnets.gateway_workload()
+        )
+        .as_bytes(),
     )?;
     Ok(file.into_temp_path())
 }
@@ -713,6 +790,11 @@ fn write_resolv_conf() -> std::io::Result<tempfile::TempPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SUBNETS: Subnets = Subnets {
+        egress: Ipv4Addr::new(10, 231, 0, 0),
+        internal: Ipv4Addr::new(10, 231, 1, 0),
+    };
 
     #[test]
     fn dns_is_forwarded_only_when_some_egress_is_allowed() {
@@ -734,16 +816,37 @@ mod tests {
             ports: None,
         };
 
-        let policy = render_policy(&egress(gateway::Action::Deny, vec![rule]), None, &[]);
+        let policy = render_policy(
+            &egress(gateway::Action::Deny, vec![rule]),
+            None,
+            &[],
+            SUBNETS,
+        );
         assert!(policy.forward_dns);
-        assert_eq!(policy.workload_address, GATEWAY_WORKLOAD_ADDRESS);
+        assert_eq!(policy.workload_address, Ipv4Addr::new(10, 231, 1, 254));
         assert_eq!(policy.proxy_port, PROXY_PORT);
         assert_eq!(
-            workload_proxy_url(None).unwrap(),
+            workload_proxy_url(None, SUBNETS).unwrap(),
             "http://10.231.1.254:3128"
         );
-        assert!(render_policy(&egress(gateway::Action::Allow, Vec::new()), None, &[]).forward_dns);
-        assert!(!render_policy(&egress(gateway::Action::Deny, Vec::new()), None, &[]).forward_dns);
+        assert!(
+            render_policy(
+                &egress(gateway::Action::Allow, Vec::new()),
+                None,
+                &[],
+                SUBNETS
+            )
+            .forward_dns
+        );
+        assert!(
+            !render_policy(
+                &egress(gateway::Action::Deny, Vec::new()),
+                None,
+                &[],
+                SUBNETS
+            )
+            .forward_dns
+        );
     }
 
     fn custom(url: &str, host: CustomProxyHost, port: u16) -> CustomProxy {
@@ -778,7 +881,7 @@ mod tests {
             address: Some(Ipv4Addr::new(1, 1, 1, 1)),
             port: 8080,
         };
-        let policy = render_policy(&egress, Some(relayed.clone()), &[]);
+        let policy = render_policy(&egress, Some(relayed.clone()), &[], SUBNETS);
         assert_eq!(policy.proxy_port, 8080);
         assert!(!policy.forward_dns);
         assert_eq!(policy.custom_proxy, Some(relayed));
@@ -841,11 +944,11 @@ mod tests {
             )
         };
         assert_eq!(
-            workload_proxy_url(Some(&ip("http://user:pw@1.1.1.1:8080", 8080))).unwrap(),
+            workload_proxy_url(Some(&ip("http://user:pw@1.1.1.1:8080", 8080)), SUBNETS).unwrap(),
             "http://user:pw@10.231.1.254:8080/"
         );
         assert_eq!(
-            workload_proxy_url(Some(&ip("socks5://1.1.1.1:1080", 1080))).unwrap(),
+            workload_proxy_url(Some(&ip("socks5://1.1.1.1:1080", 1080)), SUBNETS).unwrap(),
             "socks5://10.231.1.254:1080"
         );
         let named = custom(
@@ -854,7 +957,7 @@ mod tests {
             443,
         );
         assert_eq!(
-            workload_proxy_url(Some(&named)).unwrap(),
+            workload_proxy_url(Some(&named), SUBNETS).unwrap(),
             "https://proxy.example:443"
         );
     }
@@ -884,13 +987,14 @@ mod tests {
                 mapping(18081, 8080),
                 mapping(2222, 22),
             ],
+            SUBNETS,
         );
         assert!(!policy.forward_dns);
         assert_eq!(
             policy.port_mappings,
             [8080, 22].map(|port| gateway::PortMapping {
                 listen_port: port,
-                workload_address: WORKLOAD_ADDRESS,
+                workload_address: Ipv4Addr::new(10, 231, 1, 2),
                 workload_port: port,
             })
         );
@@ -939,13 +1043,16 @@ mod tests {
             warnings: Vec::new(),
         };
         assert_eq!(
-            render_policy(&egress(true), None, &[]).host_loopback,
+            render_policy(&egress(true), None, &[], SUBNETS).host_loopback,
             Some(gateway::HostLoopback {
                 relay_address: Ipv4Addr::new(10, 231, 1, 3),
                 prefix_length: 24,
             })
         );
-        assert_eq!(render_policy(&egress(false), None, &[]).host_loopback, None);
+        assert_eq!(
+            render_policy(&egress(false), None, &[], SUBNETS).host_loopback,
+            None
+        );
 
         let caller = ["NO_PROXY=*".to_string()];
         let no_proxy = |host_loopback| {
@@ -967,14 +1074,67 @@ mod tests {
     }
 
     #[test]
-    fn proxy_names_share_the_prefix_and_the_session_key() {
-        let names = ProxyNames::for_session("session");
-        let other = ProxyNames::for_session("other session");
+    fn proxy_names_share_the_prefix_and_the_owner_key() {
+        let names = ProxyNames::for_owner("wslc:one");
+        let other = ProxyNames::for_owner("wslc:two");
         assert!(session_resources::is_fingerprint(&names.key));
         assert_ne!(names.key, other.key);
         assert!(names
             .all()
             .iter()
             .all(|name| name.starts_with(&format!("{NAME_PREFIX}{}-", names.key))));
+    }
+
+    #[test]
+    fn each_proxy_takes_two_subnets_no_other_network_holds() {
+        let held = |name: &str, subnet: [u8; 4]| SessionNetwork {
+            name: name.to_string(),
+            ipv4_subnet: Some((Ipv4Addr::from(subnet), 24)),
+        };
+        let subnets = Subnets::allocate(&[
+            held("bridge", [172, 17, 0, 0]),
+            held("a", [10, 231, 0, 0]),
+            held("b", [10, 231, 2, 0]),
+        ])
+        .unwrap();
+        assert_eq!(subnets.egress, Ipv4Addr::new(10, 231, 1, 0));
+        assert_eq!(subnets.internal, Ipv4Addr::new(10, 231, 3, 0));
+        assert_eq!(subnets.workload(), Ipv4Addr::new(10, 231, 3, 2));
+
+        let full: Vec<_> = (0..=255).map(|c| held("n", [10, 231, c, 0])).collect();
+        assert!(Subnets::allocate(&full[1..]).is_err());
+    }
+
+    #[test]
+    fn a_failed_proxy_sweep_still_removes_sandbox_networks() {
+        let mut networks_swept = false;
+        let error = sweep_both(
+            || Err("a malformed record".to_string()),
+            |_| {
+                networks_swept = true;
+                Ok(())
+            },
+            &mut Logger::new(Mode::Buffer),
+        )
+        .expect_err("the proxy failure is reported");
+        assert!(
+            networks_swept,
+            "the network sweep ran after the proxy sweep failed"
+        );
+        assert!(error.contains("a malformed record"), "{error}");
+    }
+
+    #[test]
+    fn both_failed_sweeps_are_reported() {
+        let error = sweep_both(
+            || Err("proxy busy".to_string()),
+            |_| Err("network busy".to_string()),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .expect_err("both failures are reported");
+        assert!(
+            error.contains("proxy busy") && error.contains("network busy"),
+            "{error}"
+        );
     }
 }

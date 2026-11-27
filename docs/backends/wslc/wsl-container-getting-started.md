@@ -523,20 +523,21 @@ no separate `--setup-wslc` step is required.
 
 | Type | Exact policy | WSLC behavior |
 |---|---|---|
-| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on a NAT network in the session VM. It can reach the internet, the local network, and [port mappings](#port-mappings) forward Windows ports into it. Windows host loopback isn't accessible. Nothing is filtered. With container lifecycle operations, each sandbox has a network of its own, so sandboxes in one session can't connect to each other's container addresses, though mapped ports stay reachable inside the session; see [Bridged networking](wslc-state-aware.md#bridged-networking). |
+| Bridged | Egress, ingress, and host-loopback defaults all `allow`, without egress rules | The container gets an address on a NAT network in the session VM. It can reach the internet, the local network, and TCP services on Windows `127.0.0.1` at `host.wslc.internal`, and [port mappings](#port-mappings) forward Windows ports into it. Nothing is filtered. With container lifecycle operations, each sandbox has a network of its own, so sandboxes in one session can't connect to each other's container addresses, though mapped ports stay reachable inside the session; see [Bridged networking](wslc-state-aware.md#bridged-networking). |
 | Isolated | All three defaults omitted or `deny`, without egress allow rules, port mappings, or `runtimeConfig.networkProxy` | No networking. The container only has its own loopback interface. It can't reach anything outside itself, and nothing can reach it. |
-| Built-in proxy | Any other combination, create-and-run execution | Egress filtered by the [built-in proxy](#built-in-proxy) |
-| Built-in proxy | Any other combination, container lifecycle operations | Rejected |
+| Built-in proxy | Any other combination | Egress filtered by the [built-in proxy](#built-in-proxy) |
 
 > The removed legacy `allowOutbound` setting and JSON host-list fields are not
 > accepted by any supported contract.
 
 ### Built-in proxy
 
-For create-and-run execution, MXC enforces egress rules and mixed defaults
-with a filtering proxy that runs in a second container in the same session.
-The workload's only network is internal and has no route out, so its traffic
-leaves only through the proxy.
+MXC enforces egress rules and mixed defaults with a filtering proxy that runs
+in a second container in the same session. The workload's only network is
+internal and has no route out, so its traffic leaves only through the proxy.
+This section describes create-and-run execution; container lifecycle
+operations behave the same way, with the differences in
+[Built-in proxy](wslc-state-aware.md#built-in-proxy).
 
 Before the workload starts, MXC creates these in the run's session. `<key>`
 is 16 hex digits derived from the session name.
@@ -617,7 +618,8 @@ services on Windows `127.0.0.1` at `host.wslc.internal`, on any port.
 - With `hostLoopback: "deny"`, the proxy refuses lookups and requests for
   `host.wslc.internal`.
 
-- Not available with bridged networking or container lifecycle operations.
+- Needs WSL 3.0.5 or later; on older runtimes, `hostLoopback: "allow"` fails
+  with `backend_unavailable`.
 
 #### Custom proxy
 
@@ -688,8 +690,9 @@ them use your proxy. With any other policy, it goes through the built-in proxy
 instead; see [Custom proxy](#custom-proxy).
 
 - MXC sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy` and `https_proxy` to the
-  URL, and `NO_PROXY`/`no_proxy` to empty so an image's `ENV NO_PROXY` can't
-  bypass it. Caller-supplied values for these keys are dropped.
+  URL, and `NO_PROXY`/`no_proxy` to `host.wslc.internal` (empty on WSL older
+  than 3.0.5) so an image's `ENV NO_PROXY` can't bypass it. Caller-supplied
+  values for these keys are dropped.
 
 - Nothing is enforced. Clients that ignore the variables (raw sockets, some
   static binaries) connect directly, and the workload can change its own
@@ -697,10 +700,11 @@ instead; see [Custom proxy](#custom-proxy).
   to it.
 
 - The URL must be reachable from the container. `127.0.0.1` is the
-  container's own loopback, and Windows loopback isn't reachable. For a proxy
-  on Windows loopback, use a [custom proxy](#custom-proxy).
+  container's own loopback. For a proxy on Windows loopback, use a
+  [custom proxy](#custom-proxy).
 
-- Container lifecycle operations set the proxy on `exec`, not at provision.
+- Container lifecycle operations can set the proxy at provision (contract
+  `1.1.0-alpha`) or on each `exec`.
 
 This create-and-run example uses a proxy at `proxy.example:8080`:
 
@@ -717,20 +721,6 @@ This create-and-run example uses a proxy at `proxy.example:8080`:
   "wslc": { "image": "alpine:latest" }
 }
 ```
-
-### Filtering for container lifecycle operations
-
-Container lifecycle operations do not use the built-in proxy yet. A
-provisioned container is either isolated (deny/deny/deny) or bridged
-(allow/allow/allow), and any other network policy is **rejected before
-provisioning**:
-
-```
-WSLc does not support network.egress allow/deny rules; networking is all-or-nothing
-```
-
-Use a runtime proxy with unrestricted bridged networking for cooperative
-filtering at the proxy layer.
 
 ### Retired enforcement and inbound fields
 

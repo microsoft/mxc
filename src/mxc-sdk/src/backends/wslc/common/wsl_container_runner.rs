@@ -29,10 +29,12 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::process_util::InterruptiblePipeWriter;
 use crate::mxc_common::sandbox_process::{StdioMode, StreamCloser};
 use crate::mxc_common::script_runner::ScriptRunner;
-use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use crate::mxc_common::string_util::CoTaskMemPWSTR;
 use crate::mxc_common::validator::validate_network_policy_support;
 
-use crate::wslc_common::container_steps::{self, sdk_error, SESSION_BOOT_TIMEOUT_MS};
+use crate::wslc_common::container_steps::{
+    self, sdk_error, ContainerNetworking, ContainerSettings, HostLoopback,
+};
 use crate::wslc_common::egress_gateway;
 use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
 use crate::wslc_common::image;
@@ -43,7 +45,6 @@ use crate::wslc_common::sdk_init;
 use crate::wslc_common::session_resources;
 use crate::wslc_common::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_common::wslc_bindings::*;
-use crate::wslc_gateway_policy as gateway;
 
 fn sdk_wait_error(operation: &str, hr: HRESULT, sdk_msg: &str) -> WslcStepError {
     WslcError::sdk(format!("{operation} failed"), hr, sdk_msg)
@@ -489,7 +490,7 @@ impl WSLContainerRunner {
     }
 
     fn network_mode(&self, request: &ExecutionRequest) -> Result<policy::NetworkMode, MxcError> {
-        policy::create_and_run_network_mode(request, !self.config.port_mappings.is_empty())
+        policy::network_mode(request, !self.config.port_mappings.is_empty())
     }
 
     fn validate_target_os(&self) -> Result<(), ScriptResponse> {
@@ -526,7 +527,7 @@ impl ScriptRunner for WSLContainerRunner {
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
-        validate_network_policy_support(request, policy::create_and_run_network_policy_support())
+        validate_network_policy_support(request, policy::network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
         let network_mode = self.network_mode(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
@@ -545,23 +546,12 @@ fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
 }
 
-fn create_session_error(hr: HRESULT, host_loopback: bool, sdk_msg: &str) -> WslcError {
-    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED && host_loopback {
-        return WslcError::Unavailable(
-            "WSLc: network.ingress.hostLoopback 'allow' and a runtimeConfig.networkProxy on \
-             Windows loopback need WSL 3.0.5 or later. Run `wsl --update`"
-                .to_string(),
-        );
-    }
-    WslcError::sdk("WslcCreateSession failed", hr, sdk_msg)
-}
-
 fn resolve_custom_proxy(
     network_mode: &policy::NetworkMode,
 ) -> Result<Option<crate::wslc_gateway_policy::CustomProxy>, ScriptResponse> {
     match network_mode {
         policy::NetworkMode::Proxied(egress) => {
-            egress_gateway::resolve_custom_proxy(egress).map_err(WslcError::into_response)
+            egress_gateway::resolve_custom_proxy(egress).map_err(WslcStepError::into_response)
         }
         policy::NetworkMode::None | policy::NetworkMode::Bridged => Ok(None),
     }
@@ -644,10 +634,6 @@ impl WSLContainerRunner {
         })
     }
 
-    /// Configure session settings and create the session.
-    /// Returns the session guard (RAII).
-    /// Keeps owned string data alive through session creation.
-    ///
     /// # Safety
     /// `sdk` must contain valid, currently-loaded function pointers.
     /// COM must already be initialized on this thread.
@@ -655,108 +641,29 @@ impl WSLContainerRunner {
         &self,
         sdk: &'static WslcSdk,
         request: &ExecutionRequest,
-        session_name_str: &str,
-        host_loopback: bool,
+        session_name: &str,
+        network_mode: &policy::NetworkMode,
         logger: &mut Logger,
-    ) -> Result<WslcSessionGuard, ScriptResponse> {
+    ) -> Result<(WslcSessionGuard, bool), ScriptResponse> {
         // Backstop for a direct `execute` that skipped `validate_runner`.
         reject_embedded_nul_container_id(&request.container_id)?;
-        let session_name: Vec<u16> = to_wide(session_name_str);
-        let storage_path_wide: Vec<u16> = to_wide(&self.storage_path());
-
-        let mut settings = std::mem::zeroed::<WslcSessionSettings>();
-        let hr = sdk.WslcInitSessionSettings(
-            session_name.as_ptr(),
-            storage_path_wide.as_ptr(),
-            &mut settings,
-        );
-        if hr != S_OK {
-            return Err(sdk_error("WslcInitSessionSettings failed", hr, ""));
-        }
-
-        // Repeated from `validate_runner` so a caller reaching `execute`
-        // directly cannot skip it.
-        container_steps::check_sizing_against_host(self.session_sizing())?;
-
-        if let Some(cpu) = self.config.cpu_count {
-            let hr = sdk.WslcSetSessionSettingsCpuCount(&mut settings, cpu);
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetSessionSettingsCpuCount failed", hr, ""));
-            }
-        }
-        if let Some(mem_mb) = self.config.memory_mb {
-            let mem_mb = match u32::try_from(mem_mb) {
-                Ok(v) => v,
-                Err(_) => {
-                    return Err(WslcError::Rejected(format!(
-                        "Invalid config: memory_mb value {} exceeds maximum {} MB",
-                        mem_mb,
-                        u32::MAX
-                    ))
-                    .into_response());
-                }
-            };
-            let hr = sdk.WslcSetSessionSettingsMemory(&mut settings, mem_mb);
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetSessionSettingsMemory failed", hr, ""));
-            }
-        }
-        let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, SESSION_BOOT_TIMEOUT_MS);
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
-        }
-        if self.config.gpu {
-            let hr = sdk.WslcSetSessionSettingsFeatureFlags(
-                &mut settings,
-                WslcSessionFeatureFlags::WSLC_SESSION_FEATURE_FLAG_ENABLE_GPU,
-            );
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetSessionSettingsFeatureFlags failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
-
-        // The SDK reads the name when the session is created.
-        let host_loopback_name =
-            CString::new(gateway::HOST_LOOPBACK_NAME).expect("the host loopback name has no NUL");
-        if host_loopback {
-            let hr =
-                sdk.WslcSetSessionSettingsHostLoopback(&mut settings, host_loopback_name.as_ptr());
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetSessionSettingsHostLoopback failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
-
-        // Create session while string data is still alive
-        let mut session: WslcSession = ptr::null_mut();
-        let mut err_msg = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcCreateSession(&mut settings, &mut session, err_msg.as_mut_ptr());
-        if hr != S_OK {
-            return Err(
-                create_session_error(hr, host_loopback, &err_msg.to_string_lossy()).into_response(),
-            );
-        }
-        let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
-        if host_loopback {
-            let _ = writeln!(
-                logger,
-                "[WSLC] Session reaches Windows loopback as {}",
-                gateway::HOST_LOOPBACK_NAME
-            );
-        }
-
-        Ok(WslcSessionGuard::from_raw(
-            session,
-            sdk.terminate_session_fn(),
-            sdk.release_session_fn(),
-        ))
+        let host_loopback = if network_mode.session_host_loopback() {
+            HostLoopback::Required
+        } else if *network_mode == policy::NetworkMode::Bridged {
+            HostLoopback::IfSupported
+        } else {
+            HostLoopback::Off
+        };
+        let (session, host_loopback) = container_steps::create_session(
+            sdk,
+            session_name,
+            &self.storage_path(),
+            self.session_sizing(),
+            host_loopback,
+            logger,
+        )?;
+        let _ = writeln!(logger, "[WSLC] Session created: {session_name}");
+        Ok((session, host_loopback))
     }
 
     /// Wait for process exit with timeout enforcement.
@@ -1048,22 +955,11 @@ impl WSLContainerRunner {
 
         // -- Session (configure + create in one step to keep string data alive) --
         let session_name = resolve_session_name(&request.container_id);
-        let session_guard = self.create_session(
-            sdk,
-            request,
-            &session_name,
-            network_mode.session_host_loopback(),
-            logger,
-        )?;
+        let (session_guard, host_loopback) =
+            self.create_session(sdk, request, &session_name, &network_mode, logger)?;
 
         // -- Image resolution --
-        // An isolated sandbox gets no registry fetch on its behalf; the pull
-        // would run on the host's network before the container exists.
-        let registry = if policy::network_is_isolated(request) {
-            image::RegistryAccess::Denied
-        } else {
-            image::RegistryAccess::Allowed
-        };
+        let registry = network_mode.registry_access();
         let resolved = image::resolve_image(
             sdk,
             session_guard.as_raw(),
@@ -1085,16 +981,12 @@ impl WSLContainerRunner {
 
         let gateway = match &network_mode {
             policy::NetworkMode::Proxied(egress) => {
-                for warning in &egress.warnings {
-                    logger.warning_line(&format!("WARNING: WSLc: {warning}"));
+                for warning in egress.warning_lines() {
+                    logger.warning_line(&warning);
                 }
                 let storage_path = self.storage_path();
-                egress_gateway::sweep_leftovers(
-                    sdk,
-                    session_guard.as_raw(),
-                    &storage_path,
-                    logger,
-                )?;
+                egress_gateway::sweep_leftovers(sdk, session_guard.as_raw(), &storage_path, logger)
+                    .map_err(|e| WslcError::Host(e).into_response())?;
                 Some(egress_gateway::Gateway::start(
                     sdk,
                     session_guard.as_raw(),
@@ -1184,10 +1076,7 @@ impl WSLContainerRunner {
                 "[WSLC] Cooperative network proxy configured: {}",
                 crate::mxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
-            crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
-                request.env_entries(),
-                &proxy_url,
-            )
+            process_env::with_proxy(request.env_entries(), &proxy_url, host_loopback)
         } else {
             request.env_entries().to_vec()
         };
@@ -1227,47 +1116,6 @@ impl WSLContainerRunner {
         }
 
         // -- Container settings --
-        // Volume and image string data must stay alive until WslcCreateContainer.
-        let image_name = &self.config.image;
-        let image_cstr = format!("{}\0", image_name);
-        let mut container_settings = std::mem::zeroed::<WslcContainerSettings>();
-        let hr = sdk.WslcInitContainerSettings(
-            image_cstr.as_bytes().as_ptr() as PCSTR,
-            &mut container_settings,
-        );
-        if hr != S_OK {
-            return Err(sdk_error("WslcInitContainerSettings failed", hr, ""));
-        }
-
-        // -- Port mappings (host<->container) --
-        // Apply before networking mode so the SDK has the complete picture
-        // when the container is created. Empty list = no forwarding (default).
-        // Read by WslcCreateContainer below. Behind the built-in proxy, the
-        // gateway owns the mappings.
-        let mappings = if gateway.is_some() {
-            Vec::new()
-        } else {
-            container_steps::sdk_port_mappings(&self.config.port_mappings)
-        };
-        if !mappings.is_empty() {
-            let hr = sdk.WslcSetContainerSettingsPortMappings(
-                &mut container_settings,
-                mappings.as_ptr(),
-                mappings.len() as u32,
-            );
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetContainerSettingsPortMappings failed",
-                    hr,
-                    "",
-                ));
-            }
-            let _ = writeln!(
-                logger,
-                "[WSLC] {} port mapping(s) configured",
-                mappings.len()
-            );
-        }
         let mut mounts = match policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
@@ -1278,94 +1126,17 @@ impl WSLContainerRunner {
                 return Err(WslcError::Rejected(e).into_response());
             }
         };
-        if let Some(gateway) = &gateway {
-            mounts.push(gateway.resolv_conf_mount());
-        }
-
-        // Keep owned data alive for volume pointers
-        let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts
-            .iter()
-            .map(|m| {
-                let win: Vec<u16> = to_wide(&m.windows_path);
-                let ctr: Vec<u8> = format!("{}\0", m.container_path).into_bytes();
-                (win, ctr)
-            })
-            .collect();
-
-        // Built at function scope alongside `wide_paths`: these structs point
-        // into `wide_paths` and must outlive `WslcCreateContainer` below.
-        let volumes: Vec<WslcContainerVolume> = wide_paths
-            .iter()
-            .zip(mounts.iter())
-            .map(|((win, ctr), m)| WslcContainerVolume {
-                windowsPath: win.as_ptr(),
-                containerPath: ctr.as_ptr() as PCSTR,
-                readOnly: if m.read_only { 1 } else { 0 },
-            })
-            .collect();
-        if !volumes.is_empty() {
-            let hr = sdk.WslcSetContainerSettingsVolumes(
-                &mut container_settings,
-                volumes.as_ptr(),
-                volumes.len() as u32,
-            );
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetContainerSettingsVolumes failed", hr, ""));
+        // Behind the built-in proxy, the gateway owns the port mappings.
+        let (networking, port_mappings) = match (&gateway, &network_mode) {
+            (Some(gateway), _) => {
+                mounts.push(gateway.resolv_conf_mount());
+                (gateway.workload_networking(), &[][..])
             }
-            let _ = writeln!(
-                logger,
-                "[WSLC] {} volume mount(s) configured",
-                volumes.len()
-            );
-        }
-
-        // Read by WslcCreateContainer below.
-        let workload_networks = gateway.as_ref().map(|g| g.workload_networks());
-        // Raw sockets could hand frames to the gateway outside the proxy.
-        let workload_capability_drops: [PCSTR; 1] = [c"NET_RAW".as_ptr()];
-        if let (Some(gateway), Some(workload_networks)) = (&gateway, &workload_networks) {
-            let hr = sdk.WslcSetContainerSettingsName(
-                &mut container_settings,
-                gateway.workload_name().as_ptr(),
-            );
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetContainerSettingsName failed", hr, ""));
+            (None, policy::NetworkMode::None) => {
+                (ContainerNetworking::None, &self.config.port_mappings[..])
             }
-            let hr = sdk.WslcSetContainerSettingsNetworks(
-                &mut container_settings,
-                workload_networks.as_ptr(),
-                workload_networks.len() as u32,
-            );
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetContainerSettingsNetworks failed", hr, ""));
-            }
-            let hr = sdk.WslcSetContainerSettingsCapabilityDrops(
-                &mut container_settings,
-                workload_capability_drops.as_ptr(),
-                workload_capability_drops.len() as u32,
-            );
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetContainerSettingsCapabilityDrops failed",
-                    hr,
-                    "",
-                ));
-            }
-            let _ = writeln!(logger, "[WSLC] Networking: built-in proxy");
-        } else {
-            let is_default_block = network_mode == policy::NetworkMode::None;
-            let net_mode = policy_mapping::map_network_policy(is_default_block);
-            let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetContainerSettingsNetworkingMode failed",
-                    hr,
-                    "",
-                ));
-            }
-            let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
-        }
-
+            (None, _) => (ContainerNetworking::Nat, &self.config.port_mappings[..]),
+        };
         let mut flags = WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE;
         if request.lifecycle.destroy_on_exit {
             flags |= WslcContainerFlags::WSLC_CONTAINER_FLAG_AUTO_REMOVE;
@@ -1373,13 +1144,20 @@ impl WSLContainerRunner {
         if self.config.gpu {
             flags |= WslcContainerFlags::WSLC_CONTAINER_FLAG_ENABLE_GPU;
         }
-        let hr = sdk.WslcSetContainerSettingsFlags(&mut container_settings, flags);
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetContainerSettingsFlags failed", hr, ""));
-        }
+        let mut container_settings = ContainerSettings::build(
+            sdk,
+            &self.config.image,
+            &mounts,
+            port_mappings,
+            networking,
+            flags,
+            logger,
+        )?;
 
-        let hr =
-            sdk.WslcSetContainerSettingsInitProcess(&mut container_settings, &mut process_settings);
+        let hr = sdk.WslcSetContainerSettingsInitProcess(
+            container_settings.raw_mut(),
+            &mut process_settings,
+        );
         if hr != S_OK {
             return Err(sdk_error(
                 "WslcSetContainerSettingsInitProcess failed",
@@ -1393,7 +1171,7 @@ impl WSLContainerRunner {
         let mut err_msg = CoTaskMemPWSTR::null();
         let hr = sdk.WslcCreateContainer(
             session_guard.as_raw(),
-            &container_settings,
+            container_settings.raw(),
             &mut container,
             err_msg.as_mut_ptr(),
         );
@@ -2655,48 +2433,6 @@ mod tests {
     }
 
     #[test]
-    fn only_create_and_run_accepts_egress_rules() {
-        use crate::mxc_common::models::{NetworkPort, NetworkProtocol, NetworkRule};
-        let request = ExecutionRequest {
-            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::mxc_common::models::ContainerPolicy {
-                network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
-                    allow: vec![NetworkRule {
-                        to: Vec::new(),
-                        ports: vec![NetworkPort {
-                            protocol: NetworkProtocol::Tcp,
-                            port: None,
-                            end_port: None,
-                        }],
-                    }],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let runner = WSLContainerRunner::new(&WslcConfig::default());
-        runner.validate_runner(&request).unwrap();
-        assert!(matches!(
-            runner.network_mode(&request).unwrap(),
-            policy::NetworkMode::Proxied(_)
-        ));
-
-        let state_aware =
-            crate::wslc_common::policy::validate_provision_policy(&request).unwrap_err();
-        assert_eq!(
-            state_aware.code,
-            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
-        );
-        assert!(
-            state_aware.message.contains("allow/deny rules"),
-            "got: {}",
-            state_aware.message
-        );
-    }
-
-    #[test]
     fn validate_runner_tags_shared_validator_rejections() {
         // The shared network validator builds untagged responses; WSLc retags them
         // so callers get `policy_validation` rather than an opaque backend error.
@@ -3670,20 +3406,5 @@ mod tests {
     #[test]
     fn minted_session_names_do_not_repeat() {
         assert_ne!(resolve_session_name(""), resolve_session_name(""));
-    }
-
-    #[test]
-    fn an_old_runtime_is_unavailable_only_when_host_loopback_was_requested() {
-        assert!(matches!(
-            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, true, ""),
-            WslcError::Unavailable(m) if m.contains("wsl --update")
-        ));
-        assert!(matches!(
-            create_session_error(WSLC_E_RUNTIME_UPDATE_NEEDED, false, ""),
-            WslcError::Sdk {
-                hr: WSLC_E_RUNTIME_UPDATE_NEEDED,
-                ..
-            }
-        ));
     }
 }

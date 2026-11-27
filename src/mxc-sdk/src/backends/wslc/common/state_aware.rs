@@ -37,12 +37,13 @@ use crate::wslc_common::daemon_client::{
     truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome,
 };
 use crate::wslc_common::daemon_protocol::{
-    DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, NetworkMode,
+    DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig,
     PortMapping as DaemonPortMapping, ProvisionConfig,
     ProvisionSessionConfig as DaemonProvisionSessionConfig, StartConfig, StopConfig, VolumeMount,
 };
 use crate::wslc_common::policy::{
-    exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
+    exec_proxy_url, validate_exec_policy, validate_post_provision_policy,
+    validate_provision_policy, NetworkMode,
 };
 use crate::wslc_common::process_env::EnvScope;
 #[cfg(windows)]
@@ -115,6 +116,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         config: Option<WslcProvisionConfig>,
     ) -> Result<ProvisionResult<()>, MxcError> {
         let provision_config = build_provision_config(request, config)?;
+        let warnings = match &provision_config.network {
+            NetworkMode::Proxied(egress) => egress.warning_lines().collect(),
+            NetworkMode::None | NetworkMode::Bridged => Vec::new(),
+        };
 
         let client = connect_daemon()?;
         let sandbox_id = client
@@ -124,6 +129,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         Ok(ProvisionResult {
             sandbox_id,
             metadata: None,
+            warnings,
         })
     }
 
@@ -222,7 +228,11 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             request,
             crate::wslc_common::policy::network_policy_support(),
         )?;
-        validate_provision_policy(request)
+        validate_provision_policy(request)?;
+        let has_port_mappings = config
+            .and_then(|config| config.port_mappings.as_ref())
+            .is_some_and(|mappings| !mappings.is_empty());
+        crate::wslc_common::policy::network_mode(request, has_port_mappings).map(drop)
     }
 
     fn validate_provision_session(
@@ -858,12 +868,7 @@ fn build_provision_config(
     };
 
     let volumes = build_daemon_volumes(request)?;
-    let network = map_network(request);
-    crate::wslc_common::policy::reject_port_mappings_without_bridged_network(
-        request,
-        "wslc.provision.portMappings",
-        !port_mappings.is_empty(),
-    )?;
+    let network = crate::wslc_common::policy::network_mode(request, !port_mappings.is_empty())?;
 
     Ok(ProvisionConfig {
         image,
@@ -918,16 +923,6 @@ fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, 
             read_only: m.read_only,
         })
         .collect())
-}
-
-/// Map the validated directional egress default to the daemon's binary
-/// network mode: `Deny` → isolated, `Allow` → bridged NAT.
-fn map_network(request: &ExecutionRequest) -> NetworkMode {
-    if crate::wslc_common::policy::network_is_isolated(request) {
-        NetworkMode::None
-    } else {
-        NetworkMode::Bridged
-    }
 }
 
 /// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
@@ -1359,6 +1354,7 @@ mod tests {
         ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
         ProxyConfig,
     };
+    use crate::wslc_common::daemon_protocol::NetworkMode;
 
     /// The exit code is unrecoverable once dropped, so failing the call must not
     /// discard it.
@@ -1535,8 +1531,8 @@ mod tests {
         }
     }
 
-    /// A rule-based posture cannot be mapped to the daemon's binary
-    /// [`NetworkMode`], so validation must refuse it before provision.
+    /// An egress allow entry the built-in proxy can't carry is refused before
+    /// provision.
     #[test]
     fn validate_provision_rejects_unimplementable_network_posture() {
         let runner = WslcStateAwareRunner::new();
@@ -1562,12 +1558,22 @@ mod tests {
         );
     }
 
-    /// Guards against rejecting either supported all-or-nothing posture.
+    /// Guards against rejecting a posture WSLc can enforce.
     #[test]
     fn validate_provision_accepts_the_postures_wslc_can_honour() {
         let runner = WslcStateAwareRunner::new();
         for (label, policy) in [
             ("isolated", ContainerPolicy::default()),
+            (
+                "proxied",
+                ContainerPolicy {
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: NetworkAction::Allow,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ),
             (
                 "bridged",
                 ContainerPolicy {
@@ -1602,27 +1608,6 @@ mod tests {
     }
 
     #[test]
-    fn map_network_maps_block_to_none() {
-        let req = ExecutionRequest::default();
-        assert_eq!(map_network(&req), NetworkMode::None);
-    }
-
-    #[test]
-    fn map_network_maps_allow_to_bridged() {
-        let req = ExecutionRequest {
-            policy: ContainerPolicy {
-                network_egress: Some(NetworkEgressPolicy {
-                    default: NetworkAction::Allow,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_eq!(map_network(&req), NetworkMode::Bridged);
-    }
-
-    #[test]
     fn build_provision_config_maps_directional_postures_to_daemon_modes() {
         for (action, expected) in [
             (NetworkAction::Deny, NetworkMode::None),
@@ -1646,6 +1631,17 @@ mod tests {
             let config = build_provision_config(&request, None).unwrap();
             assert_eq!(config.network, expected);
         }
+
+        let mut mixed = bridged_request();
+        mixed.policy.network_ingress = Some(NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+        let NetworkMode::Proxied(proxied) = build_provision_config(&mixed, None).unwrap().network
+        else {
+            panic!("a mixed posture must run behind the built-in proxy");
+        };
+        assert!(!proxied.host_loopback);
     }
 
     #[test]
@@ -1744,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_networking_rejects_port_mappings_before_the_daemon_sees_them() {
+    fn isolated_port_mappings_run_behind_the_built_in_proxy() {
         let phase = WslcProvisionConfig {
             port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
                 windows_port: 8080,
@@ -1753,16 +1749,15 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        let NetworkMode::Proxied(proxied) = cfg.network else {
+            panic!("port mappings must run behind the built-in proxy");
+        };
         assert_eq!(
-            err.code,
-            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            proxied.egress.default,
+            crate::wslc_gateway_policy::Action::Deny
         );
-        assert!(
-            err.message.contains("portMappings"),
-            "the message must name the field to remove; got: {}",
-            err.message
-        );
+        assert_eq!(cfg.port_mappings.len(), 1);
     }
 
     #[test]

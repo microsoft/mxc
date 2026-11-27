@@ -13,25 +13,25 @@
 //! | `readwrite` / `readonly`    | honoured (volume mounts)     | rejected (immutable)       | rejected (immutable)       |
 //! | `denied_paths`              | rejected if overlapping [^1] | rejected                   | rejected                   |
 //! | `ui`                        | rejected (no UI primitive)   | rejected                   | rejected                   |
-//! | `network.egress.default`    | honoured (None / Bridged)    | rejected (immutable)       | rejected (immutable)       |
-//! | `network.ingress.*`         | must match egress (deny all / allow all) | rejected         | rejected                   |
-//! | `runtimeConfig.networkProxy` | rejected (applies at exec) | rejected                   | honoured (cooperative env) |
+//! | `network.egress.*`          | honoured ([`network_mode`])  | rejected (immutable)       | rejected (immutable)       |
+//! | `network.ingress.*`         | honoured ([`network_mode`])  | rejected (immutable)       | rejected (immutable)       |
+//! | `runtimeConfig.networkProxy` | honoured ([`network_mode`]) | rejected                   | honoured (must match provision) |
 //!
 //! [^1]: a standalone `denied_path` is honoured by container isolation (unlisted
 //! host paths are simply never mounted); only a denied path nested under a
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 //!
-//! Create-and-run also accepts egress rules, mixed postures (including
-//! `hostLoopback: allow`), port mappings without bridged networking and a
-//! `networkProxy` with egress denied, which [`create_and_run_network_mode`]
-//! routes through the built-in proxy.
+//! Egress rules, mixed postures, port mappings without bridged networking and
+//! a `networkProxy` with egress denied run behind the built-in proxy.
 //!
 //! Checks run filesystem → ui → network, so a request that trips several gets a
 //! stable message rather than one that depends on field order (asserted by
 //! tests). [`reject_ui_policy`] applies to both one-shot and state-aware validation.
 
 use std::net::{IpAddr, Ipv4Addr};
+
+use serde::{Deserialize, Serialize};
 
 use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPort,
@@ -40,6 +40,7 @@ use crate::mxc_common::models::{
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::validator::NetworkPolicySupport;
 
+use crate::wslc_common::image::RegistryAccess;
 use crate::wslc_common::policy_mapping::validate_denied_path_overlap;
 use crate::wslc_common::process_env::EnvScope;
 use crate::wslc_gateway_policy as gateway;
@@ -52,10 +53,9 @@ const ERR_ENUMERATE_PATHS: &str =
 const ERR_NETWORK_IMMUTABLE: &str =
     "network mode is bound to the provision phase and cannot be changed by the WSLc backend after \
      provisioning";
-const ERR_PROXY_AT_PROVISION: &str =
-    "runtimeConfig.networkProxy is applied per-exec by the WSLc backend; set it on the exec phase, not provision";
 const ERR_PROXY_AT_PHASE: &str =
-    "runtimeConfig.networkProxy is only honoured on the exec phase by the WSLc backend";
+    "runtimeConfig.networkProxy is only honoured on the provision and exec phases by the WSLc \
+     backend";
 const ERR_PROXY_URL_TOO_LONG: &str = "WSLc: runtimeConfig.networkProxy must not exceed 8192 bytes";
 const ERR_PROXY_MISMATCH: &str =
     "WSLc: runtimeConfig.networkProxy on exec must match the proxy set at provision; omit it to \
@@ -63,9 +63,6 @@ const ERR_PROXY_MISMATCH: &str =
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: runtimeConfig.networkProxy requires a proxy url reachable from inside the container; \
      a host-loopback proxy is not reachable from the container's own network namespace";
-const ERR_PROXY_WITHOUT_ROUTE: &str =
-    "WSLc runtimeConfig.networkProxy requires bridged networking; a proxy cannot create a route \
-     in an isolated container";
 const ERR_PROXY_WITH_RULES: &str =
     "WSLc: runtimeConfig.networkProxy cannot be combined with egress filtering rules \
      (network.egress allow/deny); the proxy decides where traffic goes. Remove the rules or the \
@@ -93,24 +90,20 @@ const ERR_PROXY_CREDENTIALS_IN_ARGV: &str =
      the URL out of the command line, use a proxy that needs no inline credentials, or supply \
      them to the proxy itself";
 
-/// WSLc enforces these axes only as a single all-or-nothing networking mode.
-/// `validate_directional_network` rejects every independently filtered posture.
 pub(crate) fn network_policy_support() -> NetworkPolicySupport {
     NetworkPolicySupport::EGRESS_DEFAULT
+        | NetworkPolicySupport::EGRESS_RULES
         | NetworkPolicySupport::INGRESS_DEFAULT
         | NetworkPolicySupport::HOST_LOOPBACK
         | NetworkPolicySupport::RUNTIME_PROXY
 }
 
-/// Create-and-run also filters egress rules through the built-in proxy.
-pub(crate) fn create_and_run_network_policy_support() -> NetworkPolicySupport {
-    network_policy_support() | NetworkPolicySupport::EGRESS_RULES
-}
-
-/// How a create-and-run container is networked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NetworkMode {
+/// How a container is networked.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
     /// No network at all.
+    #[default]
     None,
     /// The session's NAT network, unfiltered.
     Bridged,
@@ -119,10 +112,8 @@ pub(crate) enum NetworkMode {
 }
 
 impl NetworkMode {
-    /// Whether the session must reach Windows loopback. The setting is
-    /// session-wide, which is safe only because each create-and-run gets its
-    /// own session.
-    pub(crate) fn session_host_loopback(&self) -> bool {
+    /// Whether the built-in proxy needs the session to reach Windows loopback.
+    pub fn session_host_loopback(&self) -> bool {
         match self {
             NetworkMode::Proxied(proxied) => {
                 proxied.host_loopback
@@ -137,41 +128,63 @@ impl NetworkMode {
             NetworkMode::None | NetworkMode::Bridged => false,
         }
     }
+
+    /// An image pull runs on the host's network, so only egress that
+    /// defaults to allow may trigger one.
+    pub fn registry_access(&self) -> RegistryAccess {
+        match self {
+            NetworkMode::None => RegistryAccess::Denied,
+            NetworkMode::Bridged => RegistryAccess::Allowed,
+            NetworkMode::Proxied(proxied) if proxied.egress.default == gateway::Action::Allow => {
+                RegistryAccess::Allowed
+            }
+            NetworkMode::Proxied(_) => RegistryAccess::Denied,
+        }
+    }
 }
 
 /// Egress filtering for [`NetworkMode::Proxied`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProxiedEgress {
-    pub(crate) egress: gateway::Egress,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxiedEgress {
+    pub egress: gateway::Egress,
     /// Relay `host.wslc.internal` to Windows loopback.
-    pub(crate) host_loopback: bool,
+    pub host_loopback: bool,
     /// Where the built-in proxy relays instead of filtering itself.
-    pub(crate) custom_proxy: Option<CustomProxy>,
-    /// Deny entries the proxy has nothing to apply to.
-    pub(crate) warnings: Vec<String>,
+    pub custom_proxy: Option<CustomProxy>,
+    /// Parts of the policy that have no effect behind the proxy.
+    pub warnings: Vec<String>,
+}
+
+impl ProxiedEgress {
+    pub(crate) fn warning_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.warnings
+            .iter()
+            .map(|warning| format!("WARNING: WSLc: {warning}"))
+    }
 }
 
 /// A `runtimeConfig.networkProxy` behind the built-in proxy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CustomProxy {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomProxy {
     /// The configured URL.
-    pub(crate) url: String,
-    pub(crate) host: CustomProxyHost,
-    pub(crate) port: u16,
+    pub url: String,
+    pub host: CustomProxyHost,
+    pub port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CustomProxyHost {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomProxyHost {
     /// Resolved on Windows when the built-in proxy starts.
     Name(String),
     /// `None` is Windows 127.0.0.1.
     Address(Option<Ipv4Addr>),
 }
 
-/// Choose how a create-and-run container is networked, rejecting what the
-/// chosen mode cannot enforce. Port mappings are their own grant, so an
-/// otherwise isolated container with them is proxied rather than unnetworked.
-pub(crate) fn create_and_run_network_mode(
+/// Choose how a container is networked, rejecting what the chosen mode cannot
+/// enforce. Port mappings are their own grant, so an otherwise isolated
+/// container with them is proxied rather than unnetworked.
+pub(crate) fn network_mode(
     request: &ExecutionRequest,
     has_port_mappings: bool,
 ) -> Result<NetworkMode, MxcError> {
@@ -461,81 +474,8 @@ fn port_ranges(ports: &[NetworkPort]) -> Result<Option<Vec<gateway::PortRange>>,
     Ok((!every_port).then_some(ranges))
 }
 
-/// Read the directional posture; absent egress defaults to deny.
-pub(crate) fn network_is_isolated(request: &ExecutionRequest) -> bool {
-    request
-        .policy
-        .network_egress
-        .as_ref()
-        .is_none_or(|egress| egress.default == NetworkAction::Deny)
-}
-
-/// Reject port mappings that isolated networking cannot carry. `field_path`
-/// names the list in the caller's own request shape.
-///
-/// WslcCreateContainer fails with E_INVALIDARG when port mappings accompany
-/// isolated networking.
-pub(crate) fn reject_port_mappings_without_bridged_network(
-    request: &ExecutionRequest,
-    field_path: &str,
-    has_port_mappings: bool,
-) -> Result<(), MxcError> {
-    if has_port_mappings && network_is_isolated(request) {
-        return Err(MxcError::policy_validation(format!(
-            "WSLc: {field_path} requires bridged networking. Set network.egress.default, \
-             network.ingress.default and network.ingress.hostLoopback all to 'allow', or remove \
-             the port mappings"
-        )));
-    }
-    Ok(())
-}
-
-/// No firewall is installed inside or outside a WSLc container. NONE denies all
-/// connectivity; BRIDGED cannot promise either inbound or host-loopback filtering.
-pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result<(), MxcError> {
-    let policy = &request.policy;
-    if policy
-        .network_egress
-        .as_ref()
-        .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
-    {
-        return Err(MxcError::policy_validation(
-            "WSLc does not support network.egress allow/deny rules; networking is all-or-nothing",
-        ));
-    }
-    let isolated = network_is_isolated(request);
-    let action = if isolated {
-        NetworkAction::Deny
-    } else {
-        NetworkAction::Allow
-    };
-    let ingress = policy.network_ingress.clone().unwrap_or_default();
-    if ingress.default != action || ingress.host_loopback != action {
-        return Err(MxcError::policy_validation(
-            "WSLc cannot filter ingress or host-loopback independently: isolated networking \
-             requires network.egress.default, network.ingress.default and \
-             network.ingress.hostLoopback all 'deny'; bridged networking requires all 'allow'",
-        ));
-    }
-    if isolated && policy.network_proxy.is_enabled() {
-        return Err(MxcError::policy_validation(ERR_PROXY_WITHOUT_ROUTE));
-    }
-    Ok(())
-}
-
-/// The daemon's provision proxy check; requests that skip
-/// [`validate_provision_policy`] reach the daemon directly.
-pub fn check_provision_proxy(network_proxy: Option<&str>) -> Result<(), &'static str> {
-    match network_proxy {
-        Some(_) => Err(ERR_PROXY_AT_PROVISION),
-        None => Ok(()),
-    }
-}
-
 /// Validate the request for the provision phase. `rw` / `ro` paths become
-/// volume mounts and `network.egress.default` selects the container network
-/// mode; both are honoured here. Everything else in the module table is
-/// rejected.
+/// volume mounts; [`network_mode`] checks the network policy.
 pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if !request.policy.enumerate_paths.is_empty() {
         return Err(MxcError::policy_validation(ERR_ENUMERATE_PATHS));
@@ -547,12 +487,7 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
     )
     .map_err(MxcError::policy_validation)?;
     reject_ui_policy(request)?;
-    // Only proxied containers hold a provision proxy; bridged ones set it per exec.
-    if request.policy.network_proxy.is_enabled() {
-        return Err(MxcError::policy_validation(ERR_PROXY_AT_PROVISION));
-    }
-    validate_directional_network(request)?;
-    Ok(())
+    reject_non_url_proxy(request)
 }
 
 /// Validate the request for start / stop / deprovision. These phases carry no
@@ -622,16 +557,18 @@ fn exposes_proxy_credentials(scope: EnvScope, url: &str) -> bool {
     scope == EnvScope::Replace && crate::mxc_common::proxy_env::proxy_url_has_credentials(url)
 }
 
-/// The proxy URL an exec runs under: its own, or the one a proxied container
-/// was provisioned with when it names none. The daemon calls this because only
-/// it holds the provisioned URL; the error is a rejection message that never
-/// repeats either URL.
+/// The proxy URL an exec runs under: its own, or the one the container was
+/// provisioned with when it names none. A proxied container reaches only its
+/// provisioned proxy. The daemon calls this because only it holds the
+/// provisioned URL; the error is a rejection message that never repeats
+/// either URL.
 pub fn resolve_exec_proxy<'a>(
     provisioned: Option<&'a str>,
     requested: Option<&'a str>,
     scope: EnvScope,
+    proxied: bool,
 ) -> Result<Option<&'a str>, &'static str> {
-    if provisioned.is_some() && requested.is_some() && provisioned != requested {
+    if (proxied || provisioned.is_some()) && requested.is_some() && provisioned != requested {
         return Err(ERR_PROXY_MISMATCH);
     }
     let url = requested.or(provisioned);
@@ -774,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn directional_networking_accepts_only_truthful_all_or_nothing_postures() {
+    fn every_directional_posture_is_provisioned() {
         for egress in ["allow", "deny"] {
             for ingress in ["allow", "deny"] {
                 for loopback in ["allow", "deny"] {
@@ -782,10 +719,16 @@ mod tests {
                         r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
                     );
                     let request = parsed(&source);
-                    assert_eq!(network_is_isolated(&request), egress == "deny");
+                    validate_provision_policy(&request).unwrap();
+                    let mode = network_mode(&request, false).unwrap();
+                    match (egress, ingress, loopback) {
+                        ("deny", "deny", "deny") => assert_eq!(mode, NetworkMode::None),
+                        ("allow", "allow", "allow") => assert_eq!(mode, NetworkMode::Bridged),
+                        _ => assert!(matches!(mode, NetworkMode::Proxied(_)), "{source}"),
+                    }
                     assert_eq!(
-                        validate_provision_policy(&request).is_ok(),
-                        egress == ingress && ingress == loopback,
+                        mode.registry_access() == RegistryAccess::Allowed,
+                        egress == "allow",
                         "{source}"
                     );
                 }
@@ -793,8 +736,8 @@ mod tests {
         }
         let defaults =
             parsed(r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#);
-        assert!(network_is_isolated(&defaults));
         validate_provision_policy(&defaults).unwrap();
+        assert_eq!(network_mode(&defaults, false).unwrap(), NetworkMode::None);
     }
 
     #[test]
@@ -840,37 +783,26 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_runtime_proxy_requires_a_real_route_not_a_proxy_only_firewall_promise() {
+    fn a_bridged_proxy_is_cooperative_and_an_isolated_one_is_relayed() {
         let bridged = parsed(
             r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
         );
-        validate_directional_network(&bridged).unwrap();
+        assert_eq!(network_mode(&bridged, false).unwrap(), NetworkMode::Bridged);
         assert_eq!(exec_proxy_url(&bridged), Some("http://proxy.example:8080"));
         let isolated = parsed(
             r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
         );
-        assert_policy_validation(
-            validate_directional_network(&isolated).unwrap_err(),
-            "requires bridged networking",
-        );
+        let NetworkMode::Proxied(proxied) = network_mode(&isolated, false).unwrap() else {
+            panic!("an isolated proxy must be relayed by the built-in proxy");
+        };
+        assert!(proxied.custom_proxy.is_some());
     }
 
     #[test]
-    fn directional_rules_and_proxy_peer_identity_are_not_advertised_or_ignored() {
-        assert!(!network_policy_support().contains(NetworkPolicySupport::EGRESS_RULES));
+    fn egress_rules_are_advertised_but_proxy_peer_identity_is_not() {
+        assert!(network_policy_support().contains(NetworkPolicySupport::EGRESS_RULES));
         assert!(!network_policy_support().contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
-        for action in ["allow", "deny"] {
-            let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
-            );
-            assert_policy_validation(
-                validate_provision_policy(&parsed(&source)).unwrap_err(),
-                "allow/deny rules",
-            );
-        }
     }
-
-    // ---- provision ----
 
     #[test]
     fn provision_accepts_rw_ro_and_network_mode() {
@@ -918,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn provision_rejects_proxy_in_bridged_and_isolated_containers() {
+    fn provision_accepts_a_url_proxy_and_rejects_any_other() {
         for network in [
             r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"#,
             "",
@@ -926,8 +858,13 @@ mod tests {
             let req = parsed(&format!(
                 r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"wslc",{network}"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
             ));
-            assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "exec phase");
+            validate_provision_policy(&req).unwrap();
         }
+        let req = request_with_policy(ContainerPolicy {
+            network_proxy: non_url_proxy(),
+            ..Default::default()
+        });
+        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "url");
     }
 
     #[test]
@@ -939,15 +876,15 @@ mod tests {
         assert_eq!(at_limit.len(), MAX_PROXY_URL_BYTES);
         let over_limit = format!("{at_limit}a");
         assert_eq!(
-            resolve_exec_proxy(None, Some(&at_limit), EnvScope::Merge),
+            resolve_exec_proxy(None, Some(&at_limit), EnvScope::Merge, false),
             Ok(Some(at_limit.as_str()))
         );
         assert_eq!(
-            resolve_exec_proxy(None, Some(&over_limit), EnvScope::Merge),
+            resolve_exec_proxy(None, Some(&over_limit), EnvScope::Merge, false),
             Err(ERR_PROXY_URL_TOO_LONG)
         );
         assert_eq!(
-            resolve_exec_proxy(Some(&over_limit), None, EnvScope::Merge),
+            resolve_exec_proxy(Some(&over_limit), None, EnvScope::Merge, false),
             Err(ERR_PROXY_URL_TOO_LONG)
         );
 
@@ -968,21 +905,30 @@ mod tests {
         let provisioned = Some("http://proxy.example:8080");
         for requested in [None, provisioned] {
             assert_eq!(
-                resolve_exec_proxy(provisioned, requested, EnvScope::Merge),
+                resolve_exec_proxy(provisioned, requested, EnvScope::Merge, false),
                 Ok(provisioned)
             );
         }
         assert_eq!(
-            resolve_exec_proxy(None, provisioned, EnvScope::Merge),
+            resolve_exec_proxy(None, provisioned, EnvScope::Merge, false),
             Ok(provisioned)
         );
         assert_eq!(
             resolve_exec_proxy(
                 provisioned,
                 Some("http://other.example:8080"),
-                EnvScope::Merge
+                EnvScope::Merge,
+                false
             ),
             Err(ERR_PROXY_MISMATCH)
+        );
+        assert_eq!(
+            resolve_exec_proxy(None, provisioned, EnvScope::Merge, true),
+            Err(ERR_PROXY_MISMATCH)
+        );
+        assert_eq!(
+            resolve_exec_proxy(provisioned, None, EnvScope::Merge, true),
+            Ok(provisioned)
         );
     }
 
@@ -990,11 +936,11 @@ mod tests {
     fn a_replaced_environment_refuses_a_credential_bearing_provisioned_proxy() {
         let url = credential_proxy().address.unwrap().original_url.unwrap();
         assert_eq!(
-            resolve_exec_proxy(Some(&url), None, EnvScope::Replace),
+            resolve_exec_proxy(Some(&url), None, EnvScope::Replace, false),
             Err(ERR_PROXY_CREDENTIALS_IN_ARGV)
         );
         assert_eq!(
-            resolve_exec_proxy(Some(&url), None, EnvScope::Merge),
+            resolve_exec_proxy(Some(&url), None, EnvScope::Merge, false),
             Ok(Some(url.as_str()))
         );
     }
@@ -1187,28 +1133,6 @@ mod tests {
     }
 
     #[test]
-    fn every_new_rejection_maps_to_policy_validation() {
-        let cases = [
-            ContainerPolicy {
-                ui_specified: true,
-                ..Default::default()
-            },
-            ContainerPolicy {
-                network_egress: Some(NetworkEgressPolicy {
-                    default: NetworkAction::Allow,
-                    allow: vec![Default::default()],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        ];
-        for policy in cases {
-            let err = validate_provision_policy(&request_with_policy(policy)).unwrap_err();
-            assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-        }
-    }
-
-    #[test]
     fn a_replaced_environment_refuses_a_credential_bearing_proxy_url() {
         let request = credential_proxy_request(Some(vec!["FOO=bar"]), false);
 
@@ -1260,7 +1184,7 @@ mod tests {
         );
     }
 
-    // ---- create-and-run network modes ----
+    // ---- network modes ----
 
     fn one_shot(network: &str) -> ExecutionRequest {
         parsed(&format!(
@@ -1269,7 +1193,7 @@ mod tests {
     }
 
     fn mode(network: &str) -> Result<NetworkMode, MxcError> {
-        create_and_run_network_mode(&one_shot(network), false)
+        network_mode(&one_shot(network), false)
     }
 
     fn proxied(network: &str) -> ProxiedEgress {
@@ -1280,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_run_uses_the_proxy_only_for_postures_the_sdk_cannot_express() {
+    fn the_proxy_is_used_only_for_postures_the_sdk_cannot_express() {
         assert_eq!(mode("{}").unwrap(), NetworkMode::None);
         let ingress_only = proxied(
             r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]},"ingress":{"default":"allow"}}"#,
@@ -1334,14 +1258,11 @@ mod tests {
                 ]),
             }]
         );
-        assert!(
-            create_and_run_network_policy_support().contains(NetworkPolicySupport::EGRESS_RULES)
-        );
     }
 
     #[test]
     fn port_mappings_are_proxied_unless_bridged() {
-        let with_mappings = |network: &str| create_and_run_network_mode(&one_shot(network), true);
+        let with_mappings = |network: &str| network_mode(&one_shot(network), true);
         for network in [
             "{}",
             r#"{"egress":{"deny":[{"to":[{"cidr":"10.0.0.0/8"}]}]}}"#,
@@ -1389,7 +1310,7 @@ mod tests {
                 false,
             ),
         ] {
-            let mode = create_and_run_network_mode(&one_shot(network), mappings).unwrap();
+            let mode = network_mode(&one_shot(network), mappings).unwrap();
             assert!(mode.session_host_loopback(), "{network}");
             let NetworkMode::Proxied(p) = mode else {
                 panic!("{network} was not proxied");
@@ -1419,7 +1340,7 @@ mod tests {
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::from_url(url, String::new(), 0)),
         };
-        create_and_run_network_mode(&request, port_mappings)
+        network_mode(&request, port_mappings)
     }
 
     #[test]
@@ -1516,10 +1437,7 @@ mod tests {
         }
         let mut non_url = one_shot("{}");
         non_url.policy.network_proxy = non_url_proxy();
-        assert_policy_validation(
-            create_and_run_network_mode(&non_url, false).unwrap_err(),
-            "URL-backed",
-        );
+        assert_policy_validation(network_mode(&non_url, false).unwrap_err(), "URL-backed");
         for (network, needle) in [
             (
                 r#"{"egress":{"allow":[{"ports":[{"protocol":"udp","port":53}]}]}}"#,

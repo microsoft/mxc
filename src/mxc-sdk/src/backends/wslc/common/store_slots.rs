@@ -487,6 +487,7 @@ mod host_tests {
                         SessionSizing::default(),
                         &mut log,
                     )
+                    .map(|(session, _)| session)
                 }
             })
             .expect("first lease");
@@ -501,6 +502,7 @@ mod host_tests {
                         SessionSizing::default(),
                         &mut log,
                     )
+                    .map(|(session, _)| session)
                 }
             })
             .expect("second concurrent lease");
@@ -545,6 +547,7 @@ mod host_tests {
                         SessionSizing::default(),
                         &mut log,
                     )
+                    .map(|(session, _)| session)
                 }
             })
             .expect("first lease");
@@ -609,6 +612,7 @@ mod host_tests {
                         SessionSizing::default(),
                         &mut log,
                     )
+                    .map(|(session, _)| session)
                 }
             })
             .expect("first lease");
@@ -654,6 +658,7 @@ mod host_tests {
                         SessionSizing::default(),
                         &mut log,
                     )
+                    .map(|(session, _)| session)
                 }
             })
             .expect("re-lease after return");

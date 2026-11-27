@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, oneshot};
 
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
@@ -53,23 +53,23 @@ use mxc_sdk::mxc_common::models::FailurePhase;
 #[cfg(test)]
 use mxc_sdk::mxc_common::models::ScriptResponse;
 use mxc_sdk::mxc_common::mxc_error::ApiFailure;
-use mxc_sdk::mxc_common::proxy_env::apply_cooperative_proxy_env;
 use mxc_sdk::wslc_common::container_steps::{
-    self, DaemonNetworking, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
+    self, ContainerNetworking, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
 };
 use mxc_sdk::wslc_common::daemon_protocol::{
     DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode,
     PortMapping, ProvisionConfig, ProvisionSessionConfig, StartConfig, StopConfig,
 };
+use mxc_sdk::wslc_common::egress_gateway::{self, Gateway};
 use mxc_sdk::wslc_common::error::WslcStepError;
 use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy;
 use mxc_sdk::wslc_common::policy_mapping;
-use mxc_sdk::wslc_common::process_env::EnvScope;
-use mxc_sdk::wslc_common::sandbox_network::{self, SandboxNetwork};
+use mxc_sdk::wslc_common::process_env::{self, EnvScope};
+use mxc_sdk::wslc_common::sandbox_network::SandboxNetwork;
 use mxc_sdk::wslc_common::store_slots::{StoreSlotLease, StoreSlotPool};
 use mxc_sdk::wslc_common::wslc_bindings::{
-    WslcContainer, WslcContainerGuard, WslcSdk, WslcSessionGuard,
+    WslcContainer, WslcContainerGuard, WslcSdk, WslcSession, WslcSessionGuard,
 };
 
 /// Prefix of the name each session's WSL2 utility VM is created under.
@@ -294,7 +294,7 @@ pub enum WorkerCommand {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Provision {
-        config: ProvisionConfig,
+        config: Box<ProvisionConfig>,
         reply: oneshot::Sender<Result<String, WorkerError>>,
     },
     /// Anything addressed to one container. Routing every such command through
@@ -316,6 +316,12 @@ pub enum WorkerCommand {
     PullFinished {
         token: u64,
         outcome: Result<(), WslcStepError>,
+    },
+
+    /// Report a built-in proxy start, from its thread.
+    GatewayStarted {
+        session_ref: String,
+        outcome: Result<Box<dyn BuiltInProxy>, WorkerError>,
     },
     /// Report an off-worker exec, from its run thread.
     ExecFinished {
@@ -460,13 +466,16 @@ fn start_exec(
     spawned.map(|_| ())
 }
 
-/// `env` with the cooperative proxy variables pointed at `proxy_url`.
-fn with_proxy_env(env: &[(String, String)], proxy_url: &str) -> Vec<(String, String)> {
+/// `env` rewritten by `rewrite`, which works on `NAME=value` entries.
+fn rewrite_env(
+    env: &[(String, String)],
+    rewrite: impl FnOnce(&[String]) -> Vec<String>,
+) -> Vec<(String, String)> {
     let entries: Vec<String> = env
         .iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
-    apply_cooperative_proxy_env(&entries, proxy_url)
+    rewrite(&entries)
         .into_iter()
         .filter_map(|entry| {
             entry
@@ -811,7 +820,10 @@ impl SessionHandle {
     /// Provision a container, returning its minted `sandbox_id`.
     pub async fn provision(&self, config: ProvisionConfig) -> Result<String, WorkerError> {
         let (reply, rx) = oneshot::channel();
-        self.send(WorkerCommand::Provision { config, reply })?;
+        self.send(WorkerCommand::Provision {
+            config: Box::new(config),
+            reply,
+        })?;
         rx.await.map_err(worker_gone)?
     }
 
@@ -1007,6 +1019,10 @@ struct ContainerEntry {
     /// Kept in the map rather than dropped so [`Worker::shutdown`] still stops
     /// and deletes the container.
     retired: bool,
+
+    /// Set once the container is deleted but its network isn't, so the entry
+    /// stays only for a deprovision that retries the network.
+    container_deleted: bool,
     container: WslcContainerGuard,
 
     /// Which session's utility VM this container lives in.
@@ -1020,10 +1036,72 @@ struct ContainerEntry {
     /// whose termination was never confirmed may still hold a live process.
     exec_slot: Option<ExecSlotGuard>,
 
-    /// The cooperative proxy URL set at provision, applied to every exec.
+    /// The proxy URL set at provision, applied to every exec.
     network_proxy: Option<String>,
 
-    network: Option<SandboxNetwork>,
+    network: Option<SandboxNetworking>,
+}
+
+/// The network resources a sandbox owns beyond its container.
+enum SandboxNetworking {
+    Bridged(SandboxNetwork),
+    Proxied(Box<dyn BuiltInProxy>),
+}
+
+/// Lets worker tests hold a proxied sandbox without starting a [`Gateway`].
+pub(crate) trait BuiltInProxy: Send {
+    fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount;
+
+    fn workload_networking(&self) -> ContainerNetworking<'_>;
+
+    fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String>;
+
+    fn teardown(&self, logger: &mut Logger) -> Result<(), String>;
+}
+
+struct StartedGateway(Gateway);
+
+// SAFETY: as for `SessionJob`. The gateway is moved, never shared, so only one
+// thread owns it at a time.
+unsafe impl Send for StartedGateway {}
+
+impl BuiltInProxy for StartedGateway {
+    fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount {
+        self.0.resolv_conf_mount()
+    }
+
+    fn workload_networking(&self) -> ContainerNetworking<'_> {
+        self.0.workload_networking()
+    }
+
+    fn workload_env(&self, caller_env: &[String], scope: EnvScope) -> Vec<String> {
+        self.0.workload_env(caller_env, scope)
+    }
+
+    fn teardown(&self, logger: &mut Logger) -> Result<(), String> {
+        self.0.teardown(logger)
+    }
+}
+
+impl SandboxNetworking {
+    /// Delete the network, and for a proxied sandbox, its gateway. Call after
+    /// the sandbox's container is deleted.
+    ///
+    /// # Safety
+    /// `sdk` must hold valid function pointers, `session` must be the live
+    /// session the network was created in, and COM must be initialized on the
+    /// calling thread.
+    unsafe fn delete(
+        &self,
+        sdk: &WslcSdk,
+        session: WslcSession,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        match self {
+            SandboxNetworking::Bridged(network) => network.delete(sdk, session, logger),
+            SandboxNetworking::Proxied(gateway) => gateway.teardown(logger),
+        }
+    }
 }
 
 /// A provision waiting on its image to arrive from a registry.
@@ -1037,6 +1115,57 @@ struct PendingProvision {
 
     /// Held only so dropping this entry retires the deadline thread.
     _retire_deadline: std::sync::mpsc::Sender<()>,
+}
+
+struct GatewayStart {
+    sandbox_id: String,
+    config: ProvisionConfig,
+
+    /// Taken when the daemon shuts down, which answers it before the start
+    /// reports.
+    reply: Option<oneshot::Sender<Result<String, WorkerError>>>,
+
+    /// Later work for the same session, held so the proxy start is the only
+    /// network or container operation in the session.
+    parked: Vec<SessionWork>,
+}
+
+impl GatewayStart {
+    fn waiting_provisions(&self) -> usize {
+        1 + self
+            .parked
+            .iter()
+            .filter(|work| matches!(work, SessionWork::Provision(..)))
+            .count()
+    }
+
+    fn refuse(&mut self, message: &str) {
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(WorkerError::backend(anyhow::anyhow!("{message}"))));
+        }
+        for work in std::mem::take(&mut self.parked) {
+            work.refuse(message);
+        }
+    }
+}
+
+enum SessionWork {
+    Provision(
+        Box<ProvisionConfig>,
+        oneshot::Sender<Result<String, WorkerError>>,
+    ),
+    Container(ContainerWork),
+}
+
+impl SessionWork {
+    fn refuse(self, message: &str) {
+        match self {
+            SessionWork::Provision(_, reply) => {
+                let _ = reply.send(Err(WorkerError::backend(anyhow::anyhow!("{message}"))));
+            }
+            SessionWork::Container(work) => work.refuse(message),
+        }
+    }
 }
 
 /// A command addressed to one container, either about to run or parked behind
@@ -1106,22 +1235,36 @@ type RunStarter = fn(
 ) -> Result<(), WorkerError>;
 
 /// Injected so a worker with no SDK loaded can still be tested.
-type NetworkDeleter = fn(&mut Worker, &str, SandboxNetwork);
+type NetworkDeleter = fn(&mut Worker, &str, &SandboxNetworking) -> Result<(), String>;
+
+/// Injected so a worker with no SDK loaded can still be tested.
+type GatewayStarter = fn(
+    &Worker,
+    &str,
+    &policy::ProxiedEgress,
+    &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError>;
 
 /// A network that can't be deleted stays recorded for the store's next session.
-fn delete_network_on_sdk(state: &mut Worker, session_ref: &str, network: SandboxNetwork) {
+fn delete_network_on_sdk(
+    state: &mut Worker,
+    session_ref: &str,
+    network: &SandboxNetworking,
+) -> Result<(), String> {
     let (Some(sdk), Some(entry)) = (state.sdk.as_ref(), state.sessions.get(session_ref)) else {
-        return;
+        return Err(format!("session {session_ref} is no longer loaded"));
     };
 
     // SAFETY: `sdk` is valid, and the session stays registered until nothing
     // holds it.
-    let deleted = unsafe { network.delete(sdk, entry.session.as_raw(), &mut state.logger) };
-    if let Err(e) = deleted {
-        state.logger.log_line(&format!(
-            "could not delete a sandbox network in session {session_ref}: {e}"
-        ));
-    }
+    unsafe { network.delete(sdk, entry.session.as_raw(), &mut state.logger) }
+}
+
+fn unfinished_deprovision(sandbox_id: &str) -> WorkerError {
+    WorkerError::backend(anyhow::anyhow!(
+        "the container of sandbox {sandbox_id} is deleted but its network isn't; deprovision it \
+         again"
+    ))
 }
 
 /// Hand a claimed run to its own MTA thread using the SDK this worker loaded.
@@ -1155,6 +1298,38 @@ fn start_run_on_sdk(
     start_exec(job, worker.clone(), &state.execs_in_flight).map_err(|e| {
         WorkerError::backend(anyhow::anyhow!(
             "could not start a thread to run exec on sandbox {sandbox_id}: {e}"
+        ))
+    })
+}
+
+fn start_gateway_on_sdk(
+    state: &Worker,
+    session_ref: &str,
+    egress: &policy::ProxiedEgress,
+    worker: &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError> {
+    let (Some(sdk), Some(session), Some(start)) = (
+        state.sdk.as_ref(),
+        state.sessions.get(session_ref),
+        state.gateway_starts.get(session_ref),
+    ) else {
+        return Err(WorkerError::backend(anyhow::anyhow!(
+            "no active WSLc session"
+        )));
+    };
+
+    let job = GatewayJob {
+        sdk: &**sdk as *const WslcSdk,
+        session: session.session.as_raw(),
+        store: session.store.path().to_string_lossy().into_owned(),
+        sandbox_id: start.sandbox_id.clone(),
+        egress: egress.clone(),
+        port_mappings: to_model_port_mappings(&start.config.port_mappings),
+    };
+
+    start_gateway_thread(job, session_ref.to_string(), worker.clone()).map_err(|e| {
+        WorkerError::backend(anyhow::anyhow!(
+            "could not start a thread for the built-in proxy: {e}"
         ))
     })
 }
@@ -1194,7 +1369,10 @@ struct SessionJob {
 unsafe impl Send for SessionJob {}
 
 /// A booted session handle on its way back to the worker.
-pub(crate) struct BootedSession(WslcSessionGuard);
+pub(crate) struct BootedSession {
+    session: WslcSessionGuard,
+    host_loopback: bool,
+}
 
 // SAFETY: as for `SessionJob`. The guard is moved, never shared, so only one
 // thread owns it at a time.
@@ -1263,10 +1441,10 @@ fn start_session_boot(
                             &*job.sdk, &job.name, &job.store, job.sizing, &mut log,
                         )
                     }
-                    .map(|session| {
+                    .map(|(session, host_loopback)| {
                         // SAFETY: as above, and `session` is live.
                         let swept = unsafe {
-                            sandbox_network::sweep_leftovers(
+                            egress_gateway::sweep_leftovers(
                                 &*job.sdk,
                                 session.as_raw(),
                                 &job.store,
@@ -1278,11 +1456,14 @@ fn start_session_boot(
                         // allocation skips, so the session is still usable.
                         if let Err(e) = swept {
                             log.log_line(&format!(
-                                "could not remove the sandbox networks left in {}: {e}",
+                                "could not remove the networks left in {}: {e}",
                                 job.store
                             ));
                         }
-                        BootedSession(session)
+                        BootedSession {
+                            session,
+                            host_loopback,
+                        }
                     })
                     .map_err(|failure| BootFailure {
                         error: sr_err(failure.response),
@@ -1292,6 +1473,66 @@ fn start_session_boot(
             };
 
             let _ = worker.send(WorkerCommand::SessionBooted {
+                session_ref,
+                outcome,
+            });
+        });
+
+    spawned.map(|_| ())
+}
+
+struct GatewayJob {
+    sdk: *const WslcSdk,
+    session: WslcSession,
+    store: String,
+    sandbox_id: String,
+    egress: policy::ProxiedEgress,
+    port_mappings: Vec<mxc_sdk::mxc_common::models::PortMapping>,
+}
+
+// SAFETY: as for `SessionJob`, with teardown leaking the session and the SDK
+// rather than releasing them while this start has not reported.
+unsafe impl Send for GatewayJob {}
+
+fn start_gateway_thread(
+    job: GatewayJob,
+    session_ref: String,
+    worker: mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), std::io::Error> {
+    let spawned = std::thread::Builder::new()
+        .name("wslc-gateway-start".to_string())
+        .spawn(move || {
+            let job = job;
+
+            let outcome = match ComApartment::enter() {
+                Err(e) => Err(WorkerError::backend(e)),
+                Ok(_apartment) => {
+                    let mut log = Logger::new(Mode::Console);
+                    egress_gateway::resolve_custom_proxy(&job.egress)
+                        .map_err(sr_err)
+                        .and_then(|custom_proxy| {
+                            // SAFETY: `sdk` and `session` stay loaded while
+                            // this start is recorded and for as long as the
+                            // gateway lives, and this thread is in the MTA.
+                            unsafe {
+                                Gateway::start(
+                                    job.sdk,
+                                    job.session,
+                                    &job.store,
+                                    &job.sandbox_id,
+                                    &job.egress,
+                                    custom_proxy,
+                                    &job.port_mappings,
+                                    &mut log,
+                                )
+                            }
+                            .map_err(sr_err)
+                        })
+                        .map(|gateway| Box::new(StartedGateway(gateway)) as Box<dyn BuiltInProxy>)
+                }
+            };
+
+            let _ = worker.send(WorkerCommand::GatewayStarted {
                 session_ref,
                 outcome,
             });
@@ -1480,6 +1721,9 @@ struct SessionEntry {
     /// What this session's VM was sized as.
     sizing: SessionSizing,
 
+    /// Whether this session's VM reaches Windows loopback.
+    host_loopback: bool,
+
     /// Pulls started against this session that have not reported back.
     pulls_in_flight: Arc<AtomicUsize>,
 
@@ -1497,7 +1741,11 @@ struct Worker {
     logger: Logger,
     start_run: RunStarter,
     delete_network: NetworkDeleter,
+    start_gateway: GatewayStarter,
     pending: HashMap<u64, PendingProvision>,
+
+    /// Keyed by session, since a session starts one built-in proxy at a time.
+    gateway_starts: HashMap<String, GatewayStart>,
     exec_in_flight: HashMap<String, InFlightExec>,
 
     /// Runs this worker started that have not reported back. Shared with the run
@@ -1540,7 +1788,9 @@ impl Worker {
             logger: Logger::new(Mode::Console),
             start_run: start_run_on_sdk,
             delete_network: delete_network_on_sdk,
+            start_gateway: start_gateway_on_sdk,
             pending: HashMap::new(),
+            gateway_starts: HashMap::new(),
             exec_in_flight: HashMap::new(),
             execs_in_flight: Arc::new(AtomicUsize::new(0)),
             sessions_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1586,8 +1836,12 @@ impl Worker {
             .sessions
             .get(session_ref)
             .map_or(0, |entry| entry.pulls_in_flight.load(Ordering::SeqCst));
+        let starting = self
+            .gateway_starts
+            .get(session_ref)
+            .map_or(0, GatewayStart::waiting_provisions);
 
-        containers + pending + execs + pulls
+        containers + pending + execs + pulls + starting
     }
 
     /// Lazily load the SDK. Idempotent.
@@ -1797,7 +2051,7 @@ impl Worker {
         } = pending;
 
         let booted = match outcome {
-            Ok(BootedSession(session)) => session,
+            Ok(booted) => booted,
             Err(BootFailure {
                 error: e,
                 store_may_be_held,
@@ -1852,7 +2106,7 @@ impl Worker {
             // asked that VM to stop.
             let _ = start_session_release(
                 SessionRelease {
-                    session: Some(booted),
+                    session: Some(booted.session),
                     store,
                     name,
                 },
@@ -1872,7 +2126,7 @@ impl Worker {
             ));
             let _ = start_session_release(
                 SessionRelease {
-                    session: Some(booted),
+                    session: Some(booted.session),
                     store: None,
                     name,
                 },
@@ -1887,10 +2141,11 @@ impl Worker {
         self.sessions.insert(
             session_ref.to_string(),
             SessionEntry {
-                session: booted,
+                session: booted.session,
                 store,
                 name,
                 sizing,
+                host_loopback: booted.host_loopback,
                 pulls_in_flight: Arc::new(AtomicUsize::new(0)),
                 empty_since: None,
             },
@@ -2025,6 +2280,7 @@ impl Worker {
             store,
             name,
             sizing,
+            host_loopback,
             pulls_in_flight,
             empty_since,
         } = entry;
@@ -2077,6 +2333,7 @@ impl Worker {
                 store,
                 name,
                 sizing,
+                host_loopback,
                 pulls_in_flight,
                 empty_since,
             },
@@ -2180,6 +2437,11 @@ impl Worker {
                 *hold += entry.pulls_in_flight.load(Ordering::SeqCst);
             }
         }
+        for (session_ref, start) in &self.gateway_starts {
+            if let Some(hold) = holds.get_mut(session_ref) {
+                *hold += start.waiting_provisions();
+            }
+        }
 
         holds
     }
@@ -2235,10 +2497,6 @@ impl Worker {
         reply: oneshot::Sender<Result<String, WorkerError>>,
         worker: &mpsc::UnboundedSender<WorkerCommand>,
     ) {
-        if let Err(message) = policy::check_provision_proxy(config.network_proxy.as_deref()) {
-            let _ = reply.send(Err(WorkerError::rejected(anyhow::anyhow!(message))));
-            return;
-        }
         let session_ref = match self.ensure_session(config.session_ref.as_deref(), worker) {
             Ok(SessionLookup::Ready(session_ref)) => session_ref,
             Ok(SessionLookup::Booting(session_ref)) => {
@@ -2273,10 +2531,7 @@ impl Worker {
                 &config.image,
                 config.image_tar_path.as_deref(),
                 &store,
-                match config.network {
-                    NetworkMode::None => image::RegistryAccess::Denied,
-                    NetworkMode::Bridged => image::RegistryAccess::Allowed,
-                },
+                config.network.registry_access(),
                 "[WSLC][daemon]",
                 &mut self.logger,
             )
@@ -2290,9 +2545,7 @@ impl Worker {
         };
 
         match step {
-            image::ImageStep::Ready => {
-                let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
-            }
+            image::ImageStep::Ready => self.provision_container(config, session_ref, reply, worker),
             image::ImageStep::Pull => {
                 let token = self.next_pull_token;
                 self.next_pull_token += 1;
@@ -2371,7 +2624,12 @@ impl Worker {
     /// Resume a parked provision once its pull reported, or its deadline did.
     ///
     /// An unknown token is the loser of that race, and has nothing left to do.
-    fn finish_provision(&mut self, token: u64, outcome: Result<(), WslcStepError>) {
+    fn finish_provision(
+        &mut self,
+        token: u64,
+        outcome: Result<(), WslcStepError>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
         let Some(PendingProvision {
             config,
             reply,
@@ -2408,26 +2666,156 @@ impl Worker {
             return;
         }
 
-        let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
+        self.provision_container(config, session_ref, reply, worker);
     }
 
-    /// Everything after the image is in the store: create the container and
-    /// register it under a fresh sandbox id.
+    /// Carry on with a provision once its image is in the store.
+    fn provision_container(
+        &mut self,
+        config: ProvisionConfig,
+        session_ref: String,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if let Some(start) = self.gateway_starts.get_mut(&session_ref) {
+            start
+                .parked
+                .push(SessionWork::Provision(Box::new(config), reply));
+            return;
+        }
+
+        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
+        let network = match &config.network {
+            NetworkMode::None => None,
+            NetworkMode::Bridged => {
+                let sdk = self.sdk.as_ref().expect("session ensured");
+                let entry = &self.sessions[&session_ref];
+                let store = entry.store.path().to_string_lossy().into_owned();
+
+                // SAFETY: `sdk`/`session` are valid.
+                let created = unsafe {
+                    SandboxNetwork::create(
+                        sdk,
+                        entry.session.as_raw(),
+                        &store,
+                        &sandbox_id,
+                        &mut self.logger,
+                    )
+                };
+                match created {
+                    Ok(network) => Some(SandboxNetworking::Bridged(network)),
+                    Err(e) => {
+                        let _ = reply.send(Err(sr_err(e)));
+                        return;
+                    }
+                }
+            }
+            NetworkMode::Proxied(egress) => {
+                let egress = egress.clone();
+                self.begin_gateway_start(config, &egress, session_ref, sandbox_id, reply, worker);
+                return;
+            }
+        };
+
+        let _ = reply.send(self.create_provisioned_container(
+            &config,
+            &session_ref,
+            sandbox_id,
+            network,
+        ));
+    }
+
+    /// Start a proxied provision's built-in proxy off this thread, since
+    /// resolving a custom proxy, importing the proxy's image and waiting for
+    /// it to listen would stall every other session.
+    fn begin_gateway_start(
+        &mut self,
+        config: ProvisionConfig,
+        egress: &policy::ProxiedEgress,
+        session_ref: String,
+        sandbox_id: String,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if config.network.session_host_loopback() && !self.sessions[&session_ref].host_loopback {
+            let _ = reply.send(Err(sr_err(container_steps::host_loopback_unsupported())));
+            return;
+        }
+
+        // Recorded before the thread starts, so nothing releases the session or
+        // the SDK while the thread could be using them.
+        self.gateway_starts.insert(
+            session_ref.clone(),
+            GatewayStart {
+                sandbox_id,
+                config,
+                reply: Some(reply),
+                parked: Vec::new(),
+            },
+        );
+        let start_gateway = self.start_gateway;
+        if let Err(e) = start_gateway(self, &session_ref, egress, worker) {
+            if let Some(GatewayStart {
+                reply: Some(reply), ..
+            }) = self.gateway_starts.remove(&session_ref)
+            {
+                let _ = reply.send(Err(e));
+            }
+            return;
+        }
+        self.touch_session(&session_ref);
+    }
+
+    fn finish_gateway_start(
+        &mut self,
+        session_ref: &str,
+        outcome: Result<Box<dyn BuiltInProxy>, WorkerError>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let Some(GatewayStart {
+            sandbox_id,
+            config,
+            reply: Some(reply),
+            parked,
+        }) = self.gateway_starts.remove(session_ref)
+        else {
+            return;
+        };
+
+        let created = outcome.and_then(|gateway| {
+            self.create_provisioned_container(
+                &config,
+                session_ref,
+                sandbox_id,
+                Some(SandboxNetworking::Proxied(gateway)),
+            )
+        });
+        let _ = reply.send(created);
+
+        for work in parked {
+            match work {
+                SessionWork::Provision(config, reply) => {
+                    self.provision_container(*config, session_ref.to_string(), reply, worker);
+                }
+                SessionWork::Container(work) => self.dispatch(work, worker),
+            }
+        }
+    }
+
+    /// Everything after the image and network are ready: create the container
+    /// and register it under `sandbox_id`.
     fn create_provisioned_container(
         &mut self,
         config: &ProvisionConfig,
         session_ref: &str,
+        sandbox_id: String,
+        network: Option<SandboxNetworking>,
     ) -> Result<String, WorkerError> {
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.sessions[session_ref].session.as_raw();
         let gpu = self.sessions[session_ref].sizing.gpu;
-        let store = self.sessions[session_ref]
-            .store
-            .path()
-            .to_string_lossy()
-            .into_owned();
 
-        let mounts: Vec<policy_mapping::VolumeMount> = config
+        let mut mounts: Vec<policy_mapping::VolumeMount> = config
             .volumes
             .iter()
             .map(|v| policy_mapping::VolumeMount {
@@ -2436,25 +2824,20 @@ impl Worker {
                 read_only: v.read_only,
             })
             .collect();
-        let port_mappings = to_model_port_mappings(&config.port_mappings);
-        let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
+        let mut port_mappings = to_model_port_mappings(&config.port_mappings);
+        let networking = match &network {
+            None => ContainerNetworking::None,
+            Some(SandboxNetworking::Bridged(network)) => {
+                ContainerNetworking::Network(network.name())
+            }
+            Some(SandboxNetworking::Proxied(gateway)) => {
+                mounts.push(gateway.resolv_conf_mount());
 
-        let network = match config.network {
-            NetworkMode::None => None,
-
-            // SAFETY: `sdk`/`session` are valid.
-            NetworkMode::Bridged => Some(
-                unsafe {
-                    SandboxNetwork::create(sdk, session, &store, &sandbox_id, &mut self.logger)
-                }
-                .map_err(sr_err)?,
-            ),
+                // The gateway publishes the ports and relays them.
+                port_mappings.clear();
+                gateway.workload_networking()
+            }
         };
-        let networking = network
-            .as_ref()
-            .map_or(DaemonNetworking::Isolated, |network| {
-                DaemonNetworking::Network(network.name())
-            });
 
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
@@ -2485,17 +2868,7 @@ impl Worker {
         };
         let container = match created {
             Ok(container) => container,
-            Err(mut e) => {
-                if let Some(network) = &network {
-                    // SAFETY: `sdk`/`session` are valid.
-                    let deleted = unsafe { network.delete(sdk, session, &mut self.logger) };
-                    if let Err(cleanup) = deleted {
-                        e.error_message =
-                            format!("{}; cleanup also failed: {cleanup}", e.error_message);
-                    }
-                }
-                return Err(sr_err(e));
-            }
+            Err(e) => return Err(self.finish_failed_create(session_ref, network, e)),
         };
 
         self.touch_session(session_ref);
@@ -2505,6 +2878,7 @@ impl Worker {
                 started: false,
                 quarantined: false,
                 retired: false,
+                container_deleted: false,
                 container,
                 session_ref: session_ref.to_string(),
                 exec_slot: None,
@@ -2515,11 +2889,29 @@ impl Worker {
         Ok(sandbox_id)
     }
 
+    fn finish_failed_create(
+        &mut self,
+        session_ref: &str,
+        network: Option<SandboxNetworking>,
+        mut error: WslcStepError,
+    ) -> WorkerError {
+        if let Some(network) = network {
+            if let Err(cleanup) = self.delete_network(session_ref, &network) {
+                error.error_message =
+                    format!("{}; cleanup also failed: {cleanup}", error.error_message);
+            }
+        }
+        sr_err(error)
+    }
+
     fn start(&mut self, config: StartConfig) -> Result<(), WorkerError> {
         // Existence check first, so an unknown sandbox errors without needing the
         // SDK (keeps the no-WSL unit tests self-contained).
         if !self.containers.contains_key(&config.sandbox_id) {
             return Err(WorkerError::NotProvisioned(config.sandbox_id));
+        }
+        if self.containers[&config.sandbox_id].container_deleted {
+            return Err(unfinished_deprovision(&config.sandbox_id));
         }
         let sdk = self
             .sdk
@@ -2556,6 +2948,7 @@ impl Worker {
     fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
         match self.containers.get(sandbox_id) {
             None => Err(WorkerError::NotProvisioned(sandbox_id.to_string())),
+            Some(entry) if entry.container_deleted => Err(unfinished_deprovision(sandbox_id)),
             Some(entry) if entry.quarantined => Err(WorkerError::backend(anyhow::anyhow!(
                 "sandbox {sandbox_id} is quarantined after an exec whose termination could not \
                  be confirmed; deprovision it before reuse"
@@ -2576,6 +2969,15 @@ impl Worker {
                 }
                 lifecycle => in_flight.parked.push(lifecycle),
             }
+            return;
+        }
+
+        let start = self
+            .containers
+            .get(work.sandbox_id())
+            .and_then(|entry| self.gateway_starts.get_mut(&entry.session_ref));
+        if let Some(start) = start {
+            start.parked.push(SessionWork::Container(work));
             return;
         }
 
@@ -2619,14 +3021,31 @@ impl Worker {
         };
 
         let mut config = config;
-        let provisioned = self.containers[&config.sandbox_id].network_proxy.as_deref();
+        let entry = &self.containers[&config.sandbox_id];
+        let host_loopback = self
+            .sessions
+            .get(&entry.session_ref)
+            .is_some_and(|session| session.host_loopback);
+        let gateway = match &entry.network {
+            Some(SandboxNetworking::Proxied(gateway)) => Some(gateway),
+            _ => None,
+        };
         match policy::resolve_exec_proxy(
-            provisioned,
+            entry.network_proxy.as_deref(),
             config.network_proxy.as_deref(),
             config.env_scope,
+            gateway.is_some(),
         ) {
-            Ok(Some(proxy_url)) => config.env = with_proxy_env(&config.env, proxy_url),
-            Ok(None) => {}
+            Ok(proxy_url) => {
+                let scope = config.env_scope;
+                if let Some(gateway) = gateway {
+                    config.env = rewrite_env(&config.env, |env| gateway.workload_env(env, scope));
+                } else if let Some(proxy_url) = proxy_url {
+                    config.env = rewrite_env(&config.env, |env| {
+                        process_env::with_proxy(env, proxy_url, host_loopback)
+                    });
+                }
+            }
             Err(message) => {
                 let _ = admit.send(Err(WorkerError::rejected(anyhow::anyhow!(message))));
                 return;
@@ -2762,14 +3181,13 @@ impl Worker {
                 // Deleting the container ends anything still running inside it,
                 // so this exec stops counting against capacity.
                 drop(slot);
-                if let Some(entry) = self.containers.remove(sandbox_id) {
-                    if let Some(network) = entry.network {
-                        self.delete_network(&entry.session_ref, network);
-                    }
-                }
+                let unfinished = match self.finish_delete(sandbox_id) {
+                    Ok(()) => String::new(),
+                    Err(e) => format!(", but not its network ({e}); deprovision it to finish"),
+                };
                 let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
-                     the container was quarantined and deleted"
+                     the container was quarantined and deleted{unfinished}"
                 );
                 WorkerError::backend_with_api_failure(error, api_failure)
             }
@@ -2807,6 +3225,9 @@ impl Worker {
         if !self.containers.contains_key(&config.sandbox_id) {
             return Err(WorkerError::NotProvisioned(config.sandbox_id));
         }
+        if self.containers[&config.sandbox_id].container_deleted {
+            return Err(unfinished_deprovision(&config.sandbox_id));
+        }
         let sdk = self
             .sdk
             .as_ref()
@@ -2835,43 +3256,72 @@ impl Worker {
     ///
     /// Drives the idle watchdog, which shuts the daemon down only at zero. A
     /// parked provision has no container yet, so counting it keeps the daemon
-    /// alive for the client still waiting on its pull.
+    /// alive for the client still waiting on its pull or built-in proxy.
     fn live_container_count(&self) -> usize {
-        self.containers.values().filter(|e| !e.retired).count() + self.pending.len()
+        self.containers.values().filter(|e| !e.retired).count()
+            + self.pending.len()
+            + self
+                .gateway_starts
+                .values()
+                .map(GatewayStart::waiting_provisions)
+                .sum::<usize>()
     }
 
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
-        let container_raw = match self.containers.get(&config.sandbox_id) {
-            Some(e) => e.container.as_raw(),
+        let (container_raw, container_deleted) = match self.containers.get(&config.sandbox_id) {
+            Some(e) => (e.container.as_raw(), e.container_deleted),
             None => return Err(WorkerError::NotProvisioned(config.sandbox_id)),
         };
 
-        if let Some(sdk) = self.sdk.as_ref() {
-            // SAFETY: `sdk` is valid and `container_raw` is a live handle.
-            unsafe {
-                container_steps::delete_daemon_container(sdk, container_raw, &mut self.logger)
+        if !container_deleted {
+            if let Some(sdk) = self.sdk.as_ref() {
+                // SAFETY: `sdk` is valid and `container_raw` is a live handle.
+                unsafe {
+                    container_steps::delete_daemon_container(sdk, container_raw, &mut self.logger)
+                }
+                .map_err(sr_err)?;
             }
-            .map_err(sr_err)?;
         }
 
-        // Delete succeeded (or no SDK loaded): drop the handle now. Keeping the
-        // entry on failure above leaves it retryable.
-        let entry = self
-            .containers
-            .remove(&config.sandbox_id)
-            .expect("checked above");
-        if let Some(network) = entry.network {
-            self.delete_network(&entry.session_ref, network);
-        }
+        // A failed delete keeps the entry, so another deprovision retries it.
+        self.finish_delete(&config.sandbox_id).map_err(|e| {
+            WorkerError::backend(anyhow::anyhow!(
+                "deleted the container of sandbox {}, but not its network: {e}; deprovision it \
+                 again to retry",
+                config.sandbox_id
+            ))
+        })?;
 
         // The session and SDK stay loaded so a subsequent provision reuses the
         // already-booted WSL2 VM.
         Ok(())
     }
 
-    fn delete_network(&mut self, session_ref: &str, network: SandboxNetwork) {
+    fn finish_delete(&mut self, sandbox_id: &str) -> Result<(), String> {
+        let Some(entry) = self.containers.get_mut(sandbox_id) else {
+            return Ok(());
+        };
+        entry.container_deleted = true;
+        let session_ref = entry.session_ref.clone();
+        if let Some(network) = entry.network.take() {
+            if let Err(e) = self.delete_network(&session_ref, &network) {
+                if let Some(entry) = self.containers.get_mut(sandbox_id) {
+                    entry.network = Some(network);
+                }
+                return Err(e);
+            }
+        }
+        self.containers.remove(sandbox_id);
+        Ok(())
+    }
+
+    fn delete_network(
+        &mut self,
+        session_ref: &str,
+        network: &SandboxNetworking,
+    ) -> Result<(), String> {
         let delete = self.delete_network;
-        delete(self, session_ref, network);
+        delete(self, session_ref, network)
     }
 
     /// Give up the SDK handles rather than release them, when an off-worker
@@ -2890,11 +3340,16 @@ impl Worker {
         // nothing reads as in flight.
         let boot_reports_possible = !self.pending_sessions.is_empty();
 
+        // A start's thread may still be using the session, or its report may be
+        // holding a live proxy.
+        let gateway_start_pending = !self.gateway_starts.is_empty();
+
         if execs_in_flight > 0
             || sessions_in_flight > 0
             || releases_in_flight > 0
             || pull_outstanding
             || boot_reports_possible
+            || gateway_start_pending
         {
             std::mem::forget(std::mem::take(&mut self.containers));
 
@@ -2923,7 +3378,7 @@ impl Worker {
     ///
     /// [`WorkerCommand::ExecFinished`] is the one the drain is looking for and
     /// is handled by its caller.
-    fn refuse_while_shutting_down(&self, cmd: WorkerCommand) {
+    fn refuse_while_shutting_down(&mut self, cmd: WorkerCommand) {
         const SHUTTING_DOWN: &str = "the WSLc daemon is shutting down";
 
         match cmd {
@@ -2963,6 +3418,17 @@ impl Worker {
 
             // The provision this would resume was already answered above.
             WorkerCommand::PullFinished { .. } => {}
+
+            // No workload exists yet, and every drain runs before any session is
+            // released, so the proxy can be deleted now.
+            WorkerCommand::GatewayStarted {
+                session_ref,
+                outcome,
+            } => {
+                self.gateway_starts.remove(&session_ref);
+                let network = outcome.ok().map(SandboxNetworking::Proxied);
+                self.finish_shutdown_delete(&session_ref, network, Ok(()));
+            }
             WorkerCommand::ExecFinished { .. } => {}
         }
     }
@@ -2999,6 +3465,15 @@ impl Worker {
                     "the WSLc daemon shut down while session {session_ref} was booting"
                 ))));
             }
+        }
+
+        // Each entry stays until its thread reports, since that thread is
+        // still using the entry's session.
+        for (session_ref, start) in self.gateway_starts.iter_mut() {
+            start.refuse(&format!(
+                "the WSLc daemon shut down while session {session_ref} was starting a built-in \
+                 proxy"
+            ));
         }
 
         // An off-worker exec is still using its container handle, so nothing
@@ -3068,24 +3543,26 @@ impl Worker {
             for (_, entry) in std::mem::take(&mut self.containers) {
                 let sdk = self.sdk.as_ref().expect("checked above");
 
-                // SAFETY: `sdk` is valid and `entry.container` is a live handle.
-                let deleted = unsafe {
-                    if entry.started {
-                        let _ = container_steps::stop_daemon_container(
+                let deleted = if entry.container_deleted {
+                    Ok(())
+                } else {
+                    // SAFETY: `sdk` is valid and `entry.container` is a live handle.
+                    unsafe {
+                        if entry.started {
+                            let _ = container_steps::stop_daemon_container(
+                                sdk,
+                                entry.container.as_raw(),
+                                &mut self.logger,
+                            );
+                        }
+                        container_steps::delete_daemon_container(
                             sdk,
                             entry.container.as_raw(),
                             &mut self.logger,
-                        );
+                        )
                     }
-                    container_steps::delete_daemon_container(
-                        sdk,
-                        entry.container.as_raw(),
-                        &mut self.logger,
-                    )
                 };
-                if let (Ok(()), Some(network)) = (deleted, entry.network) {
-                    self.delete_network(&entry.session_ref, network);
-                }
+                self.finish_shutdown_delete(&entry.session_ref, entry.network, deleted);
                 // entry (WslcContainerGuard) drops here, releasing the handle.
             }
         } else {
@@ -3093,6 +3570,21 @@ impl Worker {
         }
 
         self.release_sessions_for_shutdown(rx, deadline, drain_budget, left_running);
+    }
+
+    fn finish_shutdown_delete(
+        &mut self,
+        session_ref: &str,
+        network: Option<SandboxNetworking>,
+        deleted: Result<(), WslcStepError>,
+    ) {
+        if let (Ok(()), Some(network)) = (deleted, network) {
+            if let Err(e) = self.delete_network(session_ref, &network) {
+                self.logger.log_line(&format!(
+                    "could not delete a sandbox network in session {session_ref}: {e}"
+                ));
+            }
+        }
     }
 
     /// Release a session whose boot landed after teardown had begun, returning
@@ -3108,7 +3600,7 @@ impl Worker {
         let PendingSession { store, name, .. } = pending;
 
         let session = match outcome {
-            Ok(BootedSession(session)) => session,
+            Ok(booted) => booted.session,
             Err(failure) => {
                 // The VM may still hold the store's VHDX open, so the slot
                 // must never be handed out again.
@@ -3150,6 +3642,38 @@ impl Worker {
             None,
         )
         .is_err()
+    }
+
+    /// Delete the proxies of the starts that report by `deadline`, and leak
+    /// the sessions of those that don't, returning whether any was leaked.
+    fn drain_gateway_starts(
+        &mut self,
+        rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
+        deadline: Instant,
+    ) -> bool {
+        while !self.gateway_starts.is_empty() && Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(cmd) => self.refuse_while_shutting_down(cmd),
+                Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(50)),
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        let mut leaked = false;
+        for session_ref in std::mem::take(&mut self.gateway_starts).into_keys() {
+            self.logger.log_line(&format!(
+                "a WSLC built-in proxy is still starting in session {session_ref}; leaking the \
+                 session rather than releasing a handle the start is using"
+            ));
+
+            // The leaked session keeps its store mounted, so its slot must stay
+            // held too.
+            if let Some(entry) = self.sessions.remove(&session_ref) {
+                std::mem::forget(entry);
+            }
+            leaked = true;
+        }
+        leaked
     }
 
     /// Release the sessions nothing is still using and abandon the rest.
@@ -3196,6 +3720,8 @@ impl Worker {
             // slot and dropping the entry returns it.
             self.pending_sessions.clear();
         }
+
+        abandoned |= self.drain_gateway_starts(rx, deadline);
 
         // Waiting first, so one session's stuck pull cannot spend the budget the
         // terminates below need.
@@ -3323,10 +3849,16 @@ pub fn spawn() -> Result<SessionHandle> {
                             worker.release_session(&config.session_ref, reply, &worker_tx);
                         }
                         WorkerCommand::Provision { config, reply } => {
-                            worker.begin_provision(config, reply, &worker_tx);
+                            worker.begin_provision(*config, reply, &worker_tx);
                         }
                         WorkerCommand::PullFinished { token, outcome } => {
-                            worker.finish_provision(token, outcome);
+                            worker.finish_provision(token, outcome, &worker_tx);
+                        }
+                        WorkerCommand::GatewayStarted {
+                            session_ref,
+                            outcome,
+                        } => {
+                            worker.finish_gateway_start(&session_ref, outcome, &worker_tx);
                         }
                         WorkerCommand::Container(work) => {
                             worker.dispatch(work, &worker_tx);
@@ -3477,6 +4009,7 @@ mod tests {
             started: false,
             quarantined: false,
             retired,
+            container_deleted: false,
             // SAFETY: `release_noop` never dereferences the handle, so the guard
             // owns a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
@@ -3572,11 +4105,12 @@ mod tests {
         worker.finish_provision(
             3,
             Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
+            &unread_queue(),
         );
         assert!(rx.try_recv().is_ok(), "the first report answers the client");
 
         // The loser of the race: nothing left to answer, and no panic.
-        worker.finish_provision(3, Ok(()));
+        worker.finish_provision(3, Ok(()), &unread_queue());
         assert_eq!(worker.live_container_count(), 0);
     }
 
@@ -3591,6 +4125,7 @@ mod tests {
         worker.finish_provision(
             1,
             Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
+            &unread_queue(),
         );
         worker.finish_provision(
             2,
@@ -3599,6 +4134,7 @@ mod tests {
                 error_message: "WSLC image 'nope:1' could not be pulled".to_string(),
                 api_failure: Some(Box::new(image_not_found.clone())),
             }),
+            &unread_queue(),
         );
 
         let timed_out = timed_out.try_recv().unwrap().unwrap_err();
@@ -3709,6 +4245,7 @@ mod tests {
                 store,
                 name: session_name(session_ref),
                 sizing: SessionSizing::default(),
+                host_loopback: false,
                 pulls_in_flight: Arc::new(AtomicUsize::new(0)),
                 empty_since: None,
             },
@@ -4159,9 +4696,12 @@ mod tests {
         worker.reap_stuck_boots_at(past_grace());
 
         // SAFETY: neither function pointer dereferences the handle.
-        let booted = BootedSession(unsafe {
-            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_counts, release_ok)
-        });
+        let booted = BootedSession {
+            host_loopback: false,
+            session: unsafe {
+                WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_counts, release_ok)
+            },
+        };
         worker.finish_session(TEST_SESSION, Ok(booted), &worker_tx);
 
         assert!(
@@ -4221,6 +4761,7 @@ mod tests {
                 store,
                 name: session_name(TEST_SESSION),
                 sizing: SessionSizing::default(),
+                host_loopback: false,
                 pulls_in_flight: Arc::new(AtomicUsize::new(0)),
                 empty_since: None,
             },
@@ -4410,6 +4951,7 @@ mod tests {
                 store,
                 name: session_name(session_ref),
                 sizing: SessionSizing::default(),
+                host_loopback: false,
                 pulls_in_flight: Arc::new(AtomicUsize::new(0)),
                 empty_since: None,
             },
@@ -4593,9 +5135,12 @@ mod tests {
         worker.exec_in_flight.insert("wslc:busy".to_string(), exec);
 
         // SAFETY: neither function pointer dereferences the handle.
-        let booted = BootedSession(unsafe {
-            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_fails, release_ok)
-        });
+        let booted = BootedSession {
+            host_loopback: false,
+            session: unsafe {
+                WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_fails, release_ok)
+            },
+        };
         tx.send(WorkerCommand::SessionBooted {
             session_ref: TEST_SESSION.to_string(),
             outcome: Ok(booted),
@@ -4932,9 +5477,10 @@ mod tests {
         let sentinel = std::ptr::dangling_mut();
 
         // SAFETY: neither function pointer dereferences the handle.
-        let booted = BootedSession(unsafe {
-            WslcSessionGuard::from_raw(sentinel, terminate_counts, release_ok)
-        });
+        let booted = BootedSession {
+            host_loopback: false,
+            session: unsafe { WslcSessionGuard::from_raw(sentinel, terminate_counts, release_ok) },
+        };
         tx.send(WorkerCommand::SessionBooted {
             session_ref: TEST_SESSION.to_string(),
             outcome: Ok(booted),
@@ -5005,6 +5551,7 @@ mod tests {
                 store,
                 name: session_name(TEST_SESSION),
                 sizing: SessionSizing::default(),
+                host_loopback: false,
                 pulls_in_flight: Arc::new(AtomicUsize::new(0)),
                 empty_since: None,
             },
@@ -5068,9 +5615,12 @@ mod tests {
             .to_path_buf();
 
         // SAFETY: neither function pointer dereferences the handle.
-        let booted = BootedSession(unsafe {
-            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_hangs, release_ok)
-        });
+        let booted = BootedSession {
+            host_loopback: false,
+            session: unsafe {
+                WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_hangs, release_ok)
+            },
+        };
         tx.send(WorkerCommand::SessionBooted {
             session_ref: TEST_SESSION.to_string(),
             outcome: Ok(booted),
@@ -5254,31 +5804,6 @@ mod tests {
             reply.try_recv().is_ok(),
             "a sandbox in another session must be served while one session boots"
         );
-    }
-
-    #[test]
-    fn a_provision_proxy_is_refused_before_any_session_boots() {
-        for network in [NetworkMode::None, NetworkMode::Bridged] {
-            let (tx, _rx) = mpsc::unbounded_channel();
-            let mut worker = Worker::new();
-            let (reply, mut rx) = oneshot::channel();
-            worker.begin_provision(
-                ProvisionConfig {
-                    network,
-                    network_proxy: Some("http://proxy.example:8080".to_string()),
-                    ..test_provision_config()
-                },
-                reply,
-                &tx,
-            );
-
-            let refusal = rx
-                .try_recv()
-                .unwrap()
-                .expect_err("a provision proxy must be refused");
-            assert_eq!(refusal.kind(), ErrKind::Rejected);
-            assert!(worker.sessions.is_empty() && worker.pending_sessions.is_empty());
-        }
     }
 
     /// Two implicit sessions would mean two VMs where the caller asked for
@@ -5799,6 +6324,7 @@ mod tests {
             started: false,
             quarantined: false,
             retired: false,
+            container_deleted: false,
 
             // SAFETY: `release` never dereferences the handle, so the guard owns
             // a value it can release without touching memory.
@@ -6533,27 +7059,82 @@ mod tests {
     thread_local! {
         static DELETED_NETWORKS: std::cell::RefCell<Vec<String>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        static NETWORK_DELETION_FAILS: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
     }
 
-    fn record_deleted_network(_: &mut Worker, session_ref: &str, network: SandboxNetwork) {
-        DELETED_NETWORKS.with(|deleted| {
-            deleted.borrow_mut().push(format!(
-                "{session_ref} {}",
-                network.name().to_string_lossy()
-            ))
-        });
+    const PROXY_DELETION: &str = "built-in proxy";
+
+    fn record_deleted_network(
+        _: &mut Worker,
+        session_ref: &str,
+        network: &SandboxNetworking,
+    ) -> Result<(), String> {
+        if NETWORK_DELETION_FAILS.with(|fails| fails.get()) {
+            return Err("the network is busy".to_string());
+        }
+        let name = match network {
+            SandboxNetworking::Bridged(network) => network.name().to_string_lossy().into_owned(),
+            SandboxNetworking::Proxied(_) => PROXY_DELETION.to_string(),
+        };
+        DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().push(format!("{session_ref} {name}")));
+        Ok(())
+    }
+
+    fn fail_network_deletion(fails: bool) {
+        NETWORK_DELETION_FAILS.with(|fail| fail.set(fails));
     }
 
     fn deleted_networks() -> Vec<String> {
         DELETED_NETWORKS.with(|deleted| deleted.borrow().clone())
     }
 
-    fn worker_with_bridged_sandbox(sandbox_id: &str) -> (Worker, String) {
+    struct FakeProxy;
+
+    impl BuiltInProxy for FakeProxy {
+        fn resolv_conf_mount(&self) -> policy_mapping::VolumeMount {
+            unreachable!("no test provisions behind a fake proxy")
+        }
+
+        fn workload_networking(&self) -> ContainerNetworking<'_> {
+            unreachable!("no test provisions behind a fake proxy")
+        }
+
+        fn workload_env(&self, _: &[String], _: EnvScope) -> Vec<String> {
+            unreachable!("no test execs behind a fake proxy")
+        }
+
+        fn teardown(&self, _: &mut Logger) -> Result<(), String> {
+            unreachable!("tests delete through record_deleted_network")
+        }
+    }
+
+    fn sandbox_networks(sandbox_id: &str) -> [(SandboxNetworking, String); 2] {
+        let bridged = SandboxNetwork::named(sandbox_id, r"C:\store");
+        let bridged_deletion = format!("{TEST_SESSION} {}", bridged.name().to_string_lossy());
+        [
+            (SandboxNetworking::Bridged(bridged), bridged_deletion),
+            (
+                SandboxNetworking::Proxied(Box::new(FakeProxy)),
+                format!("{TEST_SESSION} {PROXY_DELETION}"),
+            ),
+        ]
+    }
+
+    fn record_deleted_networks(worker: &mut Worker) {
         DELETED_NETWORKS.with(|deleted| deleted.borrow_mut().clear());
-        let mut worker = Worker::new();
+        fail_network_deletion(false);
         worker.delete_network = record_deleted_network;
-        let network = SandboxNetwork::named(sandbox_id, r"C:\store");
-        let expected_deletion = format!("{TEST_SESSION} {}", network.name().to_string_lossy());
+    }
+
+    fn worker_recording_deleted_networks() -> Worker {
+        let mut worker = Worker::new();
+        record_deleted_networks(&mut worker);
+        worker
+    }
+
+    fn worker_with_sandbox(sandbox_id: &str, network: SandboxNetworking) -> Worker {
+        let mut worker = worker_recording_deleted_networks();
         worker.containers.insert(
             sandbox_id.to_string(),
             ContainerEntry {
@@ -6561,44 +7142,441 @@ mod tests {
                 ..started_entry()
             },
         );
-        (worker, expected_deletion)
+        worker
     }
 
     #[test]
-    fn deprovisioning_a_bridged_sandbox_deletes_its_network() {
-        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
-        worker
-            .deprovision(DeprovisionConfig {
-                sandbox_id: "wslc:bridged".to_string(),
-            })
-            .unwrap();
-        assert_eq!(deleted_networks(), [expected_deletion]);
+    fn deprovisioning_a_sandbox_deletes_its_network() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            worker
+                .deprovision(DeprovisionConfig {
+                    sandbox_id: "wslc:networked".to_string(),
+                })
+                .unwrap();
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
     }
 
     #[test]
     fn a_quarantine_deletes_the_network_only_once_its_container_is_gone() {
-        let (mut worker, expected_deletion) = worker_with_bridged_sandbox("wslc:bridged");
-        let _ = worker.finish_quarantine(
-            "wslc:bridged",
-            "the exit event was unavailable",
-            None,
-            None,
-            Some(Err(delete_failure())),
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            let _ = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Err(delete_failure())),
+            );
+            assert!(
+                deleted_networks().is_empty(),
+                "a container that may still run keeps its network ({expected_deletion})"
+            );
+            assert!(worker.containers["wslc:networked"].network.is_some());
+
+            let _ = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Ok(())),
+            );
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+    }
+
+    #[test]
+    fn shutdown_deletes_a_network_only_once_its_container_is_gone() {
+        let undeleted = sandbox_networks("wslc:undeleted");
+        let deleted = sandbox_networks("wslc:deleted");
+        for ((left, _), (network, expected_deletion)) in undeleted.into_iter().zip(deleted) {
+            let mut worker = worker_recording_deleted_networks();
+            worker.finish_shutdown_delete(TEST_SESSION, Some(left), Err(delete_failure()));
+            assert!(
+                deleted_networks().is_empty(),
+                "shutdown leaves the network of a container it couldn't delete ({expected_deletion})"
+            );
+
+            worker.finish_shutdown_delete(TEST_SESSION, Some(network), Ok(()));
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+    }
+
+    #[test]
+    fn a_deprovision_that_cannot_delete_the_network_fails_until_a_retry_does() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+            let id = || "wslc:networked".to_string();
+
+            fail_network_deletion(true);
+            let error = worker
+                .deprovision(DeprovisionConfig { sandbox_id: id() })
+                .expect_err("the network is still there");
+            assert!(
+                error.to_string().contains("deprovision it again"),
+                "{error}"
+            );
+            assert!(deleted_networks().is_empty());
+
+            for refused in [
+                worker.start(StartConfig { sandbox_id: id() }).err(),
+                worker.stop(StopConfig { sandbox_id: id() }).err(),
+                worker.validate_exec(&id()).err(),
+            ] {
+                let refused =
+                    refused.expect("a sandbox with no container accepts only deprovision");
+                assert!(
+                    refused.to_string().contains("deprovision it again"),
+                    "{refused}"
+                );
+            }
+
+            fail_network_deletion(false);
+            worker
+                .deprovision(DeprovisionConfig { sandbox_id: id() })
+                .unwrap();
+            assert_eq!(deleted_networks(), [expected_deletion]);
+            assert!(!worker.containers.contains_key(&id()));
+        }
+    }
+
+    #[test]
+    fn a_failed_create_deletes_its_network_and_reports_a_failed_cleanup() {
+        let create_failure = || WslcStepError {
+            failure_phase: FailurePhase::LaunchFailed,
+            error_message: "could not create the workload".to_string(),
+            api_failure: None,
+        };
+
+        for (network, expected_deletion) in sandbox_networks("wslc:unborn") {
+            let mut worker = worker_recording_deleted_networks();
+            let error = worker.finish_failed_create(TEST_SESSION, Some(network), create_failure());
+            assert_eq!(error.to_string(), "could not create the workload");
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+
+        for (network, _) in sandbox_networks("wslc:unborn") {
+            let mut worker = worker_recording_deleted_networks();
+            fail_network_deletion(true);
+            let error = worker.finish_failed_create(TEST_SESSION, Some(network), create_failure());
+            assert_eq!(
+                error.to_string(),
+                "could not create the workload; cleanup also failed: the network is busy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quarantine_that_cannot_delete_the_network_leaves_it_to_deprovision() {
+        for (network, expected_deletion) in sandbox_networks("wslc:networked") {
+            let mut worker = worker_with_sandbox("wslc:networked", network);
+
+            fail_network_deletion(true);
+            let error = worker.finish_quarantine(
+                "wslc:networked",
+                "the exit event was unavailable",
+                None,
+                None,
+                Some(Ok(())),
+            );
+            assert!(
+                error.to_string().contains("deprovision it to finish"),
+                "{error}"
+            );
+
+            fail_network_deletion(false);
+            worker
+                .deprovision(DeprovisionConfig {
+                    sandbox_id: "wslc:networked".to_string(),
+                })
+                .unwrap();
+            assert_eq!(deleted_networks(), [expected_deletion]);
+        }
+    }
+
+    const SESSION_A: &str = "wslcsess:a";
+    const SESSION_B: &str = "wslcsess:b";
+
+    fn worker_with_sessions(session_refs: &[&str]) -> (tempfile::TempDir, Worker) {
+        fn start_no_gateway(
+            _: &Worker,
+            _: &str,
+            _: &policy::ProxiedEgress,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Ok(())
+        }
+
+        fn start_no_run(
+            _: &Worker,
+            _: ExecConfig,
+            _: WslcContainer,
+            _: OutputSink,
+            _: Arc<AtomicBool>,
+            _: Option<StdinSource>,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Ok(())
+        }
+
+        let (root, mut worker) = worker_with_scratch_pool();
+        record_deleted_networks(&mut worker);
+        worker.start_gateway = start_no_gateway;
+        worker.start_run = start_no_run;
+        for session_ref in session_refs {
+            register_test_session(&mut worker, session_ref);
+        }
+        (root, worker)
+    }
+
+    fn sandbox_in(session_ref: &str) -> ContainerEntry {
+        ContainerEntry {
+            session_ref: session_ref.to_string(),
+            ..started_entry()
+        }
+    }
+
+    fn provision_proxied(
+        worker: &mut Worker,
+        session_ref: &str,
+    ) -> oneshot::Receiver<Result<String, WorkerError>> {
+        let config = ProvisionConfig {
+            network: NetworkMode::Proxied(policy::ProxiedEgress {
+                egress: mxc_sdk::wslc_gateway_policy::Egress {
+                    default: mxc_sdk::wslc_gateway_policy::Action::Allow,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+                host_loopback: false,
+                custom_proxy: None,
+                warnings: Vec::new(),
+            }),
+            session_ref: Some(session_ref.to_string()),
+            ..test_provision_config()
+        };
+        let (reply, provisioned) = oneshot::channel();
+        worker.provision_container(config, session_ref.to_string(), reply, &unread_queue());
+        provisioned
+    }
+
+    fn proxy_did_not_start() -> Result<Box<dyn BuiltInProxy>, WorkerError> {
+        Err(WorkerError::backend(anyhow::anyhow!(
+            "the built-in proxy did not start"
+        )))
+    }
+
+    fn waiting<T>(receiver: &mut oneshot::Receiver<T>) -> bool {
+        matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        )
+    }
+
+    #[test]
+    fn a_session_starting_a_built_in_proxy_does_not_hold_up_another() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A, SESSION_B]);
+        worker
+            .containers
+            .insert("wslc:b-run".to_string(), sandbox_in(SESSION_B));
+        worker
+            .containers
+            .insert("wslc:b-done".to_string(), sandbox_in(SESSION_B));
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        let mut exec = exec_work("wslc:b-run", "exec-b");
+        worker.dispatch(exec.work, &unread_queue());
+        let (deprovision, mut deprovisioned) = deprovision_work("wslc:b-done");
+        worker.dispatch(deprovision, &unread_queue());
+
+        assert!(
+            matches!(exec.admit.try_recv(), Ok(Ok(()))),
+            "an exec in another session must be admitted while the proxy starts"
         );
         assert!(
-            deleted_networks().is_empty(),
-            "a container that may still run keeps its network"
+            matches!(deprovisioned.try_recv(), Ok(Ok(()))),
+            "a lifecycle command in another session must complete while the proxy starts"
         );
-        assert!(worker.containers["wslc:bridged"].network.is_some());
+        assert!(
+            waiting(&mut provisioned),
+            "the proxied provision is answered only once its proxy reports"
+        );
+    }
 
-        let _ = worker.finish_quarantine(
-            "wslc:bridged",
-            "the exit event was unavailable",
-            None,
-            None,
-            Some(Ok(())),
+    #[test]
+    fn work_in_a_session_starting_a_built_in_proxy_waits_for_it_in_order() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker
+            .containers
+            .insert("wslc:a".to_string(), sandbox_in(SESSION_A));
+        let mut first = provision_proxied(&mut worker, SESSION_A);
+        let mut second = provision_proxied(&mut worker, SESSION_A);
+        let mut exec = exec_work("wslc:a", "exec-a");
+        worker.dispatch(exec.work, &unread_queue());
+        assert!(
+            waiting(&mut exec.admit),
+            "an exec in the session waits for the proxy"
         );
-        assert_eq!(deleted_networks(), [expected_deletion]);
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        let error = first.try_recv().unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "the built-in proxy did not start");
+        assert!(
+            waiting(&mut second),
+            "the second provision starts its own proxy"
+        );
+        assert!(
+            waiting(&mut exec.admit),
+            "the exec arrived after the second provision, so it waits for that proxy too"
+        );
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert!(second.try_recv().unwrap().is_err());
+        assert!(matches!(exec.admit.try_recv(), Ok(Ok(()))));
+        assert!(worker.gateway_starts.is_empty());
+    }
+
+    #[test]
+    fn a_built_in_proxy_start_holds_its_session_and_the_daemon_until_it_reports() {
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        let _first = provision_proxied(&mut worker, SESSION_A);
+        let _second = provision_proxied(&mut worker, SESSION_A);
+
+        assert_eq!(worker.session_hold(SESSION_A), 2);
+        assert_eq!(worker.live_container_count(), 2);
+        age_out(&mut worker, SESSION_A);
+        worker.reap_idle_sessions_at(past_grace(), &unread_queue());
+        assert!(
+            worker.sessions.contains_key(SESSION_A),
+            "the start's thread is using the session, so it must not be reaped"
+        );
+
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert_eq!(worker.session_hold(SESSION_A), 1);
+        worker.finish_gateway_start(SESSION_A, proxy_did_not_start(), &unread_queue());
+        assert_eq!(worker.session_hold(SESSION_A), 0);
+        assert_eq!(worker.live_container_count(), 0);
+    }
+
+    #[test]
+    fn a_built_in_proxy_whose_thread_cannot_start_fails_its_provision() {
+        fn fail_to_start(
+            _: &Worker,
+            _: &str,
+            _: &policy::ProxiedEgress,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Err(WorkerError::backend(anyhow::anyhow!(
+                "could not start a thread for the built-in proxy"
+            )))
+        }
+
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker.start_gateway = fail_to_start;
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        let error = provisioned.try_recv().unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("could not start a thread"),
+            "{error}"
+        );
+        assert_eq!(
+            worker.session_hold(SESSION_A),
+            0,
+            "a start that never ran must not hold its session, or later work would wait forever"
+        );
+    }
+
+    #[test]
+    fn shutdown_deletes_a_built_in_proxy_that_finished_starting() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        worker
+            .containers
+            .insert("wslc:a".to_string(), sandbox_in(SESSION_A));
+        let held = worker.sessions[SESSION_A].store.path().to_path_buf();
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+        let mut exec = exec_work("wslc:a", "exec-a");
+        worker.dispatch(exec.work, &tx);
+        tx.send(WorkerCommand::GatewayStarted {
+            session_ref: SESSION_A.to_string(),
+            outcome: Ok(Box::new(FakeProxy)),
+        })
+        .unwrap();
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        for answer in [
+            provisioned.try_recv().unwrap().unwrap_err(),
+            exec.admit.try_recv().unwrap().unwrap_err(),
+        ] {
+            assert!(answer.to_string().contains("shut down"), "{answer}");
+        }
+        assert_eq!(
+            deleted_networks(),
+            [format!("{SESSION_A} {PROXY_DELETION}")]
+        );
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_eq!(
+            relet.path(),
+            held,
+            "once its proxy is deleted, the session is released"
+        );
+    }
+
+    #[test]
+    fn shutdown_keeps_the_session_of_a_built_in_proxy_still_starting() {
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_sessions(&[SESSION_A]);
+        let held = worker.sessions[SESSION_A].store.path().to_path_buf();
+        let mut provisioned = provision_proxied(&mut worker, SESSION_A);
+
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        assert!(provisioned.try_recv().unwrap().is_err());
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the pool still has a free slot");
+        assert_ne!(
+            relet.path(),
+            held,
+            "the start is still using the session, so its slot must stay leased"
+        );
+    }
+
+    #[test]
+    fn an_unwind_with_a_built_in_proxy_starting_keeps_container_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:idle".to_string(), flagged_entry(release));
+        worker.gateway_starts.insert(
+            TEST_SESSION.to_string(),
+            GatewayStart {
+                sandbox_id: "wslc:starting".to_string(),
+                config: test_provision_config(),
+                reply: None,
+                parked: Vec::new(),
+            },
+        );
+
+        worker.abandon_if_borrowed(0, 0, 0, false);
+
+        assert!(
+            !RELEASED.load(Ordering::SeqCst),
+            "a start still borrows the SDK and session, so the handles must be kept"
+        );
     }
 
     fn kill_failure() -> ApiFailure {

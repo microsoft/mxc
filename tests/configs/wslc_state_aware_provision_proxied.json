@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "phase": "provision",
+    "containment": "wslc",
+    "network": {
+        "egress": {
+            "default": "allow",
+            "deny": [{ "to": [{ "cidr": "8.8.8.8/32" }] }]
+        },
+        "ingress": { "default": "deny", "hostLoopback": "deny" }
+    },
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest"
+        }
+    }
+}

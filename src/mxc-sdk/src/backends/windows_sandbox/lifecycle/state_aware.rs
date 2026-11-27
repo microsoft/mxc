@@ -662,6 +662,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         Ok(ProvisionResult {
             sandbox_id,
             metadata: None,
+            warnings: Vec::new(),
         })
     }
 

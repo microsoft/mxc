@@ -51,12 +51,11 @@ pub fn null_pipe_handle() -> PipeHandle {
     -1
 }
 
-/// Provision-phase result. Carries the freshly-minted `sandbox_id` and
-/// optional backend-typed metadata.
 #[derive(Debug)]
 pub struct ProvisionResult<M> {
     pub sandbox_id: String,
     pub metadata: Option<M>,
+    pub warnings: Vec<String>,
 }
 
 /// Session-provision-phase result. Carries the freshly-minted `session_id`
@@ -288,6 +287,7 @@ pub trait StatefulSandboxBackend {
         Ok(ProvisionResult {
             sandbox_id: format!("{}:{}", Self::ID_PREFIX, mint_random_token()),
             metadata: None,
+            warnings: Vec::new(),
         })
     }
 

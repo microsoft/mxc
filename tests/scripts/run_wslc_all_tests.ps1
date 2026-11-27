@@ -722,6 +722,11 @@ try {
                 NO_PROXY = "host\.wslc\.internal"; HOST_DNS = "10\.231\.1\.3"; HOST_DIRECT = "200"; HOST_VIA_PROXY = "200"
                 LOOPBACK = "403"; ALLOWED = "200"; DENIED = "403"; DIRECT = "BLOCKED"
             })))
+        # A bridged run reaches Windows loopback without the built-in proxy, and
+        # its cooperative proxy exempts host.wslc.internal.
+        $null = $results.Add((Run-WslcTest "wslc_network_bridged_host_loopback.json" -ForceDebug `
+            -OutputContains "Session reaches Windows loopback as host.wslc.internal" -OutputNotContains "Built-in proxy ready" `
+            -Probes ([ordered]@{ NO_PROXY = "host\.wslc\.internal"; HOST_DIRECT = "200"; DIRECT = "REACHED" })))
         Invoke-WslcMappedRun "wslc_network_egress_port_mapping_host_loopback.json" ([ordered]@{ 18091 = 8091 }) `
             -Probes ([ordered]@{ HOST_DIRECT = "200"; DIRECT = "BLOCKED" })
         # A custom proxy on Windows 127.0.0.1 doesn't expose host.wslc.internal,

@@ -300,17 +300,6 @@ fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&
         ("WSLC provision", Some("network.proxy")) => {
             Some("move the proxy URL to top-level runtimeConfig.networkProxy on the exec phase")
         }
-        ("WSLC provision", Some("network.defaultPolicy" | "network.allowLocalNetwork")) => Some(
-            "set network.egress.default, network.ingress.default, and \
-             network.ingress.hostLoopback consistently to 'allow' or 'deny'",
-        ),
-        ("WSLC provision", Some("network.enforcementMode")) => Some(
-            "remove network.enforcementMode; WSLc selects its all-or-nothing network mechanism",
-        ),
-        ("WSLC provision", Some("network.allowedHosts" | "network.blockedHosts")) => Some(
-            "WSLc does not support hostname or destination filtering; use an all-'allow' or \
-             all-'deny' directional posture",
-        ),
         (_, Some("network.defaultPolicy")) => {
             Some("use network.egress.default ('allow' or 'deny')")
         }

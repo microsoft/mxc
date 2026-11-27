@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::mxc_common::default_env::EnvResolution;
 use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::proxy_env;
+use crate::wslc_gateway_policy as gateway;
 
 const SHELL: &str = "/bin/sh";
 
@@ -83,6 +85,24 @@ pub fn sdk_entries(scope: EnvScope, entries: &[String]) -> Vec<String> {
         EnvScope::Merge => assignments(entries).cloned().collect(),
         EnvScope::Replace => Vec::new(),
     }
+}
+
+/// `caller_env` pointed at `proxy_url`. With host loopback, `NO_PROXY`
+/// exempts [`HOST_LOOPBACK_NAME`](gateway::HOST_LOOPBACK_NAME), which the
+/// proxy can't reach.
+pub fn with_proxy(caller_env: &[String], proxy_url: &str, host_loopback: bool) -> Vec<String> {
+    let mut env = proxy_env::apply_cooperative_proxy_env(caller_env, proxy_url);
+    if host_loopback {
+        for entry in env.iter_mut() {
+            if let Some(key) = proxy_env::PROXY_NEUTRALIZE_KEYS
+                .iter()
+                .find(|key| entry.strip_suffix('=') == Some(**key))
+            {
+                *entry = format!("{key}={}", gateway::HOST_LOOPBACK_NAME);
+            }
+        }
+    }
+    env
 }
 
 #[cfg(test)]

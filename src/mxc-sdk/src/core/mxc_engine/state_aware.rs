@@ -195,12 +195,16 @@ impl EngineStateAwareResult {
     }
 
     #[cfg(target_os = "windows")]
-    fn provision(sandbox_id: String, metadata: Option<EngineProvisionMetadata>) -> Self {
+    fn provision(
+        sandbox_id: String,
+        metadata: Option<EngineProvisionMetadata>,
+        warnings: Vec<String>,
+    ) -> Self {
         Self {
             sandbox_id: Some(sandbox_id),
             session_id: None,
             metadata,
-            warnings: Vec::new(),
+            warnings,
         }
     }
 
@@ -243,6 +247,7 @@ fn typed_dispatch_result<
                 .metadata
                 .map(&mut map_provision_metadata)
                 .transpose()?,
+            result.warnings,
         )),
         TypedDispatchOutcome::Start(result) => {
             if result.metadata.is_some() {
@@ -1995,6 +2000,23 @@ mod tests {
         .unwrap();
         assert_eq!(released.session_id, None);
         assert_eq!(released.sandbox_id, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn provision_warnings_reach_the_typed_result() {
+        let provisioned = typed_dispatch_result(
+            TypedDispatchOutcome::<(), (), (), ()>::Provision(
+                crate::mxc_common::state_aware_backend::ProvisionResult {
+                    sandbox_id: "wslc:0123456789abcdef0123456789abcdef".to_string(),
+                    metadata: None,
+                    warnings: vec!["ingress has no effect".to_string()],
+                },
+            ),
+            no_provision_metadata,
+        )
+        .unwrap();
+        assert_eq!(provisioned.warnings, ["ingress has no effect"]);
     }
 
     #[cfg(target_os = "windows")]

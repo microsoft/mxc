@@ -9,7 +9,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as _;
 
 use crate::mxc_common::logger::Logger;
-use crate::wslc_common::error::{sdk_api_failure, WslcError, WslcStepError};
+use crate::wslc_common::error::{WslcError, WslcStepError};
 use crate::wslc_common::session_resources::{
     self, fingerprint, Kind, OwnedNames, StoreRecords, SUBNET_PREFIX_LENGTH,
 };
@@ -139,23 +139,11 @@ impl SandboxNetwork {
     }
 }
 
-/// Call once a session has opened the store, before it creates any sandbox network.
+/// Delete every sandbox network recorded for the store.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers, `session` must be live, and COM
 /// must be initialized on the calling thread.
-pub unsafe fn sweep_leftovers(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    store_path: &str,
-    logger: &mut Logger,
-) -> Result<(), String> {
-    let records = StoreRecords::open(store_path)?;
-    remove_leftovers(sdk, session, &records, logger)
-}
-
-/// # Safety
-/// As for [`sweep_leftovers`].
 pub(crate) unsafe fn remove_leftovers(
     sdk: &WslcSdk,
     session: WslcSession,
@@ -176,20 +164,11 @@ fn host(message: String) -> WslcStepError {
 }
 
 fn sdk_failure(error: WslcError, operation: &str) -> WslcStepError {
-    let WslcError::Sdk { hr, .. } = error else {
-        return error.into_step_error();
-    };
-    let failure = sdk_api_failure(operation, hr);
-    if hr == WSLC_E_RUNTIME_UPDATE_NEEDED {
-        return WslcError::Unavailable(
-            "WSLc: bridged networking for container lifecycle operations needs WSL 3.0.5 or \
-             later. Run `wsl --update`"
-                .to_string(),
-        )
-        .into_step_error()
-        .with_api_failure(failure);
-    }
-    error.into_step_error().with_api_failure(failure)
+    session_resources::session_network_failure(
+        error,
+        operation,
+        "bridged networking for container lifecycle operations",
+    )
 }
 
 #[cfg(test)]

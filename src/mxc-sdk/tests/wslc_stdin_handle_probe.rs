@@ -25,7 +25,7 @@ use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::string_util::CoTaskMemPWSTR;
 use mxc_sdk::wslc_common::container_steps::{
     create_daemon_container, create_daemon_session, load_sdk_checked, start_daemon_container,
-    DaemonNetworking, ProcessSettings, SessionSizing, KEEPALIVE_SCRIPT,
+    ContainerNetworking, ProcessSettings, SessionSizing, KEEPALIVE_SCRIPT,
 };
 use mxc_sdk::wslc_common::image::{resolve_image, RegistryAccess, StoreHint};
 use mxc_sdk::wslc_common::process_env::EnvScope;
@@ -243,7 +243,7 @@ unsafe fn probe_attached_init(
         "alpine:latest",
         &[],
         &[],
-        DaemonNetworking::Isolated,
+        ContainerNetworking::None,
         false,
         &mut init,
         logger,
@@ -327,7 +327,7 @@ fn stdin_handle_requires_the_stdin_process_flag() {
         let hr = sdk.WslcSetProcessSettingsFlags(unknown_bit.raw_mut(), WslcProcessFlags(0x2));
         assert_eq!(Hr(hr), rejected, "an unknown process flag must be rejected");
 
-        let session = create_daemon_session(
+        let (session, _) = create_daemon_session(
             &sdk,
             "mxc-wslc-stdin-probe",
             &storage,
@@ -354,7 +354,7 @@ fn stdin_handle_requires_the_stdin_process_flag() {
             "alpine:latest",
             &[],
             &[],
-            DaemonNetworking::Isolated,
+            ContainerNetworking::None,
             false,
             &mut keepalive,
             &mut logger,

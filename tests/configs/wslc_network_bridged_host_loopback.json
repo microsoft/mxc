@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-bridged-host-loopback",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "python3 - <<'EOF'\nimport os, socket, urllib.request\nprint('NO_PROXY=' + os.environ.get('NO_PROXY', 'unset'))\ntry:\n    with urllib.request.urlopen('http://host.wslc.internal:18890/', timeout=10) as r:\n        print('HOST_DIRECT=' + str(r.status))\nexcept OSError as e:\n    print('HOST_DIRECT=ERROR ' + str(e))\ntry:\n    socket.create_connection(('1.1.1.1', 443), timeout=3).close()\n    print('DIRECT=REACHED')\nexcept OSError:\n    print('DIRECT=BLOCKED')\nEOF"
+  },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:9"
+  },
+  "wslc": { "image": "python:3.12-alpine" }
+}

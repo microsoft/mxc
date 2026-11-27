@@ -14,7 +14,6 @@ use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
-use crate::wslc_common::wslc_bindings::WslcContainerNetworkingMode;
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -460,21 +459,6 @@ fn validate_denied_path_overlap_with(
     }
 
     Ok(())
-}
-
-/// Map the network default policy to a WSLC networking mode.
-///
-/// The WSLC SDK provides two networking modes:
-/// - `None` — no network interface, fully isolated
-/// - `Bridged` — NAT networking through the WSL2 VM's virtual adapter
-///
-/// Directional egress selects the all-or-nothing network mode.
-pub fn map_network_policy(is_block: bool) -> WslcContainerNetworkingMode {
-    if is_block {
-        WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
-    } else {
-        WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,24 +1088,6 @@ mod tests {
             &strings(&[r"project\secret"]),
         )
         .expect("absolute mount vs relative deny must not be a false rejection");
-    }
-
-    // -- Network policy tests --
-
-    #[test]
-    fn denied_egress_maps_to_none() {
-        assert_eq!(
-            map_network_policy(true),
-            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
-        );
-    }
-
-    #[test]
-    fn allowed_egress_maps_to_bridged() {
-        assert_eq!(
-            map_network_policy(false),
-            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
-        );
     }
 
     // -- Path edge case tests --
