@@ -9,7 +9,7 @@ if [ ! -f "$LXC_EXEC" ]; then
     exit 1
 fi
 
-for tool in bwrap unshare python3 mount timeout; do
+for tool in bwrap unshare setpriv python3 mount timeout; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "FAIL: $tool is required for resolver isolation coverage."
         exit 1
@@ -22,16 +22,21 @@ fi
 
 # Replace host paths only inside a private mount namespace.
 if [ "${MXC_RESOLVER_ISOLATION_INNER:-0}" != "1" ]; then
-    if ! unshare -Urm true >/dev/null 2>&1; then
+    namespace_args=(--mount)
+    if [ "$(id -u)" -ne 0 ]; then
+        namespace_args+=(--user --map-current-user --keep-caps)
+    fi
+    if ! unshare "${namespace_args[@]}" true >/dev/null 2>&1; then
         echo "SKIP: unprivileged user and mount namespaces are unavailable."
         exit 77
     fi
-    exec unshare -Urm env MXC_RESOLVER_ISOLATION_INNER=1 \
+    exec unshare "${namespace_args[@]}" env MXC_RESOLVER_ISOLATION_INNER=1 \
         LXC_EXEC="$LXC_EXEC" bash "$0"
 fi
 
 WORK_DIR="$(mktemp -d)"
 PEER_PID=""
+WORKLOAD_OWNER=""
 ETC_MOUNTED=0
 RUN_MOUNTED=0
 VAR_MOUNTED=0
@@ -41,17 +46,19 @@ cleanup() {
         kill "$PEER_PID" 2>/dev/null || true
         wait "$PEER_PID" 2>/dev/null || true
     fi
-    if [ "$ETC_MOUNTED" = 1 ]; then umount /etc; fi
-    if [ "$RUN_MOUNTED" = 1 ]; then umount /run; fi
-    if [ "$VAR_MOUNTED" = 1 ]; then umount /var; fi
-    if [ "$MNT_MOUNTED" = 1 ]; then umount /mnt; fi
+
+    # The private /etc has no mtab; unmount without updating mount records.
+    if [ "$ETC_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /etc; fi
+    if [ "$RUN_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /run; fi
+    if [ "$VAR_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /var; fi
+    if [ "$MNT_MOUNTED" = 1 ]; then umount --no-mtab --internal-only /mnt; fi
     rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
 
 mkdir -p "$WORK_DIR/etc" "$WORK_DIR/run" "$WORK_DIR/scratch" "$WORK_DIR/var" \
     "$WORK_DIR/bin" "$WORK_DIR/mnt/wsl"
-for file in passwd group hosts ld.so.cache protocols services; do
+for file in passwd group hosts ld.so.cache protocols services subuid subgid; do
     if [ -f "/etc/$file" ]; then cp "/etc/$file" "$WORK_DIR/etc/$file"; fi
 done
 if [ -d /etc/alternatives ]; then cp -RP /etc/alternatives "$WORK_DIR/etc/"; fi
@@ -299,6 +306,14 @@ else:
     }
     (work / (mode + ".json")).write_text(json.dumps(config))
 
+(work / "root-preflight.json").write_text(json.dumps({
+    "version": "0.9.0-alpha",
+    "containerId": "Resolver-Isolation-root-preflight",
+    "containment": "bubblewrap",
+    "filesystem": {"readwritePaths": [str(work / "scratch")]},
+    "process": {"commandLine": "touch " + shlex.quote(str(work / "scratch/workload-owner"))},
+}))
+
 wrapper = work / "bin/bwrap"
 wrapper.write_text(f"""#!{sys.executable}
 import os
@@ -306,7 +321,7 @@ from pathlib import Path
 import sys
 if '--version' not in sys.argv:
     for value in sys.argv[1:]:
-        if value.startswith(os.environ['TMPDIR'] + '/mxc-bwrap-resolver-'):
+        if value.startswith({str(work / 'scratch')!r} + '/mxc-bwrap-resolver-'):
             os.unlink(value)
             os.symlink({str(work / 'ungranted-sentinel')!r}, value)
     if '--file' in sys.argv:
@@ -323,6 +338,31 @@ wrapper.chmod(0o755)
 (work / "ungranted-sentinel").write_text("UNGRANTED_FILE_SENTINEL\n")
 PY
 
+# Root workloads run as a reserved host identity, which must own the fixtures they write.
+if [ "$(id -u)" -eq 0 ]; then
+    chmod 755 "$WORK_DIR"
+    chmod 1777 "$WORK_DIR/scratch"
+    if ! output="$(TMPDIR="$WORK_DIR/scratch" timeout 60 \
+        "$LXC_EXEC" --experimental "$WORK_DIR/root-preflight.json" 2>&1)" ||
+        [ ! -f "$WORK_DIR/scratch/workload-owner" ]; then
+        echo "$output"
+        echo "FAIL: the root fixture could not launch; check root's subordinate allocations."
+        exit 1
+    fi
+    WORKLOAD_OWNER="$(stat -c %u:%g "$WORK_DIR/scratch/workload-owner")"
+    rm "$WORK_DIR/scratch/workload-owner"
+    if [ "$WORKLOAD_OWNER" = 0:0 ]; then
+        echo "FAIL: the root fixture's workload created files as host root."
+        exit 1
+    fi
+    chmod 755 "$WORK_DIR/scratch"
+    chown "$WORKLOAD_OWNER" "$WORK_DIR/scratch" /run/systemd/resolve/stub-resolv.conf \
+        /run/resolvconf/resolv.conf /run/systemd/resolve/writable-sibling.conf \
+        /run/systemd/resolve/writable-child /run/resolvconf/writable-sibling.conf \
+        /run/resolvconf/writable-child
+    echo "PASS: the root fixture launches its workload as host $WORKLOAD_OWNER."
+fi
+
 run_case() {
     local mode="$1" output
     python3 - <<'PY'
@@ -336,6 +376,7 @@ for path in ["/run/systemd/resolve/io.systemd.Resolve",
             raise SystemExit("FAIL: host resolver IPC control did not answer")
 PY
     if ! output="$(TMPDIR="$WORK_DIR/scratch" timeout 60 \
+        setpriv --inh-caps=-all --ambient-caps=-all -- \
         "$LXC_EXEC" --experimental "$WORK_DIR/$mode.json" 2>&1)"; then
         echo "$output"
         echo "FAIL: resolver isolation in $mode mode."
@@ -411,6 +452,10 @@ mkdir -p /var/lib/resolvconf/policy-root /var/lib/resolvconf/nested/deeper/alias
 ln -s /var/lib/resolvconf/policy-root /var/lib/resolvconf/nested/deeper/alias/root
 printf 'nameserver 192.0.2.53\nsearch mxc-test.invalid\n' >/var/lib/resolvconf/policy-root/resolv.conf
 printf 'PROTECTED\n' >/var/lib/resolvconf/policy-root/secret
+if [ -n "$WORKLOAD_OWNER" ]; then
+    chown "$WORKLOAD_OWNER" /var/lib/resolvconf/policy-root \
+        /var/lib/resolvconf/policy-root/resolv.conf
+fi
 ln -sfn /run/resolvconf/nested/deeper/alias/root/resolv.conf /etc/resolv.conf
 run_case translated-denied-child
 run_case translated-readonly-child

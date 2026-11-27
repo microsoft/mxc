@@ -23,6 +23,9 @@ pub mod bwrap_version;
 #[cfg(target_os = "linux")]
 pub(crate) mod capability_check;
 pub(crate) mod host_tools;
+#[cfg(target_os = "linux")]
+pub(crate) mod identity;
+
 /// Forks `bwrap` from a process-lifetime thread (see the module docs).
 #[cfg(target_os = "linux")]
 pub(crate) mod lifetime_spawner;

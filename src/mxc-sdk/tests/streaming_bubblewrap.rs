@@ -219,21 +219,35 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
 
 #[test]
 fn streaming_bubblewrap_launches_with_closed_caller_stdio() {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::process::Command;
 
     use mxc_sdk::v1::{NetworkAction, NetworkEgressPolicy, NetworkPolicy};
 
     const FIXTURE_ENV: &str = "MXC_BWRAP_CLOSED_STDIO_FIXTURE";
+    const RESULT_ENV: &str = "MXC_BWRAP_CLOSED_STDIO_RESULT";
     const FIXTURE_DONE: &str = "BUBBLEWRAP_CLOSED_STDIO_FIXTURE_DONE";
     if let Some(mode) = std::env::var_os(FIXTURE_ENV) {
-        // SAFETY: this fixture process never uses its stdin or stdout again.
-        unsafe {
-            libc::close(libc::STDIN_FILENO);
-            libc::close(libc::STDOUT_FILENO);
+        let mode = mode.into_string().expect("fixture mode");
+        let (network, closed) = mode.split_once(':').expect("network:descriptors");
+        let mut result = std::fs::File::create(std::env::var_os(RESULT_ENV).expect("result path"))
+            .expect("result file");
+        let panics = result.try_clone().expect("result file");
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = writeln!(&panics, "{info}");
+        }));
+        for name in closed.split(',') {
+            let descriptor = match name {
+                "stdin" => libc::STDIN_FILENO,
+                "stdout" => libc::STDOUT_FILENO,
+                _ => libc::STDERR_FILENO,
+            };
+
+            // SAFETY: this fixture process never uses the closed descriptor again.
+            unsafe { libc::close(descriptor) };
         }
-        let mut request = bwrap_request("echo WORKLOAD_STARTED", 30_000);
-        if mode == "firewall" {
+        let mut request = bwrap_request("echo WORKLOAD_STDOUT; echo WORKLOAD_STDERR >&2", 30_000);
+        if network == "firewall" {
             request.network = Some(NetworkPolicy {
                 egress: Some(NetworkEgressPolicy {
                     default: Some(NetworkAction::Allow),
@@ -243,42 +257,55 @@ fn streaming_bubblewrap_launches_with_closed_caller_stdio() {
             });
         }
         let mut process = spawn(request, Default::default())
-            .unwrap_or_else(|error| panic!("{mode:?} launch failed: {error:?}"));
-        let mut output = String::new();
+            .unwrap_or_else(|error| panic!("{mode} launch failed: {error:?}"));
+        let mut stdout = String::new();
         process
             .take_stdout()
             .expect("stdout available")
-            .read_to_string(&mut output)
+            .read_to_string(&mut stdout)
             .expect("read stdout");
-        assert_eq!(output, "WORKLOAD_STARTED\n", "{mode:?}");
+        let mut stderr = String::new();
+        process
+            .take_stderr()
+            .expect("stderr available")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert_eq!(stdout, "WORKLOAD_STDOUT\n", "{mode}");
+        assert_eq!(stderr, "WORKLOAD_STDERR\n", "{mode}");
         assert_eq!(
             process.wait().expect("wait"),
             WaitResult::Exited(0),
-            "{mode:?}"
+            "{mode}"
         );
-        eprintln!("{FIXTURE_DONE}");
+        result.write_all(FIXTURE_DONE.as_bytes()).expect("report");
         std::process::exit(0);
     }
 
     if !bwrap_network_available() {
         return;
     }
-    for mode in ["isolated", "firewall"] {
-        let output = Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "streaming_bubblewrap_launches_with_closed_caller_stdio",
-                "--nocapture",
-            ])
-            .env(FIXTURE_ENV, mode)
-            .output()
-            .expect("run closed-stdio fixture");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success() && stderr.contains(FIXTURE_DONE),
-            "{mode} closed-stdio fixture exited {}:\n{stderr}",
-            output.status
-        );
+    for network in ["isolated", "firewall"] {
+        for closed in ["stdin,stdout", "stderr", "stdin,stdout,stderr"] {
+            let mode = format!("{network}:{closed}");
+            let result = tempfile::NamedTempFile::new().expect("result file");
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "streaming_bubblewrap_launches_with_closed_caller_stdio",
+                    "--nocapture",
+                ])
+                .env(FIXTURE_ENV, &mode)
+                .env(RESULT_ENV, result.path())
+                .output()
+                .expect("run closed-stdio fixture");
+            let report = std::fs::read_to_string(result.path()).unwrap_or_default();
+            assert!(
+                output.status.success() && report == FIXTURE_DONE,
+                "{mode} closed-stdio fixture exited {}: {report}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 
@@ -593,17 +620,22 @@ fn streaming_bubblewrap_cancels_without_parent_death_signal() {
     let wrapper = directory.path().join("bwrap");
 
     // Omit parent-death cleanup to hold the startup condition without a timing race.
+    // MXC starts bwrap with an empty environment, so the real path is written into
+    // the wrapper instead of being passed through a variable.
+    let real_bwrap = format!("'{}'", real_bwrap.to_string_lossy().replace('\'', r"'\''"));
     std::fs::write(
         &wrapper,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 for arg in "$@"; do
     shift
     if [ "$arg" != "--die-with-parent" ]; then
         set -- "$@" "$arg"
     fi
 done
-exec "$MXC_TEST_REAL_BWRAP" "$@"
-"#,
+exec {real_bwrap} "$@"
+"#
+        ),
     )
     .expect("write bwrap wrapper");
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
@@ -622,7 +654,6 @@ exec "$MXC_TEST_REAL_BWRAP" "$@"
             "--test-threads=1",
         ])
         .env(FIXTURE_ENV, "1")
-        .env("MXC_TEST_REAL_BWRAP", real_bwrap)
         .env("PATH", path);
     run_terminal_fixture(command);
 }

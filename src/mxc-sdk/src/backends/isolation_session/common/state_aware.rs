@@ -25,12 +25,11 @@ use crate::mxc_common::validator::{
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::{
-    log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome, WAIT_FOR_EXIT_TIMEOUT,
-};
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::{
     reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
 };
+use super::process::WAIT_FOR_EXIT_TIMEOUT;
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox::spawn_existing_session_pty;
 use super::sandbox_id::{self, SandboxIdPayload};

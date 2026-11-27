@@ -23,7 +23,8 @@ requiring root privileges or a container runtime.
 
 ## Prerequisites
 
-- **Linux** host with kernel 3.8+ (user namespace support)
+- **Linux** host with kernel 3.8+ (user namespace support); root callers need
+  5.3+ (see [Root callers](#root-callers))
 - **x86-64 or AArch64** host. The filter also preserves x32 and i386
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
@@ -119,6 +120,80 @@ requiring root privileges or a container runtime.
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
 
+### Root callers
+
+Root callers require administrator-reserved subordinate UID and GID allocations
+in `/etc/subuid` and `/etc/subgid`, and `getent` for checking host accounts.
+Each file must be a regular, root-owned file, not a symlink or writable by
+group or others. Root launches also require Linux 5.3 or later and an
+unshifted host user namespace. Mixed real/effective root credentials and root
+callers in limited user namespaces are rejected.
+
+MXC selects the first allocation for root with at least 65,536 IDs in each
+file. Numeric owner `0` and account names whose UID is 0 are supported. UID
+and GID bases may differ. The workload maps sandbox IDs 0 through 65,535 into
+those reserved ranges, runs as sandbox UID/GID 1000, and has no supplementary
+groups or capabilities. No sandbox identity maps to host UID or GID 0.
+For example, reserved UID/GID bases of 100,000 would make the workload's host
+UID/GID 101,000. These numbers are an illustration, not default allocations.
+
+Missing, undersized, malformed, or overlapping allocations reject startup.
+The selected ranges must not contain account UIDs, group GIDs, or account
+primary GIDs reported by `getent`. An account lookup failure or truncated
+result also rejects startup. Administrators must ensure the ranges are
+reserved for this use, including existing file ownership and identities that
+an account service does not enumerate. Absence from `/etc/passwd` is not proof
+that an ID is unused. MXC never allocates ranges or edits the host's account
+configuration.
+
+Filesystem grants must be accessible to the mapped host UID/GID with no
+supplementary groups, including directory traversal. Granting a root-owned
+`0700` directory or `0600` file does not make it accessible. MXC rejects such
+grants before launch; it does not change their ownership or permissions.
+Provision the intended access explicitly. Files created in writable grants
+belong to the mapped host identity.
+
+When a missing `deniedPaths` entry needs a private overlay, MXC gives the
+mapped workload group read and search access to that overlay's private storage
+under `TMPDIR`. The mapped identity must be able to traverse `TMPDIR`, or the
+launch is rejected.
+
+The trusted root network supervisor stays in the host user namespace and
+enters only the workload's network namespace to install policy. Before
+slirp4netns relays any workload traffic, MXC has it confine itself with
+`--enable-sandbox` and `--enable-seccomp`: it keeps only
+`CAP_NET_BIND_SERVICE`, runs with no-new-privileges under a seccomp filter, and
+sees only read-only copies of `/etc` and `/run`. slirp4netns needs
+`CAP_SETPCAP` and `CAP_NET_BIND_SERVICE` from the root caller to drop its
+other capabilities; without them, startup fails. If `/etc/resolv.conf` links
+outside `/etc` and `/run`, as on WSL, use slirp4netns 1.2.1 or later; earlier
+versions cannot read that file from their sandbox, so slirp's DNS forwarder
+cannot resolve names.
+
+The supervisor's private state directory is not granted to the workload.
+Generated hosts and resolver
+files are passed by descriptor and copied read-only into the sandbox. MXC
+reads their host inputs as the mapped identity. If that identity cannot read
+the resolver file, MXC supplies no resolver copy and logs a warning. If it
+cannot read `/etc/hosts` while pinning a proxy hostname, startup fails.
+
+Linux does not deliver Bubblewrap's parent-death signal to a sandbox running
+as another host UID. MXC therefore starts a helper process for each root
+launch, running as the mapped host UID/GID with no capabilities. The helper
+stops the sandbox when Bubblewrap exits, when MXC tears the run down, or when
+the MXC process exits. It runs in its own session, so it still stops the
+sandbox when MXC's whole process group is killed. The launch fails before the
+workload starts if the helper cannot open or signal the sandbox, for example
+because host policy blocks `pidfd_open` or `pidfd_send_signal`. When the run
+ends, MXC waits for the helper to confirm that the sandbox has exited, and
+reports an error naming the mapped host UID if it cannot. As with unprivileged
+callers, processes the workload leaves running in the background stop when the
+workload exits. On kernels before 5.3, which lack `pidfd_open`, root launches
+fail before the workload starts.
+
+Unprivileged callers keep their existing UID/GID behavior and do not require
+subordinate allocations.
+
 ### Host tool lookup
 
 MXC finds `bwrap` and the network tools above in this order, both for the
@@ -168,7 +243,8 @@ lxc-exec --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
 
 Bubblewrap creates a namespace-isolated process by:
 
-1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
+1. Creating or joining a private user namespace and unsharing PID, IPC, and
+   UTS namespaces
 2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
    sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
    `/usr/libexec`, `/usr/share`, `/etc`, plus a read-only copy of the resolver
@@ -188,11 +264,10 @@ Bubblewrap creates a namespace-isolated process by:
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
-Capability removal does not change the workload's UID or GID. Run MXC as an
-unprivileged user: a root caller still gives the workload root-owner access
-to visible host files, including secrets in `/etc` and writable policy grants.
-The separate network supervisor retains the namespace capabilities it needs
-to install firewall rules.
+Unprivileged callers retain their UID/GID. Root callers use the reserved
+identity described under [Root callers](#root-callers), rather than retaining
+root-owner access to visible host files. The separate network supervisor
+retains the capabilities it needs to install firewall rules.
 
 Bubblewrap ignores a refused capability drop when the caller is root, for
 example when the host's seccomp or security policy blocks `capset`. MXC
@@ -339,8 +414,8 @@ Common consequences of this default:
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
-unreadable to a non-root caller — user-namespace UID mapping does not
-bypass kernel DAC.
+unreadable to an unprivileged or shifted root workload. User namespaces do not
+bypass the host's file permissions.
 
 ## Configuration
 
@@ -350,7 +425,11 @@ backend-specific config block is needed.
 ### Process environment
 
 The host environment is never inherited — the sandbox is built with
-`--clearenv`, so host secrets can't leak into untrusted code.
+`--clearenv`, so host secrets can't leak into untrusted code. `bwrap` itself is
+also started with an empty environment, so the host environment can't be read
+from `/proc/<pid>/environ` (for example `/proc/1/environ`) inside the sandbox.
+The command's environment is passed to `bwrap` as `--clearenv` and `--setenv`
+arguments.
 
 **From schema 0.9** the child gets a default block of `PATH`
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `TERM`
@@ -525,7 +604,8 @@ This needs no root or `slirp4netns`.
 
 **Address filtering** (`egress.allow` / `egress.deny`) puts the sandbox in a
 private, slirp-backed network namespace and programs its rules there from a
-supervisor holding `CAP_NET_ADMIN` inside an unprivileged user namespace.
+supervisor holding `CAP_NET_ADMIN` in the network namespace's owning user
+namespace, or in the host user namespace for a root caller.
 **No root required**; the sandbox drops `CAP_NET_ADMIN` before the workload
 starts, so it cannot undo the rules.
 
@@ -563,10 +643,11 @@ sandbox when asked to.
 **The pin never costs you a sandbox.** It improves on a resolver the sandbox
 already cannot reach, so every failure gives up the pin rather than the run:
 a resolver path that cannot be followed, one the filesystem policy denies, a
-resolver file that exists but cannot be read, and a failure to write the
-replacement all leave the sandbox exactly as it would have started without
-this feature, each with a warning naming the cause. A host with no
-`/etc/resolv.conf` at all is silent — there is no loopback stub to rescue.
+resolver file that exists but cannot be read or is not a regular file, and a
+failure to write the replacement all leave the sandbox exactly as it would
+have started without this feature, each with a warning naming the cause. A
+host with no `/etc/resolv.conf` at all is silent — there is no loopback stub
+to rescue.
 
 A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
 in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
@@ -931,11 +1012,14 @@ shared-host-network behavior.
    This also applies to create-and-run execution, streaming, and PTY execution
    in both proxy-only and firewall-enforced modes.
 
-   Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
-   creating its own, so the sandbox lives in the namespace that owns the
-   rule-bearing network namespace. MXC passes `--cap-drop ALL` so the workload
+   For an unprivileged caller, Bubblewrap joins the supervisor's user
+   namespace (`--userns`) rather than creating its own, so the sandbox lives
+   in the namespace that owns the rule-bearing network namespace. For a root
+   caller, the supervisor stays in the host user namespace, and Bubblewrap
+   joins the separate mapped workload namespace described under
+   [Root callers](#root-callers). MXC passes `--cap-drop ALL` so the workload
    has no capabilities, regardless of the caller's UID. The supervisor keeps
-   its namespace capabilities; the workload cannot use `CAP_NET_ADMIN` to
+   its capabilities; the workload cannot use `CAP_NET_ADMIN` to
    flush the chain or `CAP_NET_RAW` to create packet sockets.
 4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
@@ -1072,15 +1156,18 @@ so a Node caller keeps the first answer it received.
   any host-loopback port, but the egress chain admits only the single
   `10.0.2.2:<proxy-port>` destination and drops the rest. The host-loopback
   surface is therefore the proxy endpoint alone.
-- **The supervisor's user namespace is visible to the sandbox**: in proxy
-  mode `bwrap` joins the supervisor's user namespace via `--userns` rather
-  than creating its own, and the namespace descriptor stays open in the
-  workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
-  to close it. Re-entering the namespace with `setns` requires
+- **An unprivileged caller's sandbox can see the supervisor's user
+  namespace**: in proxy mode `bwrap` joins the supervisor's user namespace via
+  `--userns` rather than creating its own, and the namespace descriptor stays
+  open in the workload — `bwrap` keeps it across its own `fork`/`exec` and
+  offers no flag to close it. Re-entering the namespace with `setns` requires
   `CAP_SYS_ADMIN`, which MXC removes with `--cap-drop ALL` before workload
   execution. The permitted, effective, inheritable, bounding, and ambient
-  capability sets are empty. Functional tests cover root and non-root callers
-  in isolated, firewall, and proxy modes.
+  capability sets are empty. A root caller's supervisor stays in the host
+  user namespace, and MXC never passes its namespace to `bwrap`; the
+  descriptor the workload keeps is for its own mapped workload namespace.
+  Functional tests cover root and non-root callers in isolated, firewall, and
+  proxy modes.
 - **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
   and additionally programs a default-DROP egress chain inside the sandbox's

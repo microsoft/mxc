@@ -166,6 +166,16 @@ jobs:
             '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
             tee -a "$RUNNER_TEMP/mxc-ci.log"
 
+      - name: Reserve Bubblewrap root IDs on the disposable CI host
+        if: matrix.backend == 'bubblewrap'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py setup --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids" 2>&1 |
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
+
       - name: Configure unprivileged LXC
         if: matrix.backend == 'lxc'
         shell: bash
@@ -235,6 +245,16 @@ jobs:
             done
             exit "$status"
           fi
+
+      - name: Restore Bubblewrap root ID configuration
+        if: always() && matrix.backend == 'bubblewrap'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            python3 scripts/ci/bwrap-root-ids.py restore --disposable-ci-host \
+            --backup-directory "$RUNNER_TEMP/mxc-bwrap-root-ids" 2>&1 |
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Upload logs
         if: always()

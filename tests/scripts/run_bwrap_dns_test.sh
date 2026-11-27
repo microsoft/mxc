@@ -45,7 +45,7 @@ if ! grep -Fq "$PROBE_NAME" "$CONFIG"; then
     exit 1
 fi
 
-for tool in bwrap unshare python3 timeout ip getent; do
+for tool in bwrap unshare setpriv python3 timeout ip getent; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "FAIL: $tool is required to serve and query the stub resolver."
         exit 1
@@ -60,12 +60,16 @@ fi
 # rather than requires. The namespaces are unprivileged, so the sandbox still
 # launches the way it does for a real caller.
 if [ "${MXC_BWRAP_DNS_INNER:-0}" != "1" ]; then
-    if ! unshare -Urmn true >/dev/null 2>&1; then
+    namespace_args=(--mount --net)
+    if [ "$(id -u)" -ne 0 ]; then
+        namespace_args+=(--user --map-current-user --keep-caps)
+    fi
+    if ! unshare "${namespace_args[@]}" true >/dev/null 2>&1; then
         echo "SKIP: unprivileged user, mount, and network namespaces are unavailable;"
         echo "      a loopback-resolver host cannot be simulated here."
         exit 77
     fi
-    exec unshare -Urmn env MXC_BWRAP_DNS_INNER=1 LXC_EXEC="$LXC_EXEC" bash "$0" "$@"
+    exec unshare "${namespace_args[@]}" env MXC_BWRAP_DNS_INNER=1 LXC_EXEC="$LXC_EXEC" bash "$0" "$@"
 fi
 
 # The resolver file the sandbox will read is the one the symlink chain ends at,
@@ -177,7 +181,9 @@ fi
 
 echo "Running Bubblewrap loopback-resolver DNS test..."
 RC=0
-OUTPUT="$("$LXC_EXEC" --experimental "$CONFIG" 2>&1)" || RC=$?
+
+# Only the fixture setup needs ambient namespace capabilities.
+OUTPUT="$(setpriv --inh-caps=-all --ambient-caps=-all -- "$LXC_EXEC" --experimental "$CONFIG" 2>&1)" || RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "$OUTPUT"
     echo "FAIL: the sandbox did not complete its lookup."

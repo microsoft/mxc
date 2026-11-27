@@ -530,7 +530,10 @@ timeout therefore cannot unload code beneath a blocked worker. If that lifetime
 protection cannot be established, the probe fails without starting a worker.
 
 On Unix, delegation uses the real UID/GID; a root-running LXC executor still
-checks root's access, not a pre-elevation user's access. These deadlines bound
+checks root's access, not a pre-elevation user's access. Bubblewrap root
+launches additionally check grants against the workload's mapped host UID/GID
+with no supplementary groups; see [root callers](backends/bwrap/bubblewrap-backend.md#root-callers).
+These deadlines bound
 policy probes, not total sandbox startup, backend mount operations, or workload
 I/O if the filesystem becomes unavailable after validation.
 

@@ -118,15 +118,20 @@ fn bubblewrap_streams_stdout() {
 /// Bubblewrap runs with `--clearenv`, so the sandboxed child does *not* inherit
 /// the launcher's environment even when `process.env` is empty. The refactor
 /// should preserve this; if it ever turns RED the env model has drifted.
+///
+/// `bwrap` itself is the sandbox's PID 1 and the child can read its environment
+/// from `/proc/1/environ`, so the launcher must start it with an empty
+/// environment too.
 #[test]
 fn bubblewrap_clears_host_env_by_default() {
     if !ready() {
         return;
     }
     let marker = "CHAR_BWRAP_SHOULD_NOT_APPEAR_8a02f";
+    let command = r#"printf 'MARKER=[%s]\n' "$MXC_CHAR_MARKER"; if d=$(tr '\0' '\n' < /proc/1/environ); then printf 'PID1_LEAK=[%s]\n' "$(printf '%s\n' "$d" | grep -c '^MXC_CHAR_MARKER=')"; else echo 'PID1_LEAK=[unreadable]'; fi"#;
     let result = run_platform_config_value(
         "bwrap env clear",
-        &config("env-clear", "printf 'MARKER=[%s]\\n' \"$MXC_CHAR_MARKER\""),
+        &config("env-clear", command),
         &[("MXC_CHAR_MARKER", marker)],
         None,
     );
@@ -135,6 +140,10 @@ fn bubblewrap_clears_host_env_by_default() {
     assert!(
         out.contains("MARKER=[]"),
         "expected cleared env (MARKER=[]); current Bubblewrap --clearenv behavior. Output:\n{out}"
+    );
+    assert!(
+        out.contains("PID1_LEAK=[0]"),
+        "expected the sandbox's /proc/1/environ to be readable without the host marker. Output:\n{out}"
     );
     assert!(
         !out.contains(marker),

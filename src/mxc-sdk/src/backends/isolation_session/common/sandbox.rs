@@ -34,9 +34,8 @@ use crate::mxc_common::telemetry::session;
 use crate::mxc_common::validator::validate_common;
 
 use super::error::{lifecycle_err, IsolationSessionError};
-use super::manager::{
-    log_sandbox_torn_down, ClosingProcess, IsolationSessionManager, TeardownOutcome,
-};
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
+use super::process::ClosingProcess;
 use super::process_options::{
     build_process_options, build_pty_process_options, with_service_timeout_grace,
 };

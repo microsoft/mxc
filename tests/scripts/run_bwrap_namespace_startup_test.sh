@@ -47,14 +47,6 @@ if [ "${1:-}" = "--user" ]; then
 fi
 exec "$REAL_UNSHARE" "$@"
 SHIM
-cat >"$WORK_DIR/shim/bwrap" <<'SHIM'
-#!/bin/sh
-if [ "${TEST_FAILURE:-}" = "bwrap" ] && [ "${1:-}" != "--version" ]; then
-    echo "test: bwrap network namespace refused" >&2
-    exit 1
-fi
-exec "$REAL_BWRAP" "$@"
-SHIM
 cat >"$WORK_DIR/shim/iptables-restore" <<'SHIM'
 #!/bin/sh
 if [ "${TEST_FAILURE:-}" = "rules" ] && [ "${1:-}" != "--version" ]; then
@@ -63,7 +55,24 @@ if [ "${TEST_FAILURE:-}" = "rules" ] && [ "${1:-}" != "--version" ]; then
 fi
 exec "$REAL_RESTORE" "$@"
 SHIM
-chmod +x "$WORK_DIR/shim/unshare" "$WORK_DIR/shim/bwrap" "$WORK_DIR/shim/iptables-restore"
+chmod +x "$WORK_DIR/shim/unshare" "$WORK_DIR/shim/iptables-restore"
+
+# MXC starts bwrap with an empty environment, so this shim cannot read the real
+# path or the failure mode from variables. Each case gets its own copy with both
+# written in.
+write_bwrap_shim() {
+    local dir="$1" failure="$2"
+    mkdir -p "$dir"
+    cat >"$dir/bwrap" <<SHIM
+#!/bin/sh
+if [ "$failure" = "bwrap" ] && [ "\${1:-}" != "--version" ]; then
+    echo "test: bwrap network namespace refused" >&2
+    exit 1
+fi
+exec "$REAL_BWRAP" "\$@"
+SHIM
+    chmod +x "$dir/bwrap"
+}
 
 for mode in proxy firewall; do
     proxy=""
@@ -94,8 +103,10 @@ run_case() {
     shift 3
     local dir="$WORK_DIR/$label"
     mkdir "$dir"
+    write_bwrap_shim "$dir/shim" "$failure"
     local rc=0
-    TEST_LOG="$dir/unshare.log" TEST_PID="$dir/supervisor.pid" TEST_FAILURE="$failure" \
+    PATH="$dir/shim:$PATH" \
+        TEST_LOG="$dir/unshare.log" TEST_PID="$dir/supervisor.pid" TEST_FAILURE="$failure" \
         timeout 30 "$LXC_EXEC" --experimental "$@" "$WORK_DIR/$mode.json" \
         >"$dir/output" 2>&1 || rc=$?
     echo "$rc" >"$dir/exit"
