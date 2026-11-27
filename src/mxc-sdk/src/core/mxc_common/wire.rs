@@ -46,6 +46,8 @@ pub enum Containment {
     IsolationSession,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
+    /// Kata Containers microVM (experimental).
+    Kata,
     /// Remote Windows 365 container lifecycle operations (experimental).
     W365Agents,
 }
@@ -64,6 +66,7 @@ impl Containment {
             "seatbelt" | "macos_sandbox" => Self::Seatbelt,
             "isolation_session" => Self::IsolationSession,
             "bubblewrap" => Self::Bubblewrap,
+            "kata" => Self::Kata,
             "w365_agents" => Self::W365Agents,
             _ => return None,
         })
@@ -478,6 +481,16 @@ pub struct Hyperlight {
     pub runtime: Option<crate::mxc_common::models::HyperlightRuntime>,
 }
 
+/// Kata backend config.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kata {
+    /// Host path of the guest root filesystem.
+    pub rootfs: Option<String>,
+    /// Hypervisor to run; the host default applies when absent.
+    pub hypervisor: Option<crate::mxc_common::models::KataHypervisor>,
+}
+
 /// MicroVM creation settings retained by contract adapters before normalization.
 #[derive(Debug, Clone)]
 pub(crate) struct MicroVm {
@@ -563,6 +576,7 @@ mod tests {
         ContainmentBackend::IsolationSession,
         ContainmentBackend::Seatbelt,
         ContainmentBackend::Bubblewrap,
+        ContainmentBackend::Kata,
     ];
 
     #[test]

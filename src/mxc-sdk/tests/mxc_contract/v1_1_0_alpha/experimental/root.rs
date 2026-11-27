@@ -10,7 +10,8 @@ fn accepts_permanent_development_fields() {
         "process": {"commandLine": "echo"},
         "test": {"message": "this is a message"},
         "windowsSandbox": {},
-        "hyperlight": {}
+        "hyperlight": {},
+        "kata": {"rootfs": "/srv/rootfs"}
     }"#;
 
     assert_valid(json);

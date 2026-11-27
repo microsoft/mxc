@@ -37,10 +37,11 @@ mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
-    const EXPERIMENTAL: [ContainmentBackend; 4] = [
+    const EXPERIMENTAL: [ContainmentBackend; 5] = [
         ContainmentBackend::MicroVm,
         ContainmentBackend::Hyperlight,
         ContainmentBackend::WindowsSandbox,
+        ContainmentBackend::Kata,
         ContainmentBackend::W365Agents,
     ];
 
