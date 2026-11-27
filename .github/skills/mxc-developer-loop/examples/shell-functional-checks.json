@@ -1,0 +1,18 @@
+{
+  "Desktop": [
+    {
+      "id": "desktop-file-found",
+      "description": "Shell Desktop enumeration finds the exact independently supplied caller-owned Desktop file path, not merely virtual shell items"
+    }
+  ],
+  "Documents": [
+    {
+      "id": "documents-path",
+      "description": "The resolved Documents path is nonempty and matches the independently supplied intended host Documents folder"
+    },
+    {
+      "id": "documents-file-found",
+      "description": "Enumeration of that Documents folder finds the exact caller-owned fixture file path"
+    }
+  ]
+}
