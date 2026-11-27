@@ -36,6 +36,8 @@ mod pipe_relay;
 #[cfg(target_os = "windows")]
 mod policy;
 #[cfg(target_os = "windows")]
+mod process;
+#[cfg(target_os = "windows")]
 mod process_options;
 #[cfg(target_os = "windows")]
 mod sandbox;
