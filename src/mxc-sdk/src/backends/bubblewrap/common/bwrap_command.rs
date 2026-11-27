@@ -22,11 +22,18 @@ use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WritableOverlay {
+    pub lower: String,
+    pub workdir: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PolicyMount {
     pub source: String,
     pub destination: String,
     pub intent: FsIntent,
     pub readonly_overlay: Option<String>,
+    pub writable_overlay: Option<WritableOverlay>,
 }
 
 pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
@@ -37,6 +44,7 @@ pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
             source: mount.path,
             intent: mount.intent,
             readonly_overlay: None,
+            writable_overlay: None,
         })
         .collect()
 }
@@ -386,6 +394,19 @@ fn sandbox_layout(mount_args: &[String]) -> Option<Vec<(&str, SandboxEntry<'_>)>
             "--ro-overlay" => {
                 let destination = args.next()?;
                 let entry = if overlay_source.take()? == destination {
+                    SandboxEntry::HostBind
+                } else {
+                    SandboxEntry::Closed
+                };
+                layout.push((destination, entry));
+                continue;
+            }
+            "--overlay" => {
+                let source = args.next()?;
+                args.next()?; // workdir
+                let destination = args.next()?;
+                overlay_source.take()?;
+                let entry = if source == destination {
                     SandboxEntry::HostBind
                 } else {
                     SandboxEntry::Closed
@@ -910,14 +931,24 @@ pub(crate) fn build_args_classified_with_mode(
     let mut denied_directories = Vec::new();
     for mount in mounts {
         match mount.intent {
-            // Read-write: override the base ro-bind and any standard mount.
-            FsIntent::ReadWrite => {
-                args.extend([
+            // Read-write: use the host grant as the upper layer when a missing
+            // deny needs a private mountpoint. Ordinary writes still reach the
+            // host, while the lower layer supplies only the denied paths.
+            FsIntent::ReadWrite => match &mount.writable_overlay {
+                Some(overlay) => args.extend([
+                    "--overlay-src".into(),
+                    overlay.lower.clone(),
+                    "--overlay".into(),
+                    mount.source.clone(),
+                    overlay.workdir.clone(),
+                    mount.destination.clone(),
+                ]),
+                None => args.extend([
                     "--bind".into(),
                     mount.source.clone(),
                     mount.destination.clone(),
-                ]);
-            }
+                ]),
+            },
             // Read-only: already covered by the base ro-bind, but listed
             // explicitly so the intent is clear and it overrides any rw parent.
             // The private layer goes below the host source, so directories in
@@ -2482,6 +2513,7 @@ mod tests {
             destination: path.into(),
             intent,
             readonly_overlay: None,
+            writable_overlay: None,
         }
     }
 
@@ -2785,6 +2817,18 @@ mod tests {
     }
 
     #[test]
+    fn links_in_a_writable_overlay_keep_the_host_alias_layout() {
+        let mut parent = mount("/data", FsIntent::ReadWrite);
+        parent.writable_overlay = Some(WritableOverlay {
+            lower: "/private/lower".into(),
+            workdir: "/private/work".into(),
+        });
+        let plan = plan_for(&[parent], &[], &[aliased("/data/alias", "/data/project")]);
+        assert!(plan.args.is_empty());
+        assert!(plan.unavailable.is_empty());
+    }
+
+    #[test]
     fn links_inside_a_bind_of_another_host_path_are_unavailable() {
         let mounts = [
             PolicyMount {
@@ -2792,6 +2836,7 @@ mod tests {
                 destination: "/run/app".into(),
                 intent: FsIntent::ReadWrite,
                 readonly_overlay: None,
+                writable_overlay: None,
             },
             mount("/data/project", FsIntent::ReadWrite),
         ];

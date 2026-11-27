@@ -962,7 +962,7 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run private network state torn down once it exits.
 struct BwrapChild {
-    _deny_mountpoints: Option<tempfile::TempDir>,
+    _deny_mountpoints: Option<Vec<missing_denials::OverlayStorage>>,
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
     child: Arc<Mutex<Child>>,
@@ -1211,7 +1211,11 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 "Bubblewrap: script timed out",
             ));
         }
-        if let Some(status) = self.inner.lock_child().try_wait()? {
+        let exited = self.inner.lock_child().try_wait()?;
+        if let Some(status) = exited {
+            // Status polling only observes the child. Network finalization stays
+            // in wait or drop: it may block, and the monitor must remain available
+            // so a provider failure is not reclassified as an ordinary exit.
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -1731,14 +1735,79 @@ mod tests {
         }
     }
 
+    fn exited_process(
+        deny_mountpoints: Option<Vec<missing_denials::OverlayStorage>>,
+        monitor: Option<ProviderMonitor>,
+        child: Arc<Mutex<Child>>,
+    ) -> BubblewrapSandboxProcess {
+        BubblewrapSandboxProcess::new(BwrapChild {
+            _deny_mountpoints: deny_mountpoints,
+            child,
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            stdout_canceller: None,
+            stderr_canceller: None,
+            pty: None,
+            group: false,
+            proxy_network: None,
+            monitor,
+            timeout: None,
+            started: Instant::now(),
+            timed_out: false,
+            termination_error: None,
+        })
+    }
+
+    fn exited_child() -> Arc<Mutex<Child>> {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        Arc::new(Mutex::new(child))
+    }
+
+    #[test]
+    fn terminal_polling_preserves_provider_loss_for_wait() {
+        let child = exited_child();
+        let (watch, provider) = nix::unistd::pipe().unwrap();
+        let monitor = ProviderMonitor::watch(watch, Arc::clone(&child), false);
+        let mut process = exited_process(None, Some(monitor), child);
+        drop(provider);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process.provider_lost() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(process.provider_lost(), "provider loss was not observed");
+        assert_eq!(process.try_wait().unwrap(), Some(0));
+
+        let error = process.wait().expect_err(
+            "poll-then-wait discarded the provider failure and returned a workload exit",
+        );
+        assert!(
+            error.to_string().contains("lost its network provider"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_failed_bwrap_spawn_is_a_launch_failure() {
         use crate::mxc_common::logger::Mode;
         use crate::mxc_common::mxc_error::MxcErrorCode;
 
-        // A NUL in an argument makes `Command::spawn` fail before exec.
+        // A NUL in an argument makes `Command::spawn` fail before exec, after
+        // the denied mount points have already been prepared.
+        let fixture = tempfile::tempdir().unwrap();
+        let denied = fixture.path().join("missing/deep");
+        std::fs::create_dir_all(&denied).unwrap();
         let request = ExecutionRequest {
             script_code: "echo \0".into(),
+            policy: crate::mxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![fixture.path().to_str().unwrap().into()],
+                denied_paths: vec![denied.to_str().unwrap().into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let Some(resp) = BubblewrapScriptRunner::new()
@@ -1772,6 +1841,10 @@ mod tests {
             resp.error_message.contains("failed to spawn bwrap"),
             "got: {}",
             resp.error_message
+        );
+        assert!(
+            denied.is_dir(),
+            "a post-preparation spawn failure removed an existing denied directory"
         );
     }
 

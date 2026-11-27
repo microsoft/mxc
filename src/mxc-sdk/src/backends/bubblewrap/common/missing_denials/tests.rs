@@ -9,7 +9,7 @@ fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
-) -> Result<Option<tempfile::TempDir>, FilesystemPolicyError> {
+) -> Result<Option<Vec<OverlayStorage>>, FilesystemPolicyError> {
     super::prepare(mounts, baseline_links, version, false)
 }
 
@@ -20,6 +20,7 @@ fn mount(path: &Path, intent: FsIntent) -> PolicyMount {
         destination: path,
         intent,
         readonly_overlay: None,
+        writable_overlay: None,
     }
 }
 
@@ -59,21 +60,48 @@ fn missing_denials_use_private_layers_without_modifying_the_host() {
 }
 
 #[test]
-fn existing_targets_and_missing_targets_under_writable_grants_need_no_overlay() {
+fn missing_targets_under_writable_grants_use_private_overlays() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     std::fs::write(root.join("existing"), "secret").unwrap();
     std::fs::create_dir(root.join("tools")).unwrap();
+    let missing = root.join("tools/missing");
     let mut mounts = vec![
         mount(root, FsIntent::ReadOnly),
         mount(&root.join("existing"), FsIntent::Denied),
         mount(&root.join("tools"), FsIntent::ReadWrite),
-        mount(&root.join("tools/missing"), FsIntent::Denied),
+        mount(&missing, FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
+    let storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0))
         .unwrap()
-        .is_none());
+        .unwrap();
+    let parent = mounts
+        .iter()
+        .find(|mount| mount.intent == FsIntent::ReadWrite)
+        .unwrap();
+    let overlay = parent.writable_overlay.as_ref().unwrap();
+    assert!(Path::new(&overlay.lower).join("missing").is_dir());
+    assert!(Path::new(&overlay.workdir).is_dir());
+    assert_eq!(
+        std::fs::metadata(&overlay.workdir).unwrap().dev(),
+        std::fs::metadata(&parent.source).unwrap().dev()
+    );
+    assert!(!missing.exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("existing")).unwrap(),
+        "secret"
+    );
     assert!(mounts.iter().all(|mount| mount.readonly_overlay.is_none()));
+    let lower = overlay.lower.clone();
+    let workdir = overlay.workdir.clone();
+    let internal = Path::new(&workdir).join("work");
+    std::fs::create_dir(&internal).unwrap();
+    std::fs::set_permissions(&internal, std::fs::Permissions::from_mode(0o000)).unwrap();
+    drop(storage);
+    assert!(!Path::new(&lower).exists());
+    assert!(!Path::new(&workdir).exists());
 }
 
 #[test]
@@ -100,6 +128,23 @@ fn missing_denials_require_overlay_support_only_when_needed() {
         .message()
         .contains(root.join("missing").to_str().unwrap()));
     assert!(!root.join("missing").exists());
+}
+
+#[test]
+fn writable_missing_denials_require_overlay_support() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let missing = grant.join("missing");
+    let mut mounts = vec![
+        mount(&grant, FsIntent::ReadWrite),
+        mount(&missing, FsIntent::Denied),
+    ];
+    let error = prepare(&mut mounts, &[], BwrapVersion::new(0, 11, 0)).unwrap_err();
+    assert!(error.message().contains("requires bwrap 0.12.0"));
+    assert!(error.message().contains("read-write"));
+    assert!(!missing.exists());
+    assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -137,6 +182,77 @@ fn mountinfo_decodes_nested_mountpoints() {
 }
 
 #[test]
+fn mountinfo_accepts_namespace_roots_only_for_nsfs() {
+    let mountinfo = concat!(
+        "1 0 8:1 / / rw - ext4 /dev/root rw\n",
+        "2 1 0:44 net:[4026533000] /run/netns/persisted rw - nsfs nsfs rw\n"
+    );
+    let entries = parse_mountinfo(mountinfo).unwrap();
+    assert_eq!(entries[1].root, PathBuf::from("net:[4026533000]"));
+    assert_eq!(entries[1].mountpoint, PathBuf::from("/run/netns/persisted"));
+
+    assert!(parse_mountinfo(
+        "2 1 0:44 net:[4026533000] /run/netns/persisted rw - tmpfs tmpfs rw\n"
+    )
+    .is_err());
+    assert!(
+        parse_mountinfo("2 1 0:44 not-a-namespace /run/netns/persisted rw - nsfs nsfs rw\n")
+            .is_err()
+    );
+}
+
+#[test]
+fn writable_storage_requires_mount_identity_not_only_device() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let entries = vec![
+        MountInfoEntry {
+            id: 1,
+            device: (8, 1),
+            root: PathBuf::from("/"),
+            mountpoint: PathBuf::from("/"),
+        },
+        MountInfoEntry {
+            id: 2,
+            device: (8, 1),
+            root: PathBuf::from("/real"),
+            mountpoint: grant.clone(),
+        },
+    ];
+    let error = writable_storage(&grant, &[], &entries).unwrap_err();
+    assert!(error.message().contains("same mount"));
+    assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn writable_storage_preparation_obeys_the_probe_deadline() {
+    let fixture = tempfile::tempdir().unwrap();
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    crate::mxc_common::filesystem_probe::launch_tests::inject(
+        "bwrap-writable-storage",
+        grant.clone(),
+    );
+    let missing = grant.join("missing");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut mounts = vec![
+            mount(&grant, FsIntent::ReadWrite),
+            mount(&missing, FsIntent::Denied),
+        ];
+        let result = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0));
+        let _ = sender.send(result.map(|_| ()));
+    });
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(8))
+        .expect("writable storage preparation ignored its probe deadline");
+    let error = result.expect_err("a stalled writable storage probe must reject startup");
+    assert!(error.message().contains("timed out after 5000ms"));
+}
+
+#[test]
 fn malformed_or_oversized_mountinfo_is_rejected() {
     assert!(parse_mountinfo("not mount information").is_err());
     assert!(parse_mountinfo("1 0 8:1 /bad\\999 / rw - ext4 /dev/root rw").is_err());
@@ -165,14 +281,18 @@ fn writable_bind_aliases_of_private_storage_are_masked() {
 
 #[test]
 fn a_writable_policy_parent_supersedes_readonly_baseline_mounts() {
-    let target = format!("/etc/mxc-missing-{}", uuid::Uuid::new_v4());
+    let fixture = tempfile::tempdir().unwrap();
+    let target = fixture.path().join("missing");
     let mut mounts = vec![
-        mount(Path::new("/"), FsIntent::ReadWrite),
-        mount(Path::new(&target), FsIntent::Denied),
+        mount(fixture.path(), FsIntent::ReadWrite),
+        mount(&target, FsIntent::Denied),
     ];
-    assert!(prepare(&mut mounts, &[], BwrapVersion::new(0, 5, 0))
+    let _storage = prepare(&mut mounts, &[], BwrapVersion::new(0, 12, 0))
         .unwrap()
-        .is_none());
+        .unwrap();
+    let overlay = mounts[0].writable_overlay.as_ref().unwrap();
+    assert!(Path::new(&overlay.lower).join("missing").is_dir());
+    assert!(!target.exists());
 }
 
 #[test]
@@ -232,7 +352,7 @@ fn overlays_are_emitted_before_child_grants_and_deny_masks() {
             ]),
         "the host source must be the top layer so shared directories keep host metadata: {args:?}"
     );
-    let hidden = std::fs::canonicalize(storage.path()).unwrap();
+    let hidden = std::fs::canonicalize(storage[0].path()).unwrap();
     let hidden = hidden.to_str().unwrap();
     assert!(args
         .windows(2)

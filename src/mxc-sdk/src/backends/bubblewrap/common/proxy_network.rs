@@ -3431,6 +3431,7 @@ mod tests {
                 destination,
                 intent,
                 readonly_overlay: None,
+                writable_overlay: None,
             }];
             let mut logger = buffer_logger();
             let pin = ResolverPin::from_resolver(

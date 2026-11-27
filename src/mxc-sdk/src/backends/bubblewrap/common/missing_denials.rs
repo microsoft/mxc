@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::bwrap_command::{BaselineLink, PolicyMount, BASELINE_RO_BIND_PATHS};
+use super::bwrap_command::{BaselineLink, PolicyMount, WritableOverlay, BASELINE_RO_BIND_PATHS};
 use super::bwrap_version::BwrapVersion;
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::filesystem_probe::FilesystemProbe;
@@ -22,8 +22,9 @@ const MAX_MOUNTINFO_BYTES: usize = 1_048_576;
 const MAX_MOUNTINFO_ENTRIES: usize = 4096;
 
 #[cfg(any(target_os = "linux", test))]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MountInfoEntry {
+    id: u64,
     device: (u32, u32),
     root: PathBuf,
     mountpoint: PathBuf,
@@ -57,6 +58,7 @@ fn baseline_mounts(
                 destination: path.to_owned(),
                 intent: FsIntent::ReadOnly,
                 readonly_overlay: None,
+                writable_overlay: None,
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -69,17 +71,281 @@ fn baseline_mounts(
     Ok(mounts)
 }
 
-/// Keep missing deny mountpoints off the host and out of read-only binds.
-/// The returned directory must outlive the sandbox's overlay mounts.
+struct OverlayPlan {
+    intent: FsIntent,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OverlayStorage {
+    _directory: TempDir,
+    workdir: Option<PathBuf>,
+}
+
+impl OverlayStorage {
+    fn read_only(directory: TempDir) -> Self {
+        Self {
+            _directory: directory,
+            workdir: None,
+        }
+    }
+
+    fn writable(directory: TempDir, workdir: PathBuf) -> Self {
+        Self {
+            _directory: directory,
+            workdir: Some(workdir),
+        }
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        self._directory.path()
+    }
+}
+
+impl Drop for OverlayStorage {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Overlayfs creates its internal work/work directory with mode 000.
+        // Make only that private directory traversable so TempDir can remove it.
+        let Some(workdir) = &self.workdir else {
+            return;
+        };
+        let internal = workdir.join("work");
+        if std::fs::symlink_metadata(&internal).is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            let _ = std::fs::set_permissions(&internal, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+}
+
+fn same_mount(source: &Path, storage: &Path, entries: &[MountInfoEntry]) -> bool {
+    if entries.is_empty() {
+        return cfg!(not(target_os = "linux"));
+    }
+    let Some(source_mount) = containing_mount(source, entries) else {
+        return false;
+    };
+    let Some(storage_mount) = containing_mount(storage, entries) else {
+        return false;
+    };
+    source_mount.id == storage_mount.id
+}
+
+fn storage_is_compatible(
+    source: &Path,
+    storage: &Path,
+    source_device: u64,
+    mountinfo: &[MountInfoEntry],
+) -> Result<bool, FilesystemPolicyError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if storage.starts_with(source) || source.starts_with(storage) {
+        return Ok(false);
+    }
+    let device = std::fs::metadata(storage)
+        .map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not inspect private overlay storage '{}': {error}",
+                storage.display()
+            ))
+        })?
+        .dev();
+    Ok(device == source_device && same_mount(source, storage, mountinfo))
+}
+
+fn writable_storage(
+    source: &Path,
+    denied_paths: &[PathBuf],
+    mountinfo: &[MountInfoEntry],
+) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let source_device = std::fs::metadata(source)
+        .map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not inspect read-write grant '{}': {error}",
+                source.display()
+            ))
+        })?
+        .dev();
+    if let Some(parent) = source.parent() {
+        if let Ok(directory) = tempfile::Builder::new()
+            .prefix(".mxc-bwrap-overlay-")
+            .tempdir_in(parent)
+        {
+            let storage = std::fs::canonicalize(directory.path()).map_err(|error| {
+                FilesystemPolicyError::Host(format!(
+                    "Bubblewrap: could not resolve private overlay storage for '{}': {error}",
+                    source.display()
+                ))
+            })?;
+            if storage_is_compatible(source, &storage, source_device, mountinfo)? {
+                return initialize_writable_storage(directory, storage, source, denied_paths);
+            }
+        }
+    }
+
+    // A writable grant does not imply a writable parent. Both upperdir and
+    // workdir must be on the same mount, not merely the same device.
+    let directory = tempfile::tempdir().map_err(|error| {
+        FilesystemPolicyError::Host(format!(
+            "Bubblewrap: could not create private overlay storage in TMPDIR for '{}': {error}",
+            source.display()
+        ))
+    })?;
+    let storage = std::fs::canonicalize(directory.path()).map_err(|error| {
+        FilesystemPolicyError::Host(format!(
+            "Bubblewrap: could not resolve private overlay storage for '{}': {error}",
+            source.display()
+        ))
+    })?;
+    if !storage_is_compatible(source, &storage, source_device, mountinfo)? {
+        return Err(FilesystemPolicyError::Host(format!(
+            "Bubblewrap: cannot prepare writable overlay storage for '{}': neither its parent \
+             nor TMPDIR provides a writable directory outside the grant on the same mount and \
+             filesystem. Bind-mounted grants at a mount root cannot use their parent or TMPDIR; \
+             grant a subdirectory inside that mount instead.",
+            source.display()
+        )));
+    }
+    initialize_writable_storage(directory, storage, source, denied_paths)
+}
+
+#[cfg(target_os = "linux")]
+fn upper_directory_is_opaque(path: &Path) -> io::Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "overlay upper directory contains a NUL byte",
+        )
+    })?;
+    let name = CString::new("user.overlay.opaque").unwrap();
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    let mut value = vec![0; size as usize];
+    let read = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(value[..read as usize] == *b"y")
+}
+
+#[cfg(target_os = "linux")]
+fn reject_opaque_upper_directories(
+    source: &Path,
+    denied_paths: &[PathBuf],
+) -> Result<(), FilesystemPolicyError> {
+    for denied_path in denied_paths {
+        let mut current = source.to_path_buf();
+        let components = denied_path.components().collect::<Vec<_>>();
+        for index in 0..=components.len() {
+            if index > 0 {
+                current.push(components[index - 1].as_os_str());
+            }
+            match upper_directory_is_opaque(&current) {
+                Ok(true) => {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: opaque upper-layer directory '{}' hides the private \
+                         mountpoint for deniedPaths entry '{}'; remove the opaque directory \
+                         or choose a different read-write grant",
+                        current.display(),
+                        source.join(denied_path).display()
+                    )))
+                }
+                Ok(false) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: could not inspect overlay upper-layer directory '{}' for \
+                         deniedPaths entry '{}': {error}",
+                        current.display(),
+                        source.join(denied_path).display()
+                    )))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reject_opaque_upper_directories(
+    _source: &Path,
+    _denied_paths: &[PathBuf],
+) -> Result<(), FilesystemPolicyError> {
+    Ok(())
+}
+
+fn initialize_writable_storage(
+    directory: TempDir,
+    storage: PathBuf,
+    source: &Path,
+    denied_paths: &[PathBuf],
+) -> Result<(TempDir, PathBuf), FilesystemPolicyError> {
+    let layer = storage.join("lower");
+    let workdir = storage.join("work");
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-writable-storage", source);
+    reject_opaque_upper_directories(source, denied_paths)?;
+    std::fs::create_dir(&workdir).map_err(|error| {
+        FilesystemPolicyError::Host(format!(
+            "Bubblewrap: could not create private overlay workdir '{}': {error}",
+            workdir.display()
+        ))
+    })?;
+    for path in denied_paths {
+        std::fs::create_dir_all(layer.join(path)).map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not prepare private mountpoint for deniedPaths entry '{}': \
+                 {error}",
+                source.join(path).display()
+            ))
+        })?;
+    }
+    Ok((directory, storage))
+}
+
+fn intent_name(intent: FsIntent) -> &'static str {
+    match intent {
+        FsIntent::ReadOnly => "read-only",
+        FsIntent::ReadWrite => "read-write",
+        FsIntent::Denied => "denied",
+    }
+}
+
+/// Keep missing deny mountpoints off the host with private overlay layers.
+/// The returned directories must outlive the sandbox's overlay mounts.
 pub(crate) fn prepare(
     mounts: &mut Vec<PolicyMount>,
     baseline_links: &[BaselineLink],
     version: BwrapVersion,
     bwrap_is_setuid: bool,
-) -> Result<Option<TempDir>, FilesystemPolicyError> {
+) -> Result<Option<Vec<OverlayStorage>>, FilesystemPolicyError> {
     let mut probe = FilesystemProbe::default();
     let baseline = baseline_mounts(BASELINE_RO_BIND_PATHS, baseline_links, &mut probe)?;
-    let mut overlays = BTreeMap::<(String, String), Vec<PathBuf>>::new();
+    let mut overlays = BTreeMap::<(String, String), OverlayPlan>::new();
     for (index, denied) in mounts.iter().enumerate() {
         if denied.intent != FsIntent::Denied {
             continue;
@@ -88,7 +354,7 @@ pub(crate) fn prepare(
         let parent = baseline.iter().chain(&mounts[..index]).rfind(|mount| {
             target != Path::new(&mount.destination) && target.starts_with(&mount.destination)
         });
-        let Some(parent) = parent.filter(|parent| parent.intent == FsIntent::ReadOnly) else {
+        let Some(parent) = parent.filter(|parent| parent.intent != FsIntent::Denied) else {
             continue;
         };
         let relative = target.strip_prefix(&parent.destination).map_err(|error| {
@@ -110,18 +376,26 @@ pub(crate) fn prepare(
         }
         overlays
             .entry((parent.source.clone(), parent.destination.clone()))
-            .or_default()
+            .or_insert_with(|| OverlayPlan {
+                intent: parent.intent,
+                paths: Vec::new(),
+            })
+            .paths
             .push(relative.to_path_buf());
     }
     let first_overlay = overlays
         .iter()
         .next()
-        .and_then(|((_, destination), paths)| {
-            paths
-                .first()
-                .map(|path| (destination.clone(), path.clone()))
+        .and_then(|((_, destination), overlay)| {
+            overlay.paths.first().map(|path| {
+                (
+                    destination.clone(),
+                    path.clone(),
+                    intent_name(overlay.intent),
+                )
+            })
         });
-    let Some((first_destination, first_path)) = first_overlay else {
+    let Some((first_destination, first_path, first_intent)) = first_overlay else {
         return Ok(None);
     };
 
@@ -129,104 +403,198 @@ pub(crate) fn prepare(
     let mountinfo = read_mountinfo(&mut probe)?;
 
     #[cfg(target_os = "linux")]
-    for ((source, destination), paths) in &overlays {
+    for ((source, destination), overlay) in &overlays {
         if let Some(nested) = nested_mountpoint(Path::new(source), &mountinfo) {
-            let Some(path) = paths.first() else {
+            let Some(path) = overlay.paths.first() else {
                 continue;
             };
             return Err(FilesystemPolicyError::Host(format!(
-                "Bubblewrap: missing deniedPaths entry '{}' beneath read-only '{destination}' \
+                "Bubblewrap: missing deniedPaths entry '{}' beneath {} '{destination}' \
                  cannot be enforced because nested host mount '{}' would be hidden by its \
-                 private overlay. Use a read-only grant without nested mounts or avoid a \
-                 missing denied path beneath that grant.",
+                 private overlay. Use a grant without nested mounts or avoid a missing denied \
+                 path beneath that grant.",
                 Path::new(destination).join(path).display(),
+                intent_name(overlay.intent),
                 nested.display()
             )));
         }
     }
-    if version < BwrapVersion::new(0, 11, 0) {
+    let (minimum_version, overlay_kind) = if overlays
+        .values()
+        .any(|overlay| overlay.intent == FsIntent::ReadWrite)
+    {
+        (BwrapVersion::new(0, 12, 0), "writable")
+    } else {
+        (BwrapVersion::new(0, 11, 0), "read-only")
+    };
+    if version < minimum_version {
         return Err(FilesystemPolicyError::Host(format!(
-            "Bubblewrap: missing deniedPaths entry '{}' beneath read-only '{}' \
-             requires bwrap 0.11.0 or newer for private read-only overlays; found {version}.",
+            "Bubblewrap: missing deniedPaths entry '{}' beneath {first_intent} '{}' \
+             requires bwrap {minimum_version} or newer for private {overlay_kind} overlays; \
+             found {version}.",
             Path::new(&first_destination).join(first_path).display(),
             first_destination
         )));
     }
     if bwrap_is_setuid {
         return Err(FilesystemPolicyError::Host(format!(
-            "Bubblewrap: missing deniedPaths entry '{}' beneath read-only '{}' requires a \
+            "Bubblewrap: missing deniedPaths entry '{}' beneath {first_intent} '{}' requires a \
              non-setuid bwrap installation; the selected bwrap has the setuid bit set.",
             Path::new(&first_destination).join(first_path).display(),
             first_destination
         )));
     }
 
-    let directory = tempfile::tempdir().map_err(|error| {
-        FilesystemPolicyError::Host(format!(
-            "Bubblewrap: could not create private deny mountpoint storage: {error}"
-        ))
-    })?;
-    let storage = std::fs::canonicalize(directory.path()).map_err(|error| {
-        FilesystemPolicyError::Host(format!(
-            "Bubblewrap: could not resolve private deny mountpoint storage: {error}"
-        ))
-    })?;
-    for (index, ((source, destination), paths)) in overlays.into_iter().enumerate() {
-        // Overlayfs rejects lower layers that contain one another.
-        if storage.starts_with(&source) || Path::new(&source).starts_with(&storage) {
-            return Err(FilesystemPolicyError::Host(format!(
-                "Bubblewrap: cannot prepare missing deniedPaths entry '{}' beneath \
-                 read-only '{destination}': private temporary storage overlaps its host \
-                 source '{source}'. Set TMPDIR outside that source.",
-                Path::new(&destination).join(&paths[0]).display()
-            )));
-        }
-        let layer = storage.join(index.to_string());
-        for path in paths {
-            std::fs::create_dir_all(layer.join(&path)).map_err(|error| {
-                FilesystemPolicyError::Host(format!(
-                    "Bubblewrap: could not prepare private mountpoint for deniedPaths \
-                     entry '{}': {error}",
-                    Path::new(&destination).join(path).display()
-                ))
-            })?;
+    let mut directories = Vec::new();
+    let mut storage_roots = Vec::new();
+    let readonly_storage = if overlays
+        .values()
+        .any(|overlay| overlay.intent == FsIntent::ReadOnly)
+    {
+        let directory = tempfile::tempdir().map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not create private deny mountpoint storage: {error}"
+            ))
+        })?;
+        let storage = std::fs::canonicalize(directory.path()).map_err(|error| {
+            FilesystemPolicyError::Host(format!(
+                "Bubblewrap: could not resolve private deny mountpoint storage: {error}"
+            ))
+        })?;
+        directories.push(OverlayStorage::read_only(directory));
+        storage_roots.push(storage.clone());
+        Some(storage)
+    } else {
+        None
+    };
+
+    for (index, ((source, destination), overlay)) in overlays.into_iter().enumerate() {
+        let (layer, workdir) = match overlay.intent {
+            FsIntent::ReadOnly => {
+                // Overlayfs rejects lower layers that contain one another.
+                let storage = readonly_storage.as_ref().expect("read-only storage");
+                if storage.starts_with(&source) || Path::new(&source).starts_with(storage) {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: cannot prepare missing deniedPaths entry '{}' beneath \
+                         read-only '{destination}': private temporary storage overlaps its host \
+                         source '{source}'. Set TMPDIR outside that source.",
+                        Path::new(&destination).join(&overlay.paths[0]).display()
+                    )));
+                }
+                (storage.join(index.to_string()), None)
+            }
+            FsIntent::ReadWrite => {
+                #[cfg(target_os = "linux")]
+                let (directory, storage) = {
+                    let display = source.clone();
+                    let worker_source = display.clone();
+                    let worker_mountinfo = mountinfo.clone();
+                    let worker_paths = overlay.paths.clone();
+                    probe
+                        .run(&display, move |_| {
+                            writable_storage(
+                                Path::new(&worker_source),
+                                &worker_paths,
+                                &worker_mountinfo,
+                            )
+                        })
+                        .map_err(FilesystemPolicyError::Host)??
+                };
+                #[cfg(not(target_os = "linux"))]
+                let (directory, storage) =
+                    writable_storage(Path::new(&source), &overlay.paths, &[])?;
+                let layer = storage.join("lower");
+                let workdir = storage.join("work");
+                directories.push(OverlayStorage::writable(directory, workdir.clone()));
+                storage_roots.push(storage);
+                (layer, Some(workdir))
+            }
+            FsIntent::Denied => unreachable!("denied parents are not overlay grants"),
+        };
+        if overlay.intent == FsIntent::ReadOnly {
+            for path in &overlay.paths {
+                std::fs::create_dir_all(layer.join(path)).map_err(|error| {
+                    FilesystemPolicyError::Host(format!(
+                        "Bubblewrap: could not prepare private mountpoint for deniedPaths \
+                         entry '{}': {error}",
+                        Path::new(&destination).join(path).display()
+                    ))
+                })?;
+            }
         }
         let layer = layer.into_os_string().into_string().map_err(|_| {
             FilesystemPolicyError::Host(
                 "Bubblewrap: private deny mountpoint storage is not valid UTF-8".to_owned(),
             )
         })?;
-        match mounts.iter_mut().find(|mount| {
-            mount.intent == FsIntent::ReadOnly
-                && mount.source == source
-                && mount.destination == destination
-        }) {
-            Some(mount) => mount.readonly_overlay = Some(layer),
-            None => mounts.push(PolicyMount {
-                source,
-                destination,
-                intent: FsIntent::ReadOnly,
-                readonly_overlay: Some(layer),
-            }),
+        match overlay.intent {
+            FsIntent::ReadOnly => match mounts.iter_mut().find(|mount| {
+                mount.intent == FsIntent::ReadOnly
+                    && mount.source == source
+                    && mount.destination == destination
+            }) {
+                Some(mount) => mount.readonly_overlay = Some(layer),
+                None => mounts.push(PolicyMount {
+                    source,
+                    destination,
+                    intent: FsIntent::ReadOnly,
+                    readonly_overlay: Some(layer),
+                    writable_overlay: None,
+                }),
+            },
+            FsIntent::ReadWrite => {
+                let workdir = workdir
+                    .expect("writable overlay workdir")
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| {
+                        FilesystemPolicyError::Host(
+                            "Bubblewrap: private overlay workdir is not valid UTF-8".to_owned(),
+                        )
+                    })?;
+                let mount = mounts
+                    .iter_mut()
+                    .find(|mount| {
+                        mount.intent == FsIntent::ReadWrite
+                            && mount.source == source
+                            && mount.destination == destination
+                    })
+                    .ok_or_else(|| {
+                        FilesystemPolicyError::Host(format!(
+                            "Bubblewrap: read-write overlay parent '{destination}' disappeared \
+                             during preparation."
+                        ))
+                    })?;
+                mount.writable_overlay = Some(WritableOverlay {
+                    lower: layer,
+                    workdir,
+                });
+            }
+            FsIntent::Denied => unreachable!("denied parents are not overlay grants"),
         }
     }
     #[cfg(target_os = "linux")]
-    add_alias_masks(&storage, &mountinfo, mounts).map_err(FilesystemPolicyError::Host)?;
-    // A caller may grant its whole temporary directory read-write. The workload
-    // must not reach the overlay's private lower layer through any bind alias.
-    let hidden = storage.into_os_string().into_string().map_err(|_| {
-        FilesystemPolicyError::Host(
-            "Bubblewrap: private deny mountpoint storage is not valid UTF-8".to_owned(),
-        )
-    })?;
-    mounts.push(PolicyMount {
-        source: hidden.clone(),
-        destination: hidden,
-        intent: FsIntent::Denied,
-        readonly_overlay: None,
-    });
+    for storage in &storage_roots {
+        add_alias_masks(storage, &mountinfo, mounts).map_err(FilesystemPolicyError::Host)?;
+    }
+    // A caller may grant a directory containing private overlay storage. The
+    // workload must not reach lower layers or workdirs through any bind alias.
+    for storage in storage_roots {
+        let hidden = storage.into_os_string().into_string().map_err(|_| {
+            FilesystemPolicyError::Host(
+                "Bubblewrap: private deny mountpoint storage is not valid UTF-8".to_owned(),
+            )
+        })?;
+        mounts.push(PolicyMount {
+            source: hidden.clone(),
+            destination: hidden,
+            intent: FsIntent::Denied,
+            readonly_overlay: None,
+            writable_overlay: None,
+        });
+    }
     mounts.sort_by_key(|mount| Path::new(&mount.destination).components().count());
-    Ok(Some(directory))
+    Ok(Some(directories))
 }
 
 #[cfg(target_os = "linux")]
@@ -275,8 +643,9 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
             ));
         };
         let fields = fields.split_whitespace().collect::<Vec<_>>();
+        let filesystem_fields = filesystem_fields.split_whitespace().collect::<Vec<_>>();
         if fields.len() < 6
-            || filesystem_fields.split_whitespace().count() < 3
+            || filesystem_fields.len() < 3
             || fields[0].parse::<u64>().is_err()
             || fields[1].parse::<u64>().is_err()
         {
@@ -308,13 +677,20 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
                 index + 1
             )
         })?);
-        if !root.is_absolute() || !mountpoint.is_absolute() {
+        let namespace_root = filesystem_fields[0] == "nsfs" && is_namespace_identifier(&root);
+        if (!root.is_absolute() && !namespace_root) || !mountpoint.is_absolute() {
             return Err(format!(
                 "mount information entry {} contains a non-absolute path",
                 index + 1
             ));
         }
         entries.push(MountInfoEntry {
+            id: fields[0].parse::<u64>().map_err(|_| {
+                format!(
+                    "mount information entry {} has an invalid mount identifier",
+                    index + 1
+                )
+            })?,
             device,
             root,
             mountpoint,
@@ -324,6 +700,23 @@ fn parse_mountinfo(contents: &str) -> Result<Vec<MountInfoEntry>, String> {
         return Err("mount information contains no entries".to_owned());
     }
     Ok(entries)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_namespace_identifier(root: &Path) -> bool {
+    let Some(root) = root.to_str() else {
+        return false;
+    };
+    let Some((namespace, inode)) = root.split_once(":[") else {
+        return false;
+    };
+    !namespace.is_empty()
+        && namespace
+            .chars()
+            .all(|character| character.is_ascii_alphabetic() || character == '_')
+        && inode.strip_suffix(']').is_some_and(|inode| {
+            !inode.is_empty() && inode.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -359,17 +752,21 @@ fn nested_mountpoint<'a>(source: &Path, entries: &'a [MountInfoEntry]) -> Option
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn mount_aliases(path: &Path, entries: &[MountInfoEntry]) -> Result<BTreeSet<PathBuf>, String> {
-    let containing = entries
+fn containing_mount<'a>(path: &Path, entries: &'a [MountInfoEntry]) -> Option<&'a MountInfoEntry> {
+    entries
         .iter()
         .filter(|entry| path.starts_with(&entry.mountpoint))
         .max_by_key(|entry| entry.mountpoint.components().count())
-        .ok_or_else(|| {
-            format!(
-                "private temporary storage '{}' is not listed in mount information",
-                path.display()
-            )
-        })?;
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn mount_aliases(path: &Path, entries: &[MountInfoEntry]) -> Result<BTreeSet<PathBuf>, String> {
+    let containing = containing_mount(path, entries).ok_or_else(|| {
+        format!(
+            "private temporary storage '{}' is not listed in mount information",
+            path.display()
+        )
+    })?;
     let root = containing
         .root
         .join(path.strip_prefix(&containing.mountpoint).map_err(|error| {
@@ -410,6 +807,7 @@ fn add_alias_masks(
             destination: alias,
             intent: FsIntent::Denied,
             readonly_overlay: None,
+            writable_overlay: None,
         });
     }
     Ok(())

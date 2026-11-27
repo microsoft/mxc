@@ -65,6 +65,25 @@ fn bwrap_request(command: &str, timeout_ms: u32) -> ContainerRequest {
     }
 }
 
+fn bwrap_request_with_missing_denial(
+    command: &str,
+    timeout_ms: u32,
+    grant: &std::path::Path,
+) -> (ContainerRequest, std::path::PathBuf) {
+    let denied = grant.join("missing/deep");
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![denied.to_str().unwrap().to_string()],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: (timeout_ms != 0).then_some(timeout_ms),
+        ..ContainerRequest::new(command)
+    };
+    (request, denied)
+}
+
 /// Whether `pid` still has a `/proc` entry. An exited child stays a zombie --
 /// with a live `/proc` entry -- until its parent `wait()`s and the kernel
 /// releases its pid and exit status; that is "reaped". So this distinguishes a
@@ -155,8 +174,12 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
     use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
 
     const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
+    const DENIED_ENV: &str = "MXC_TEST_MISSING_DENIAL";
     if std::env::var_os(FIXTURE_ENV).is_some() {
-        let mut request = bwrap_request("echo WORKLOAD_STARTED", 0);
+        let denied = std::path::PathBuf::from(std::env::var_os(DENIED_ENV).unwrap());
+        let grant = denied.parent().unwrap().parent().unwrap();
+        let (mut request, _) = bwrap_request_with_missing_denial("echo WORKLOAD_STARTED", 0, grant);
+        assert_eq!(denied, grant.join("missing/deep"));
         request.network = Some(NetworkPolicy {
             egress: Some(NetworkEgressPolicy {
                 default: Some(NetworkAction::Allow),
@@ -176,6 +199,10 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
                     && error.message.contains("user.max_net_namespaces"),
                 "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
             );
+            assert!(
+                !denied.exists(),
+                "post-preparation startup failure created a host denied path (pty={pty})"
+            );
         }
         return;
     }
@@ -184,11 +211,14 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
         return;
     }
 
+    let missing_fixture = tempfile::tempdir().expect("missing-denial fixture");
+    let denied = missing_fixture.path().join("missing/deep");
     let dir = tempfile::tempdir().expect("shim directory");
     let shim = dir.path().join("bwrap");
     std::fs::write(
         &shim,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.12.0'; exit 0; fi\n\
+         if [ -e \"$MXC_TEST_MISSING_DENIAL\" ]; then echo 'test: missing denial reached the host' >&2; exit 2; fi\n\
          echo 'test: bwrap namespace refused' >&2\nexit 1\n",
     )
     .expect("write bwrap shim");
@@ -205,6 +235,7 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
             "--nocapture",
         ])
         .env(FIXTURE_ENV, "1")
+        .env(DENIED_ENV, &denied)
         .env("PATH", path)
         .output()
         .expect("run startup failure fixture");
@@ -214,6 +245,10 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !denied.exists(),
+        "startup failure fixture created a host denied path"
     );
 }
 
@@ -659,6 +694,123 @@ exec {real_bwrap} "$@"
 }
 
 #[test]
+fn streaming_bubblewrap_pty_preserves_provider_loss() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Command;
+
+    use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_PROVIDER_LOSS_FIXTURE";
+    fn slirp_processes() -> Vec<i32> {
+        let mut processes: Vec<_> = std::fs::read_dir("/proc")
+            .expect("read /proc")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+                let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+                (comm.trim() == "slirp4netns").then_some(pid)
+            })
+            .collect();
+        processes.sort_unstable();
+        processes
+    }
+
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        for mode in ["wait", "poll_then_wait"] {
+            let before = slirp_processes();
+            let mut request = bwrap_request("echo PROVIDER_LOSS_STARTED; sleep 30", 0);
+            request.network = Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let process = spawn_with_pty(request, Default::default()).expect("spawn PTY fixture");
+            let mut reader = BufReader::new(process.try_clone_reader().expect("clone PTY reader"));
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read workload readiness");
+            assert_eq!(line.trim(), "PROVIDER_LOSS_STARTED");
+            drop(reader);
+
+            let after = slirp_processes();
+            let sandbox_pid = process.id();
+            let children =
+                std::fs::read_to_string(format!("/proc/{sandbox_pid}/task/{sandbox_pid}/children"))
+                    .expect("read sandbox children");
+            let namespace_pid = children
+                .split_whitespace()
+                .next()
+                .expect("sandbox has no namespace init")
+                .to_string();
+            let providers: Vec<_> = after
+                .iter()
+                .filter(|pid| !before.contains(pid))
+                .filter(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .ok()
+                        .is_some_and(|args| {
+                            args.split(|byte| *byte == 0)
+                                .any(|arg| arg == namespace_pid.as_bytes())
+                        })
+                })
+                .copied()
+                .collect();
+            assert_eq!(
+                providers.len(),
+                1,
+                "{mode}: could not identify this run's provider"
+            );
+            kill(Pid::from_raw(providers[0]), Signal::SIGKILL).expect("kill network provider");
+
+            if mode == "poll_then_wait" {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    if process
+                        .try_wait()
+                        .expect("poll provider-loss fixture")
+                        .is_some()
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "provider death did not terminate the workload"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            let error = process
+                .wait()
+                .expect_err("PTY wait reclassified provider loss as an ordinary workload exit");
+            assert!(
+                error.to_string().contains("lost its network provider"),
+                "{mode}: {error}"
+            );
+        }
+        return;
+    }
+
+    if !bwrap_network_available() {
+        return;
+    }
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "streaming_bubblewrap_pty_preserves_provider_loss",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FIXTURE_ENV, "1");
+    run_terminal_fixture(command);
+}
+
+#[test]
 fn bubblewrap_pty_supports_io_resize_and_merged_output() {
     if !bwrap_available() {
         return;
@@ -825,6 +977,214 @@ fn streaming_bubblewrap_kill_reaps_the_child() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(reaped, "pid {pid} should be reaped, not left as a zombie");
+}
+
+#[test]
+fn streaming_bubblewrap_missing_denials_use_writable_overlays() {
+    if !bwrap_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("writable overlay fixture");
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).expect("create writable grant");
+    let missing_dir = grant.join("missing-dir");
+    let missing_file = grant.join("missing-file.json");
+    let workload = grant.join("workload-ran");
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![
+                missing_dir.to_str().unwrap().to_string(),
+                missing_file.to_str().unwrap().to_string(),
+            ],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(5_000),
+        ..ContainerRequest::new(format!(
+            "set -eu; test -d '{0}'; test -d '{1}'; \
+             test -z \"$(ls -A '{0}')\"; test -z \"$(ls -A '{1}')\"; \
+             if printf denied > '{0}/write' 2>/dev/null; then exit 11; fi; \
+             if printf denied > '{1}/write' 2>/dev/null; then exit 12; fi; \
+             printf ran > '{2}'",
+            missing_dir.display(),
+            missing_file.display(),
+            workload.display()
+        ))
+    };
+
+    let version = mxc_sdk::bwrap_common::bwrap_version::probe_bwrap().expect("Bubblewrap version");
+    if version < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 12, 0) {
+        let error = spawn(request, Default::default())
+            .map(|_| ())
+            .expect_err("older Bubblewrap must reject writable overlays");
+        assert!(error.message.contains("requires bwrap 0.12.0 or newer"));
+        assert!(!missing_dir.exists());
+        assert!(!missing_file.exists());
+        assert!(!workload.exists());
+        assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+        return;
+    }
+
+    let mut process = spawn(request, Default::default()).expect("spawn writable overlay");
+    let outcome = process.wait().expect("wait");
+    drop(process);
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert!(!missing_dir.exists());
+    assert!(!missing_file.exists());
+    assert_eq!(std::fs::read_to_string(&workload).unwrap(), "ran");
+    let remaining = std::fs::read_dir(fixture.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [std::ffi::OsString::from("grant")]);
+}
+
+#[test]
+fn streaming_bubblewrap_rejects_opaque_upper_directories() {
+    if !bwrap_available()
+        || mxc_sdk::bwrap_common::bwrap_version::probe_bwrap().expect("Bubblewrap version")
+            < mxc_sdk::bwrap_common::bwrap_version::BwrapVersion::new(0, 12, 0)
+    {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("opaque upper fixture");
+    let grant = fixture.path().join("grant");
+    std::fs::create_dir(&grant).expect("create writable grant");
+    let opaque = grant.join("newdir");
+    let first_workload = grant.join("first-workload");
+    let (first, first_denied) = bwrap_request_with_missing_denial(
+        &format!(
+            "set -eu; mkdir '{0}'; printf first > '{1}'",
+            opaque.display(),
+            first_workload.display()
+        ),
+        5_000,
+        &grant,
+    );
+    let mut process = spawn(first, Default::default()).expect("spawn first overlay");
+    assert_eq!(
+        process.wait().expect("wait first overlay"),
+        WaitResult::Exited(0)
+    );
+    drop(process);
+    assert!(!first_denied.exists());
+    assert!(opaque.is_dir());
+    // Model the opaque metadata an earlier overlay run can leave on an upper
+    // directory. Setting the fixture attribute does not modify SDK behavior.
+    let opaque_path = std::ffi::CString::new(opaque.as_os_str().as_encoded_bytes()).unwrap();
+    let opaque_name = std::ffi::CString::new("user.overlay.opaque").unwrap();
+    let attribute_result = unsafe {
+        libc::setxattr(
+            opaque_path.as_ptr(),
+            opaque_name.as_ptr(),
+            b"y".as_ptr().cast(),
+            1,
+            0,
+        )
+    };
+    assert_eq!(
+        attribute_result,
+        0,
+        "set opaque fixture attribute: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let denied = opaque.join("config.json");
+    let workload = opaque.join("second-workload");
+    let second = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![grant.to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![denied.to_str().unwrap().to_string()],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(5_000),
+        ..ContainerRequest::new(format!("printf should-not-run > '{}'", workload.display()))
+    };
+    let error = match spawn(second, Default::default()) {
+        Ok(mut process) => {
+            let outcome = process.wait().expect("wait opaque upper workload");
+            drop(process);
+            assert!(
+                !denied.exists(),
+                "opaque upper hid the lower placeholder and created a host mountpoint: {outcome:?}"
+            );
+            panic!("an opaque upper directory was accepted: {outcome:?}");
+        }
+        Err(error) => error,
+    };
+    assert!(error.message.contains("opaque upper-layer directory"));
+    assert!(!denied.exists());
+    assert!(!workload.exists());
+    assert_eq!(std::fs::read_to_string(first_workload).unwrap(), "first");
+}
+
+#[test]
+fn streaming_bubblewrap_masks_existing_fifo_and_socket() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixListener;
+
+    if !bwrap_available() {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("special-file deny fixture");
+    let fifo = fixture.path().join("private.pipe");
+    let socket = fixture.path().join("private.sock");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .expect("create FIFO");
+    let _listener = UnixListener::bind(&socket).expect("create Unix socket");
+    let result = fixture.path().join("result");
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec![fixture.path().to_str().unwrap().to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![
+                fifo.to_str().unwrap().to_string(),
+                socket.to_str().unwrap().to_string(),
+            ],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(5_000),
+        ..ContainerRequest::new(format!(
+            "stat -c '%F %n' '{}' '{}' > '{}'; \
+             cat '{}' '{}' >> '{}' 2>&1; printf 'cat=%s\\n' \"$?\" >> '{}'",
+            fifo.display(),
+            socket.display(),
+            result.display(),
+            fifo.display(),
+            socket.display(),
+            result.display(),
+            result.display()
+        ))
+    };
+
+    let mut process = spawn(request, Default::default()).expect("spawn with special-file denials");
+    assert_eq!(
+        process.wait().expect("wait for masked reads"),
+        WaitResult::Exited(0)
+    );
+    let observed = std::fs::read_to_string(&result).unwrap();
+    assert!(
+        observed.starts_with(&format!(
+            "character special file {}\ncharacter special file {}\n",
+            fifo.display(),
+            socket.display()
+        )) && observed.matches("Permission denied").count() == 2
+            && observed.ends_with("cat=1\n"),
+        "unexpected special-file masks: {observed}"
+    );
+    assert!(std::fs::symlink_metadata(&fifo)
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    assert!(std::fs::symlink_metadata(&socket)
+        .unwrap()
+        .file_type()
+        .is_socket());
 }
 
 #[test]

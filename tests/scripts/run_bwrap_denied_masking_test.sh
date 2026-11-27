@@ -44,8 +44,10 @@ SYMBASE="/mnt/symmask"
 
 PRIVATE_ALIAS_MOUNTED=0
 NESTED_MOUNTED=0
+BIND_MOUNTED=0
 cleanup() {
     if [ "$NESTED_MOUNTED" -eq 1 ]; then sudo umount "$BASE/nested-mount"; fi
+    if [ "$BIND_MOUNTED" -eq 1 ]; then sudo umount "$BASE/bind-root/grant"; fi
     if [ "$PRIVATE_ALIAS_MOUNTED" -eq 1 ]; then sudo umount "$PRIVATE_ALIAS"; fi
     sudo rm -rf "$BASE" "$SYMBASE" "$PRIVATE_TMP" "$PRIVATE_ALIAS"
 }
@@ -77,8 +79,22 @@ if ! cat "$DIR/inner.txt" | grep -q "DIR_SECRET"; then
 fi
 
 echo "Running Bubblewrap denied-path masking test (denied file + denied dir)..."
-if ! OUTPUT=$("$LXC_EXEC" --experimental \
-    "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1); then
+MISSING_PRECREATED=0
+FIRST_STATUS=0
+OUTPUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1) || FIRST_STATUS=$?
+if [ "$FIRST_STATUS" -ne 0 ] \
+    && echo "$OUTPUT" | grep -qF "requires bwrap 0.12.0 or newer" \
+    && [ ! -e "$BASE/missing" ] && [ ! -e "$BASE/control_write" ]; then
+    echo "PASS: older Bubblewrap rejects the missing denied path without modifying the host."
+    # Continue the existing-object checks with a fixture that needs no overlay.
+    mkdir "$BASE/missing"
+    MISSING_PRECREATED=1
+    FIRST_STATUS=0
+    OUTPUT=$("$LXC_EXEC" --experimental \
+        "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1) || FIRST_STATUS=$?
+fi
+if [ "$FIRST_STATUS" -ne 0 ]; then
     echo "$OUTPUT"
     echo "FAIL: denied-path masking sandbox did not start."
     exit 1
@@ -126,6 +142,19 @@ for path in secret_dir secret_dir/nested missing; do
         FAIL=1
     fi
 done
+
+MISSING_HOST_OK=0
+if [ "$MISSING_PRECREATED" -eq 1 ] && [ -d "$BASE/missing" ]; then
+    MISSING_HOST_OK=1
+elif [ "$MISSING_PRECREATED" -eq 0 ] && [ ! -e "$BASE/missing" ]; then
+    MISSING_HOST_OK=1
+fi
+if [ "$(cat "$BASE/control_write")" = writable ] && [ "$MISSING_HOST_OK" -eq 1 ]; then
+    echo "PASS: ordinary writes reach the host and the denied path has the expected host state."
+else
+    echo "FAIL: writable-overlay host persistence or missing-denial host state is incorrect."
+    FAIL=1
+fi
 
 # Missing deny mountpoints must be private even when their parent is read-only.
 TOOLS="$BASE/tools"
@@ -234,6 +263,88 @@ else
 fi
 sudo umount "$NESTED"
 NESTED_MOUNTED=0
+
+# A read-write grant is the overlay's host upper layer. Missing denied entries
+# come from a private lower layer, so their masks need no host mount point.
+# Ordinary writes must still reach the host, and all private storage must be
+# removed after execution without touching existing denied content.
+RWTREE="$BASE/writable"
+mkdir -p "$RWTREE/kept-empty"
+printf 'EXISTING_SECRET\n' > "$RWTREE/existing.txt"
+rw_config='{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "set -eu; cd /mnt/masktest/writable; test -d missing-file.json; test -d kept-empty/nested; test -z \"$(ls -A missing-file.json)\"; test -z \"$(ls -A kept-empty/nested)\"; if printf denied > missing-file.json/write 2>/dev/null; then exit 41; fi; if printf denied > kept-empty/nested/write 2>/dev/null; then exit 42; fi; test ! -s existing.txt; if printf denied > existing.txt 2>/dev/null; then exit 43; fi; printf rw-ok > workload.txt; printf 'RW_WORKLOAD_OK\\n'"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/masktest/writable"],
+    "deniedPaths": [
+      "/mnt/masktest/writable/missing-file.json",
+      "/mnt/masktest/writable/kept-empty/nested",
+      "/mnt/masktest/writable/existing.txt"
+    ]
+  }
+}'
+RW_STATUS=0
+RW_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
+    --config-base64 "$(printf '%s' "$rw_config" | base64 -w0)" 2>&1) || RW_STATUS=$?
+if [ "$RW_STATUS" -ne 0 ] \
+    && echo "$RW_OUT" | grep -qF "requires bwrap 0.12.0 or newer" \
+    && [ ! -e "$RWTREE/missing-file.json" ] \
+    && [ ! -e "$RWTREE/kept-empty/nested" ] \
+    && [ ! -e "$RWTREE/workload.txt" ]; then
+    echo "PASS: older Bubblewrap rejects writable missing denials without modifying the host."
+elif [ "$RW_STATUS" -eq 0 ] \
+    && echo "$RW_OUT" | grep -qFx "RW_WORKLOAD_OK" \
+    && [ ! -e "$RWTREE/missing-file.json" ] \
+    && [ ! -e "$RWTREE/kept-empty/nested" ] \
+    && [ -d "$RWTREE/kept-empty" ] \
+    && [ "$(cat "$RWTREE/existing.txt")" = "EXISTING_SECRET" ] \
+    && [ "$(cat "$RWTREE/workload.txt")" = "rw-ok" ] \
+    && ! compgen -G "$BASE/.mxc-bwrap-overlay-*" > /dev/null; then
+    echo "PASS: writable overlays enforce missing denials, persist ordinary writes, and leave no host placeholders or private storage."
+else
+    echo "$RW_OUT"
+    echo "FAIL: writable-overlay enforcement, persistence, or cleanup failed (sandbox $RW_STATUS)."
+    FAIL=1
+fi
+
+# A bind-mounted grant at a mount root cannot use its parent or TMPDIR as the
+# overlay workdir: equal device numbers do not make those mounts identical.
+BINDROOT="$BASE/bind-root"
+mkdir -p "$BINDROOT/real" "$BINDROOT/grant"
+sudo mount --bind "$BINDROOT/real" "$BINDROOT/grant"
+BIND_MOUNTED=1
+bind_config='{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "printf should-not-run > /mnt/masktest/bind-root/grant/workload"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/masktest/bind-root/grant"],
+    "deniedPaths": ["/mnt/masktest/bind-root/grant/missing"]
+  }
+}'
+BIND_STATUS=0
+BIND_OUT=$(timeout 60 "$LXC_EXEC" --experimental \
+    --config-base64 "$(printf '%s' "$bind_config" | base64 -w0)" 2>&1) || BIND_STATUS=$?
+if [ "$BIND_STATUS" -ne 0 ] \
+    && { echo "$BIND_OUT" | grep -qF "same mount" \
+        || echo "$BIND_OUT" | grep -qF "requires bwrap 0.12.0 or newer"; } \
+    && ! echo "$BIND_OUT" | grep -qF "Invalid argument" \
+    && [ ! -e "$BINDROOT/real/workload" ] \
+    && [ ! -e "$BINDROOT/real/missing" ] \
+    && ! compgen -G "$BINDROOT/.mxc-bwrap-overlay-*" > /dev/null; then
+    echo "PASS: bind-root grant is rejected before execution without creating host changes."
+else
+    echo "$BIND_OUT"
+    echo "FAIL: bind-root overlay storage was not rejected safely (sandbox $BIND_STATUS)."
+    FAIL=1
+fi
+sudo umount "$BINDROOT/grant"
+BIND_MOUNTED=0
 
 # --- Denied-symlink masking ----------------------------------------------------
 # Denying a symlink masks the object it points to: the runner rewrites a denied
